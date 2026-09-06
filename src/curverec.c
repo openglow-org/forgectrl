@@ -5,29 +5,32 @@
  * maps a commanded power through a measured curve (laser_dose_curve).
  * That curve is per tube and supply and drifts with tube age; this
  * module lets an owner measure their own from one Record press: the
- * recorder streams the ladder job itself over the local Grbl socket -
- * absolute coordinates from X0 Y0, one 100 mm line per rung - with
- * ok-per-line flow control, and the machine treats it as any job: the
- * arm gates stand and the operator's button press starts the fire.
- * Because a new Grbl connection displaces the sender (last connection
- * wins), the recorder refuses to start while the controller's published
- * state file shows a sender connected. While the ladder plays it
- * samples the tube current (pic/hv_current) and the head thermopile
- * (head/beam_detect_analog, a scatter detector in the beam path, so it
- * reads the beam and not the material) at 25 Hz; when the ladder has
- * played, the fitter segments the trace on the dark gaps, reads each
- * rung's thermopile delta over its local baseline, normalizes to the
- * full-power rung, and offers the result as a ready laser_dose_curve
- * value the panel can apply. GET /curve/ladder.gcode still serves the
- * exact job the recorder streams, for inspection.
+ * recorder streams the ladder job itself over the local Grbl socket
+ * through jobstream (absolute coordinates from X0 Y0, one 100 mm line
+ * per rung, ok-per-line flow control), and the machine treats it as any
+ * job: the arm gates stand and the operator's button press starts the
+ * fire. Because a new Grbl connection displaces the sender (last
+ * connection wins), the recorder refuses to start while the
+ * controller's published state file shows a sender connected. While
+ * the ladder plays the streamer samples the tube current
+ * (pic/hv_current) and the head thermopile (head/beam_detect_analog, a
+ * scatter detector in the beam path, so it reads the beam and not the
+ * material) at 25 Hz; when the ladder has played, the fitter segments
+ * the trace on the dark gaps, reads each rung's thermopile delta over
+ * its local baseline, normalizes to the full-power rung, and offers the
+ * result as a ready laser_dose_curve value the panel can apply.
+ * GET /curve/ladder.gcode still serves the exact job the recorder
+ * streams, for inspection.
  *
  * For the measurement to be the raw dose response, the floor and the
- * curve in force must not bend the ladder: start saves
- * laser_floor_density and laser_dose_curve, writes 0 and "off", and
- * every end path (fit, stop, failure) restores them. The controller
- * re-reads both at each arm, so the override applies to the ladder job
- * and to nothing after it. Re-running the ladder over time gives the
- * tube's aging as a trend.
+ * curve in force must not bend the ladder: the run overrides
+ * laser_floor_density to 0 and laser_dose_curve to "off", and every end
+ * path restores them. The override keeps the originals in a marker
+ * file so a daemon that dies mid-run restores them at its next start;
+ * the sheet wizards use the same override for their ladders and for
+ * the corner rolloff exponent. The controller re-reads the keys at
+ * each arm, so the override applies to the one job and to nothing
+ * after it.
  *
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
@@ -35,31 +38,27 @@
 #define _GNU_SOURCE
 #include "curverec.h"
 #include "fflog.h"
+#include "jobstream.h"
 #include "settings.h"
+#include "wizdark.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <math.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
-#define SAMPLE_HZ      25.0
+#define SAMPLE_HZ      JOBSTREAM_HZ
 #define MAX_SAMPLES    30000            /* 20 minutes at 25 Hz */
-#define HV_ON          30               /* discharge present above this */
+#define HV_ON          JOBSTREAM_HV_ON  /* discharge present above this */
 #define GAP_MERGE_S    1.0             /* dark shorter than this stays in a rung */
 #define MIN_SEG_S      2.0             /* a rung is at least this long lit */
 #define DARK_END_S     20.0            /* recording ends after this much dark */
 #define WAIT_TIMEOUT_S 600.0           /* budget for the arm + the press */
 #define RUN_TIMEOUT_S  900.0
-#define GRBL_PORT      23
 #define LADDER_MAX_LINES 40
 
 /* The ladder's rungs: the S each maps to with the floor at 0 and the
@@ -79,29 +78,103 @@ static long *buf_hv, *buf_tp;
 static pthread_t thread;
 static int thread_live;
 static volatile int stop_requested;
-static char saved_floor[32], saved_curve[192];
 
-/* The marker that carries the saved floor and curve across a daemon
- * exit mid-recording: two lines, floor then curve, an empty line for a
- * value that was unset. */
+/* ------------------------------------------------ the laser override */
+
+/* The marker that carries the saved keys across a daemon exit mid-job:
+ * three lines, floor, curve, gamma; an empty line for a value that was
+ * unset, a line of one '-' for a key the override did not touch. */
 #define SAVED_MARKER "/data/forgefirm/curverec.saved"
+#define UNTOUCHED "-"
 
-static void saved_write(void)
+static pthread_mutex_t ov_mu = PTHREAD_MUTEX_INITIALIZER;
+static int ov_active;
+static char saved_floor[32], saved_curve[192], saved_gamma[32];
+
+/* One line of the marker; a missing line reads as untouched. */
+static void saved_line(FILE *f, char *buf, size_t len)
 {
+    buf[0] = '\0';
+    if (fgets(buf, (int)len, f))
+        buf[strcspn(buf, "\r\n")] = '\0';
+    else
+        snprintf(buf, len, "%s", UNTOUCHED);
+}
+
+static void saved_restore_locked(void)
+{
+    if (strcmp(saved_floor, UNTOUCHED))
+        settings_set("laser_floor_density", saved_floor);
+    if (strcmp(saved_curve, UNTOUCHED))
+        settings_set("laser_dose_curve", saved_curve);
+    if (strcmp(saved_gamma, UNTOUCHED))
+        settings_set("laser_corner_gamma", saved_gamma);
+    unlink(SAVED_MARKER);
+    ov_active = 0;
+}
+
+int curverec_override_begin(const char *floor, const char *curve, const char *gamma)
+{
+    pthread_mutex_lock(&ov_mu);
+    if (ov_active) {
+        pthread_mutex_unlock(&ov_mu);
+        return -1;
+    }
+    snprintf(saved_floor, sizeof(saved_floor), "%s", UNTOUCHED);
+    snprintf(saved_curve, sizeof(saved_curve), "%s", UNTOUCHED);
+    snprintf(saved_gamma, sizeof(saved_gamma), "%s", UNTOUCHED);
+    if (floor && settings_get("laser_floor_density", saved_floor, sizeof(saved_floor)) != 0)
+        saved_floor[0] = '\0';
+    if (curve && settings_get("laser_dose_curve", saved_curve, sizeof(saved_curve)) != 0)
+        saved_curve[0] = '\0';
+    if (gamma && settings_get("laser_corner_gamma", saved_gamma, sizeof(saved_gamma)) != 0)
+        saved_gamma[0] = '\0';
+    /* The originals go to the marker before the keys change, so a
+     * daemon that dies or is restarted mid-job restores them at its
+     * next start. */
     FILE *f = fopen(SAVED_MARKER, "w");
     if (!f) {
         fflog(LOG_ERR, "curverec: cannot write %s: %s", SAVED_MARKER, strerror(errno));
-        return;
+        pthread_mutex_unlock(&ov_mu);
+        return -1;
     }
-    fprintf(f, "%s\n%s\n", saved_floor, saved_curve);
+    fprintf(f, "%s\n%s\n%s\n", saved_floor, saved_curve, saved_gamma);
     fclose(f);
+    if (floor)
+        settings_set("laser_floor_density", floor);
+    if (curve)
+        settings_set("laser_dose_curve", curve);
+    if (gamma)
+        settings_set("laser_corner_gamma", gamma);
+    ov_active = 1;
+    pthread_mutex_unlock(&ov_mu);
+    return 0;
 }
 
-static void saved_restore(void)
+void curverec_override_end(void)
 {
-    settings_set("laser_floor_density", saved_floor);
-    settings_set("laser_dose_curve", saved_curve);
-    unlink(SAVED_MARKER);
+    pthread_mutex_lock(&ov_mu);
+    if (ov_active)
+        saved_restore_locked();
+    pthread_mutex_unlock(&ov_mu);
+}
+
+int curverec_override_active(void)
+{
+    pthread_mutex_lock(&ov_mu);
+    int a = ov_active;
+    pthread_mutex_unlock(&ov_mu);
+    return a;
+}
+
+void curverec_saved(char *floor, size_t fl, char *curve, size_t cl)
+{
+    pthread_mutex_lock(&ov_mu);
+    if (floor)
+        snprintf(floor, fl, "%s", strcmp(saved_floor, UNTOUCHED) ? saved_floor : "");
+    if (curve)
+        snprintf(curve, cl, "%s", strcmp(saved_curve, UNTOUCHED) ? saved_curve : "");
+    pthread_mutex_unlock(&ov_mu);
 }
 
 void curverec_init(void)
@@ -109,64 +182,25 @@ void curverec_init(void)
     FILE *f = fopen(SAVED_MARKER, "r");
     if (!f)
         return;
-    char floor[32] = "", curve[192] = "";
-    if (fgets(floor, sizeof(floor), f))
-        floor[strcspn(floor, "\r\n")] = '\0';
-    if (fgets(curve, sizeof(curve), f))
-        curve[strcspn(curve, "\r\n")] = '\0';
+    pthread_mutex_lock(&ov_mu);
+    saved_line(f, saved_floor, sizeof(saved_floor));
+    saved_line(f, saved_curve, sizeof(saved_curve));
+    saved_line(f, saved_gamma, sizeof(saved_gamma));
     fclose(f);
-    snprintf(saved_floor, sizeof(saved_floor), "%s", floor);
-    snprintf(saved_curve, sizeof(saved_curve), "%s", curve);
-    saved_restore();
-    fflog(LOG_WARNING, "curverec: a recording was cut short by a daemon exit; "
-          "the floor and curve it overrode are restored");
+    ov_active = 1;
+    saved_restore_locked();
+    pthread_mutex_unlock(&ov_mu);
+    fflog(LOG_WARNING, "curverec: a job was cut short by a daemon exit; the laser keys "
+          "it overrode are restored");
 }
+
+/* ------------------------------------------------------- the ladder */
+
 static char ladder_lines[LADDER_MAX_LINES][40];
 static int ladder_n;
 static char result_curve[256];
 static curverec_pt result_pts[LADDER_N];
 static int result_n;
-
-static const char *sysfs_root(void)
-{
-    const char *r = getenv("GF_SYSFS_ROOT");
-    return r && *r ? r : "/sys/glowforge";
-}
-
-/* The controller's published state: is a sender on the Grbl socket?
- * -1 when the file is unreadable (no controller: the connect will say). */
-static int sender_connected(void)
-{
-    const char *d = getenv("GF_RUN_DIR");
-    char path[192], body[512];
-    snprintf(path, sizeof(path), "%s/grbl.state", d && *d ? d : "/run/forgefirm");
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-    size_t n = fread(body, 1, sizeof(body) - 1, f);
-    fclose(f);
-    body[n] = '\0';
-    if (strstr(body, "\"connected\":true"))
-        return 1;
-    if (strstr(body, "\"connected\":false"))
-        return 0;
-    return -1;
-}
-
-static long rd_long(const char *attr, long fallback)
-{
-    char path[192], text[32];
-    snprintf(path, sizeof(path), "%s/%s", sysfs_root(), attr);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return fallback;
-    ssize_t n = read(fd, text, sizeof(text) - 1);
-    close(fd);
-    if (n <= 0)
-        return fallback;
-    text[n] = '\0';
-    return atol(text);
-}
 
 /* -------------------------------------------------- the pure fitter */
 
@@ -247,20 +281,25 @@ int curverec_fit(const long *hv, const long *tp, int n, double hz,
     return out;
 }
 
+int curverec_curve_text(const curverec_pt *pts, int n, char *buf, size_t len)
+{
+    size_t off = 0;
+    buf[0] = '\0';
+    for (int i = 0; i < n; i++)
+        off += (size_t)snprintf(buf + off, len - off, "%s%g:%.2f", i ? "," : "",
+                                pts[i].density, pts[i].light);
+    return off < len ? 0 : -1;
+}
+
 static void ladder_build(void);
 
 /* -------------------------------------------------- lifecycle */
-
-static void restore_keys_locked(void)
-{
-    saved_restore();
-}
 
 static void finish_locked(int state, const char *reason)
 {
     cr_state = state;
     snprintf(cr_reason, sizeof(cr_reason), "%s", reason ? reason : "");
-    restore_keys_locked();
+    curverec_override_end();
     fflog(LOG_INFO, "curverec: %s%s%s",
           state == CR_DONE ? "done" : "failed",
           reason && *reason ? " - " : "", reason ? reason : "");
@@ -276,142 +315,55 @@ static void fit_locked(void)
         return;
     }
     result_n = n;
-    size_t off = 0;
-    result_curve[0] = '\0';
-    for (int i = 0; i < n; i++)
-        off += (size_t)snprintf(result_curve + off, sizeof(result_curve) - off,
-                                "%s%g:%.2f", i ? "," : "",
-                                result_pts[i].density, result_pts[i].light);
+    curverec_curve_text(result_pts, n, result_curve, sizeof(result_curve));
     finish_locked(CR_DONE, "");
+}
+
+/* The streamer's sample: into the trace, and the state to recording
+ * at the first discharge. */
+static void on_sample(void *ctx, const jobstream_sample_t *s)
+{
+    (void)ctx;
+    pthread_mutex_lock(&mu);
+    if (cr_samples < MAX_SAMPLES) {
+        buf_hv[cr_samples] = s->hv;
+        buf_tp[cr_samples] = s->tp;
+        cr_samples++;
+    }
+    if (s->hv > HV_ON && cr_state == CR_WAITING) {
+        cr_state = CR_RECORDING;
+        fflog(LOG_INFO, "curverec: the ladder is firing");
+    }
+    pthread_mutex_unlock(&mu);
 }
 
 static void *record_thread(void *arg)
 {
     (void)arg;
-    struct timespec tick = { 0, (long)(1e9 / SAMPLE_HZ) };
-    int lit_seen = 0, dark_run = 0, sent = 0, acked = 0, sock_done = 0;
-    char rx[256];
-    size_t rxn = 0;
-    time_t t0 = time(NULL);
-
-    /* The recorder is the sender for this job: one local connection,
-     * one line in flight, ok-per-line flow control so the RX ring can
-     * never overrun. The arm's button wait holds the first laser-on's
-     * ok for as long as the operator takes; that is the job's gate. */
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    struct sockaddr_in sa = { .sin_family = AF_INET,
-                              .sin_port = htons(GRBL_PORT),
-                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    if (fd < 0 || connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
-        if (fd >= 0)
-            close(fd);
-        pthread_mutex_lock(&mu);
-        finish_locked(CR_FAILED, "cannot reach the controller on the Grbl socket");
-        pthread_mutex_unlock(&mu);
-        return NULL;
-    }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    char program[LADDER_MAX_LINES * 40], err[160];
+    size_t off = 0;
     ladder_build();
-
-    for (;;) {
-        long hv = rd_long("pic/hv_current", 0);
-        long tp = rd_long("head/beam_detect_analog", 0);
-
-        /* Pump the sender side: harvest ok/error, feed the next line. */
-        if (!sock_done) {
-            ssize_t r;
-            while ((r = read(fd, rx + rxn, sizeof(rx) - 1 - rxn)) > 0) {
-                rxn += (size_t)r;
-                rx[rxn] = '\0';
-                char *nl;
-                while ((nl = memchr(rx, '\n', rxn))) {
-                    *nl = '\0';
-                    if (!strncmp(rx, "ok", 2))
-                        acked++;
-                    else if (!strncmp(rx, "error", 5) || !strncmp(rx, "ALARM", 5)) {
-                        pthread_mutex_lock(&mu);
-                        char why[112];
-                        rx[24] = '\0';   /* the code alone; frames can be long */
-                        snprintf(why, sizeof(why), "the controller answered %.24s "
-                                 "on line %d (%.40s)", rx, acked + 1,
-                                 acked < ladder_n ? ladder_lines[acked] : "?");
-                        finish_locked(CR_FAILED, why);
-                        pthread_mutex_unlock(&mu);
-                        close(fd);
-                        return NULL;
-                    }
-                    size_t rest = rxn - (size_t)(nl + 1 - rx);
-                    memmove(rx, nl + 1, rest);
-                    rxn = rest;
-                }
-                if (rxn >= sizeof(rx) - 1)
-                    rxn = 0;            /* a status frame overran: drop it */
-            }
-            if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
-                           errno != EINTR)) {
-                pthread_mutex_lock(&mu);
-                finish_locked(CR_FAILED, "the controller closed the connection "
-                              "(a sender took the socket?)");
-                pthread_mutex_unlock(&mu);
-                close(fd);
-                return NULL;
-            }
-            if (sent < ladder_n && acked >= sent) {
-                char line[44];
-                int ln = snprintf(line, sizeof(line), "%s\n", ladder_lines[sent]);
-                if (write(fd, line, (size_t)ln) == ln)
-                    sent++;
-            }
-            if (sent >= ladder_n && acked >= ladder_n) {
-                sock_done = 1;
-                close(fd);
-                fd = -1;
-                fflog(LOG_INFO, "curverec: the ladder streamed to the end");
-            }
-        }
-
-        pthread_mutex_lock(&mu);
-        if (stop_requested) {
-            if (lit_seen)
-                fit_locked();
-            else
-                finish_locked(CR_FAILED, "stopped before the ladder fired");
-            pthread_mutex_unlock(&mu);
-            break;
-        }
-        if (cr_samples < MAX_SAMPLES) {
-            buf_hv[cr_samples] = hv;
-            buf_tp[cr_samples] = tp;
-            cr_samples++;
-        }
-        if (hv > HV_ON) {
-            if (!lit_seen) {
-                lit_seen = 1;
-                cr_state = CR_RECORDING;
-                fflog(LOG_INFO, "curverec: the ladder is firing");
-            }
-            dark_run = 0;
-        } else if (lit_seen) {
-            dark_run++;
-        }
-        double elapsed = difftime(time(NULL), t0);
-        if (lit_seen && sock_done && dark_run > (int)(DARK_END_S * SAMPLE_HZ)) {
+    for (int i = 0; i < ladder_n; i++)
+        off += (size_t)snprintf(program + off, sizeof(program) - off, "%s\n", ladder_lines[i]);
+    jobstream_lines_t lines = { program, 0 };
+    jobstream_cfg_t cfg = {
+        .gen = jobstream_lines_gen, .sample = on_sample, .ctx = &lines,
+        .abort_flag = &stop_requested, .wait_timeout_s = WAIT_TIMEOUT_S,
+        .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = DARK_END_S,
+    };
+    jobstream_run_t run;
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    pthread_mutex_lock(&mu);
+    if (rc == 0 || (stop_requested && run.lit)) {
+        if (cr_samples >= MAX_SAMPLES)
+            finish_locked(CR_FAILED, "the record ran out of room");
+        else
             fit_locked();
-            pthread_mutex_unlock(&mu);
-            break;
-        }
-        if ((!lit_seen && elapsed > WAIT_TIMEOUT_S) ||
-            elapsed > RUN_TIMEOUT_S || cr_samples >= MAX_SAMPLES) {
-            finish_locked(CR_FAILED, lit_seen ? "the record ran out of room"
-                                              : "no discharge seen: the press never came");
-            pthread_mutex_unlock(&mu);
-            break;
-        }
-        pthread_mutex_unlock(&mu);
-        nanosleep(&tick, NULL);
-    }
-    if (fd >= 0)
-        close(fd);
+    } else if (stop_requested)
+        finish_locked(CR_FAILED, "stopped before the ladder fired");
+    else
+        finish_locked(CR_FAILED, err);
+    pthread_mutex_unlock(&mu);
     return NULL;
 }
 
@@ -421,6 +373,11 @@ int curverec_start(char *err, size_t elen)
     if (cr_state == CR_WAITING || cr_state == CR_RECORDING) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "a recording is already running");
+        return -1;
+    }
+    if (wizdark_running()) {
+        pthread_mutex_unlock(&mu);
+        snprintf(err, elen, "a commissioning wizard holds the machine");
         return -1;
     }
     if (thread_live) {
@@ -436,23 +393,17 @@ int curverec_start(char *err, size_t elen)
         snprintf(err, elen, "out of memory");
         return -1;
     }
-    int sender = sender_connected();
-    if (sender == 1) {
+    if (jobstream_sender_connected() == 1) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "a sender is connected to the machine - close it "
                  "first (the recorder streams the ladder itself)");
         return -1;
     }
-    if (settings_get("laser_floor_density", saved_floor, sizeof(saved_floor)) != 0)
-        saved_floor[0] = '\0';
-    if (settings_get("laser_dose_curve", saved_curve, sizeof(saved_curve)) != 0)
-        saved_curve[0] = '\0';
-    /* The overrides are persisted in the settings file for the run; the
-     * saved values go to a marker first, so a daemon that dies or is
-     * restarted mid-recording restores them at its next start. */
-    saved_write();
-    settings_set("laser_floor_density", "0");
-    settings_set("laser_dose_curve", "off");
+    if (curverec_override_begin("0", "off", NULL) != 0) {
+        pthread_mutex_unlock(&mu);
+        snprintf(err, elen, "the laser keys are held by another job");
+        return -1;
+    }
     cr_state = CR_WAITING;
     cr_reason[0] = '\0';
     cr_samples = 0;

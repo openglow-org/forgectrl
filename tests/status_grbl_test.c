@@ -21,6 +21,8 @@
 #include <unistd.h>
 
 int diag_running(void) { return 0; }
+/* No settings store on the host: the lens block reads its defaults. */
+int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
 static int grbl_up = 1;
 int super_grbl_running(void) { return grbl_up; }
 

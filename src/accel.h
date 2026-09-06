@@ -79,6 +79,16 @@ const char *crash_axes_name(unsigned axes);
 int  crash_hw_open(void);
 int  crash_hw_arm(int ths_x_alert, int ths_y_alert, int ths_abort);
 int  crash_hw_poll(unsigned *src1, unsigned *src2);
+/* One output sample, x and y as signed counts at the armed window's
+ * full scale, from the running part; after arm. The same re-assertion
+ * as poll when a one-shot read elsewhere powered the part down, with
+ * a short settle so the sample is a fresh one. -1 on an i2c failure. */
+int  crash_hw_sample(long *x, long *y);
+/* The lens stop finder's listening: the three axes in one burst at the
+ * run rate. crash_hw_listen(1) saves the rate and scale and sets the run
+ * values; crash_hw_listen(0) puts them back. */
+int  crash_hw_listen(int on);
+int  crash_hw_burst(long *x, long *y, long *z);
 void crash_hw_disarm(void);
 void crash_hw_close(void);
 

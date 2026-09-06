@@ -1,0 +1,400 @@
+<!--
+  wizard.html - forgectrl: the commissioning wizard
+  Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+  SPDX-License-Identifier: MIT
+
+  Served at "/" while the first run is incomplete and at "/setup" on
+  demand. One task per screen, a progress rail on the left; the steps
+  are sections that wizard.js shows one at a time from the state in
+  GET /wiz. Bundled by src/ui/embed.cmake like the panel: the styles and
+  scripts linked below are inlined in order.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ForgeFIRM setup</title>
+    <script>
+      (function () {
+        var t = 'light';
+        try {
+          var s = localStorage.getItem('ff_theme');
+          if (s === 'light' || s === 'dark') t = s;
+          else if (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)
+            t = 'dark';
+        } catch (e) {}
+        document.documentElement.setAttribute('data-bs-theme', t);
+      })();
+    </script>
+    <link rel="stylesheet" href="vendor/bootstrap.min.css" />
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="wizard.css" />
+  </head>
+  <body>
+    <header>
+      <div class="hrow">
+        <svg width="95" height="36" viewBox="0 0 95 36" aria-label="OpenGlow">
+          <g stroke="#e8262a" stroke-linecap="round">
+            <line x1="34" y1="8" x2="90" y2="8" stroke-width="1.2" />
+            <line x1="34" y1="0.5" x2="34" y2="15.5" stroke-width="1.2" />
+            <line x1="26.5" y1="8" x2="41.5" y2="8" stroke-width="1.2" />
+            <line x1="28.7" y1="2.7" x2="39.3" y2="13.3" stroke-width="1.1" />
+            <line x1="39.3" y1="2.7" x2="28.7" y2="13.3" stroke-width="1.1" />
+            <line x1="31.1" y1="1.1" x2="36.9" y2="14.9" stroke-width=".8" />
+            <line x1="36.9" y1="1.1" x2="31.1" y2="14.9" stroke-width=".8" />
+            <line x1="27.1" y1="5.1" x2="40.9" y2="10.9" stroke-width=".8" />
+            <line x1="40.9" y1="5.1" x2="27.1" y2="10.9" stroke-width=".8" />
+          </g>
+          <circle cx="34" cy="8" r="2" fill="#e8262a" />
+          <text x="0" y="31" font-size="20" font-family="inherit"><tspan fill="#fff" font-weight="600">Open</tspan><tspan fill="#b9bac9" font-weight="300">Glow</tspan></text></svg
+        ><span class="appname">ForgeFIRM</span><span id="host"></span
+        ><button id="themebtn" type="button" onclick="cycleTheme()" title="Theme">Theme</button>
+      </div>
+    </header>
+
+    <div class="wz-wrap">
+      <aside class="wz-rail">
+        <ol id="rail"></ol>
+        <div class="wz-estimate" id="estimate"></div>
+      </aside>
+
+      <main class="wz-main">
+        <!-- 1. Welcome -->
+        <section class="wz-step" id="st-welcome">
+          <h1>Let's set up your machine</h1>
+          <p class="lead">
+            ForgeFIRM is on this machine. Before it cuts anything, it asks you to read a few
+            things, set up your account, and tell it what it needs to know about the machine.
+          </p>
+          <div class="wz-card">
+            <h2>What this takes</h2>
+            <p>
+              About fifteen minutes for this part. You can stop at any step and come back; your
+              progress is saved on the machine.
+            </p>
+            <div class="wz-facts">
+              <span>Machine</span><span id="w-host">…</span>
+              <span>Firmware</span><span id="w-fw">…</span>
+            </div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" onclick="go('advisories')">Start</button>
+          </div>
+        </section>
+
+        <!-- 2. Advisories -->
+        <section class="wz-step" id="st-advisories">
+          <h1>Read these first</h1>
+          <p class="lead">
+            Four short documents. Read each one to the end, then confirm it. The safety document
+            asks you to type a phrase. When all four are confirmed, the machine asks for one press
+            of its button.
+          </p>
+          <div class="wz-doctabs" id="doctabs"></div>
+          <div class="wz-doc" id="docview"></div>
+          <div class="wz-consent" id="consent"></div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" id="docs-next" disabled onclick="showPress()">
+              Continue to the button
+            </button>
+            <span class="msg" id="docs-msg"></span>
+          </div>
+        </section>
+
+        <!-- 2b. The press -->
+        <section class="wz-step" id="st-press">
+          <h1>Press the button on the machine</h1>
+          <p class="lead">
+            The button on the machine is breathing teal. One press is your acceptance of the four
+            documents, made at the machine, by you.
+          </p>
+          <div class="wz-card wz-press">
+            <div class="wz-button" id="pressled"></div>
+            <div id="pressmsg">Waiting for your press…</div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-outline-secondary" onclick="cancelPress()">Back to the documents</button>
+            <button class="btn btn-outline-secondary" id="press-retry" style="display: none" onclick="startPress()">Ask again</button>
+          </div>
+        </section>
+
+        <!-- 3. Account -->
+        <section class="wz-step" id="st-account">
+          <h1>Your account</h1>
+          <p class="lead">
+            The name and password for this control panel. The same name and password open the
+            machine's shell over SSH, which stays off until you turn it on from the panel.
+          </p>
+          <form class="wz-card" id="acct" autocomplete="on">
+            <div class="wz-field">
+              <label for="a-name">Name</label>
+              <input class="form-control" id="a-name" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" />
+              <div class="help">Lowercase letters, digits, "-" and "_". Two to 32 characters.</div>
+            </div>
+            <div class="wz-field">
+              <label for="a-pw">Password</label>
+              <input class="form-control" id="a-pw" name="new-password" type="password" autocomplete="new-password" />
+              <div class="help">At least eight characters. A few words you can remember work well.</div>
+            </div>
+            <div class="wz-field">
+              <label for="a-pw2">Password again</label>
+              <input class="form-control" id="a-pw2" type="password" autocomplete="new-password" />
+            </div>
+            <div class="wz-actions">
+              <button class="btn btn-primary" type="submit" id="a-go">Create the account</button>
+              <span class="msg" id="a-msg"></span>
+            </div>
+          </form>
+          <p class="help" style="font-size: 12.5px; color: var(--og-dim)">
+            If you forget the password: hold the machine's button while you turn the machine on,
+            for ten seconds, until it blinks amber. The setup then asks for a new one.
+          </p>
+        </section>
+
+        <!-- 4. Preferences -->
+        <section class="wz-step" id="st-preferences">
+          <h1>Preferences</h1>
+          <p class="lead">A few choices that shape what the panel shows and how the radio behaves.</p>
+          <div class="wz-card">
+            <div class="wz-field">
+              <label for="p-units">Units</label>
+              <select class="form-select" id="p-units">
+                <option value="metric">Metric (mm, °C)</option>
+                <option value="imperial">Imperial (in, °F)</option>
+              </select>
+              <div class="help">A display preference. The machine stores everything in metric.</div>
+            </div>
+            <div class="wz-field">
+              <label for="p-region">WiFi region</label>
+              <select class="form-select" id="p-region"></select>
+              <div class="help">
+                Sets the channels and power the radio is allowed to use where you are. Automatic
+                follows the access point.
+              </div>
+            </div>
+          </div>
+          <div class="wz-card">
+            <h2>Clock</h2>
+            <p id="p-clock">…</p>
+            <div class="wz-actions" style="margin-top: 6px">
+              <button class="btn btn-sm btn-outline-secondary" id="p-clockbtn" style="display: none" onclick="setClock()">
+                Set from this device
+              </button>
+            </div>
+          </div>
+          <div class="wz-card">
+            <h2>Releases</h2>
+            <p id="p-upd">The machine can check for a newer ForgeFIRM release now. It needs internet access.</p>
+            <div class="wz-actions" style="margin-top: 6px">
+              <button class="btn btn-sm btn-outline-secondary" id="p-updbtn" onclick="checkUpdate()">Check now</button>
+            </div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" onclick="savePreferences()">Continue</button>
+            <span class="msg" id="p-msg"></span>
+          </div>
+        </section>
+
+        <!-- 5. Machine -->
+        <section class="wz-step" id="st-machine">
+          <h1>Your machine</h1>
+          <p class="lead">What ForgeFIRM found on its own, and two things only you can tell it.</p>
+          <div class="wz-card">
+            <h2>Detected</h2>
+            <div class="wz-facts" id="m-facts"></div>
+          </div>
+          <div class="wz-card">
+            <h2>Which model is it?</h2>
+            <p>The label is on the back of the machine, near the power inlet.</p>
+            <div class="wz-choices" id="m-models">
+              <label class="wz-choice"><input type="radio" name="model" value="basic" /><b>Basic</b><span>40 W tube. The interlock connector on the back is covered by a factory jumper.</span></label>
+              <label class="wz-choice"><input type="radio" name="model" value="plus" /><b>Plus</b><span>40 W tube, faster motion. The same jumpered interlock connector as the Basic.</span></label>
+              <label class="wz-choice"><input type="radio" name="model" value="pro" /><b>Pro</b><span>45 W tube, pass-through slots, and a working remote-interlock connector on the back.</span></label>
+            </div>
+            <div class="wz-check" id="m-tecrow" style="display: none">
+              <input type="checkbox" id="m-tec" />
+              <label for="m-tec">This Pro has its thermoelectric cooler fitted (every Pro has one unless it was removed).</label>
+            </div>
+          </div>
+          <div class="wz-card">
+            <h2>Sheet id</h2>
+            <p>
+              <span class="mono" id="m-sheet">…</span><br />
+              This code identifies your machine on the commissioning sheet it will burn later. It is
+              made from the serial number with a secret kept on the machine, so it does not reveal
+              the serial number. You can share a photo of the sheet.
+            </p>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" onclick="saveMachine()">Continue</button>
+            <span class="msg" id="m-msg"></span>
+          </div>
+        </section>
+
+        <!-- 6. Cloud -->
+        <section class="wz-step" id="st-cloud">
+          <h1>Cloud mode</h1>
+          <p class="lead">
+            Cloud mode connects the machine to the Glowforge service as itself, with its software
+            named as ForgeFIRM, and uses the service the way a stock Glowforge does, so the
+            Glowforge app works as it did. It is off by default, and everything else works without
+            it.
+          </p>
+          <div class="wz-choices">
+            <label class="wz-choice on" id="c-off"><input type="radio" name="cloud" value="0" checked /><b>Keep cloud mode off</b><span>The machine talks to nobody but you. You cut from LightBurn or another G-code sender over your network. Recommended.</span></label>
+            <label class="wz-choice" id="c-on"><input type="radio" name="cloud" value="1" /><b>Turn cloud mode on</b><span>The Glowforge app, its catalog, and its camera placement. Needs internet access and a Glowforge account. Read the risks first.</span></label>
+          </div>
+          <div id="c-onbox" style="display: none">
+            <div class="wz-card">
+              <h2>Before you turn it on</h2>
+              <p>
+                You read the cloud service document. In short: it is up to you to stay within the
+                terms of your Glowforge account; Glowforge may refuse or block a machine that runs
+                software it did not make, and this project cannot prevent or reverse that; the
+                identity in the machine's fuses cannot be changed or replaced.
+              </p>
+              <div class="wz-consent">
+                Type <b>I UNDERSTAND</b> to confirm:
+                <input type="text" class="form-control form-control-sm" id="c-phrase" autocapitalize="characters" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+            <div class="wz-card">
+              <div class="wz-field">
+                <label for="c-homing">Homing in GRBL mode</label>
+                <select class="form-select" id="c-homing">
+                  <option value="gfcloud">Use the Glowforge service (cameras)</option>
+                  <option value="none">None</option>
+                </select>
+                <div class="help">
+                  The one thing in GRBL mode that reaches the service: a homing cycle that finds the
+                  head with the cameras. Without it the machine cuts from wherever the head is.
+                </div>
+              </div>
+              <details>
+                <summary style="cursor: pointer; color: var(--og-dim)">Identity override (rarely needed)</summary>
+                <div class="wz-field">
+                  <label for="c-serial">Serial</label>
+                  <input class="form-control" id="c-serial" inputmode="numeric" placeholder="(from the fuses)" />
+                </div>
+                <div class="wz-field">
+                  <label for="c-pw">Password</label>
+                  <input class="form-control" id="c-pw" type="password" placeholder="(from the fuses)" autocomplete="off" />
+                  <div class="help">Only for a board whose fuses cannot be read. Leave both blank otherwise.</div>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" onclick="saveCloud()">Continue</button>
+            <span class="msg" id="c-msg"></span>
+          </div>
+        </section>
+
+        <!-- 7. Done -->
+        <!-- The dark checks: one section, filled per wizard -->
+        <section class="wz-step" id="st-dark">
+          <h1 id="k-title">Check</h1>
+          <p class="lead" id="k-lead"></p>
+          <div class="wz-mirror" id="k-mirror" style="display: none">
+            <span>Another browser is running this step. This page follows it.</span>
+            <button class="btn btn-sm btn-outline-secondary" onclick="darkTakeOver()">Take it over here</button>
+          </div>
+          <div class="wz-card">
+            <img class="wz-preview" id="k-preview" alt="The burn, as the machine draws it" style="display: none" />
+            <a class="wz-gcode" id="k-gcode" href="#" target="_blank" rel="noopener" style="display: none">The program (G-code)</a>
+            <div class="wz-bar"><div class="wz-fill" id="k-fill"></div></div>
+            <div class="wz-phaserow">
+              <div class="wz-phase" id="k-phase">Ready to start.</div>
+              <span class="wz-elapsed" id="k-elapsed"></span>
+            </div>
+            <div class="wz-prompt" id="k-prompt" style="display: none">
+              <p id="k-ptext"></p>
+              <img class="wz-shot" id="k-shot" alt="" style="display: none" />
+              <div class="wz-pinput" id="k-pinput" style="display: none">
+                <input class="form-control" id="k-pvalue" inputmode="decimal" placeholder="value" />
+              </div>
+              <div class="btns" id="k-pbtns"></div>
+            </div>
+            <pre class="wz-log" id="k-log"></pre>
+            <div class="wz-outcome" id="k-result" style="display: none"></div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" id="k-start" onclick="darkStart()">Start</button>
+            <button class="btn btn-outline-danger" id="k-abort" onclick="darkAbort()" style="display: none">Stop</button>
+            <button class="btn btn-primary" id="k-next" onclick="darkNext()" style="display: none">Continue</button>
+            <button class="btn btn-outline-secondary" id="k-skip" onclick="darkNext()" style="display: none">Skip for now</button>
+            <span class="msg" id="k-msg"></span>
+          </div>
+        </section>
+
+        <section class="wz-step" id="st-done">
+          <h1>Your machine is ready</h1>
+          <p class="lead">
+            The account exists, the machine knows what it is, its switches, sensors, airflow,
+            coolant loop, motion, and cameras are checked, the sheet is burned, and the record
+            holds its numbers. The control panel is yours. Keep the sheet with the machine.
+          </p>
+          <div class="wz-card">
+            <div class="wz-facts" id="d-facts"></div>
+          </div>
+          <div class="wz-card">
+            <h2>The record</h2>
+            <p>
+              Everything the setup found and wrote is in the commissioning record on the machine.
+              Print it, or save it beside the sheet. The log export carries it too.
+            </p>
+            <div class="wz-actions" style="margin-top: 6px">
+              <a class="btn btn-sm btn-outline-secondary" href="/wiz/record.html" target="_blank" rel="noopener">Printable summary</a>
+              <a class="btn btn-sm btn-outline-secondary" href="/wiz/record?download=1">Save the record</a>
+            </div>
+          </div>
+          <div class="wz-actions">
+            <button class="btn btn-primary" id="d-go" onclick="finish()">Open the control panel</button>
+            <span class="msg" id="d-msg"></span>
+          </div>
+        </section>
+
+        <!-- The exit -->
+        <section class="wz-step" id="st-return">
+          <h1>Going back to the factory firmware</h1>
+          <p class="lead" id="r-lead">The machine is putting the Glowforge firmware back.</p>
+          <div class="wz-card">
+            <div id="r-phase">…</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="wz-foot">
+      <span>ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project &middot; <a href="/licenses">Licenses</a></span>
+      <a href="#" class="exit" id="exitlink" onclick="askReturn(); return false;">Go back to the factory firmware</a>
+    </div>
+
+    <div class="modal fade" id="retmodal" tabindex="-1" aria-labelledby="ret-title" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="ret-title">Go back to the factory firmware?</h5>
+          </div>
+          <div class="modal-body">
+            <p>The machine goes back to the Glowforge firmware it ran before ForgeFIRM. ForgeFIRM stops.</p>
+            <p>To install ForgeFIRM again, you must run the install process again from the serial console.</p>
+            <p>Your settings, credentials, and logs on the machine stay.</p>
+            <p id="ret-msg" class="msg"></p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Stay with ForgeFIRM</button>
+            <button type="button" class="btn btn-danger" id="ret-go" onclick="doReturn()">Go back to the factory firmware</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="toast-container position-fixed top-0 end-0 p-3" id="toasts"></div>
+
+    <script src="vendor/bootstrap.bundle.min.js"></script>
+    <script src="regions.js"></script>
+    <script src="md.js"></script>
+    <script src="wizard.js"></script>
+  </body>
+</html>

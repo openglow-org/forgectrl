@@ -67,6 +67,10 @@ const char *crash_axes_name(unsigned axes)
 #define CTRL1            0x20      /* ODR [6:4], BDU, XYZ enables */
 #define CTRL4            0x23      /* FS [5:4]: 00 = 2 g, 10 = 4 g */
 #define CTRL7            0x26      /* LIR2 bit 3, LIR1 bit 2 */
+#define OUT_X_L          0x28      /* BDU holds the pair until both are read */
+#define OUT_X_H          0x29
+#define OUT_Y_L          0x2A
+#define OUT_Y_H          0x2B
 #define IG_CFG1          0x30
 #define IG_SRC1          0x31
 #define IG_THS_X1        0x32
@@ -165,6 +169,74 @@ int crash_hw_poll(unsigned *src1, unsigned *src2)
         return -1;
     *src1 = s1;
     *src2 = s2;
+    return 0;
+}
+
+int crash_hw_sample(long *x, long *y)
+{
+    unsigned char c1, xl, xh, yl, yh;
+    if (i2c_fd < 0)
+        return -1;
+    if (rd(CTRL1, &c1))
+        return -1;
+    if (c1 != CTRL1_RUN) {
+        if (wr(CTRL4, run_ctrl4) || wr(CTRL1, CTRL1_RUN))
+            return -1;
+        usleep(20000);          /* a few ODR periods: the first outputs settle */
+    }
+    if (rd(OUT_X_L, &xl) || rd(OUT_X_H, &xh) || rd(OUT_Y_L, &yl) || rd(OUT_Y_H, &yh))
+        return -1;
+    *x = (short)(((unsigned)xh << 8) | xl);
+    *y = (short)(((unsigned)yh << 8) | yl);
+    return 0;
+}
+
+static unsigned char listen_ctrl1, listen_ctrl4;
+static int listen_opened;
+
+int crash_hw_listen(int on)
+{
+    if (on) {
+        /* The bus handle: the crash watch's when it holds one, else
+         * opened here and closed at the end of the listening, so the
+         * watch's own state stays true. */
+        listen_opened = 0;
+        if (i2c_fd < 0) {
+            if (crash_hw_open() != 0)
+                return -1;
+            listen_opened = 1;
+        }
+        if (rd(CTRL1, &listen_ctrl1) || rd(CTRL4, &listen_ctrl4))
+            return -1;
+        /* The 2 g scale: the lens finder's thresholds were set on it
+         * (the crash watch's 4 g halves every reading). */
+        unsigned char c4 = (unsigned char)(listen_ctrl4 & ~CTRL4_FS_MASK);
+        if (wr(CTRL4, c4) || wr(CTRL1, CTRL1_RUN))
+            return -1;
+        usleep(20000);          /* a few ODR periods: the first outputs settle */
+        return 0;
+    }
+    if (i2c_fd < 0)
+        return -1;
+    wr(CTRL4, listen_ctrl4);
+    wr(CTRL1, listen_ctrl1);
+    if (listen_opened) {
+        crash_hw_close();
+        listen_opened = 0;
+    }
+    return 0;
+}
+
+int crash_hw_burst(long *x, long *y, long *z)
+{
+    unsigned char reg = OUT_X_L | 0x80, b[6];   /* auto-increment through OUT_Z_H */
+    if (i2c_fd < 0)
+        return -1;
+    if (write(i2c_fd, &reg, 1) != 1 || read(i2c_fd, b, 6) != 6)
+        return -1;
+    *x = (short)(((unsigned)b[1] << 8) | b[0]);
+    *y = (short)(((unsigned)b[3] << 8) | b[2]);
+    *z = (short)(((unsigned)b[5] << 8) | b[4]);
     return 0;
 }
 

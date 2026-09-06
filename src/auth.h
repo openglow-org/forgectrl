@@ -6,6 +6,7 @@
 #ifndef FORGECTRL_AUTH_H
 #define FORGECTRL_AUTH_H
 
+#include <stddef.h>
 #include <ulfius.h>
 
 /* Load (or first-boot generate) the panel bearer token from /data.
@@ -33,6 +34,19 @@ const char *auth_token(void);
 int auth_read_ok(const struct _u_request *req, struct _u_response *res);
 int auth_write_ok(const struct _u_request *req, struct _u_response *res);
 int auth_loopback_ok(const struct _u_request *req, struct _u_response *res);
+/* The origin checks alone: the pages and the login itself, which must
+ * answer before any session exists and whatever panel_open_reads says. */
+int auth_origin_ok(const struct _u_request *req, struct _u_response *res);
+/* Whether the request carries a valid login session cookie. */
+int auth_session_ok(const struct _u_request *req);
+/* Whether the peer is this host (the init scripts, forgetest on the
+ * board, the controllers). */
+int auth_peer_local(const struct _u_request *req);
+/* The peer address as text, for the login throttle. */
+void auth_peer_text(const struct _u_request *req, char *buf, size_t len);
+/* The dev-image marker (/etc/forgefirm-dev): token-only writes are
+ * accepted on a dev image so the bench tools keep working. */
+int auth_dev_image(void);
 
 /* Silent form of the write check (origin + token), for the file-upload
  * sink which runs during body parse and has no response object. Returns

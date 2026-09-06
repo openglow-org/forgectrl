@@ -1,0 +1,79 @@
+<!--
+  login.html - forgectrl: the panel login
+  Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+  SPDX-License-Identifier: MIT
+
+  Served at "/login" (and at "/" without a session) once an account
+  exists. One form, POST /login, a session cookie on success. Bundled
+  by src/ui/embed.cmake like the other pages.
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ForgeFIRM login</title>
+    <script>
+      (function () {
+        var t = 'light';
+        try {
+          var s = localStorage.getItem('ff_theme');
+          if (s === 'light' || s === 'dark') t = s;
+          else if (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches)
+            t = 'dark';
+        } catch (e) {}
+        document.documentElement.setAttribute('data-bs-theme', t);
+      })();
+    </script>
+    <link rel="stylesheet" href="vendor/bootstrap.min.css" />
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="wizard.css" />
+  </head>
+  <body>
+    <header>
+      <div class="hrow">
+        <svg width="95" height="36" viewBox="0 0 95 36" aria-label="OpenGlow">
+          <g stroke="#e8262a" stroke-linecap="round">
+            <line x1="34" y1="8" x2="90" y2="8" stroke-width="1.2" />
+            <line x1="34" y1="0.5" x2="34" y2="15.5" stroke-width="1.2" />
+            <line x1="26.5" y1="8" x2="41.5" y2="8" stroke-width="1.2" />
+            <line x1="28.7" y1="2.7" x2="39.3" y2="13.3" stroke-width="1.1" />
+            <line x1="39.3" y1="2.7" x2="28.7" y2="13.3" stroke-width="1.1" />
+            <line x1="31.1" y1="1.1" x2="36.9" y2="14.9" stroke-width=".8" />
+            <line x1="36.9" y1="1.1" x2="31.1" y2="14.9" stroke-width=".8" />
+            <line x1="27.1" y1="5.1" x2="40.9" y2="10.9" stroke-width=".8" />
+            <line x1="40.9" y1="5.1" x2="27.1" y2="10.9" stroke-width=".8" />
+          </g>
+          <circle cx="34" cy="8" r="2" fill="#e8262a" />
+          <text x="0" y="31" font-size="20" font-family="inherit"><tspan fill="#fff" font-weight="600">Open</tspan><tspan fill="#b9bac9" font-weight="300">Glow</tspan></text></svg
+        ><span class="appname">ForgeFIRM</span><span id="host"></span>
+      </div>
+    </header>
+    <div class="lg-wrap">
+      <form class="wz-card lg-card" id="lg" autocomplete="on">
+        <h1>Sign in</h1>
+        <p class="sub">The control panel of this machine.</p>
+        <div class="wz-field">
+          <label for="name">Name</label>
+          <input class="form-control" id="name" name="username" autocomplete="username" autofocus autocapitalize="off" spellcheck="false" />
+        </div>
+        <div class="wz-field">
+          <label for="password">Password</label>
+          <input class="form-control" id="password" name="password" type="password" autocomplete="current-password" />
+        </div>
+        <div class="wz-actions">
+          <button class="btn btn-primary" id="go" type="submit">Sign in</button>
+          <span class="msg" id="msg"></span>
+        </div>
+        <p class="help" style="margin-top: 14px; font-size: 12.5px; color: var(--og-dim)">
+          Forgot the password? Hold the machine's button while you turn the machine on, for ten
+          seconds, until the button blinks amber. Then set a new one here.
+        </p>
+      </form>
+    </div>
+    <div class="wz-foot">
+      <span>ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project &middot; <a href="/licenses">Licenses</a></span>
+    </div>
+    <script src="login.js"></script>
+  </body>
+</html>

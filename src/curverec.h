@@ -42,5 +42,19 @@ typedef struct {
 
 int curverec_fit(const long *hv, const long *tp, int n, double hz,
                  curverec_pt *pts, int max_pts, char *err, size_t elen);
+/* The fitted points as the laser_dose_curve value ("d:l,d:l,..."). */
+int curverec_curve_text(const curverec_pt *pts, int n, char *buf, size_t len);
+
+/* The laser-key override one job holds: the floor, the curve, and the
+ * corner gamma set to the given values (NULL leaves a key alone), the
+ * originals kept in a marker a daemon restart restores. -1 when
+ * another job holds it or the marker cannot be written. end restores
+ * every key it took. */
+int curverec_override_begin(const char *floor, const char *curve, const char *gamma);
+void curverec_override_end(void);
+int curverec_override_active(void);
+/* The floor and curve the active override saved ("" when unset or
+ * untouched). */
+void curverec_saved(char *floor, size_t fl, char *curve, size_t cl);
 
 #endif

@@ -34,6 +34,10 @@ int machine_is_idle(void);
  * reports NOT closed, so the camera privacy gate keeps the sensors dark
  * rather than capturing on a bad read. */
 int machine_lid_closed(void);
+/* The EV_SW switch bits as the kernel reports them (0 on any failure):
+ * 2 button, 3 doors (closed = 1), 4 hv_enable readback, 5 interlock
+ * (active = the loop is open), 7 head. */
+unsigned long machine_switch_bits(void);
 
 /* Factory coolant-thermistor conversion (shared with the diagnostics
  * runner). Raw 10-bit ADC count -> degrees C; out-of-range input maps

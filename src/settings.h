@@ -11,6 +11,9 @@
 /* Read a key from the shared config file (FORGECTRL_CONF, default
  * /data/forgefirm.conf). Returns 0 and fills val, or -1 if absent. */
 int settings_get(const char *key, char *val, size_t len);
+/* A 0/1 key: 1 when the value is "1", 0 when "0", def when absent or
+ * anything else. */
+int settings_get_bool(const char *key, int def);
 
 /* Set a key, preserving comments and unrelated keys; atomic replace.
  * An empty value removes the key. Returns 0 on success. */

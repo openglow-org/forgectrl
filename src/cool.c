@@ -127,6 +127,7 @@
 #include "accel.h"
 #include "airflow.h"
 #include "cool.h"
+#include "commission.h"
 #include "coolfmt.h"
 #include "fflog.h"
 #include "gates.h"
@@ -375,6 +376,7 @@ static double rep_at = -1.0;           /* CLOCK_MONOTONIC; <0 = never */
 static char pub_verdict[COOL_VERDICT_MAX] = "OK";
 static char pub_reason[COOL_REASON_MAX];
 static int pub_fire_ok, pub_hold;
+static int pub_armed_ack;           /* the acknowledgment as published */
 static double pub_down = -273.15, pub_up = -273.15;
 static const char *pub_phase = "idle";
 
@@ -384,6 +386,7 @@ static int start_cool;              /* the busy-start cooldown airflow still sta
 static flow_verdict_t flow_verdict = Flow_Normal;
 static uint32_t smoke_s = COOLDOWN_SMOKE_S;
 static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
+static float temp_offset_c = 0.0f;     /* the sensors wizard's room-thermometer offset */
 static float temp_max_c = TEMP_MAX_C_DEFAULT;
 static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
 static float temp_critical_c = TEMP_CRITICAL_C_DEFAULT;
@@ -408,6 +411,9 @@ static uint32_t confirm_max_s = FLOW_CONFIRM_MAX_S;
 static double flow_next_check;
 static int flow_check_active = 0;
 static int flow_check_pending = 0;
+static int quiet_held = 0;              /* cool_quiet_hold: every fan off for a listening */
+static int flow_check_held = 0;         /* cool_flow_check_hold */
+static double flow_hold_since = 0;
 static double flow_pending_since;
 static int flow_settle_warned = 0;
 static int flow_base_set = 0;
@@ -538,6 +544,10 @@ static airflow_fan_t fan_gate[Fan_N];
 static double fan_reading[Fan_N];
 static double fan_floor[Fan_N];
 static double fan_grace_until = 0.0;
+/* Every gated fan at or above its floor, this tick: the armed window is
+ * acknowledged only then, so the first fire waits for the airflow. */
+static int fans_up = 0;
+static double fans_up_at = -1.0;     /* when they first were, this session */
 static int airflow_alarm = 0;        /* latched fan fault, this run session */
 static int fan_would_warned = 0;     /* off gate, would have tripped: once */
 static char pub_fan_gates[COOL_FAN_GATES_JSON_MAX] = "{}";
@@ -603,7 +613,8 @@ static int read_temp(const char *attr, float *c)
     /* The air-assist ground shift lifts the raw counts (more counts read
      * colder): take them off before the conversion. */
     long raw_c = raw - cool_coolant_offset_counts();
-    *c = (float)coolant_degc(raw_c > 0 ? raw_c : raw);
+    /* The per-machine offset from the sensors wizard's room reading. */
+    *c = (float)coolant_degc(raw_c > 0 ? raw_c : raw) + temp_offset_c;
     return 1;
 }
 
@@ -655,8 +666,23 @@ long cool_coolant_offset_counts(void)
     return (long)(k * frac + 0.5f);
 }
 
+/* Every fan off: the lens stop finder listens to the head accelerometer
+ * and a running fan is in the reading. */
+static void fans_quiet(void)
+{
+    aa_write(0);
+    wr_attr_long("thermal/exhaust_pwm", 0);
+    wr_attr_long("thermal/intake_pwm", 0);
+    wr_attr("head/purge_air", "0");
+}
+
 static void fans_idle(void)
 {
+    if (quiet_held) {
+        fans_quiet();
+        start_cool = 0;
+        return;
+    }
     aa_write(AIR_ASSIST_IDLE);
     wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
     wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
@@ -673,6 +699,10 @@ static void fans_run(void)
     cmd_duty[0] = airflow_run_duty(AIR_ASSIST_RUN, run_duty[0], eff_armed);
     cmd_duty[1] = airflow_run_duty(EXHAUST_RUN, run_duty[1], eff_armed);
     cmd_duty[2] = airflow_run_duty(INTAKE_RUN, run_duty[2], eff_armed);
+    if (quiet_held) {
+        fans_quiet();
+        return;
+    }
     aa_write(cmd_duty[0]);
     wr_attr_long("thermal/exhaust_pwm", cmd_duty[1]);
     wr_attr_long("thermal/intake_pwm", cmd_duty[2]);
@@ -680,6 +710,10 @@ static void fans_run(void)
 
 static void fans_cool(void)
 {
+    if (quiet_held) {
+        fans_quiet();
+        return;
+    }
     aa_write(AIR_ASSIST_IDLE);
     wr_attr_long("thermal/exhaust_pwm", EXHAUST_COOL);
     wr_attr_long("thermal/intake_pwm", INTAKE_COOL);
@@ -753,6 +787,8 @@ static struct {
     uint32_t *u;
     int env_set;
 } tunables[] = {
+    { "GFCOOL_TEMP_OFFSET_C",   "cool_temp_offset_c",
+      0.0f,                   &temp_offset_c,   NULL, 0 },
     { "GFCOOL_FLOW_HEATER_PCT", "cool_flow_heater_pct",
       FLOW_HEATER_PCT,        NULL,             &flow_heater_pct, 0 },
     { "GFCOOL_FLOW_CHECK_S",    "cool_flow_check_s",
@@ -1079,6 +1115,36 @@ static int diag_guard(const char *what)
     return own ? 0 : -1;
 }
 
+void cool_quiet_hold(int on)
+{
+    pthread_mutex_lock(&mu);
+    int was = quiet_held;
+    quiet_held = on ? 1 : 0;
+    pthread_mutex_unlock(&mu);
+    if (on && !was) {
+        fans_quiet();
+        info("every fan off for the lens stop finder's listening");
+    } else if (!on && was) {
+        wr_attr("head/purge_air", "1");
+        fans_apply_phase();
+        info("the fans back in their posture after the listening");
+    }
+}
+
+void cool_flow_check_hold(int on)
+{
+    pthread_mutex_lock(&mu);
+    int was = flow_check_held;
+    flow_check_held = on ? 1 : 0;
+    if (on)
+        flow_hold_since = wall_s();
+    pthread_mutex_unlock(&mu);
+    if (on && !was)
+        info("flow check held for a commissioning card");
+    else if (!on && was)
+        info("flow check hold released");
+}
+
 void cool_diag_pump(int on)
 {
     if (diag_guard("diag pump write") == 0)
@@ -1116,6 +1182,38 @@ void cool_diag_aa(long duty)
         aa_write(duty);
 }
 
+void cool_diag_purge(int on)
+{
+    if (diag_guard("diag purge write") == 0)
+        wr_attr("head/purge_air", on ? "1" : "0");
+}
+
+void cool_diag_tec(int on)
+{
+    if (diag_guard("diag TEC write") == 0) {
+        wr_attr("thermal/tec_on", on ? "1" : "0");
+        tec_written = -1;           /* the release lets the tick rewrite it */
+    }
+}
+
+/* Engine-raised commissioning flags: a flow fault twice in a row makes
+ * the flow calibration required; a fan that starts a job within 10
+ * percent of its floor recommends the airflow wizard. Each is raised
+ * once. */
+static int flow_fault_streak;
+static int fan_margin_noted[Fan_N];
+
+static void flow_fault_noted(void)
+{
+    if (++flow_fault_streak == 2)
+        commission_flag("cooling.flow", "required", "a coolant flow fault twice in a row");
+}
+
+static void flow_fault_cleared(void)
+{
+    flow_fault_streak = 0;
+}
+
 /* ------------------------------------------------------ verdict file */
 
 /* The document must always fit its buffer. An oversized one is not
@@ -1143,17 +1241,21 @@ _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
  * at idle - stays fresh across the arm and authorizes the first fire
  * before the run airflow is applied. Published from eff_armed, which
  * the tick sets before flood_apply and before this call, so a verdict
- * carrying armed=true was computed with the run session open. */
+ * carrying armed=true was computed with the run session open, and only
+ * once every gated fan reads at or above its floor (fans_up): the
+ * controller waits on this acknowledgment, so the first fire waits for
+ * the airflow instead of the fans catching up under the beam. */
 static void verdict_publish(int fire_ok, const char *verdict, int hold,
                             int have_down, float down,
                             int have_up, float up)
 {
     char body[VERDICT_BODY_MAX];
-    int armed_ack = eff_armed;
+    int armed_ack = eff_armed && fans_up;
     pthread_mutex_lock(&mu);
     snprintf(pub_verdict, sizeof(pub_verdict), "%s", verdict);
     pub_fire_ok = fire_ok;
     pub_hold = hold;
+    pub_armed_ack = armed_ack;
     pub_down = have_down ? down : -273.15;
     pub_up = have_up ? up : -273.15;
     int n = snprintf(body, sizeof(body),
@@ -1237,7 +1339,10 @@ static void flood_apply(int on, double now)
         for (int i = 0; i < Fan_N; i++)
             airflow_reset(&fan_gate[i]);
         airflow_alarm = 0;
+        fans_up = 0;
+        fans_up_at = -1.0;
         fan_would_warned = 0;
+        memset(fan_margin_noted, 0, sizeof(fan_margin_noted));
         critical_alarm = 0;
         critical_would_warned = 0;
         job_temps_seen = 0;
@@ -1339,6 +1444,10 @@ static void flood_apply(int on, double now)
         }
         critical_alarm = 0;
         flow_check_pending = 0;
+        if (flow_check_held) {
+            flow_check_held = 0;
+            info("flow check hold released: the run ended");
+        }
         if (flow_check_active) {    /* run ended before the verdict */
             flow_check_active = 0;
             heater_set_pct(0);
@@ -1731,14 +1840,26 @@ static void engine_tick(void)
         static const long fan_local[3] = {AIR_ASSIST_RUN, EXHAUST_RUN, INTAKE_RUN};
         int run = cool_state == Cool_Run;
         int in_grace = now < fan_grace_until;
+        int up_now = 1;
         coolfmt_fan_t rows[Fan_N];
         for (int i = 0; i < Fan_N; i++) {
             airflow_state_t st;
             int dx = fan_duty_ix[i];
             int judged = dx < 0 ? airflow_judged(run, armed, 1, 1)
                        : airflow_judged(run, armed, cmd_duty[dx], fan_local[dx]);
+            if (judged && fan_floor[i] > 0.0 && fan_reading[i] < fan_floor[i])
+                up_now = 0;
             if (judged) {
                 st = airflow_tick(&fan_gate[i], fan_reading[i], fan_floor[i], in_grace);
+                if (!in_grace && !fan_margin_noted[i] && fan_floor[i] > 0.0
+                    && fan_reading[i] >= fan_floor[i]
+                    && fan_reading[i] < fan_floor[i] * 1.10) {
+                    fan_margin_noted[i] = 1;
+                    char why[96];
+                    snprintf(why, sizeof(why), "%s ran within 10 percent of its floor (%.0f of %.0f)",
+                             fan_name[i], fan_reading[i], fan_floor[i]);
+                    commission_flag("airflow", "recommended", why);
+                }
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;
                     char msg[96];
@@ -1768,6 +1889,15 @@ static void engine_tick(void)
                           : st == Air_Off ? "off"
                           : run ? "unjudged" : "idle";
         }
+        /* The airflow is up once every gated fan reads its floor; in an
+         * armed session that is the moment the window is acknowledged
+         * and the beam may start. */
+        if (flood_on && up_now && !fans_up) {
+            fans_up_at = now;
+            if (armed)
+                info("fans at their floors: the armed window is acknowledged");
+        }
+        fans_up = flood_on && up_now;
         char fg[sizeof(pub_fan_gates)];
         if (coolfmt_fan_gates(fg, sizeof(fg), rows, Fan_N) < 0)
             fflog(LOG_ERR, "cool: the fan gate rows do not fit their status "
@@ -2088,6 +2218,7 @@ static void engine_tick(void)
                              rise, flow_fault_rise, dt, laser);
                 } else {
                     flow_verdict = Flow_Fault;
+                    flow_fault_noted();
                     snprintf(msg, sizeof(msg),
                              "COOLANT FLOW FAULT: heater rise %.1f C (limit %.1f, dT %.1f%s) - check the pump",
                              rise, flow_fault_rise, dt, laser);
@@ -2100,6 +2231,7 @@ static void engine_tick(void)
                            : "coolant flow recovered (heater rise %.1f C, dT %.1f C%s)",
                          rise, dt, laser);
                 flow_verdict = Flow_Normal;
+                flow_fault_cleared();
                 info(msg);
                 pthread_mutex_lock(&mu);
                 pub_reason[0] = '\0';
@@ -2133,6 +2265,7 @@ static void engine_tick(void)
         && now - flow_suspect_since > (double)confirm_max_s) {
         char msg[96];
         flow_verdict = Flow_Fault;
+        flow_fault_noted();
         snprintf(msg, sizeof(msg),
                  "COOLANT FLOW FAULT: no clean re-check within %u s - check the pump",
                  (unsigned)confirm_max_s);
@@ -2151,9 +2284,17 @@ static void engine_tick(void)
         }
     }
 
+    /* A hold outlives nothing: the run's end clears it above, and a
+     * card that died leaves it for at most COOL_FLOW_HOLD_MAX_S. */
+    if (flow_check_held && now - flow_hold_since > (double)COOL_FLOW_HOLD_MAX_S) {
+        flow_check_held = 0;
+        warn("flow check hold released: it ran out of time");
+    }
+
     /* Gate: a pending check only starts from a settled loop - sensors
-     * in agreement AND the downstream reading stationary. */
-    if (flow_check_pending && !flow_check_active && have_down && have_up) {
+     * in agreement AND the downstream reading stationary - and not
+     * while a commissioning card holds it. */
+    if (flow_check_pending && !flow_check_active && !flow_check_held && have_down && have_up) {
         int stationary = down_hist_n >= FLOW_SETTLE_WIN;
         if (stationary) {
             uint32_t base = down_hist_n - FLOW_SETTLE_WIN;
@@ -2450,6 +2591,15 @@ double cool_report_age(void)
     double age = rep_at < 0 ? -1.0 : wall_s() - rep_at;
     pthread_mutex_unlock(&mu);
     return age;
+}
+
+void cool_controller_stopped(void)
+{
+    pthread_mutex_lock(&mu);
+    rep_at = -1.0;
+    rep_mode = 0;
+    rep_armed = 0;
+    pthread_mutex_unlock(&mu);
 }
 
 int cool_status_json(char *buf, size_t len)

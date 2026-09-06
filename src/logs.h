@@ -50,10 +50,12 @@ char *logs_tail_json(const char *name, long lines, long long from);
  * and starts the archiver; read() streams the archive; end() reaps
  * and removes the staging. Only one export runs at a time: begin()
  * fails with err="busy" otherwise. settings_cb writes the settings
- * snapshot (secrets already masked) into the given stream. */
+ * snapshot (secrets already masked) into the given stream; record_cb
+ * writes the commissioning record (system/commissioning.json), which
+ * the sanitizer then treats like any other text. Either may be NULL. */
 typedef struct logs_export logs_export_t;
 logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
-                                 char *err, size_t errlen);
+                                 void (*record_cb)(FILE *), char *err, size_t errlen);
 ssize_t logs_export_read(logs_export_t *e, char *buf, size_t max);
 void logs_export_end(logs_export_t *e);
 

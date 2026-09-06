@@ -69,9 +69,10 @@ def settings_table():
 
 
 def endpoints():
-    """(method, path) per ulfius_add_endpoint_by_val call in main.c."""
-    return re.findall(r'ulfius_add_endpoint_by_val\(&inst, "(GET|POST)", '
-                      r'"([^"]+)"', read('src/main.c'))
+    """(method, path) per row of the routes[] table in main.c."""
+    m = re.search(r'struct route routes\[\] = \{(.*?)\n    \};', read('src/main.c'),
+                  re.S)
+    return re.findall(r'\{\s*"(GET|POST)",\s*"([^"]+)"', m.group(1))
 
 
 def panel_routes():
@@ -177,7 +178,7 @@ class MockTest(unittest.TestCase):
         self.assertEqual(list(self.ds.SECRET_KEYS),
                          [k for k, secret in table if secret])
         expect = [k + '_set' if secret else k for k, secret in table]
-        expect += ['gates', 'version', 'machine_id']
+        expect += ['gates', 'version', 'machine_id', 'tls_fingerprint']
         reply = self.get_json(self.mock(), '/settings')
         self.assertEqual(list(reply), expect)
         for k, secret in table:
@@ -202,6 +203,30 @@ class MockTest(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertEqual(json.loads(body),
                          {'error': 'authentication required'})
+
+    def test_settings_cloud_enabled_is_the_cloud_steps_decision(self):
+        # as main.c rules it: on from off takes the typed phrase; off
+        # sweeps the cloud homing and the cloud boot mode
+        m = self.mock()
+        m.settings.update({'cloud_enabled': '0', 'homing_mode': 'none',
+                           'controller_mode': 'grbl'})
+        code, hdrs, body = self.call(m, 'POST', '/settings',
+                                     {'cloud_enabled': '1'})
+        self.assertEqual((code, body),
+                         (400, b'type I UNDERSTAND to turn cloud mode on'))
+        self.assertEqual(m.settings['cloud_enabled'], '0')
+        code, hdrs, body = self.call(m, 'POST', '/settings',
+                                     {'cloud_enabled': '1',
+                                      'phrase': 'I UNDERSTAND'})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)['cloud_enabled'], '1')
+        m.settings.update({'homing_mode': 'gfcloud', 'controller_mode': 'cloud'})
+        code, hdrs, body = self.call(m, 'POST', '/settings',
+                                     {'cloud_enabled': '0'})
+        self.assertEqual(code, 200)
+        reply = json.loads(body)
+        self.assertEqual((reply['cloud_enabled'], reply['homing_mode'],
+                          reply['controller_mode']), ('0', 'none', 'grbl'))
 
     # -- the mode vocabulary
     def test_mode_matches_super_c(self):

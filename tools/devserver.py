@@ -10,7 +10,7 @@ in that directory changes, while every API request is either
   * proxied to a real machine (GF_HOST / GF_TOKEN, from the environment
     or the .env file at the repo root; see .env.example), so the panel
     shows live data and its actions reach the hardware exactly as they
-    would from the machine's own port 8080; or
+    would from the machine's own HTTPS port; or
   * answered by the built-in mock backend (--mock, or automatically when
     no GF_HOST is configured), which exercises the JavaScript without a
     machine and mirrors the daemon's token check on state-changing
@@ -35,7 +35,9 @@ import http.client
 import io
 import json
 import os
+import re
 import socket
+import ssl
 import sys
 import tarfile
 import threading
@@ -52,11 +54,11 @@ TOKEN_MARK = '__FFTOKEN__'          # in panel.js; the daemon substitutes it
 # The files index.html links, in load order: the list embed.cmake inlines,
 # one marker tag per file.
 CSS_FILES = ('vendor/bootstrap.min.css', 'theme.css')
-JS_FILES = ('vendor/bootstrap.bundle.min.js', 'help.js', 'forms.js',
+JS_FILES = ('vendor/bootstrap.bundle.min.js', 'regions.js', 'help.js', 'forms.js',
             'panel.js')
 
 DEFAULT_PORT = 8081
-DEVICE_PORT = 8080
+DEVICE_PORT = 443                # the machine's HTTPS listener; the dev server proxies over TLS
 MOCK_TOKEN = '0123456789abcdef0123456789abcdef'
 WATCH_POLL_S = 0.25         # src/ui/ stat interval
 WATCH_HOLD_S = 25.0         # long-poll ceiling per /__dev/watch call
@@ -340,7 +342,7 @@ MOCK_SVG = (
 # tests/test_devserver_mock.py holds both tuples to the C table.
 SETTINGS_KEYS = (
     'controller_mode', 'homing_mode',
-    'gfcloud_home_x', 'gfcloud_home_y', 'gfcloud_home_z',
+    'gfcloud_home_x', 'gfcloud_home_y',
     'gfcloud_home_timeout_s', 'gf_serial', 'gf_password', 'ui_units',
     'wifi_country',
     'cool_flow_rise', 'cool_flow_heater_pct', 'cool_flow_check_s',
@@ -348,6 +350,7 @@ SETTINGS_KEYS = (
     'cool_laser_heat_density', 'cool_aa_offset_counts',
     'cool_temp_max', 'cool_temp_resume', 'cool_temp_critical_c',
     'cool_temp_min', 'cool_temp_start', 'cool_tec_present',
+    'cool_temp_offset_c',
     'cool_tec_on_c', 'cool_tec_off_c',
     'cool_fire_q1_alert', 'cool_fire_q1_critical',
     'cool_fire_q2_alert', 'cool_fire_q2_critical',
@@ -357,11 +360,14 @@ SETTINGS_KEYS = (
     'cool_tach_air_assist_min_rpm', 'cool_purge_min_current',
     'cool_fan_grace_s',
     'laser_button_timeout_s', 'laser_disarm_s', 'laser_floor_density',
-    'laser_dose_curve', 'laser_corner_gamma', 'laser_pulse_ticks',
+    'laser_dose_curve', 'laser_corner_gamma', 'lens_hall_edge_z_mm', 'lens_park_z_mm',
+    'lens_stop_below_steps', 'lens_stop_above_steps',
+    'laser_pulse_ticks',
     'laser_pulse_min_ticks', 'rail_settle_s', 'lid_lamp_idle',
     'cloud_pause_backtrack_ticks', 'cloud_resume_lead_ticks',
     'cloud_hold_max_s', 'pulse_warn_threshold_bytes',
     'pulse_reject_threshold_bytes', 'lid_policy',
+    'cloud_enabled', 'panel_open_reads',
     'log_forgectrl_disk', 'log_forgectrl_remote',
     'log_grblhal_disk', 'log_grblhal_remote',
     'log_gfcloud_disk', 'log_gfcloud_remote',
@@ -379,6 +385,8 @@ SETTING_CHOICES = {
     'ui_units': ('metric', 'imperial'),
     'cool_tec_present': ('0', '1'),
     'lid_policy': ('cancel', 'hold'),
+    'cloud_enabled': ('0', '1'),
+    'panel_open_reads': ('0', '1'),
     'syslog_proto': ('udp', 'tcp'),
 }
 LOGGERS = ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel', 'system')
@@ -392,6 +400,201 @@ SLOT_TARGETS = {'sd': '/dev/mmcblk1p1', 'a': '/dev/mmcblk2p1',
                 'b': '/dev/mmcblk2p2', 'legacy': '/dev/mmcblk2p4'}
 MOCK_VERSION = '20260101000000 (mock)'
 MOCK_RELEASE = '0.0.2'          # what /update/check offers
+MOCK_FINGERPRINT = ':'.join(['%02X' % ((i * 37 + 11) & 0xff)
+                             for i in range(32)])
+MOCK_SHEET_ID = 'UL5UU-LS5PI'
+MOCK_MANIFEST = ('PACKAGE NAME: forgectrl\nPACKAGE VERSION: 0.0.1\n'
+                 'RECIPE NAME: forgectrl\nLICENSE: MIT\n\n'
+                 'PACKAGE NAME: grblhal-glowforge\nPACKAGE VERSION: 0.0.1\n'
+                 'RECIPE NAME: grblhal-glowforge\nLICENSE: GPL-3.0-or-later\n\n')
+MOCK_CAMKEY = 'c0ffee00' * 4
+ADVISORY_DOCS = ('safety-and-risk', 'licenses', 'privacy', 'cloud-service')
+ADVISORY_META = {
+    'safety-and-risk': ('Safety and risk', 'typed', 'I UNDERSTAND'),
+    'licenses': ('Licenses and notices', 'check', None),
+    'privacy': ('Privacy', 'check', None),
+    'cloud-service': ('The Glowforge cloud service', 'check', None),
+}
+WIZARDS = (('advisories', 'Advisories'), ('account', 'Your account'),
+           ('preferences', 'Preferences'), ('machine', 'Your machine'),
+           ('cloud', 'Cloud mode'),
+           ('switches', 'Switches'), ('sensors', 'Sensors'), ('airflow', 'Airflow'),
+           ('motion', 'Motion'), ('cameras', 'Cameras'),
+           ('cooling.aa-offset', 'Coolant offset'), ('cooling.flow', 'Coolant flow'),
+           ('cooling.tec', 'TEC'), ('cooling.flow-verify', 'Flow check'),
+           ('cloud.header', 'Cloud header'),
+           ('sheet.place', 'Place the sheet'), ('sheet.frame', 'First fire'),
+           ('laser.focus', 'Focus'), ('laser.floor', 'Laser floor'),
+           ('laser.dose-curve', 'Dose curve'), ('laser.corner', 'Corner rolloff'),
+           ('cooling.flow-load', 'Flow under load'))
+DARK = ('switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
+        'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header')
+# The sheet wizards run on the same mock runner; the daemon's previews
+# are stood in for by a drawing of the card's box.
+LIVE = ('sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
+        'laser.corner', 'cooling.flow-load')
+# The what-changed menu (commission.c): a change, its title, its reason,
+# and the wizards it flags with their levels.
+CHANGES = (
+    ('tube', 'The laser tube was replaced', 'the tube was replaced',
+     (('laser.floor', 'required'), ('laser.dose-curve', 'required'),
+      ('cooling.flow-load', 'required'), ('laser.corner', 'recommended'))),
+    ('pump', 'The coolant pump was replaced', 'the pump was replaced',
+     (('cooling.flow', 'required'),)),
+    ('coolant', 'The coolant was changed', 'the coolant was changed',
+     (('cooling.flow', 'required'),)),
+    ('fan', 'A fan was replaced', 'a fan was replaced', (('airflow', 'required'),)),
+    ('head', 'The head was replaced', 'the head was replaced',
+     (('machine', 'required'), ('laser.focus', 'required'), ('motion', 'recommended'),
+      ('cameras', 'recommended'))),
+    ('tray', 'The tray was replaced', 'the tray was replaced',
+     (('laser.focus', 'recommended'),)),
+    ('service', 'A cover was off: belts, drivers, wiring, or switches were serviced',
+     'the machine was serviced', (('switches', 'recommended'), ('motion', 'recommended'))),
+)
+# The daemon's layout (sheet.c): a 200 x 150 sheet, the frame 180 x 130
+# at (10, 10), the header band, and the five cards in two rows.
+SHEET_CARDS = {
+    'laser.focus': ('Focus', 10, 46, 58, 48), 'laser.floor': ('Laser floor', 72, 46, 66, 48),
+    'laser.corner': ('Corner rolloff', 142, 46, 48, 48),
+    'laser.dose-curve': ('Dose curve', 10, 98, 112, 38),
+    'cooling.flow-load': ('Flow under load', 126, 98, 64, 38),
+}
+
+
+def sheet_svg(card):
+    """A stand-in for GET /wiz/sheet.svg: the sheet with the frame, the
+    card's box (every box for the frame), and the header line."""
+    out = ["<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 150' width='200mm' height='150mm'>",
+           "<rect width='200' height='150' fill='#e7d3ac' stroke='#9c8a66' stroke-width='0.4'/>",
+           "<rect x='10' y='10' width='180' height='130' fill='none' stroke='#3a2a12' stroke-width='0.3'/>",
+           "<text x='58' y='20' font-size='6' fill='#3a2a12'>OpenGlow ForgeFIRM</text>",
+           "<text x='58' y='27' font-size='4' fill='#3a2a12'>Hardware Commissioning (mock)</text>"]
+    boxes = list(SHEET_CARDS) if card in ('sheet.place', 'sheet.frame') else \
+        [card] if card in SHEET_CARDS else []
+    for k in boxes:
+        t, x, y, w, h = SHEET_CARDS[k]
+        out.append("<rect x='%d' y='%d' width='%d' height='%d' fill='none' stroke='#3a2a12' "
+                   "stroke-width='0.3'/><text x='%d' y='%d' font-size='4' fill='#3a2a12'>%s</text>"
+                   % (x, y, w, h, x + 2, y + 6, t))
+    out.append('</svg>')
+    return '\n'.join(out)
+# The mock dark wizard: a prompt after PROMPT_AT seconds, done DONE_AFTER
+# seconds after the answer, with a result shaped like the daemon's.
+DARK_PROMPT_AT = 1.0
+DARK_DONE_AFTER = 2.0
+DARK_PROMPTS = {
+    'sheet.place': ('jog', 'place', 'Put the head at the back-left, place the sheet, close the lid, '
+                    'and set the origin.', ['X-10', 'X+10', 'Y-10', 'Y+10', 'X-1', 'X+1', 'Y-1', 'Y+1',
+                                            'Set origin']),
+    'sheet.frame': ('choice', 'frame-ok', 'Is the frame on the sheet, square, and visible?',
+                    ['Yes', 'Again, lighter', 'Again, darker']),
+    'laser.focus': ('multichoice', 'focus-pick', 'Which line is the narrowest and sharpest? Choose '
+                    'every adjacent line that looks the same; the middle of the run is taken. Then Done.',
+                    [str(i) for i in range(1, 13)]),
+    'laser.floor': ('choice', 'floor-pick', 'Which is the faintest rung with a continuous line?',
+                    [str(d) for d in range(2, 25, 2)] + ['None']),
+    'laser.corner': ('choice', 'corner-pick', 'Which pattern has the most even corners?',
+                     ['1.00', '1.25', '1.50', '1.75', '2.00']),
+    'switches': ('wait', 'lid-open', 'Open the lid.', []),
+    'sensors': ('number', 'room-temp', 'Optional: the room temperature in C.', ['Set', 'Skip']),
+    'cameras': ('confirm', 'lid-view', 'This is the lid camera. Can you see the bed?', ['Yes', 'No']),
+    'motion': ('continue', 'jogs', 'The head moves 50 mm each way on X, then on Y.', ['Continue']),
+    'cloud.header': ('continue', 'print', 'In the Glowforge app, place any small design and press '
+                     'Print. Do not press the machine button.', ['Continue']),
+}
+DARK_RESULTS = {
+    'sheet.place': {'origin_x': 0, 'origin_y': 229, 'origin_z': 0, 'alone': False, 'thickness_mm': 3.2,
+                    'steps_per_mm': {'x': 53.333, 'y': 53.333, 'z': 2.832}, 'z_referenced': True,
+                    'summary': "The origin is set at the head's position. The full sheet, 3.2 mm thick. "
+                               'Every card is drawn from this point: do not move the sheet until the '
+                               'last card is done.'},
+    'sheet.frame': {'mark_s': 400, 'mark_feed': 3000, 'started': '2026-09-05 20:00Z',
+                    'emission': {'hv_max': 412, 'laser_on_samples': 1800, 'thermopile_delta': 380, 'lit_s': 62.0},
+                    'summary': 'The frame and the header are on the sheet. The mark dose is S400 at '
+                               "3000 mm/min; every card's box and labels burn at it. All three witnesses "
+                               "saw the beam: the tube current, the kernel's LASER_ON samples, and the "
+                               'head thermopile.'},
+    'laser.focus': {'pick': 11.5, 'picked_lines': [11, 12], 'thickness_mm': 2.8, 'pick_half_steps': -12.5,
+                    'edge_z_mm': 7.08, 'steps_per_mm': 2.922, 'max_height_mm': 13.92,
+                    'focus_range_mm': {'min': 2.29, 'max': 13.92},
+                    'stops': {'found': True, 'below': 14, 'above': 20, 'contact_below': 16,
+                              'contact_above': 22, 'why': ''},
+                    'emission': {'hv_max': 402, 'laser_on_samples': 300, 'thermopile_delta': 350, 'lit_s': 9.0},
+                    'summary': 'Line 11.5 on 2.8 mm: with the lens on its hall reference the focus is '
+                               '7.08 mm above the tray. A home puts the lens there, sets Z to that '
+                               'height, and parks the focus at the park height; Z counts the focus '
+                               'height above the bed. The stops were found 14 half-steps below the '
+                               'reference and 20 above, so the lens reaches 2.29 mm to 13.92 mm. Every '
+                               'later card runs at the focus for this sheet.'},
+    'laser.floor': {'faintest_density': 8.0, 'floor_density': 10.0,
+                    'emission': {'hv_max': 610, 'laser_on_samples': 900, 'thermopile_delta': 600, 'lit_s': 30.0},
+                    'summary': 'The faintest rung with a continuous line is 8 percent density. The laser '
+                               'floor is set at 10 percent, two above it: no job asks the tube for less, '
+                               'so the lightest engraving still marks this wood.'},
+    'laser.dose-curve': {'curve': '10:0.5,20:2,30:7,45:21,60:37,80:50,100:100',
+                         'points': [{'density': 10, 'light': 0.5}, {'density': 20, 'light': 2},
+                                    {'density': 30, 'light': 7}, {'density': 45, 'light': 21},
+                                    {'density': 60, 'light': 37}, {'density': 80, 'light': 50},
+                                    {'density': 100, 'light': 100}],
+                         'emission': {'hv_max': 1010, 'laser_on_samples': 1200, 'thermopile_delta': 900, 'lit_s': 70.0},
+                         'summary': 'The curve rose rung by rung and is written. It maps the density a job '
+                                    'asks for to the light the tube gives: 10 percent density gives 0.5 '
+                                    'percent of the light, 45 gives 21, and 100 gives 100. The chart shows '
+                                    'the fit.'},
+    'laser.corner': {'gamma': 1.5,
+                     'emission': {'hv_max': 350, 'laser_on_samples': 400, 'thermopile_delta': 300, 'lit_s': 20.0},
+                     'summary': 'Pattern 1.50 has the most even corners: the corner rolloff is set to 1.50. '
+                                'Under velocity-scaled power the machine eases the power into every corner '
+                                'by that exponent, so corners burn like the straights.'},
+    'cooling.flow-load': {'lit_s': 88.0, 'dose_raw_s': 52000.0, 'hv_mean': 590.0, 'base_c': 22.4, 'peak_c': 1.6,
+                          't_peak_s': 95.0, 'lag_s': 15.0, 'k_density': 3.1e-05, 'k_cw': 4.0e-05,
+                          'emission': {'hv_max': 620, 'laser_on_samples': 2000, 'thermopile_delta': 500, 'lit_s': 88.0},
+                          'summary': 'The tube was lit for 88 s and warmed the coolant by 1.60 C, peaking 95 s '
+                                     "after the fire began. That is the tube's own share of a flow check's "
+                                     'rise on this machine. It is written, and the flow check allows for it '
+                                     'from now on.'},
+    'switches': {'lid': True, 'button': True, 'interlock': 'satisfied',
+                 'hv_enable_follows_lid': True, 'head_present': True},
+    'sensors': {'coolant_down_c': 22.4, 'coolant_up_c': 21.9, 'chassis_c': 28.0, 'soc_c': 45.2,
+                'lid_ir_max': [110, 120, 105, 118], 'accel_events': 0, 'laser_pgood': 1,
+                'hv_current_max': 0, 'exhaust_rpm_idle': 3400, 'intake_rpm_idle': 2200},
+    'airflow': {'fans': {'exhaust': {'steady_rpm': 12000, 'spinup_s': 3.6, 'ok': True},
+                         'intake 1': {'steady_rpm': 4200, 'spinup_s': 2.1, 'ok': True},
+                         'intake 2': {'steady_rpm': 4180, 'spinup_s': 2.2, 'ok': True},
+                         'air assist': {'steady_rpm': 11000, 'spinup_s': 1.4, 'ok': True}},
+                'purge_current_on': 628, 'purge_current_off': 1,
+                'floors': {'cool_tach_exhaust_min_rpm': '6600', 'cool_tach_intake_min_rpm': '2299',
+                           'cool_tach_air_assist_min_rpm': '6050', 'cool_purge_min_current': '345',
+                           'cool_fan_grace_s': '9'}},
+    'motion': {'probe': 'MOTION OK - head accel p2p x=3567 y=1312', 'z_referenced': True,
+               'z_passes': [40, 40, 42, 40, 41], 'rail': 'up',
+               'moves': {'+X': {'p2p_x': 3100, 'p2p_y': 400, 'witnessed': True}}},
+    'cameras': {'sensor': 'OV5648', 'lamp_idle': 236, 'lid_ok': True, 'head_ok': True},
+    'cooling.aa-offset': {'offset_counts': 16.0, 'spread_counts': 1.2, 'recommend': 16.0},
+    'cooling.flow': {'flow_max': 6.1, 'noflow_min': 18.9, 'gap': 12.8, 'recommend': 12.5,
+                     'heater_pct': 40, 'threshold': 12.5},
+    'cooling.tec': {'tec': False, 'skipped': 'no TEC on this machine'},
+    'cooling.flow-verify': {'pass': True, 'threshold': 12.5, 'flow_rise': 6.0, 'noflow_rise': 18.8,
+                            'thin_margin': False},
+    'cloud.header': {'captured': '2026-01-01T00:00:00Z', 'job_id': 'mock', 'tag_count': 548,
+                     'calibration_tags': {'EFrd': 65535, 'IFrd': 43278, 'AArd': 1023, 'CMrx': 33000,
+                                          'XScr': 135, 'YScr': 135},
+                     'limits': {'coolant_max_c': 33.0},
+                     'machine': {'cool_tach_exhaust_min_rpm': {'local': '6600', 'default': 6400}}},
+}
+DARK_APPLIED = {
+    'laser.focus': {'lens_hall_edge_z_mm': {'from': '3.35', 'to': '7.08'},
+                    'lens_stop_below_steps': {'from': '', 'to': '14'},
+                    'lens_stop_above_steps': {'from': '', 'to': '20'}},
+    'laser.floor': {'laser_floor_density': {'from': '12', 'to': '10'}},
+    'laser.dose-curve': {'laser_dose_curve': {'from': 'off', 'to': '10:0.5,20:2,30:7,45:21,60:37,80:50,100:100'}},
+    'laser.corner': {'laser_corner_gamma': {'from': '2', 'to': '1.50'}},
+    'cooling.flow-load': {'cool_laser_heat_density': {'from': '2.7e-05', 'to': '3.1e-05'},
+                          'cool_laser_heat_cw': {'from': '3.5e-05', 'to': '4e-05'}},
+    'sensors': {'cool_temp_offset_c': {'from': '0', 'to': '0.5'}},
+}
+PRESS_S = 3                     # seconds until the mock button 'presses'
 JOB_S = 8                       # seconds a mock update job runs
 CURVE_WAIT_S, CURVE_RECORD_S = 3, 12
 # A mock update job walks its kind's phases (the daemon's own strings)
@@ -403,6 +606,10 @@ JOB_PHASES = {
     'restore': ('taking update lock', 'verifying archive checksum',
                 'unmounting target', 'writing factory image',
                 'verifying written slot'),
+    'factory-return': ('taking update lock', 'verifying archive checksum',
+                       'writing factory image', 'verifying written slot',
+                       'selecting the factory slot for the next boot',
+                       'rebooting into the factory firmware'),
 }
 
 # A mock diagnostic walks these phases (the daemon's own phase strings)
@@ -522,9 +729,39 @@ class Mock:
         self.report_at = self.t0
         self.rep_armed = False
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
+        # The commissioning record (GET /wiz): the mock starts commissioned
+        # unless GF_MOCK_FIRST_RUN=1, so the panel is what the dev server
+        # shows by default and the wizard on request.
+        first = os.environ.get('GF_MOCK_FIRST_RUN') == '1'
+        self.docs = {}
+        for d in ADVISORY_DOCS:
+            try:
+                with open(os.path.join(ROOT, 'docs', 'advisories', d + '.md'),
+                          'rb') as f:
+                    raw = f.read()
+            except OSError:
+                raw = ('# %s\n\nRevision: 0\n\n(mock document)\n' % d).encode()
+            self.docs[d] = (raw, hashlib.sha256(raw).hexdigest())
+        self.dark = {'id': '', 'running': False, 'started': 0.0, 'answered': 0.0,
+                     'seq': 0, 'answer': None, 'error': '', 'aborted': False}
+        self.wiz = {
+            'accepted': set() if first else set(ADVISORY_DOCS),
+            'pressed': not first,
+            'account': None if first else 'owner',
+            'reset': False,
+            'versions': {} if first else {w: 1 for w, _ in WIZARDS},
+            'flags': {},            # wizard id -> (level, reason), the what-changed menu
+            'completed': not first,
+            'button': 'idle', 'press_at': None,
+            'machine': {'model': None, 'tec': False},
+            'ssh': False,
+            'camkey': MOCK_CAMKEY,
+        }
         # GET /status, in the daemon's key order; diag, grbl and
         # gates_off are filled in per request.
         self.status = {
+            'lens': {'edge_z': 3.48, 'below': 14, 'above': 20, 'stops_found': True,
+                     'reach_min': -1.31, 'reach_max': 10.32},
             'state': 'idle', 'homed': True, 'diag': False,
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
@@ -549,7 +786,7 @@ class Mock:
             'sender': {'connected': False, 'generation': 3, 'for_s': 0,
                        'peer': ''},
             'laser': {'armed': False, 'arming': False, 'model': 'density',
-                      'floor_pct': 10, 'curve': 'off'},
+                      'floor_pct': 10, 'curve': 'off', 'gamma': 2.0},
             'modals': '[GC:G0 G54 G17 G21 G91 G94 M5 M9 T0 F600 S500.]',
             'overrides': {'feed': 100, 'rapid': 100},
             'driver': '260809',
@@ -656,6 +893,7 @@ class Mock:
         out['gates'] = self.gates_json()
         out['version'] = self.version
         out['machine_id'] = self.machine_id
+        out['tls_fingerprint'] = MOCK_FINGERPRINT
         return out
 
     def setting_valid(self, key, v):
@@ -678,9 +916,154 @@ class Mock:
     def idle(self):
         return self.status['state'] == 'idle'
 
+    def _license_bundle(self):
+        """A small tar.gz shaped like the image's: the manifest and one
+        generic license text under common-licenses/."""
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as t:
+            for name, text in (('common-licenses/license.manifest', MOCK_MANIFEST),
+                               ('common-licenses/generic_MIT', 'MIT License (mock)\n')):
+                data = text.encode()
+                ti = tarfile.TarInfo(name)
+                ti.size = len(data)
+                t.addfile(ti, io.BytesIO(data))
+        return buf.getvalue()
+
+    def _camkey_reply(self, headers):
+        host = (headers.get('Host') or '127.0.0.1').split(':')[0]
+        k = self.wiz['camkey']
+        return {'key': k,
+                'stream': 'http://%s/?action=stream&key=%s' % (host, k),
+                'snapshot': 'http://%s/cam/snapshot?cam=lid&key=%s' % (host, k),
+                'stream_https': 'https://%s/cam/stream?cam=lid&key=%s' % (host, k)}
+
+    def wiz_missing(self):
+        """The wizards the gate waits for: never run, or flagged required."""
+        w = self.wiz
+        return [k for k, _ in WIZARDS if not w['versions'].get(k)
+                or w['flags'].get(k, ('',))[0] == 'required']
+
+    def wiz_gate_open(self):
+        w = self.wiz
+        return (len(w['accepted']) == len(ADVISORY_DOCS) and w['pressed']
+                and w['account'] and not w['reset'] and not self.wiz_missing())
+
+    def wiz_why(self):
+        w = self.wiz
+        if len(w['accepted']) < len(ADVISORY_DOCS) or not w['pressed']:
+            return 'the advisories are not accepted'
+        if not w['account'] or w['reset']:
+            return 'no account exists'
+        missing = self.wiz_missing()
+        return 'commissioning required: ' + ', '.join(missing) if missing else ''
+
+    def wiz_record(self):
+        w = self.wiz
+        return {'schema': 1, 'sheet_id': MOCK_SHEET_ID, 'created': '2026-09-04T20:00:00Z',
+                'completed': '2026-09-06T18:55:00Z' if w['completed'] else None,
+                'advisories': {d: {'hash': self.docs[d][1], 'accepted': '2026-09-04T20:01:00Z',
+                                   'method': ADVISORY_META[d][1]} for d in w['accepted']},
+                'acceptance': {'pressed_at': '2026-09-04T20:03:00Z'} if w['pressed'] else {},
+                'account': {'name': w['account'], 'uid': 1000,
+                            'created': '2026-09-04T20:04:00Z'} if w['account'] else {},
+                'machine': {'model': w['machine']['model'], 'tec': w['machine']['tec'],
+                            'camera': 'ov5648', 'firmware': self.version, 'build_kind': 'dev',
+                            'head': {'hw_id': '0x3', 'serial_hash': 'K6JXB-KMRVF',
+                                     'version': '0x10'}},
+                'wizards': {k: {'version': v, 'completed': '2026-09-06T13:24:00Z',
+                                'result': DARK_RESULTS.get(k, {}),
+                                'applied': DARK_APPLIED.get(k, {})}
+                            for k, v in w['versions'].items()},
+                'flags': {k: {'level': lv, 'reason': rs} for k, (lv, rs) in w['flags'].items()}}
+
+    def wiz_record_html(self):
+        """A stand-in for recordhtml.c: the same sections, plain."""
+        rec = self.wiz_record()
+        titles = dict(WIZARDS)
+        h = ['<!doctype html><html lang="en"><head><meta charset="utf-8">'
+             '<title>Commissioning record %s</title><style>body{font:14px/1.5 sans-serif;'
+             'padding:28px 32px;max-width:900px}h2{border-bottom:1px solid #ddd}'
+             'th{text-align:left;color:#666;font-weight:500;padding-right:14px}</style></head>'
+             '<body><h1>ForgeFIRM commissioning record</h1><p>Sheet id <b>%s</b> &middot; '
+             'firmware %s (mock)</p>' % (MOCK_SHEET_ID, MOCK_SHEET_ID, self.version)]
+        h.append('<h2>Operator acknowledgment</h2><table>')
+        for d in ADVISORY_DOCS:
+            a = rec['advisories'].get(d)
+            h.append('<tr><th>%s</th><td>%s</td></tr>' % (
+                ADVISORY_META[d][0], a['accepted'] if a else 'not accepted'))
+        h.append('</table><h2>The steps</h2>')
+        for k, _ in WIZARDS:
+            e = rec['wizards'].get(k)
+            if not e:
+                continue
+            h.append('<h3>%s <small>v%d, %s</small></h3>' % (titles[k], e['version'], e['completed']))
+            f = rec['flags'].get(k)
+            if f:
+                h.append('<p style="color:#a33">Asked for again (%s): %s</p>' % (f['level'], f['reason']))
+            r = e['result'] or {}
+            if r.get('summary'):
+                h.append('<p>%s</p>' % r['summary'])
+            if e['applied']:
+                h.append('<div><b>Written to the settings</b>' + ''.join(
+                    '<div><code>%s</code> = %s</div>' % (kk, vv.get('to'))
+                    for kk, vv in e['applied'].items()) + '</div>')
+        h.append('</body></html>')
+        return ''.join(h)
+
+    def wiz_reply(self):
+        w = self.wiz
+        if w['button'] == 'waiting' and w['press_at'] and \
+                time.time() - w['press_at'] >= PRESS_S:
+            w['button'] = 'pressed'
+        docs = []
+        for d in ADVISORY_DOCS:
+            title, consent, phrase = ADVISORY_META[d]
+            docs.append({'id': d, 'title': title, 'consent': consent,
+                         'phrase': phrase, 'hash': self.docs[d][1],
+                         'accepted': d in w['accepted']})
+        gate = self.wiz_gate_open()
+        return {
+            'first_run': not w['completed'],
+            'gate': 'open' if gate else 'closed', 'override': False,
+            'why': '' if gate else self.wiz_why(),
+            'advisories_complete': len(w['accepted']) == len(ADVISORY_DOCS),
+            'acceptance_done': w['pressed'], 'account': bool(w['account']),
+            'completed': w['completed'], 'sheet_id': MOCK_SHEET_ID,
+            'required': [k for k, _ in WIZARDS if not w['versions'].get(k)] +
+                        [{'id': k, 'reason': rs} for k, (lv, rs) in w['flags'].items()
+                         if lv == 'required'],
+            'recommended': [{'id': k, 'reason': rs} for k, (lv, rs) in w['flags'].items()
+                            if lv == 'recommended'],
+            'versions': dict(w['versions']),
+            'changes': [{'id': c, 'title': t, 'wizards': [{'id': i, 'level': l} for i, l in wz]}
+                        for c, t, _, wz in CHANGES],
+            'documents': docs,
+            'wizards': [{'id': k, 'title': t, 'version': 1,
+                         'class': 'dark' if k in DARK else 'live' if k in LIVE else 'form',
+                         'done': w['versions'].get(k, 0)} for k, t in WIZARDS],
+            'dark': self.dark_reply(),
+            'users': {'exists': bool(w['account']) and not w['reset'],
+                      'reset_pending': w['reset'],
+                      'name': w['account'] or ''},
+            'button': w['button'], 'tls_fingerprint': MOCK_FINGERPRINT,
+            'session': True,
+            'clock': {'utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                      'set': True},
+            'machine': {'firmware': self.version, 'build': 'dev',
+                        'camera': 'ov5648',
+                        'head': {'present': True, 'hw_id': '0x3',
+                                 'version': '0x10', 'serial_hash': 'K6JXB-KMRVF'},
+                        'model': w['machine']['model'], 'tec': w['machine']['tec']},
+        }
+
     def mode_reply(self):
-        return {'mode': self.mode, 'controller': self.controller,
-                'pid': self.pid, 'motion': self.motion}
+        gated = not self.wiz_gate_open()
+        return {'mode': self.mode,
+                'controller': 'gated' if gated and self.controller != 'running'
+                else self.controller,
+                'pid': self.pid, 'motion': self.motion,
+                'gated': gated, 'local': False,
+                'why': self.wiz_why() if gated else ''}
 
     def status_reply(self):
         self.status['diag'] = self.diag['running']
@@ -879,6 +1262,13 @@ class Mock:
                                      'state': 'ok', 'kernel': 'yes'})
             result = {'ok': True, 'slot': a['slot'], 'version': ver,
                       'signed': True}
+        elif u['kind'] == 'factory-return':
+            ver = a['archive']['version']
+            slots[a['slot']].update({'type': 'factory', 'version': 'v' + ver,
+                                     'state': 'ok', 'kernel': 'yes',
+                                     'next': True})
+            result = {'ok': True, 'slot': a['slot'], 'restored': True,
+                      'factory_version': ver, 'rebooting': True}
         else:
             ver = a['archive']['version']
             slots[a['slot']].update({'type': 'factory', 'version': 'v' + ver,
@@ -922,6 +1312,208 @@ class Mock:
         return slot, None
 
     # -- dispatch: returns (status, headers dict, body bytes)
+    # -- the dark wizards: a time-driven stand-in for wizdark.c --------
+    def dark_reply(self):
+        d = self.dark
+        now = time.time()
+        if not d['id']:
+            return {'id': '', 'running': False, 'owned': False, 'mine': True, 'phase': '',
+                    'progress': 0, 'elapsed_s': 0, 'log': [], 'prompt': None, 'result': None,
+                    'applied': None, 'error': '', 'shots': {'lid': False, 'head': False}}
+        el = now - d['started']
+        prompt = None
+        result = None
+        phase = 'starting'
+        progress = min(int(el * 20), 30)
+        if d['running'] and not d['aborted']:
+            spec = DARK_PROMPTS.get(d['id'])
+            # A 'wait' prompt is the machine's own switch edge: the mock
+            # sees it two seconds later.
+            if spec and spec[0] == 'wait' and el >= DARK_PROMPT_AT + 2.0 and d['answer'] is None:
+                d['answer'] = ''
+                d['answered'] = now
+            if spec and el >= DARK_PROMPT_AT and d['answer'] is None:
+                kind, pid, text, opts = spec
+                if not d['seq']:
+                    d['seq'] = 1
+                prompt = {'seq': d['seq'], 'id': pid, 'kind': kind, 'text': text, 'options': opts,
+                          'timeout_s': 600, 'since_s': int(el - DARK_PROMPT_AT)}
+                phase = text
+                progress = 30
+            elif (not spec and el >= DARK_PROMPT_AT + DARK_DONE_AFTER) or \
+                    (spec and d['answer'] is not None and now - d['answered'] >= DARK_DONE_AFTER):
+                d['running'] = False
+                self.wiz['versions'][d['id']] = 1
+                self._log('wiz %s: complete' % d['id'])
+            elif spec and d['answer'] is not None:
+                phase = 'finishing'
+                progress = 30 + int((now - d['answered']) / DARK_DONE_AFTER * 70)
+        if not d['running']:
+            progress = 100 if not d['aborted'] else 0
+            phase = ''
+            if not d['aborted']:
+                result = DARK_RESULTS.get(d['id'], {})
+        # GF_MOCK_MIRROR=1 shows the run as another browser's (the mirror).
+        mirror = d['running'] and os.environ.get('GF_MOCK_MIRROR') == '1' and not d.get('taken')
+        return {'id': d['id'], 'running': d['running'], 'owned': bool(d['running']),
+                'mine': not mirror, 'phase': phase, 'progress': progress,
+                'elapsed_s': int(el), 'log': ['00:00 started', '00:01 %s' % phase] if phase else
+                ['00:00 started'], 'prompt': prompt, 'result': result,
+                'applied': DARK_APPLIED.get(d['id'], {}) if result is not None else None,
+                'error': 'aborted' if d['aborted'] else d['error'],
+                'shots': {'lid': d['id'] == 'cameras', 'head': d['id'] == 'cameras'}}
+
+    def _dark_post(self, path, form, J):
+        m = re.match(r'^/wiz/([a-z.:-]+)/(start|answer|abort|takeover)$', path)
+        if not m:
+            return None
+        wid, action = m.group(1), m.group(2)
+        d = self.dark
+        w = self.wiz
+        if wid not in DARK and wid not in LIVE:
+            return J(404, {'error': 'no such wizard'})
+        if action == 'takeover':
+            d['taken'] = True
+            return J(200, {'ok': True})
+        if action in ('answer', 'abort') and not self.dark_reply()['mine']:
+            return J(409, {'error': 'another browser is running this step; take it over to answer'})
+        if action == 'start':
+            if not w['pressed']:
+                return J(409, {'error': 'accept the advisories first'})
+            if d['running']:
+                return J(409, {'error': 'a wizard is already running (%s)' % d['id']})
+            self.dark = {'id': wid, 'running': True, 'started': time.time(), 'answered': 0.0,
+                         'seq': 0, 'answer': None, 'error': '', 'aborted': False}
+            self._log('wiz %s: started' % wid)
+            return J(200, {'started': True, 'id': wid})
+        if action == 'answer':
+            reply = self.dark_reply()
+            if not reply['prompt'] or str(reply['prompt']['seq']) != form.get('seq', ''):
+                return J(409, {'error': 'no such prompt is open'})
+            value = form.get('value', '')
+            if reply['prompt']['kind'] == 'jog' and value != 'Set origin':
+                self._log('wiz %s: jog %s' % (wid, value))
+                return J(200, {'ok': True})
+            d['answer'] = value
+            d['answered'] = time.time()
+            return J(200, {'ok': True})
+        if d['running']:
+            d['running'] = False
+            d['aborted'] = True
+            self._log('wiz %s: aborted' % wid)
+        return J(200, {'ok': True})
+
+    def _wiz_post(self, path, form, J):
+        w = self.wiz
+        dark = self._dark_post(path, form, J)
+        if dark is not None:
+            return dark
+        if path == '/wiz/advisories/accept':
+            d = form.get('doc')
+            if d not in self.docs:
+                return J(400, {'error': 'unknown document'})
+            if form.get('hash') != self.docs[d][1]:
+                return J(409, {'error': 'the document changed; read it again'})
+            title, consent, phrase = ADVISORY_META[d]
+            if consent == 'typed' and form.get('phrase') != phrase:
+                return J(400, {'error': 'type the phrase exactly as shown'})
+            w['accepted'].add(d)
+            w['pressed'] = False
+            return J(200, self.wiz_reply())
+        if path == '/wiz/advisories/press':
+            if len(w['accepted']) < len(ADVISORY_DOCS):
+                return J(409, {'error': 'accept every document first'})
+            w['button'] = 'waiting'
+            w['press_at'] = time.time()
+            return J(200, {'button': 'waiting'})
+        if path == '/wiz/advisories/press/cancel':
+            w['button'] = 'idle'
+            return J(200, {'button': 'idle'})
+        if path == '/wiz/account':
+            if not w['pressed']:
+                return J(409, {'error': 'accept the advisories first'})
+            name, pw = form.get('name', ''), form.get('password', '')
+            if not re.match(r'^[a-z][a-z0-9_-]{1,31}$', name):
+                return J(400, {'error': 'the name can hold lowercase letters, '
+                                        "digits, '-' and '_'"})
+            if len(pw) < 8 or pw == name:
+                return J(400, {'error': 'the password must be at least 8 characters'})
+            w['account'] = name
+            w['reset'] = False
+            w['versions']['account'] = 1
+            return 200, {'Content-Type': 'application/json',
+                         'Set-Cookie': 'ffsid=' + '0' * 64 + '; Path=/; HttpOnly'
+                         }, json.dumps({'ok': True, 'name': name}).encode()
+        if path == '/wiz/preferences':
+            for k in ('ui_units', 'wifi_country'):
+                if k in form and form[k]:
+                    if not self.setting_valid(k, form[k]):
+                        return J(400, {'error': 'invalid value for ' + k})
+                    self.settings[k] = form[k]
+            w['versions']['preferences'] = 1
+            return J(200, self.wiz_reply())
+        if path == '/wiz/machine':
+            if form.get('model') not in ('basic', 'plus', 'pro'):
+                return J(400, {'error': 'model must be basic, plus, or pro'})
+            tec = form.get('tec') == '1'
+            if tec and form.get('model') != 'pro':
+                return J(400, {'error': 'only a Pro has a thermoelectric cooler'})
+            w['machine'] = {'model': form['model'], 'tec': tec}
+            self.settings['cool_tec_present'] = '1' if tec else '0'
+            w['versions']['machine'] = 1
+            return J(200, self.wiz_reply())
+        if path == '/wiz/cloud':
+            if form.get('enabled') == '1':
+                if form.get('phrase') != 'I UNDERSTAND':
+                    return J(400, {'error': 'type I UNDERSTAND to turn cloud mode on'})
+                self.settings['cloud_enabled'] = '1'
+                self.settings['homing_mode'] = form.get('homing_mode', 'gfcloud')
+            else:
+                self.settings['cloud_enabled'] = '0'
+                if self.settings['homing_mode'] == 'gfcloud':
+                    self.settings['homing_mode'] = 'none'
+                if self.settings['controller_mode'] == 'cloud':
+                    self.settings['controller_mode'] = 'grbl'
+                    self.mode = 'grbl'
+            w['versions']['cloud'] = 1
+            return J(200, self.wiz_reply())
+        if path == '/wiz/complete':
+            if not self.wiz_gate_open():
+                return J(409, {'error': self.wiz_why()})
+            w['completed'] = True
+            return J(200, self.wiz_reply())
+        if path == '/wiz/changed':
+            for c, _, reason, wz in CHANGES:
+                if c == form.get('what'):
+                    for wid, level in wz:
+                        if w['flags'].get(wid, ('',))[0] == 'required' and level != 'required':
+                            continue
+                        w['flags'][wid] = (level, reason)
+                    self._log('commission: %s: the wizards it needs are flagged' % reason)
+                    return J(200, self.wiz_reply())
+            return J(400, {'error': 'what must name a change from the menu'})
+        if path == '/system/ssh':
+            e = form.get('enable')
+            if e not in ('0', '1'):
+                return J(400, {'error': 'enable must be 0 or 1'})
+            w['ssh'] = e == '1'
+            self._log('ssh: %s' % ('enabled until the next reboot' if w['ssh'] else 'disabled'))
+            return J(200, {'enabled': w['ssh'], 'running': w['ssh'], 'dev_image': True})
+        if path == '/system/camera-key':
+            if form.get('rotate') != '1':
+                return J(400, {'error': 'rotate=1 required'})
+            w['camkey'] = hashlib.sha256(w['camkey'].encode()).hexdigest()[:32]
+            self._log('camkey: camera key rotated')
+            return J(200, self._camkey_reply({}))
+        if path == '/restore/factory-return':
+            if form.get('confirm') != '1':
+                return J(400, {'error': 'confirm=1 required'})
+            if self.update['running']:
+                return J(409, {'error': 'an update job is running'})
+            return self._job_start('factory-return',
+                                   {'slot': 'b', 'archive': {'version': '2.6.0'}}, J)
+        return J(404, {'error': 'mock: no such endpoint'})
+
     def handle(self, method, path, q, headers, body):
         with self.lock:
             self._tick()
@@ -987,6 +1579,88 @@ class Mock:
                                   'fuse identity')
                 return J(200, {'serial': '123456789', 'hostname': 'ABC-123',
                                'password': '0123456789abcdef' * 4})
+            if path == '/wiz':
+                return J(200, self.wiz_reply())
+            if path == '/wiz/dark':
+                return J(200, self.dark_reply())
+            if path == '/wiz/sheet.svg':
+                card = q.get('card', '')
+                if card not in LIVE:
+                    return J(404, {'error': 'no such card'})
+                return 200, {'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store'}, \
+                    sheet_svg(card).encode()
+            if path == '/wiz/sheet.gcode':
+                card = q.get('card', '')
+                if card not in LIVE:
+                    return J(404, {'error': 'no such card'})
+                body = ('; ForgeFIRM commissioning: %s (mock)\nM3 S400\nG0 X10 Y10\nG1 X190 Y10 F3000\n'
+                        'G1 X190 Y140 F3000\nG1 X10 Y140 F3000\nG1 X10 Y10 F3000\nM5\n' % card)
+                return 200, {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'}, \
+                    body.encode()
+            if path == '/wiz/shot':
+                if self.dark['id'] != 'cameras':
+                    return J(404, {'error': 'no snapshot yet'})
+                svg = MOCK_SVG % ('%s camera' % q.get('cam', 'lid'))
+                return 200, {'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store'}, svg.encode()
+            if path == '/wiz/record':
+                # The daemon takes a login session or the token; the mock
+                # is always logged in.
+                hdrs = {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}
+                if 'download' in q:
+                    hdrs['Content-Disposition'] = \
+                        'attachment; filename="forgefirm-commissioning-%s.json"' % MOCK_SHEET_ID
+                return 200, hdrs, json.dumps(self.wiz_record(), indent=2).encode()
+            if path == '/wiz/record.html':
+                return 200, {'Content-Type': 'text/html; charset=utf-8',
+                             'Cache-Control': 'no-store'}, self.wiz_record_html().encode()
+            if path == '/wiz/advisories/press':
+                r = self.wiz_reply()
+                if self.wiz['button'] == 'pressed' and not self.wiz['pressed']:
+                    self.wiz['pressed'] = True
+                    self.wiz['versions']['advisories'] = 1
+                    self.wiz['button'] = 'idle'
+                    self._log('wiz: the advisories were accepted at the machine')
+                return J(200, {'button': r['button'], 'accepted': self.wiz['pressed']})
+            if path.startswith('/advisories/'):
+                d = path[len('/advisories/'):]
+                if d not in self.docs:
+                    return J(404, {'error': 'no such document'})
+                return 200, {'Content-Type': 'text/markdown; charset=utf-8',
+                             'ETag': self.docs[d][1]}, self.docs[d][0]
+            if path == '/system/ssh':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                return J(200, {'enabled': self.wiz['ssh'], 'running': self.wiz['ssh'],
+                               'dev_image': True})
+            if path == '/system/camera-key':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                return J(200, self._camkey_reply(headers))
+            if path == '/system/licenses':
+                return 200, {'Content-Type': 'application/gzip',
+                             'Content-Disposition':
+                             'attachment; filename="forgefirm-licenses-mock.tar.gz"'
+                             }, self._license_bundle()
+            if path == '/cert':
+                return 200, {'Content-Type': 'text/html; charset=utf-8'}, (
+                    '<!doctype html><title>ForgeFIRM certificate</title>'
+                    '<h1>This machine\'s certificate</h1><dl><dt>SHA-256</dt><dd><code>'
+                    + MOCK_FINGERPRINT + '</code></dd><dt>Names</dt><dd>forgefirm.local '
+                    + self.machine_id + '.local</dd></dl>'
+                    '<p><a href="/cert.pem">Download the certificate (PEM)</a></p>').encode()
+            if path == '/cert.pem':
+                return 200, {'Content-Type': 'application/x-pem-file'}, (
+                    '-----BEGIN CERTIFICATE-----\nbW9jaw==\n-----END CERTIFICATE-----\n'
+                    ).encode()
+            if path == '/licenses':
+                return 200, {'Content-Type': 'text/html; charset=utf-8'}, (
+                    '<!doctype html><title>ForgeFIRM licenses</title><h1>Licenses</h1>'
+                    '<p><a href="/system/licenses">download the license bundle (.tar.gz)</a></p>'
+                    '<pre>' + MOCK_MANIFEST + '</pre>').encode()
+            if path == '/system/licenses/manifest':
+                return 200, {'Content-Type': 'text/plain; charset=utf-8'}, MOCK_MANIFEST.encode()
+            if path in ('/setup', '/login'):
+                return T(200, 'mock: the dev server serves this page from src/ui/')
             return J(404, {'error': 'mock: no such endpoint'})
 
         if method != 'POST':
@@ -1011,8 +1685,23 @@ class Mock:
             self.rep_armed = form.get('armed', '0') not in ('', '0')
             return J(200, {'ok': True})
 
+        if path == '/login':
+            w = self.wiz
+            if w['account'] and form.get('name') == w['account'] and \
+                    form.get('password') == 'correct horse':
+                return 200, {'Content-Type': 'application/json',
+                             'Set-Cookie': 'ffsid=' + '0' * 64 + '; Path=/; HttpOnly'
+                             }, b'{"ok":true}'
+            return J(401, {'error': 'wrong name or password'})
+        if path == '/logout':
+            return J(200, {'ok': True})
+
         if not self._authorized(headers, q):
             return J(403, {'error': 'authentication required'})
+
+        if path.startswith('/wiz/') or path in ('/system/ssh', '/system/camera-key') or \
+                path == '/restore/factory-return':
+            return self._wiz_post(path, form, J)
 
         if path == '/settings':
             print('mock: POST /settings %s' % json.dumps(form), flush=True)
@@ -1027,10 +1716,22 @@ class Mock:
             for k in known:
                 if form[k] and not self.setting_valid(k, form[k]):
                     return T(400, 'invalid value for %s' % k)
+            # cloud_enabled is the cloud step's decision: on takes the
+            # typed phrase here too, off sweeps the cloud choices
+            if form.get('cloud_enabled') == '1' and self.settings.get('cloud_enabled') != '1' \
+                    and form.get('phrase') != 'I UNDERSTAND':
+                return T(400, 'type I UNDERSTAND to turn cloud mode on')
             for k in known:
                 self.settings[k] = form[k]
                 self._log('%s %s' % (k, 'cleared' if not form[k] else
                                      'set' if k in SECRET_KEYS else form[k]))
+            if form.get('cloud_enabled') == '0':
+                if 'homing_mode' not in form and self.settings.get('homing_mode') == 'gfcloud':
+                    self.settings['homing_mode'] = 'none'
+                    self._log('homing_mode none (cloud mode off)')
+                if 'controller_mode' not in form and self.settings.get('controller_mode') == 'cloud':
+                    self.settings['controller_mode'] = 'grbl'
+                    self._log('controller_mode grbl (cloud mode off)')
             return J(200, self.settings_reply())
         if path == '/mode':
             m = form.get('controller')
@@ -1248,6 +1949,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == '/' and 'action' not in q and \
                     self.command in ('GET', 'HEAD'):
                 return self._panel()
+            if u.path in ('/setup', '/login') and self.command in ('GET', 'HEAD'):
+                return self._page('wizard.html' if u.path == '/setup' else 'login.html')
             if self.command in ('GET', 'HEAD') and not self.bundled and \
                     os.path.splitext(u.path)[1] in CONTENT_TYPES and \
                     self.panel.path(u.path[1:]):
@@ -1285,6 +1988,22 @@ class Handler(BaseHTTPRequestHandler):
         if not token:
             label += ' (no GF_TOKEN: writes will be refused)'
         return token, label
+
+    def _page(self, name):
+        """The setup and login pages as the daemon serves them, with the
+        token spliced; their CSS and JS come as files (dev default). """
+        token, label = self._token_label()
+        try:
+            page = self.panel.text(name).replace(TOKEN_MARK, token or '', 1)
+        except OSError as e:
+            return self._send(500, {'Content-Type': 'text/plain'},
+                              ('devserver: %s\n' % e).encode())
+        badge = BADGE_HTML % {'bg': '#c7760a' if self.cfg.mock else '#3d854d',
+                              'label': html_escape(label)}
+        k = page.rfind('</body>')
+        page = page + badge if k < 0 else page[:k] + badge + page[k:]
+        self._send(200, {'Content-Type': 'text/html; charset=utf-8'},
+                   page.encode('utf-8'))
 
     def _panel(self):
         token, label = self._token_label()
@@ -1349,7 +2068,14 @@ class Handler(BaseHTTPRequestHandler):
             hdrs['Content-Length'] = '0'
 
         t0 = time.time()
-        conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        if port == 80:
+            conn = http.client.HTTPConnection(ip, port, timeout=timeout)
+        else:
+            # The machine signs its own certificate: no verification here,
+            # the dev server talks to the address the operator typed.
+            ctx = ssl._create_unverified_context()
+            conn = http.client.HTTPSConnection(ip, port, timeout=timeout,
+                                               context=ctx)
         try:
             conn.request(self.command, self.path, body=body, headers=hdrs)
             resp = conn.getresponse()

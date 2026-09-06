@@ -16,9 +16,10 @@
  *             plus the fuse-identity viewer (modal, on demand)
  *   #grbl     GRBL-mode settings (controller info; tunables land here
  *             as the driver exposes them)
- *   #diag     diagnostics - tools that take the hardware over (the
- *             motion controller is stopped for the duration): cooling
- *             system verification and calibration
+ *   #diag     commissioning - the checks the setup ran and what the
+ *             machine asks for again, and the cooling tools that take
+ *             the hardware over (the motion controller is stopped for
+ *             the duration): verification and calibration
  *   #logs     logging - per-logger disk and remote levels (applied at
  *             reboot), remote syslog target, live log viewer, and the
  *             sanitized tar.gz export for issue reports
@@ -125,7 +126,8 @@ function pTd(v) {
 var FT = {
   gfcloud_home_x: 'len',
   gfcloud_home_y: 'len',
-  gfcloud_home_z: 'len',
+  lens_park_z_mm: 'len',
+  lens_hall_edge_z_mm: 'len',
   cool_flow_rise: 'td',
   cool_temp_max: 'ta',
   cool_temp_resume: 'ta',
@@ -390,6 +392,10 @@ function tab() {
     sysChecked = true;
     checkUpd();
   }
+  if (h === 'system') {
+    loadSsh();
+    loadCommission();
+  }
   if (h === 'logs') {
     loadLogs();
     loadTail(false);
@@ -586,12 +592,23 @@ function renderMotion() {
         ' &nbsp;Y ' +
         posN(M.pos.y) +
         ' &nbsp;Z ' +
-        posN(M.pos.z) +
+        (M.homed ? posN(M.pos.z) : '\u2014') +
         ' ' +
         uL() +
         '</span>'
     );
   g += txt('Homed', M.homed ? 'yes' : 'no', M.homed ? 'b-ok' : 'b-dim');
+  if (M.lens) {
+    var reach =
+      'Z ' + posN(M.lens.reach_min) + ' to ' + posN(M.lens.reach_max) + ' ' + uL() +
+      (M.lens.stops_found ? '' : ' (fallback window)');
+    g += kv('Lens reach', reach);
+    var lr = $('lens_reach');
+    if (lr)
+      lr.textContent =
+        'Reach: ' + reach + '. Focus at the hall reference Z ' + posN(M.lens.edge_z) + ' ' + uL() +
+        '; free travel ' + M.lens.below + ' half-steps below it and ' + M.lens.above + ' above.';
+  }
   if (typeof M.laser_locked !== 'undefined')
     g += txt(
       'Laser latch (commanded)',
@@ -650,7 +667,229 @@ function renderMode() {
   el.textContent = st ? 'controller ' + st + (MD.pid ? ' (pid ' + MD.pid + ')' : '') : '';
   el.className = 'msg ' + (fault ? 'b-bad' : st === 'running' ? 'b-ok' : 'b-warn');
   $('ctl-retry').style.display = fault ? '' : 'none';
+  renderGate();
 }
+/* The commissioning gate: while it is closed no controller runs for a
+ * sender, and the banner says why and where to go. */
+function renderGate() {
+  var b = $('gate-banner');
+  if (!MD || !MD.gated) {
+    b.style.display = 'none';
+    return;
+  }
+  b.innerHTML =
+    '⚠ The machine is waiting for commissioning: ' +
+    esc(MD.why || 'a required step is not complete') +
+    '. Controllers stay off until it is done. ' +
+    "<a href='/setup'>Continue the setup</a>";
+  b.style.display = '';
+}
+/* Cloud mode exists on the panel only once the owner turned it on. */
+function applyCloudSurface() {
+  var on = S.cloud_enabled === '1';
+  $('t-gfcloud').style.display = on ? '' : 'none';
+  $('mode-cloud').style.display = on ? '' : 'none';
+  var opt = $('homing_mode').querySelector('option[value=gfcloud]');
+  if (opt) opt.disabled = !on;
+  if (!on && tabOf(location.hash) === 'gfcloud') location.hash = '#status';
+}
+function logout() {
+  fetch('/logout', { method: 'POST' })
+    .catch(function () {})
+    .then(function () {
+      location.replace('/login');
+    });
+}
+function renderSsh(j) {
+  var g = '';
+  g += txt('SSH', j.enabled ? (j.running ? 'on until the next reboot' : 'enabled, not running') : 'off');
+  if (j.dev_image) g += txt('Build', 'development image: SSH is on at every boot');
+  $('sshinfo').innerHTML = g;
+  $('sshbtn').textContent = j.enabled ? 'Turn SSH off' : 'Turn SSH on until reboot';
+  $('sshbtn').setAttribute('data-ssh', j.enabled ? '1' : '0');
+}
+function loadSsh() {
+  fx('/system/ssh')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(renderSsh)
+    .catch(function () {});
+}
+function toggleSsh() {
+  var want = $('sshbtn').getAttribute('data-ssh') === '1' ? '0' : '1';
+  $('msg-ssh').textContent = '…';
+  fx('/system/ssh?enable=' + want, { method: 'POST' })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      $('msg-ssh').textContent = j.error || '';
+      if (!j.error) renderSsh(j);
+    })
+    .catch(function () {
+      $('msg-ssh').textContent = 'no answer';
+    });
+}
+/* The camera key: the URL another program (LightBurn, a viewer) uses to
+ * read the camera without a login, shown on request and rotated here. */
+function renderCamUrl(j) {
+  var g = '';
+  g += kv('Stream', "<span class='mono brk'>" + esc(j.stream) + '</span>');
+  g += kv('Snapshot', "<span class='mono brk'>" + esc(j.snapshot) + '</span>');
+  g +=
+    "<div class='btns'><button class='btn btn-sm btn-outline-danger' data-nolock='1' onclick='rotateCamKey()'>New key</button>" +
+    "<span class='msg' id='msg-camkey'></span></div>" +
+    "<p class='hint'>The key lets a program read the cameras and the status without a login. " +
+    'Paste the stream URL into LightBurn. A new key stops every URL that carried the old one.</p>';
+  $('camurl').innerHTML = g;
+}
+function toggleCamUrl() {
+  var el = $('camurl');
+  if (el.style.display !== 'none') {
+    el.style.display = 'none';
+    return;
+  }
+  fx('/system/camera-key')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (j.error) {
+        $('cammsg').textContent = j.error;
+        return;
+      }
+      renderCamUrl(j);
+      el.style.display = '';
+    })
+    .catch(function () {
+      $('cammsg').textContent = 'no answer';
+    });
+}
+function rotateCamKey() {
+  if (!confirm('Make a new camera key? Every URL that carries the old key stops working.')) return;
+  fx('/system/camera-key?rotate=1', { method: 'POST' })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (j.error) {
+        $('msg-camkey').textContent = j.error;
+        return;
+      }
+      renderCamUrl(j);
+    })
+    .catch(function () {});
+}
+function loadCommission() {
+  fetch('/wiz')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (w) {
+      var g = '';
+      g += txt('State', w.completed ? 'complete' : 'in progress');
+      if (w.required && w.required.length)
+        g += txt(
+          'Required',
+          w.required
+            .map(function (x) {
+              return typeof x === 'string' ? x : x.id + (x.reason ? ' (' + x.reason + ')' : '');
+            })
+            .join(', ')
+        );
+      if (w.override) g += txt('Override', 'active until the next reboot');
+      g += kv('Sheet id', "<span class='mono'>" + esc(w.sheet_id || '') + '</span>');
+      g += kv('Certificate', "<span class='mono brk'>" + esc(w.tls_fingerprint || '') + '</span>');
+      $('commissioninfo').innerHTML = g;
+    })
+    .catch(function () {});
+}
+/* The Commissioning tab's list: every wizard the setup knows, the version
+ * it completed at, and what the machine asks for again. */
+function loadWizards() {
+  fetch('/wiz')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (w) {
+      var flags = {};
+      (w.required || []).forEach(function (x) {
+        if (typeof x === 'string') flags[x] = 'required';
+        else flags[x.id] = 'required' + (x.reason ? ': ' + x.reason : '');
+      });
+      (w.recommended || []).forEach(function (x) {
+        if (typeof x === 'string') flags[x] = flags[x] || 'recommended';
+        else flags[x.id] = flags[x.id] || 'recommended' + (x.reason ? ': ' + x.reason : '');
+      });
+      var g = '';
+      (w.wizards || []).forEach(function (z) {
+        W_TITLES[z.id] = z.title;
+        var state = z.done ? 'done (v' + z.done + ')' : 'not run';
+        var f = flags[z.id];
+        var cls = f && /^required/.test(f) ? 'b-bad' : f ? 'b-warn' : z.done ? 'b-ok' : '';
+        var again = w.completed && z.id !== 'advisories' && z.id !== 'account'
+          ? " <a href='/setup?step=" + esc(z.id) + "' data-nolock='1'>run again</a>" : '';
+        g += kv(esc(z.title), "<span class='" + cls + "'>" + esc(f ? state + ', ' + f : state) + '</span>' + again);
+      });
+      if (w.override) g += txt('Override', 'active until the next reboot: the checks are not enforced', 'b-warn');
+      $('wizlist').innerHTML = g;
+      renderChanges(w.changes || []);
+    })
+    .catch(function () {});
+}
+/* The what-changed menu: the daemon's table of changes, each mapped to
+ * the checks to run again. Drawn once; a redraw would reset the choice. */
+var CHANGES = [];
+function renderChanges(list) {
+  var sel = $('changed-what');
+  if (CHANGES.length === list.length && sel.options.length === list.length + 1) return;
+  CHANGES = list;
+  var h = '<option value="">Choose…</option>';
+  list.forEach(function (c) {
+    h += '<option value="' + esc(c.id) + '">' + esc(c.title) + '</option>';
+  });
+  sel.innerHTML = h;
+}
+function changedMsg(text, cls) {
+  var el = $('msg-changed');
+  el.textContent = text;
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+}
+function applyChanged() {
+  var what = $('changed-what').value;
+  if (!what) {
+    changedMsg('choose what changed first', 'b-bad');
+    return;
+  }
+  var c = null;
+  CHANGES.forEach(function (x) {
+    if (x.id === what) c = x;
+  });
+  changedMsg('marking…');
+  fx('/wiz/changed', { method: 'POST', body: new URLSearchParams({ what: what }) })
+    .then(function (r) {
+      if (!r.ok)
+        return r.json().then(function (j) {
+          throw j.error || r.status;
+        });
+      return r.json();
+    })
+    .then(function () {
+      var names = (c ? c.wizards : []).map(function (x) {
+        return (W_TITLES[x.id] || x.id) + ' (' + x.level + ')';
+      });
+      changedMsg('asked for again: ' + names.join(', '), 'b-ok');
+      $('changed-what').value = '';
+      loadWizards();
+      loadMode();
+    })
+    .catch(function (e) {
+      changedMsg(String(e), 'b-bad');
+    });
+}
+/* The wizard titles by id, from the last GET /wiz. */
+var W_TITLES = {};
 function retryMode() {
   setMode(MD && MD.mode ? MD.mode : 'grbl');
 }
@@ -803,7 +1042,6 @@ function fill(force) {
   setF('homing_mode', S.homing_mode || 'none');
   setF('gfcloud_home_x', S.gfcloud_home_x);
   setF('gfcloud_home_y', S.gfcloud_home_y);
-  setF('gfcloud_home_z', S.gfcloud_home_z);
   setF('gfcloud_home_timeout_s', S.gfcloud_home_timeout_s);
   setF('cloud_pause_backtrack_ticks', S.cloud_pause_backtrack_ticks);
   setF('cloud_resume_lead_ticks', S.cloud_resume_lead_ticks);
@@ -814,6 +1052,10 @@ function fill(force) {
   setF('laser_button_timeout_s', S.laser_button_timeout_s);
   setF('laser_disarm_s', S.laser_disarm_s);
   setF('laser_floor_density', S.laser_floor_density);
+  setF('lens_park_z_mm', S.lens_park_z_mm);
+  setF('lens_hall_edge_z_mm', S.lens_hall_edge_z_mm);
+  setF('lens_stop_below_steps', S.lens_stop_below_steps);
+  setF('lens_stop_above_steps', S.lens_stop_above_steps);
   setF('laser_dose_curve', S.laser_dose_curve);
   setF('laser_corner_gamma', S.laser_corner_gamma);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
@@ -835,6 +1077,8 @@ function fill(force) {
   for (ui = 0; ui < uu.length; ui++) uu[ui].textContent = uT();
   for (var pk in PH)
     $(pk).placeholder = fnum(PH[pk][1] === 'ta' ? dTa(PH[pk][0]) : dTd(PH[pk][0]), 1);
+  $('lens_park_z_mm').placeholder = fnum(dLen(3), 3);
+  $('lens_hall_edge_z_mm').placeholder = fnum(dLen(3.35), 3);
   $('host').textContent = (S.machine_id || '') + (S.version ? ' \u00b7 ' + S.version : '');
   fillForce = false;
   renderGateNotes();
@@ -867,15 +1111,8 @@ function clearIdentity() {
   $('gf_password').value = '';
   postNow({ gf_serial: '', gf_password: '' }, 'msg-i');
 }
-var RG =
-  "AF Afghanistan;AX Aland Islands;AL Albania;DZ Algeria;AS American Samoa;AD Andorra;AO Angola;AI Anguilla;AG Antigua & Barbuda;AR Argentina;AM Armenia;AW Aruba;AU Australia;AT Austria;AZ Azerbaijan;BS Bahamas;BH Bahrain;BD Bangladesh;BB Barbados;BY Belarus;BE Belgium;BZ Belize;BJ Benin;BM Bermuda;BT Bhutan;BO Bolivia;BQ Bonaire, Sint Eustatius and Saba;BA Bosnia and Herzegovina;BW Botswana;BR Brazil;IO British Indian Ocean Territory;VG British Virgin Islands;BN Brunei;BG Bulgaria;BF Burkina Faso;BI Burundi;CV Cabo Verde;KH Cambodia;CM Cameroon;CA Canada;KY Cayman Islands;CF Central African Republic;TD Chad;CL Chile;CN China;CX Christmas Island;CC Cocos (Keeling) Islands;CO Colombia;KM Comoros;CG Congo;CD Congo (DRC);CK Cook Islands;CR Costa Rica;CI Cote d'Ivoire;HR Croatia;CU Cuba;CW Curacao;CY Cyprus;CZ Czechia;DK Denmark;DJ Djibouti;DM Dominica;DO Dominican Republic;EC Ecuador;EG Egypt;SV El Salvador;GQ Equatorial Guinea;ER Eritrea;EE Estonia;SZ Eswatini;ET Ethiopia;FK Falkland Islands;FO Faroe Islands;FJ Fiji;FI Finland;FR France;GF French Guiana;PF French Polynesia;GA Gabon;GM Gambia;GE Georgia;DE Germany;GH Ghana;GI Gibraltar;GR Greece;GL Greenland;GD Grenada;GP Guadeloupe;GU Guam;GT Guatemala;GG Guernsey;GN Guinea;GW Guinea-Bissau;GY Guyana;HT Haiti;HN Honduras;HK Hong Kong SAR;HU Hungary;IS Iceland;IN India;ID Indonesia;IR Iran;IQ Iraq;IE Ireland;IM Isle of Man;IL Israel;IT Italy;JM Jamaica;JP Japan;JE Jersey;JO Jordan;KZ Kazakhstan;KE Kenya;KI Kiribati;KR Korea;XK Kosovo;KW Kuwait;KG Kyrgyzstan;LA Laos;LV Latvia;LB Lebanon;LS Lesotho;LR Liberia;LY Libya;LI Liechtenstein;LT Lithuania;LU Luxembourg;MO Macao SAR;MG Madagascar;MW Malawi;MY Malaysia;MV Maldives;ML Mali;MT Malta;MH Marshall Islands;MQ Martinique;MR Mauritania;MU Mauritius;YT Mayotte;MX Mexico;FM Micronesia;MD Moldova;MC Monaco;MN Mongolia;ME Montenegro;MS Montserrat;MA Morocco;MZ Mozambique;MM Myanmar;NA Namibia;NR Nauru;NP Nepal;NL Netherlands;NC New Caledonia;NZ New Zealand;NI Nicaragua;NE Niger;NG Nigeria;NU Niue;NF Norfolk Island;KP North Korea;MK North Macedonia;MP Northern Mariana Islands;NO Norway;OM Oman;PK Pakistan;PW Palau;PS Palestinian Authority;PA Panama;PG Papua New Guinea;PY Paraguay;PE Peru;PH Philippines;PN Pitcairn Islands;PL Poland;PT Portugal;PR Puerto Rico;QA Qatar;RE Reunion;RO Romania;RU Russia;RW Rwanda;WS Samoa;SM San Marino;ST Sao Tome & Principe;SA Saudi Arabia;SN Senegal;RS Serbia;SC Seychelles;SL Sierra Leone;SG Singapore;SX Sint Maarten;SK Slovakia;SI Slovenia;SB Solomon Islands;SO Somalia;ZA South Africa;SS South Sudan;ES Spain;LK Sri Lanka;SH St Helena, Ascension, Tristan da Cunha;BL St. Barthelemy;KN St. Kitts & Nevis;LC St. Lucia;MF St. Martin;PM St. Pierre & Miquelon;VC St. Vincent & Grenadines;SD Sudan;SR Suriname;SJ Svalbard & Jan Mayen;SE Sweden;CH Switzerland;SY Syria;TW Taiwan;TJ Tajikistan;TZ Tanzania;TH Thailand;TL Timor-Leste;TG Togo;TK Tokelau;TO Tonga;TT Trinidad & Tobago;TN Tunisia;TR Turkiye;TM Turkmenistan;TC Turks & Caicos Islands;TV Tuvalu;UM U.S. Outlying Islands;VI U.S. Virgin Islands;UG Uganda;UA Ukraine;AE United Arab Emirates;GB United Kingdom;US United States;UY Uruguay;UZ Uzbekistan;VU Vanuatu;VA Vatican City;VE Venezuela;VN Vietnam;WF Wallis & Futuna;YE Yemen;ZM Zambia;ZW Zimbabwe";
 (function () {
-  var s = $('wifi_country'),
-    a = RG.split(';'),
-    i;
-  s.add(new Option('Automatic \u2014 AP country, else World (00)', '00'));
-  for (i = 0; i < a.length; i++)
-    s.add(new Option(a[i].slice(3) + ' (' + a[i].slice(0, 2) + ')', a[i].slice(0, 2)));
+  fillRegions($('wifi_country'));
 })();
 function showFuse() {
   fx('/fuse-identity')
@@ -1596,6 +1833,7 @@ fetch('/settings')
   .then(function (s) {
     S = s;
     fill(true);
+    applyCloudSurface();
   })
   .catch(function () {});
 initHelp();
@@ -1609,6 +1847,8 @@ loadCam();
 setInterval(loadCam, 5000);
 loadDiag();
 setInterval(loadDiag, 2500);
+loadWizards();
+setInterval(loadWizards, 10000);
 loadSlots();
 jobPoll();
 renderGrbl();

@@ -17,6 +17,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The recorder refuses to start beside a dark wizard; none runs here. */
+int wizdark_running(void) { return 0; }
+
 static int failures;
 
 #define CHECK(cond, msg) do { \

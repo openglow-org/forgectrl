@@ -26,6 +26,8 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
                     void *user_data);
 int cb_update_upload(const struct _u_request *req, struct _u_response *res,
                      void *user_data);
+int cb_restore_factory_return(const struct _u_request *req,
+                              struct _u_response *res, void *user_data);
 int cb_restore_factory(const struct _u_request *req, struct _u_response *res,
                        void *user_data);
 int cb_update_status(const struct _u_request *req, struct _u_response *res,

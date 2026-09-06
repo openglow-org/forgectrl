@@ -80,6 +80,12 @@ void fflog(int prio, const char *fmt, ...)
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int machine_is_idle(void) { return 1; }
+static char last_flag[160];
+int commission_flag(const char *id, const char *level, const char *reason)
+{
+    snprintf(last_flag, sizeof(last_flag), "%s:%s:%s", id, level, reason);
+    return 0;
+}
 double chassis_degc(void) { return 25.0; }
 long supply_temp_raw(void) { return 540; }
 double soc_degc(void) { return 38.0; }
@@ -302,6 +308,45 @@ static int failures;
     else { printf("  FAIL: %s\n", msg); failures++; } \
 } while (0)
 
+/* The armed acknowledgment waits for the fans: with the exhaust under
+ * its floor the verdict carries armed=false however long the window is
+ * open; the tick the exhaust reads its floor, the acknowledgment goes
+ * out and the engine says so. A fan that never comes up never
+ * acknowledges (the controller refuses the arm at its budget). */
+static void test_ack_waits_for_fans(loop_t *L)
+{
+    printf("L. the armed acknowledgment waits for the fans\n");
+    close_session(L);
+    put_long("thermal/tach_exhaust", 10000000);     /* 3000 rpm: under the 6400 floor */
+    for (int i = 0; i < 20; i++) {
+        loop_tick(L);
+        fake_now += 1.0;
+        cool_state_report("idle", 0, -1, -1, -1, NULL);
+        engine_tick();
+    }
+    L->session = 1;
+    int acked_early = 0;
+    for (int i = 0; i < 25; i++) {
+        loop_tick(L);
+        fake_now += 1.0;
+        cool_state_report("run", 1, -1, -1, -1, NULL);
+        engine_tick();
+        if (pub_armed_ack)
+            acked_early = 1;
+    }
+    CHECK(!acked_early, "no acknowledgment while the exhaust is under its floor (25 s)");
+    CHECK(!fans_up, "fans_up is false with the exhaust slow");
+    put_long("thermal/tach_exhaust", 300);
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+    CHECK(pub_armed_ack && fans_up, "the acknowledgment goes out the tick the exhaust reads its floor");
+    CHECK(strstr(last_log, "fans at their floors") != NULL, "and the engine says so");
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+}
+
 int main(void)
 {
     make_tree();
@@ -420,6 +465,29 @@ int main(void)
           "the downstream sensor alone is enough to blind the engine");
     L.dead_down = 0;
 
+    printf("H2. a held flow check does not start; the release lets it\n");
+    close_session(&L);
+    for (int i = 0; i < 5; i++)
+        run_tick(&L);
+    open_session(&L);           /* the run's start requests a check; the hold keeps it pending */
+    cool_flow_check_hold(1);
+    for (int i = 0; i < 60 && !flow_check_active; i++)
+        run_tick(&L);
+    CHECK(!flow_check_active && heater_pct == 0 && flow_check_pending,
+          "the check stays pending under the hold");
+    CHECK(pub_fire_ok, "the hold is not a gate: fire stays permitted");
+    cool_flow_check_hold(0);
+    for (int i = 0; i < 200 && !flow_check_active; i++)
+        run_tick(&L);
+    CHECK(flow_check_active && heater_pct > 0, "the released check starts");
+    close_session(&L);
+    for (int i = 0; i < 30; i++)
+        run_tick(&L);
+    cool_flow_check_hold(1);
+    fake_now += COOL_FLOW_HOLD_MAX_S + 5;
+    run_tick(&L);
+    CHECK(!flow_check_held, "a forgotten hold runs out of time");
+
     printf("I. blind during a flow check: the heater goes off, the check is asked for again\n");
     open_session(&L);
     for (int i = 0; i < 200 && !flow_check_active; i++)
@@ -489,6 +557,8 @@ int main(void)
           "reading again: the warm-up holds on with its heater back");
     kv[0] = NULL;
     close_session(&L);
+
+    test_ack_waits_for_fans(&L);
 
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the flow check reads means, takes the tube's share off, "

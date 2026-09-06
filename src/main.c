@@ -3,7 +3,7 @@
  * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
  * SPDX-License-Identifier: MIT
  *
- * The machine-services daemon of ForgeFIRM: the HTTP service on port 8080
+ * The machine-services daemon of ForgeFIRM: the HTTP service on ports 80 and 443
  * that supervises the controller and brokers the pulse device, runs the
  * cooling engine, the cameras, telemetry, settings, diagnostics, logging,
  * the web control panel, and the A/B update system. The contract, every
@@ -20,7 +20,7 @@
  * clients (their streams end cleanly - viewers freeze on the last frame)
  * and switches. A SNAPSHOT of the other camera does not switch: the
  * engine borrows the mux for one frame and the stream freezes briefly.
- * Environment: FORGECTRL_PORT (8080), FORGECTRL_STREAM_Q (75),
+ * Environment: FORGECTRL_PORT (80), FORGECTRL_TLS_PORT (443), FORGECTRL_STREAM_Q (75),
  * FORGECTRL_LAMP (132), FORGECTRL_STREAM_FPS (0 = sensor max; 1 or more
  * is also realized as CSI hardware frame skip), FORGECTRL_H264_KBPS
  * (1500), FORGECTRL_H264_GOP (30), and the fallback switches
@@ -31,20 +31,33 @@
  * callback may block waiting for the next frame.
  */
 #define _GNU_SOURCE
+#include "advisories.h"
 #include "auth.h"
+#include "button.h"
 #include "cam.h"
+#include "camkey.h"
+#include "commission.h"
 #include "mp4mux.h"
 #include "cool.h"
 #include "curverec.h"
 #include "diag.h"
 #include "fflog.h"
 #include "gates.h"
+#include "hooks.h"
+#include "led.h"
 #include "logs.h"
+#include "paths.h"
+#include "session.h"
 #include "settings.h"
+#include "sheetid.h"
 #include "status.h"
 #include "super.h"
+#include "tls.h"
 #include "ui.h"
 #include "update.h"
+#include "users.h"
+#include "wiz.h"
+#include "wizdark.h"
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -55,17 +68,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 #include <microhttpd.h>
 #include <ulfius.h>
 #include <unistd.h>
 #include <zlib.h>
 
-#define DEFAULT_PORT 8080
+#define DEFAULT_PORT 80             /* HTTP: the read-only routes, this host, the redirect */
+#define DEFAULT_TLS_PORT 443        /* HTTPS: the login, the panel, every state change */
 #define BOUNDARY     "forgectrl-frame"
 #define SNAP_Q_DEF   75
 
 static volatile sig_atomic_t quit = 0;
+static unsigned tls_port = DEFAULT_TLS_PORT;
+static int cb_http_redirect(const struct _u_request *req, struct _u_response *res,
+                            void *user_data);
 
 static void on_signal(int sig)
 {
@@ -555,6 +574,14 @@ static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start"
 static int valid_tec_on(const char *v)     { return valid_gate("cool_tec_on_c", v); }
 static int valid_tec_off(const char *v)    { return valid_gate("cool_tec_off_c", v); }
 static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v, "1"); }
+/* The coolant sensors' per-machine offset: a room thermometer's word,
+ * within 5 C either way. */
+static int valid_temp_offset(const char *v)
+{
+    char *end;
+    double d = strtod(v, &end);
+    return end != v && *end == '\0' && d >= -5.0 && d <= 5.0;
+}
 static int valid_fire_q1a(const char *v)   { return valid_gate("cool_fire_q1_alert", v); }
 static int valid_fire_q1c(const char *v)   { return valid_gate("cool_fire_q1_critical", v); }
 static int valid_fire_q2a(const char *v)   { return valid_gate("cool_fire_q2_alert", v); }
@@ -594,6 +621,13 @@ static int valid_floor_pct(const char *v)  { return valid_range(v, 0, 100); }
  * ("10:0.5,...,100:100"); the controller validates the shape and falls
  * back loudly, this only bounds the alphabet and the length. */
 static int valid_corner_gamma(const char *v) { return valid_range(v, 0.25, 4); }
+/* The focus model in the lens's half-steps from its bottom stop: the
+ * step where the lens is 2 in from the bed (under it when negative)
+ * and the half-steps per mm of material (the count over the carriage's
+ * 12.32 mm of travel, about 2.8). */
+static int valid_edge_z(const char *v)      { return valid_range(v, -20, 20); }
+static int valid_park_z(const char *v)      { return valid_range(v, -5, 10); }
+static int valid_stop_steps(const char *v)  { return valid_range(v, 1, 40); }
 static int valid_dose_curve(const char *v)
 {
     size_t n = strlen(v);
@@ -634,6 +668,13 @@ static int valid_pulse_bytes(const char *v) { return valid_range(v, 0, 107374182
  * or "hold" (stock grblHAL door hold, cycle start resumes). */
 static int valid_lid_policy(const char *v) { return !strcmp(v, "cancel") || !strcmp(v, "hold"); }
 
+/* Two 0/1 switches. cloud_enabled: the owner's decision from the cloud
+ * wizard; while it is 0 the cloud controller, the cloud homing method
+ * and the cloud tab do not exist. panel_open_reads: the read-only
+ * routes (status, the cameras) answer any LAN client (unset = 1, so
+ * LightBurn reads the camera); 0 closes them to a login or this host. */
+static int valid_bool(const char *v)       { return !strcmp(v, "0") || !strcmp(v, "1"); }
+
 /* Logging: per-logger disk and remote levels (each off|error|warning|
  * notice|info|debug) and the remote syslog target. Read at boot by
  * `forgectrl --render-syslog` (rsyslog rules) and by each process for
@@ -648,7 +689,6 @@ static const struct {
     { "homing_mode",            valid_homing_mode, 0 },
     { "gfcloud_home_x",         valid_mm,          0 },
     { "gfcloud_home_y",         valid_mm,          0 },
-    { "gfcloud_home_z",         valid_mm,          0 },
     { "gfcloud_home_timeout_s", valid_timeout,     0 },
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },
@@ -668,6 +708,7 @@ static const struct {
     { "cool_temp_min",          valid_temp_min,    0 },
     { "cool_temp_start",        valid_temp_start,  0 },
     { "cool_tec_present",       valid_tec_present, 0 },
+    { "cool_temp_offset_c",     valid_temp_offset, 0 },
     { "cool_tec_on_c",          valid_tec_on,      0 },
     { "cool_tec_off_c",         valid_tec_off,     0 },
     { "cool_fire_q1_alert",     valid_fire_q1a,    0 },
@@ -689,6 +730,10 @@ static const struct {
     { "laser_floor_density",    valid_floor_pct,   0 },
     { "laser_dose_curve",       valid_dose_curve,  0 },
     { "laser_corner_gamma",     valid_corner_gamma, 0 },
+    { "lens_hall_edge_z_mm",    valid_edge_z,      0 },
+    { "lens_park_z_mm",         valid_park_z,      0 },
+    { "lens_stop_below_steps",  valid_stop_steps,  0 },
+    { "lens_stop_above_steps",  valid_stop_steps,  0 },
     { "laser_pulse_ticks",      valid_pulse_ticks, 0 },
     { "laser_pulse_min_ticks",  valid_pulse_ticks, 0 },
     { "rail_settle_s",          valid_settle_s,    0 },
@@ -699,6 +744,8 @@ static const struct {
     { "pulse_warn_threshold_bytes",   valid_pulse_bytes, 0 },
     { "pulse_reject_threshold_bytes", valid_pulse_bytes, 0 },
     { "lid_policy",             valid_lid_policy,  0 },
+    { "cloud_enabled",          valid_bool,        0 },
+    { "panel_open_reads",       valid_bool,        0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
     { "log_grblhal_disk",       logs_valid_level,  0 },
@@ -717,6 +764,16 @@ static const struct {
 };
 #define N_SETTINGS (sizeof(setting_defs) / sizeof(*setting_defs))
 
+int setting_valid(const char *key, const char *val)
+{
+    if (!key || !val)
+        return 0;
+    for (size_t i = 0; i < N_SETTINGS; i++)
+        if (!strcmp(setting_defs[i].key, key))
+            return !val[0] || setting_defs[i].valid(val);
+    return 0;
+}
+
 /* The settings as text for the log export: one "key = value" per line,
  * secrets shown only as set/unset. */
 static void settings_snapshot(FILE *out)
@@ -733,11 +790,23 @@ static void settings_snapshot(FILE *out)
     }
 }
 
+/* The commissioning record for the log export, indented so the
+ * sanitizer sees one value per line. */
+static void record_snapshot(FILE *out)
+{
+    char *text = commission_record_dump(1);
+    if (!text)
+        return;
+    fputs(text, out);
+    fputc('\n', out);
+    free(text);
+}
+
 /* WiFi radio policy, applied at startup and whenever the wifi_country
  * setting changes. The stored region (unset = "00", the world domain)
  * goes to cfg80211 as the user regulatory hint; power save is pinned
  * off - on a mains-powered machine it only adds latency. */
-static void apply_wifi(int set_region)
+void apply_wifi(int set_region)
 {
     char cc[8], cmd[48];
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
@@ -856,7 +925,7 @@ void machine_id(char *buf, size_t len)
 
 /* /etc/forgefirm-version: written by the image build (release version,
  * or build timestamp + dev tag). Sanitized for direct JSON embedding. */
-static void read_fw_version(char *buf, size_t len)
+void read_fw_version(char *buf, size_t len)
 {
     buf[0] = '\0';
     FILE *f = fopen("/etc/forgefirm-version", "r");
@@ -936,7 +1005,8 @@ static int reply_settings(struct _u_response *res)
     if (gates_json(gates, sizeof(gates), setting_gate_value, NULL) > 0)
         append(body, sizeof(body), &off, "\"gates\":%s,", gates);
     append(body, sizeof(body), &off,
-           "\"version\":\"%s\",\"machine_id\":\"%s\"}", fwver, mid);
+           "\"version\":\"%s\",\"machine_id\":\"%s\","
+           "\"tls_fingerprint\":\"%s\"}", fwver, mid, tls_fingerprint());
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -1107,6 +1177,33 @@ static int cb_settings_post(const struct _u_request *req,
      * machine can resume into an over-temperature it never leaves. The
      * per-key validators already cap each to a bounded range; this pins
      * their relationship across a multi-key POST. */
+    /* Nothing may point at the cloud while cloud mode is off: the
+     * effective cloud_enabled (this request's value, else the stored
+     * one) must be 1 for controller_mode=cloud or homing_mode=gfcloud. */
+    const char *ce = setting_param(req, "cloud_enabled");
+    {
+        /* The key is the owner's decision from the cloud step, never a
+         * plain switch: turning it on here takes the step's typed
+         * acknowledgment too. Re-sending 1 while it stands changes
+         * nothing and asks nothing. */
+        if (ce && !strcmp(ce, "1") && !settings_get_bool("cloud_enabled", 0)) {
+            const char *phrase = setting_param(req, "phrase");
+            if (!phrase || strcmp(phrase, WIZ_CLOUD_PHRASE))
+                return reply_error(res, 400,
+                    "type I UNDERSTAND to turn cloud mode on");
+        }
+        int enabled = ce && ce[0] ? !strcmp(ce, "1")
+                                  : settings_get_bool("cloud_enabled", 0);
+        const char *cm = setting_param(req, "controller_mode");
+        const char *hm = setting_param(req, "homing_mode");
+        if (!enabled && cm && !strcmp(cm, "cloud"))
+            return reply_error(res, 409,
+                "cloud mode is not enabled on this machine");
+        if (!enabled && hm && !strcmp(hm, "gfcloud"))
+            return reply_error(res, 409,
+                "cloud homing needs cloud mode enabled");
+    }
+
     double tmax, tresume, tcrit;
     effective_temp(req, "cool_temp_max", &tmax);
     effective_temp(req, "cool_temp_resume", &tresume);
@@ -1180,6 +1277,30 @@ static int cb_settings_post(const struct _u_request *req,
         vals[nset] = v;
         nset++;
     }
+    /* Off takes the cloud choices down with it, as the cloud step does,
+     * so nothing points at a cloud that is off: the driver's $H reads
+     * homing_mode alone. A choice the request sets itself was checked
+     * above and stands as sent. */
+    const char *swept[2] = { NULL, NULL };
+    if (ce && !strcmp(ce, "0")) {
+        char cur[16];
+        if (!setting_param(req, "homing_mode") &&
+            settings_get("homing_mode", cur, sizeof(cur)) == 0 &&
+            !strcmp(cur, "gfcloud")) {
+            keys[nset] = "homing_mode";
+            vals[nset] = "none";
+            nset++;
+            swept[0] = "homing_mode none";
+        }
+        if (!setting_param(req, "controller_mode") &&
+            settings_get("controller_mode", cur, sizeof(cur)) == 0 &&
+            !strcmp(cur, "cloud")) {
+            keys[nset] = "controller_mode";
+            vals[nset] = "grbl";
+            nset++;
+            swept[1] = "controller_mode grbl";
+        }
+    }
     if (settings_set_many(keys, vals, nset) != 0)
         return reply_error(res, 500, "cannot write settings file");
     for (size_t i = 0; i < N_SETTINGS; i++) {
@@ -1190,6 +1311,9 @@ static int cb_settings_post(const struct _u_request *req,
               !v[0] ? "cleared" :
               setting_defs[i].secret ? "set" : v);
     }
+    for (int i = 0; i < 2; i++)
+        if (swept[i])
+            fflog(LOG_NOTICE, "%s (cloud mode off)", swept[i]);
     if (setting_param(req, "wifi_country"))
         apply_wifi(1);
     if (setting_param(req, "lid_lamp_idle"))
@@ -1268,7 +1392,7 @@ static int cb_mode_get(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    char body[128];
+    char body[512];                     /* the gate's why alone can reach 300 */
     super_status_json(body, sizeof(body));
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -1413,28 +1537,42 @@ static int cb_diag_status(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
-/* The panel: the embedded gzip bundle inflated once, with the per-machine
- * token spliced in place of the __FFTOKEN__ placeholder. Serving the
- * token inside the page (rather than from an endpoint any LAN client
- * could call) is what lets the origin checks keep it out of a rebinding
- * attacker's reach. The splice happens on the inflated text, never
- * inside the compressed stream. */
-static const char *panel_html(void)
+
+/* --------------------------------------------------------------- pages */
+
+/* The three pages: each an embedded gzip bundle inflated once, with the
+ * per-machine token spliced in place of the __FFTOKEN__ placeholder.
+ * Serving the token inside a page (rather than from an endpoint any LAN
+ * client could call) is what lets the origin checks keep it out of a
+ * rebinding attacker's reach; and the panel and the wizard are served
+ * only into a session (or before an account exists), so the token
+ * travels only where the login did. The splice happens on the inflated
+ * text, never inside the compressed stream. */
+enum { PAGE_PANEL = 0, PAGE_WIZARD, PAGE_LOGIN, PAGE_COUNT };
+
+static const char *page_html(int which)
 {
-    static char *page;
+    static char *pages[PAGE_COUNT];
     static pthread_mutex_t page_mu = PTHREAD_MUTEX_INITIALIZER;
     static const char fallback[] =
         "<!doctype html><title>ForgeFIRM</title>"
-        "forgectrl: the panel could not be unpacked";
-    /* One inflate for the daemon's life, whichever request thread gets
-     * there first; the others wait for it rather than inflate again. */
+        "forgectrl: the page could not be unpacked";
+    const unsigned char *gz;
+    unsigned gz_len, len;
+    switch (which) {
+    case PAGE_WIZARD: gz = wizard_html_gz; gz_len = wizard_html_gz_len; len = wizard_html_len; break;
+    case PAGE_LOGIN:  gz = login_html_gz;  gz_len = login_html_gz_len;  len = login_html_len;  break;
+    default:          gz = index_html_gz;  gz_len = index_html_gz_len;  len = index_html_len;  which = PAGE_PANEL; break;
+    }
+    /* One inflate per page for the daemon's life, whichever request
+     * thread gets there first; the others wait rather than inflate. */
     pthread_mutex_lock(&page_mu);
-    if (page) {
+    if (pages[which]) {
         pthread_mutex_unlock(&page_mu);
-        return page;
+        return pages[which];
     }
 
-    char *html = malloc((size_t)index_html_len + 1);
+    char *html = malloc((size_t)len + 1);
     if (!html) {
         pthread_mutex_unlock(&page_mu);
         return fallback;
@@ -1446,10 +1584,10 @@ static const char *panel_html(void)
         pthread_mutex_unlock(&page_mu);
         return fallback;
     }
-    zs.next_in = (Bytef *)index_html_gz;
-    zs.avail_in = index_html_gz_len;
+    zs.next_in = (Bytef *)gz;
+    zs.avail_in = gz_len;
     zs.next_out = (Bytef *)html;
-    zs.avail_out = index_html_len;
+    zs.avail_out = len;
     int rc = inflate(&zs, Z_FINISH);
     size_t n = zs.total_out;
     inflateEnd(&zs);
@@ -1463,25 +1601,551 @@ static const char *panel_html(void)
     const char *mark = strstr(html, "__FFTOKEN__");
     const char *tok = auth_token();
     if (!mark || !tok[0]) {
-        page = html;                    /* no token: serve inert page */
+        pages[which] = html;            /* no token: serve the page inert */
         pthread_mutex_unlock(&page_mu);
-        return page;
+        return pages[which];
     }
     size_t pre = (size_t)(mark - html);
     size_t tlen = strlen(tok);
     size_t total = n - strlen("__FFTOKEN__") + tlen + 1;
-    page = malloc(total);
+    char *page = malloc(total);
     if (!page) {
-        page = html;
+        pages[which] = html;
         pthread_mutex_unlock(&page_mu);
-        return page;
+        return pages[which];
     }
     memcpy(page, html, pre);
     memcpy(page + pre, tok, tlen);
     strcpy(page + pre + tlen, mark + strlen("__FFTOKEN__"));
     free(html);
+    pages[which] = page;
     pthread_mutex_unlock(&page_mu);
     return page;
+}
+
+static int serve_page(struct _u_response *res, int which)
+{
+    ulfius_set_string_body_response(res, 200, page_html(which));
+    ulfius_add_header_to_response(res, "Content-Type", "text/html; charset=utf-8");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int redirect_to(struct _u_response *res, const char *path)
+{
+    ulfius_set_string_body_response(res, 302, "");
+    ulfius_add_header_to_response(res, "Location", path);
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* A path the login may return to: this origin's own, absolute, printable. */
+static int next_path_ok(const char *p)
+{
+    if (!p || p[0] != '/' || p[1] == '/' || p[1] == '\\' || strlen(p) > 200)
+        return 0;
+    for (const unsigned char *c = (const unsigned char *)p; *c; c++)
+        if (*c < 0x21 || *c > 0x7e)
+            return 0;
+    return 1;
+}
+
+/* To the login, carrying the path (with its query) that asked, so the
+ * login can return there. */
+static int redirect_login(const struct _u_request *req, struct _u_response *res)
+{
+    const char *path = req->http_url ? req->http_url : "/";
+    char loc[512] = "/login";
+    if (next_path_ok(path) && strcmp(path, "/") != 0) {
+        char enc[440];
+        size_t n = 0;
+        for (const unsigned char *c = (const unsigned char *)path; *c && n + 4 < sizeof(enc); c++) {
+            if (isalnum(*c) || strchr("-._~/", *c))
+                enc[n++] = (char)*c;
+            else
+                n += (size_t)snprintf(enc + n, sizeof(enc) - n, "%%%02X", *c);
+        }
+        enc[n] = '\0';
+        snprintf(loc, sizeof(loc), "/login?next=%s", enc);
+    }
+    return redirect_to(res, loc);
+}
+
+/* Which page a browser at "/" gets: the wizard while the first run is
+ * incomplete (into a session once an account exists), the login page
+ * without a session, else the panel. */
+static int cb_root_page(const struct _u_request *req, struct _u_response *res,
+                        void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    int session = auth_session_ok(req);
+    if (commission_first_run() || users_reset_pending()) {
+        if (users_exist() && !session)
+            return redirect_login(req, res);
+        return serve_page(res, PAGE_WIZARD);
+    }
+    if (!session && !auth_peer_local(req))
+        return redirect_login(req, res);
+    wiz_panel_opened();
+    return serve_page(res, PAGE_PANEL);
+}
+
+/* The wizard on demand, after the first run (re-runs, the Commissioning
+ * tab's "continue"). */
+static int cb_setup_page(const struct _u_request *req, struct _u_response *res,
+                         void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (users_exist() && !auth_session_ok(req) && !auth_peer_local(req))
+        return redirect_login(req, res);
+    return serve_page(res, PAGE_WIZARD);
+}
+
+static int cb_login_page(const struct _u_request *req, struct _u_response *res,
+                         void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!users_exist())
+        return redirect_to(res, "/");
+    if (auth_session_ok(req)) {
+        const char *next = u_map_get(req->map_url, "next");
+        return redirect_to(res, next_path_ok(next) ? next : "/");
+    }
+    return serve_page(res, PAGE_LOGIN);
+}
+
+/* POST /login: name and password; a session cookie on success. The
+ * token is not required here (the page that carries it is behind the
+ * login), so this is the one state-changing route without it; the
+ * per-address throttle and the constant-time verify are its guards. */
+static int cb_login(const struct _u_request *req, struct _u_response *res,
+                    void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char peer[64];
+    auth_peer_text(req, peer, sizeof(peer));
+    int left = 0;
+    if (login_locked(peer, &left)) {
+        char body[96];
+        snprintf(body, sizeof(body),
+                 "{\"error\":\"too many attempts; wait %d s\",\"wait\":%d}",
+                 left, left);
+        ulfius_set_string_body_response(res, 429, body);
+        ulfius_add_header_to_response(res, "Content-Type", "application/json");
+        return U_CALLBACK_CONTINUE;
+    }
+    const char *name = setting_param(req, "name");
+    const char *pw = setting_param(req, "password");
+    if (!users_verify(name, pw)) {
+        login_failed(peer);
+        fflog(LOG_WARNING, "login failed from %s", peer[0] ? peer : "?");
+        return reply_error(res, 401, "wrong name or password");
+    }
+    login_succeeded(peer);
+    char sid[SESSION_ID_HEX + 1], cookie[256];
+    if (session_create(name, sid, sizeof(sid)) != 0)
+        return reply_error(res, 500, "cannot create a session");
+    session_cookie_set(sid, cookie, sizeof(cookie));
+    ulfius_add_header_to_response(res, "Set-Cookie", cookie);
+    fflog(LOG_NOTICE, "login: %s from %s", name, peer[0] ? peer : "?");
+    ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_logout(const struct _u_request *req, struct _u_response *res,
+                     void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *cookie = u_map_get_case(req->map_header, "Cookie");
+    char id[SESSION_ID_HEX + 1], clear[128];
+    if (cookie && session_from_cookie(cookie, id, sizeof(id)))
+        session_end(id);
+    session_cookie_clear(clear, sizeof(clear));
+    ulfius_add_header_to_response(res, "Set-Cookie", clear);
+    ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* --------------------------------------------------------- certificate */
+
+/* The certificate, checkable before the browser's warning is accepted:
+ * served over plain HTTP too, with no redirect and no login, so a
+ * person can read the fingerprint from the machine's own address and
+ * compare it with what the HTTPS warning shows. Origin checks only: the
+ * fingerprint is public, and a page that needs a session cannot help
+ * someone who has not trusted the certificate yet. */
+static int cb_cert_page(const struct _u_request *req, struct _u_response *res,
+                        void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *fp = tls_fingerprint();
+    char mid[16], body[3072];
+    machine_id(mid, sizeof(mid));
+    snprintf(body, sizeof(body),
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>ForgeFIRM certificate</title>"
+        "<style>body{margin:0;font:15px/1.55 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+        "color:#222;background:#f0f1f4}main{max-width:720px;margin:0 auto;padding:28px 20px}"
+        "h1{font-size:22px;color:#2b2b5e;margin:0 0 10px}p{margin:0 0 12px}"
+        "a{color:#0088cc}dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px}"
+        "dt{color:#767a82}dd{margin:0}code{font-family:ui-monospace,Consolas,monospace;"
+        "font-size:14px;word-break:break-all}"
+        "@media(prefers-color-scheme:dark){body{color:#d9dce3;background:#15161c}"
+        "h1{color:#b9bcd8}a{color:#2ea3e0}dt{color:#9296a2}}</style></head><body><main>"
+        "<h1>This machine's certificate</h1>"
+        "<p>The control panel is served over HTTPS with a certificate the machine "
+        "signed itself. Your browser will warn once and ask you to continue. Before you "
+        "do, compare the fingerprint the warning shows with this one. They must match; "
+        "if they do not, you reached another device.</p>"
+        "<dl><dt>Machine</dt><dd>%s</dd>"
+        "<dt>SHA-256</dt><dd><code>%s</code></dd>"
+        "<dt>Names</dt><dd>%s</dd>"
+        "<dt>Valid from</dt><dd>%s</dd>"
+        "<dt>Valid until</dt><dd>%s</dd></dl>"
+        "<p>%s</p>"
+        "<p>The same fingerprint is on the panel's System tab and on the setup's "
+        "welcome screen once you are in.</p></main></body></html>",
+        mid[0] ? mid : "(unknown)",
+        fp[0] ? fp : "not available: this image serves HTTP only",
+        tls_names()[0] ? tls_names() : "(none)",
+        tls_valid_from()[0] ? tls_valid_from() : "(unknown)",
+        tls_valid_until()[0] ? tls_valid_until() : "(unknown)",
+        fp[0] ? "<a href=\"/cert.pem\">Download the certificate (PEM)</a> to add it to a "
+                "browser or a device that should trust it." : "");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "text/html; charset=utf-8");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_cert_pem(const struct _u_request *req, struct _u_response *res,
+                       void *user_data)
+{
+    (void)user_data;
+    if (!auth_origin_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *pem = tls_cert_pem();
+    if (!pem)
+        return reply_error(res, 404, "this image serves HTTP only");
+    ulfius_set_string_body_response(res, 200, pem);
+    ulfius_add_header_to_response(res, "Content-Type", "application/x-pem-file");
+    ulfius_add_header_to_response(res, "Content-Disposition",
+                                  "attachment; filename=\"forgefirm.pem\"");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* ------------------------------------------------------------ licenses */
+
+/* The license texts ride with the software: the image packs its license
+ * manifest (every installed package with its license) and the texts into
+ * one tar.gz, and the panel serves it here so an owner can read or pass
+ * on the texts the licenses ask to travel with the binaries. Read-only,
+ * open to the LAN like the status: the bundle is public by nature. */
+#define LICENSES_BUNDLE "/usr/share/forgefirm/licenses.tar.gz"
+#define LICENSES_MAX (16UL * 1024 * 1024)
+
+static const char *licenses_path(void)
+{
+    const char *p = getenv("FORGECTRL_LICENSES");
+    return p && *p ? p : LICENSES_BUNDLE;
+}
+
+static int cb_licenses(const struct _u_request *req, struct _u_response *res,
+                       void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    FILE *f = fopen(licenses_path(), "rb");
+    if (!f)
+        return reply_error(res, 404, "this image carries no license bundle");
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    rewind(f);
+    if (n <= 0 || (unsigned long)n > LICENSES_MAX) {
+        fclose(f);
+        return reply_error(res, 500, "the license bundle has an unexpected size");
+    }
+    char *buf = malloc((size_t)n);
+    if (!buf) {
+        fclose(f);
+        return reply_error(res, 500, "out of memory");
+    }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        free(buf);
+        return reply_error(res, 500, "cannot read the license bundle");
+    }
+    char fwver[48], fn[128];
+    read_fw_version(fwver, sizeof(fwver));
+    for (char *p = fwver; *p; p++)
+        if (*p == ' ' || *p == '(' || *p == ')' || *p == '"')
+            *p = '_';
+    snprintf(fn, sizeof(fn), "attachment; filename=\"forgefirm-licenses-%s.tar.gz\"",
+             fwver[0] ? fwver : "unknown");
+    ulfius_set_binary_body_response(res, 200, buf, (size_t)n);
+    free(buf);
+    ulfius_add_header_to_response(res, "Content-Type", "application/gzip");
+    ulfius_add_header_to_response(res, "Content-Disposition", fn);
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The manifest text, pulled out of the bundle into a malloc'd buffer
+ * (NUL-terminated; *len excludes it). Returns 0, or -1 with no bundle
+ * or no manifest. */
+static int licenses_manifest_read(char **out, size_t *len)
+{
+    *out = NULL;
+    *len = 0;
+    if (access(licenses_path(), R_OK) != 0)
+        return -1;
+    char cmd[400];
+    snprintf(cmd, sizeof(cmd),
+             "tar -xzOf '%s' common-licenses/license.manifest 2>/dev/null",
+             licenses_path());
+    FILE *p = popen(cmd, "r");
+    if (!p)
+        return -1;
+    size_t cap = 512 * 1024, n = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        pclose(p);
+        return -1;
+    }
+    size_t got;
+    while ((got = fread(buf + n, 1, cap - n - 1, p)) > 0) {
+        n += got;
+        if (n + 1 >= cap)
+            break;
+    }
+    pclose(p);
+    buf[n] = '\0';
+    if (!n) {
+        free(buf);
+        return -1;
+    }
+    *out = buf;
+    *len = n;
+    return 0;
+}
+
+/* The manifest alone, as text. */
+static int cb_licenses_manifest(const struct _u_request *req,
+                                struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char *buf;
+    size_t len;
+    if (licenses_manifest_read(&buf, &len) != 0)
+        return reply_error(res, 404, "this image carries no license bundle");
+    ulfius_set_binary_body_response(res, 200, buf, len);
+    free(buf);
+    ulfius_add_header_to_response(res, "Content-Type", "text/plain; charset=utf-8");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The Licenses page every page's footer links: the manifest, readable,
+ * with the download of the whole bundle above it. */
+static int cb_licenses_page(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char *man = NULL;
+    size_t mlen = 0;
+    int have = licenses_manifest_read(&man, &mlen) == 0;
+    char fwver[48];
+    read_fw_version(fwver, sizeof(fwver));
+    /* Escape the manifest for HTML (it is plain text from the build). */
+    size_t cap = mlen * 6 + 4096;
+    char *page = malloc(cap);
+    if (!page) {
+        free(man);
+        return reply_error(res, 500, "out of memory");
+    }
+    size_t o = (size_t)snprintf(page, cap,
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>ForgeFIRM licenses</title>"
+        "<style>body{margin:0;font:14px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+        "color:#222;background:#f0f1f4}main{max-width:900px;margin:0 auto;padding:24px 20px}"
+        "h1{font-size:22px;color:#2b2b5e;margin:0 0 6px}p{margin:0 0 12px}"
+        "a{color:#0088cc}pre{background:#fff;border:1px solid #dde0e6;border-radius:8px;"
+        "padding:14px;overflow:auto;font-size:12.5px}"
+        "@media(prefers-color-scheme:dark){body{color:#d9dce3;background:#15161c}"
+        "h1{color:#b9bcd8}a{color:#2ea3e0}pre{background:#1e2028;border-color:#32353f}}"
+        "</style></head><body><main><h1>Licenses</h1>"
+        "<p>ForgeFIRM %s. Every software package on this machine, with its license, "
+        "is listed below. The full text of every license is in the bundle: "
+        "<a href=\"/system/licenses\">download the license bundle (.tar.gz)</a>. "
+        "The bundle is what the licenses ask to travel with the software; you can pass it "
+        "on with the machine. The project's own components and their licenses are in the "
+        "Licenses and notices document of the setup.</p>",
+        fwver[0] ? fwver : "");
+    if (have) {
+        o += (size_t)snprintf(page + o, cap - o, "<pre>");
+        for (size_t i = 0; i < mlen && o + 8 < cap; i++) {
+            char c = man[i];
+            if (c == '<')
+                o += (size_t)snprintf(page + o, cap - o, "&lt;");
+            else if (c == '>')
+                o += (size_t)snprintf(page + o, cap - o, "&gt;");
+            else if (c == '&')
+                o += (size_t)snprintf(page + o, cap - o, "&amp;");
+            else
+                page[o++] = c;
+        }
+        o += (size_t)snprintf(page + o, cap - o, "</pre>");
+    } else
+        o += (size_t)snprintf(page + o, cap - o,
+                              "<p>This image carries no license bundle.</p>");
+    snprintf(page + o, cap - o, "</main></body></html>");
+    free(man);
+    ulfius_set_string_body_response(res, 200, page);
+    free(page);
+    ulfius_add_header_to_response(res, "Content-Type", "text/html; charset=utf-8");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* ----------------------------------------------------------------- ssh */
+
+/* SSH is off at boot and on until the next reboot when the owner turns
+ * it on here: the flag in /run gates the sshd init script, and the
+ * daemon starts or stops sshd through it. */
+#define SSH_FLAG_NAME "ssh-enabled"
+
+static int ssh_running(void)
+{
+    return system("pgrep -x sshd >/dev/null 2>&1") == 0;
+}
+
+static int ssh_reply(struct _u_response *res)
+{
+    char flag[256], body[160];
+    snprintf(flag, sizeof(flag), "%s/" SSH_FLAG_NAME, ff_run_dir());
+    int enabled = access(flag, F_OK) == 0;
+    snprintf(body, sizeof(body),
+             "{\"enabled\":%s,\"running\":%s,\"dev_image\":%s}",
+             enabled ? "true" : "false", ssh_running() ? "true" : "false",
+             auth_dev_image() ? "true" : "false");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* ---------------------------------------------------------- camera key */
+
+/* The key a camera consumer puts in its URL, with the URLs ready to
+ * paste; behind the login, since the key is a read credential. */
+static int camkey_reply(const struct _u_request *req, struct _u_response *res)
+{
+    const char *host = u_map_get_case(req->map_header, "Host");
+    char hb[160] = "";
+    if (host) {
+        size_t o = 0;
+        if (host[0] == '[') {
+            const char *e = strchr(host, ']');
+            size_t n = e ? (size_t)(e - host + 1) : strlen(host);
+            snprintf(hb, sizeof(hb), "%.*s", (int)n, host);
+        } else {
+            for (; host[o] && host[o] != ':' && o + 1 < sizeof(hb); o++)
+                hb[o] = host[o];
+            hb[o] = '\0';
+        }
+    }
+    const char *k = camkey_get();
+    char body[768];
+    snprintf(body, sizeof(body),
+             "{\"key\":\"%s\",\"stream\":\"http://%s/?action=stream&key=%s\","
+             "\"snapshot\":\"http://%s/cam/snapshot?cam=lid&key=%s\","
+             "\"stream_https\":\"https://%s/cam/stream?cam=lid&key=%s\"}",
+             k, hb, k, hb, k, hb, k);
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_camkey_get(const struct _u_request *req, struct _u_response *res,
+                         void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!camkey_get()[0])
+        return reply_error(res, 503, "no camera key on this machine");
+    return camkey_reply(req, res);
+}
+
+static int cb_camkey_rotate(const struct _u_request *req, struct _u_response *res,
+                            void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *r = setting_param(req, "rotate");
+    if (!r || strcmp(r, "1"))
+        return reply_error(res, 400, "rotate=1 required");
+    if (camkey_rotate() != 0)
+        return reply_error(res, 500, "cannot make a new key");
+    return camkey_reply(req, res);
+}
+
+static int cb_ssh_get(const struct _u_request *req, struct _u_response *res,
+                      void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    return ssh_reply(res);
+}
+
+static int cb_ssh_post(const struct _u_request *req, struct _u_response *res,
+                       void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *e = setting_param(req, "enable");
+    if (!e || (strcmp(e, "0") && strcmp(e, "1")))
+        return reply_error(res, 400, "enable must be 0 or 1");
+    char flag[256];
+    snprintf(flag, sizeof(flag), "%s/" SSH_FLAG_NAME, ff_run_dir());
+    if (!strcmp(e, "1")) {
+        mkdir(ff_run_dir(), 0755);
+        int fd = open(flag, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            return reply_error(res, 500, "cannot write the ssh flag");
+        close(fd);
+        if (system("/etc/init.d/sshd start >/dev/null 2>&1") != 0)
+            fflog(LOG_ERR, "ssh: sshd did not start");
+        fflog(LOG_NOTICE, "ssh: enabled until the next reboot");
+    } else {
+        unlink(flag);
+        (void)!system("/etc/init.d/sshd stop >/dev/null 2>&1");
+        fflog(LOG_NOTICE, "ssh: disabled");
+    }
+    return ssh_reply(res);
 }
 
 /* ---------------------------------------------------------------- logs */
@@ -1561,8 +2225,8 @@ static int cb_logs_export(const struct _u_request *req,
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is busy; export logs when it is idle");
     char err[160];
-    logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, err,
-                                        sizeof(err));
+    logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, record_snapshot,
+                                        err, sizeof(err));
     if (!e)
         return reply_error(res, !strcmp(err, "busy") ? 409 : 500, err);
     char fn[96], ts[24];
@@ -1582,6 +2246,7 @@ static int cb_logs_export(const struct _u_request *req,
 
 /* "/" serves the UI (src/ui/), plus the mjpg-streamer-compatible
  * ?action=stream / ?action=snapshot aliases many clients expect. */
+/* "/" on the HTTPS listener: the mjpg-streamer aliases, else a page. */
 static int cb_root(const struct _u_request *req, struct _u_response *res,
                    void *user_data)
 {
@@ -1596,12 +2261,97 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
             return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, -1, res);
         return reply_error(res, 400, "unknown action");
     }
-    ulfius_set_string_body_response(res, 200, panel_html());
-    ulfius_add_header_to_response(res, "Content-Type", "text/html");
-    return U_CALLBACK_CONTINUE;
+    return cb_root_page(req, res, NULL);
+}
+
+/* "/" on the HTTP listener: the aliases stay (LightBurn's camera URL);
+ * a browser is sent to HTTPS, where the pages live. */
+static int cb_root_http(const struct _u_request *req, struct _u_response *res,
+                        void *user_data)
+{
+    (void)user_data;
+    const char *action = u_map_get(req->map_url, "action");
+    if (action)
+        return cb_root(req, res, NULL);
+    /* A loopback peer gets every route on this listener, the page too. */
+    if (auth_peer_local(req))
+        return cb_root_page(req, res, NULL);
+    return cb_http_redirect(req, res, NULL);
+}
+
+/* Everything not read-only on the HTTP listener from a non-local peer:
+ * a redirect to the same path on HTTPS. */
+static int cb_http_redirect(const struct _u_request *req, struct _u_response *res,
+                            void *user_data)
+{
+    (void)user_data;
+    const char *host = u_map_get_case(req->map_header, "Host");
+    char hb[160] = "";
+    if (host) {
+        /* Strip a port: the HTTPS listener has its own. */
+        size_t o = 0;
+        if (host[0] == '[') {
+            const char *e = strchr(host, ']');
+            size_t n = e ? (size_t)(e - host + 1) : strlen(host);
+            snprintf(hb, sizeof(hb), "%.*s", (int)n, host);
+        } else {
+            for (; host[o] && host[o] != ':' && o + 1 < sizeof(hb); o++)
+                hb[o] = host[o];
+            hb[o] = '\0';
+        }
+    }
+    char loc[512];
+    const char *path = req->http_url ? req->http_url : "/";
+    if (tls_port == 443)
+        snprintf(loc, sizeof(loc), "https://%s%s", hb, path);
+    else
+        snprintf(loc, sizeof(loc), "https://%s:%u%s", hb, tls_port, path);
+    return redirect_to(res, loc);
+}
+
+/* A write route reached over HTTP: this host only (the init scripts,
+ * the controllers, the acceptance tool); anyone else is sent to HTTPS. */
+struct route {
+    const char *method;
+    const char *path;
+    int (*cb)(const struct _u_request *, struct _u_response *, void *);
+    void *ud;
+    int read_only;                  /* served to the LAN on HTTP too */
+};
+
+static int cb_http_local(const struct _u_request *req, struct _u_response *res,
+                         void *user_data)
+{
+    const struct route *r = user_data;
+    if (!auth_peer_local(req))
+        return cb_http_redirect(req, res, NULL);
+    return r->cb(req, res, r->ud);
 }
 
 /* ------------------------------------------------------------------ main */
+
+/* A requirement's fact outside the machine block: the cloud decision. */
+static int commission_fact(const char *fact)
+{
+    if (!strcmp(fact, "cloud_enabled"))
+        return settings_get_bool("cloud_enabled", 0);
+    return 0;
+}
+
+/* libmicrohttpd's own messages (MHD_USE_ERROR_LOG): a client that drops
+ * a stream, a TLS handshake a browser probes and abandons. Through fflog
+ * at debug, not to stderr, where the service log took them as warnings. */
+static void mhd_log(void *cls, const char *fmt, va_list ap)
+{
+    (void)cls;
+    char msg[256];
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    size_t n = strlen(msg);
+    while (n && (msg[n - 1] == '\n' || msg[n - 1] == '\r'))
+        msg[--n] = '\0';
+    if (n)
+        fflog(LOG_DEBUG, "mhd: %s", msg);
+}
 
 int main(int argc, char **argv)
 {
@@ -1609,6 +2359,9 @@ int main(int argc, char **argv)
     const char *v = getenv("FORGECTRL_PORT");
     if (v && atoi(v) > 0 && atoi(v) < 65536)
         port = (unsigned)atoi(v);
+    v = getenv("FORGECTRL_TLS_PORT");
+    if (v && atoi(v) > 0 && atoi(v) < 65536)
+        tls_port = (unsigned)atoi(v);
 
     /* Boot-time helper: render the rsyslog rules from the settings and
      * leave. Runs before rsyslog (and before this daemon) starts. */
@@ -1659,20 +2412,135 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     auth_init();
+    advisories_init();
+    sheetid_init();
+    camkey_init();
+    users_init();
+    {
+        char sp[256];
+        mkdir(ff_run_dir(), 0755);
+        snprintf(sp, sizeof(sp), "%s/sessions", ff_run_dir());
+        session_set_store(sp);
+    }
+    /* The account reset: the button held through the daemon's start,
+     * for ten seconds, with the LED blinking amber while it counts.
+     * The old password stops working at once; the wizard's account
+     * step runs again. A press that is not a hold costs nothing. */
+    if (button_held()) {
+        led_set(LED_BLINK_AMBER);
+        if (button_held_for(10)) {
+            users_mark_reset();
+            commission_init();
+            commission_clear_account();
+            fflog(LOG_WARNING, "account reset by the button hold at start");
+        }
+        led_release();
+    }
+    commission_init();
+    int have_tls = tls_init() == 0;
+    wiz_init();
     cam_engine_init();
     curverec_init();
     cool_init();
     super_init();
     diag_init();            /* its marker recovery drives the supervisor: after it */
+    wizdark_init();
+    commission_fact_hook = commission_fact;
     update_init();
     apply_wifi(0);
     cam_lamp_apply_idle();
 
-    struct _u_instance inst;
-    /* Dual-stack listener: one socket serves IPv4 and IPv6 clients. */
+    /* Every route, once. The HTTPS listener serves all of them; the
+     * HTTP listener serves the read-only ones to the LAN (the camera
+     * for LightBurn, the status), the write ones to this host only
+     * (the init scripts, the controllers, the acceptance tool on the
+     * board), and sends every other request to HTTPS. */
+    static const struct route routes[] = {
+        { "GET",  "/",                     cb_root,             NULL, 0 },
+        { "GET",  "/setup",                cb_setup_page,       NULL, 0 },
+        { "GET",  "/login",                cb_login_page,       NULL, 0 },
+        { "POST", "/login",                cb_login,            NULL, 0 },
+        { "POST", "/logout",               cb_logout,           NULL, 0 },
+        { "GET",  "/cam/stream",           cb_stream,           NULL, 1 },
+        { "GET",  "/cam/h264",             cb_h264,             NULL, 1 },
+        { "GET",  "/cam/snapshot",         cb_snapshot,         NULL, 1 },
+        { "GET",  "/cam/status",           cb_status,           NULL, 1 },
+        { "GET",  "/settings",             cb_settings_get,     NULL, 1 },
+        { "GET",  "/grbl/settings",        cb_grbl_settings,    NULL, 1 },
+        { "POST", "/curve/record",         cb_curve_record,     NULL, 0 },
+        { "POST", "/curve/stop",           cb_curve_stop,       NULL, 0 },
+        { "GET",  "/curve/status",         cb_curve_status,     NULL, 1 },
+        { "GET",  "/curve/ladder.gcode",   cb_curve_ladder,     NULL, 1 },
+        { "POST", "/settings",             cb_settings_post,    NULL, 0 },
+        { "GET",  "/status",               cb_machine_status,   NULL, 1 },
+        { "GET",  "/fuse-identity",        cb_fuse_identity,    NULL, 0 },
+        { "GET",  "/mode",                 cb_mode_get,         NULL, 1 },
+        { "POST", "/mode",                 cb_mode_post,        NULL, 0 },
+        { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0 },
+        { "POST", "/controller/start",     cb_controller_start, NULL, 0 },
+        { "POST", "/cool/state",           cb_cool_state,       NULL, 0 },
+        { "GET",  "/cool/status",          cb_cool_status,      NULL, 1 },
+        { "POST", "/diag/flow-verify",     cb_diag_start,       "flow-verify", 0 },
+        { "POST", "/diag/flow-calibrate",  cb_diag_start,       "flow-calibrate", 0 },
+        { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0 },
+        { "POST", "/diag/abort",           cb_diag_abort,       NULL, 0 },
+        { "GET",  "/diag/status",          cb_diag_status,      NULL, 1 },
+        { "GET",  "/slots",                cb_slots,            NULL, 1 },
+        { "POST", "/boot",                 cb_boot_select,      NULL, 0 },
+        { "POST", "/system/reboot",        cb_system_reboot,    NULL, 0 },
+        { "GET",  "/system/ssh",           cb_ssh_get,          NULL, 0 },
+        { "POST", "/system/ssh",           cb_ssh_post,         NULL, 0 },
+        { "GET",  "/system/camera-key",    cb_camkey_get,       NULL, 0 },
+        { "GET",  "/cert",                 cb_cert_page,        NULL, 1 },
+        { "GET",  "/cert.pem",             cb_cert_pem,         NULL, 1 },
+        { "GET",  "/licenses",             cb_licenses_page,    NULL, 1 },
+        { "GET",  "/system/licenses",      cb_licenses,         NULL, 1 },
+        { "GET",  "/system/licenses/manifest", cb_licenses_manifest, NULL, 1 },
+        { "POST", "/system/camera-key",    cb_camkey_rotate,    NULL, 0 },
+        { "POST", "/update/check",         cb_update_check,     NULL, 0 },
+        { "POST", "/update/download",      cb_update_download,  NULL, 0 },
+        { "POST", "/update/apply",         cb_update_apply,     NULL, 0 },
+        { "POST", "/update/upload",        cb_update_upload,    NULL, 0 },
+        { "POST", "/restore/factory",      cb_restore_factory,  NULL, 0 },
+        { "POST", "/restore/factory-return", cb_restore_factory_return, NULL, 0 },
+        { "GET",  "/update/status",        cb_update_status,    NULL, 1 },
+        { "GET",  "/logs",                 cb_logs_list,        NULL, 0 },
+        { "GET",  "/logs/tail",            cb_logs_tail,        NULL, 0 },
+        { "POST", "/logs/export",          cb_logs_export,      NULL, 0 },
+        { "GET",  "/wiz",                  cb_wiz_status,       NULL, 1 },
+        { "GET",  "/wiz/record",           cb_wiz_record,       NULL, 0 },
+        { "GET",  "/wiz/record.html",      cb_wiz_record_html,  NULL, 0 },
+        { "POST", "/wiz/changed",          cb_wiz_changed,      NULL, 0 },
+        { "GET",  "/advisories/:id",       cb_advisory_get,    NULL, 1 },
+        { "POST", "/wiz/advisories/accept", cb_wiz_agree,       NULL, 0 },
+        { "POST", "/wiz/advisories/press", cb_wiz_press_start,  NULL, 0 },
+        { "GET",  "/wiz/advisories/press", cb_wiz_press_status, NULL, 1 },
+        { "POST", "/wiz/advisories/press/cancel", cb_wiz_press_cancel, NULL, 0 },
+        { "POST", "/wiz/account",          cb_wiz_account,      NULL, 0 },
+        { "POST", "/wiz/preferences",      cb_wiz_preferences,  NULL, 0 },
+        { "POST", "/wiz/machine",          cb_wiz_machine,      NULL, 0 },
+        { "POST", "/wiz/cloud",            cb_wiz_cloud,        NULL, 0 },
+        { "POST", "/wiz/complete",         cb_wiz_complete,     NULL, 0 },
+        { "GET",  "/wiz/dark",             cb_wiz_dark_status,  NULL, 1 },
+        { "GET",  "/wiz/shot",             cb_wiz_shot,         NULL, 1 },
+        { "GET",  "/wiz/sheet.svg",        cb_wiz_sheet_svg,    NULL, 1 },
+        { "GET",  "/wiz/sheet.gcode",      cb_wiz_sheet_gcode,  NULL, 1 },
+        { "POST", "/wiz/:id/start",        cb_wiz_dark_start,   NULL, 0 },
+        { "POST", "/wiz/:id/answer",       cb_wiz_dark_answer,  NULL, 0 },
+        { "POST", "/wiz/:id/abort",        cb_wiz_dark_abort,   NULL, 0 },
+        { "POST", "/wiz/:id/takeover",     cb_wiz_dark_takeover, NULL, 0 },
+    };
+
+    struct _u_instance inst, tls;
+    /* Dual-stack listeners: one socket each serves IPv4 and IPv6. */
     if (ulfius_init_instance_ipv6(&inst, port, NULL, U_USE_ALL, NULL) != U_OK) {
         fflog(LOG_ERR, "ulfius init failed");
         return 1;
+    }
+    if (have_tls &&
+        ulfius_init_instance_ipv6(&tls, tls_port, NULL, U_USE_ALL, NULL) != U_OK) {
+        fflog(LOG_ERR, "ulfius init failed (https)");
+        have_tls = 0;
     }
     /* Cap the body the framework keeps in memory. ulfius accumulates
      * every POST body into its own buffer before any endpoint callback
@@ -1691,89 +2559,37 @@ int main(int argc, char **argv)
      * The largest legitimate form body is a settings POST, whose
      * longest single value is a 180-character dose curve. */
     inst.max_post_body_size = 64 * 1024;
-    ulfius_add_endpoint_by_val(&inst, "GET", "/", NULL, 0, &cb_root, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/cam/stream", NULL, 0,
-                               &cb_stream, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/cam/h264", NULL, 0,
-                               &cb_h264, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/cam/snapshot", NULL, 0,
-                               &cb_snapshot, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/cam/status", NULL, 0,
-                               &cb_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/settings", NULL, 0,
-                               &cb_settings_get, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/grbl/settings", NULL, 0,
-                               &cb_grbl_settings, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/curve/record", NULL, 0,
-                               &cb_curve_record, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/curve/stop", NULL, 0,
-                               &cb_curve_stop, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/curve/status", NULL, 0,
-                               &cb_curve_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/curve/ladder.gcode", NULL, 0,
-                               &cb_curve_ladder, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/settings", NULL, 0,
-                               &cb_settings_post, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/status", NULL, 0,
-                               &cb_machine_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/fuse-identity", NULL, 0,
-                               &cb_fuse_identity, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/mode", NULL, 0,
-                               &cb_mode_get, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/mode", NULL, 0,
-                               &cb_mode_post, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/controller/stop", NULL, 0,
-                               &cb_controller_stop, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/controller/start", NULL, 0,
-                               &cb_controller_start, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/cool/state", NULL, 0,
-                               &cb_cool_state, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/cool/status", NULL, 0,
-                               &cb_cool_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-verify", NULL, 0,
-                               &cb_diag_start, "flow-verify");
-    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/flow-calibrate", NULL,
-                               0, &cb_diag_start, "flow-calibrate");
-    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/aa-offset-calibrate", NULL,
-                               0, &cb_diag_start, "aa-offset-calibrate");
-    ulfius_add_endpoint_by_val(&inst, "POST", "/diag/abort", NULL, 0,
-                               &cb_diag_abort, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/diag/status", NULL, 0,
-                               &cb_diag_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/slots", NULL, 0,
-                               &cb_slots, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/boot", NULL, 0,
-                               &cb_boot_select, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/system/reboot", NULL, 0,
-                               &cb_system_reboot, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/update/check", NULL, 0,
-                               &cb_update_check, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/update/download", NULL, 0,
-                               &cb_update_download, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/update/apply", NULL, 0,
-                               &cb_update_apply, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/update/upload", NULL, 0,
-                               &cb_update_upload, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/restore/factory", NULL, 0,
-                               &cb_restore_factory, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/update/status", NULL, 0,
-                               &cb_update_status, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/logs", NULL, 0,
-                               &cb_logs_list, NULL);
-    ulfius_add_endpoint_by_val(&inst, "GET", "/logs/tail", NULL, 0,
-                               &cb_logs_tail, NULL);
-    ulfius_add_endpoint_by_val(&inst, "POST", "/logs/export", NULL, 0,
-                               &cb_logs_export, NULL);
-    ulfius_set_upload_file_callback_function(&inst, &update_upload_sink,
-                                             NULL);
+    tls.max_post_body_size = 64 * 1024;
+    /* The path goes in as the endpoint's url_format, not its url_prefix:
+     * ulfius matches both, but fills map_url with the :name parameters
+     * of the format only (/advisories/:id). */
+    for (size_t i = 0; i < sizeof(routes) / sizeof(*routes); i++) {
+        const struct route *r = &routes[i];
+        if (have_tls)
+            ulfius_add_endpoint_by_val(&tls, r->method, NULL, r->path, 0, r->cb, r->ud);
+        if (!strcmp(r->path, "/") && !strcmp(r->method, "GET"))
+            ulfius_add_endpoint_by_val(&inst, "GET", NULL, "/", 0,
+                                       have_tls ? cb_root_http : cb_root, NULL);
+        else if (r->read_only || !have_tls)
+            ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0, r->cb, r->ud);
+        else
+            ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0,
+                                       cb_http_local, (void *)r);
+    }
+    if (have_tls) {
+        ulfius_set_default_endpoint(&inst, cb_http_redirect, NULL);
+        ulfius_set_upload_file_callback_function(&tls, &update_upload_sink, NULL);
+    }
+    ulfius_set_upload_file_callback_function(&inst, &update_upload_sink, NULL);
 
     /* The flags ulfius computes for this configuration (a thread per
      * connection, its error log, the internal polling thread, dual
      * stack from U_USE_ALL), reproduced verbatim so only the caps are
      * new: a connection ceiling and a per-IP ceiling bound a flood at
      * the accept side (uncapped, a 500-connection flood plateaued at
-     * 379 fds). Without ulfius' logger option MHD errors go to stderr,
-     * which the service's log captures. */
+     * 379 fds). MHD's own messages (a client that drops a stream, a TLS
+     * handshake a browser probes and abandons) go through fflog at
+     * debug, not to stderr as warnings. */
     struct MHD_OptionItem mhd_ops[] = {
         /* ulfius' own connection plumbing, required by its dispatcher
          * and externalized for exactly this call: the per-request state
@@ -1781,6 +2597,7 @@ int main(int argc, char **argv)
          * callback. */
         { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
         { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
+        { MHD_OPTION_EXTERNAL_LOGGER, (intptr_t)mhd_log, NULL },
         { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
         { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
         { MHD_OPTION_END, 0, NULL },
@@ -1796,13 +2613,43 @@ int main(int argc, char **argv)
         return 1;
     }
     fflog(LOG_NOTICE, "listening on port %u", port);
+    if (have_tls) {
+        /* The same options plus the key and the certificate; TLS is
+         * libmicrohttpd's, whatever ulfius was built with. */
+        struct MHD_OptionItem tls_ops[] = {
+            { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
+            { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
+            { MHD_OPTION_EXTERNAL_LOGGER, (intptr_t)mhd_log, NULL },
+            { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
+            { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
+            { MHD_OPTION_HTTPS_MEM_KEY, 0, (void *)tls_key_pem() },
+            { MHD_OPTION_HTTPS_MEM_CERT, 0, (void *)tls_cert_pem() },
+            { MHD_OPTION_END, 0, NULL },
+        };
+        if (ulfius_start_framework_with_mhd_options(&tls, mhd_flags | MHD_USE_TLS,
+                                                    tls_ops) != U_OK) {
+            fflog(LOG_ERR, "cannot start HTTPS on port %u", tls_port);
+            ulfius_clean_instance(&tls);
+            have_tls = 0;
+        } else
+            fflog(LOG_NOTICE, "listening on port %u (https, %s)", tls_port,
+                  tls_fingerprint());
+    }
+    if (!have_tls)
+        fflog(LOG_WARNING, "HTTPS unavailable: every route is on HTTP");
 
     while (!quit)
         pause();
 
     fflog(LOG_NOTICE, "shutting down");
+    wiz_abort_all();
+    wizdark_shutdown();
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
+    if (have_tls) {
+        ulfius_stop_framework(&tls);
+        ulfius_clean_instance(&tls);
+    }
     /* A recording in progress ends here and puts the floor and curve
      * it overrode back; left running, the raw curve would be in force
      * for every job after the restart. */

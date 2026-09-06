@@ -54,6 +54,9 @@
         ><span class="appname">ForgeFIRM</span><span id="host"></span
         ><button id="themebtn" type="button" data-nolock="1" onclick="cycleTheme()" title="Theme">
           Theme
+        </button
+        ><button id="logoutbtn" type="button" data-nolock="1" onclick="logout()" title="Sign out">
+          Sign out
         </button>
       </div>
     </header>
@@ -61,7 +64,7 @@
       <div class="nrow">
         <a href="#status" id="t-status">Status</a><a href="#machine" id="t-machine">Machine</a
         ><a href="#gfcloud" id="t-gfcloud">GF Cloud</a><a href="#grbl" id="t-grbl">GRBL</a
-        ><a href="#diag" id="t-diag">Diagnostics</a><a href="#logs" id="t-logs">Logs</a
+        ><a href="#diag" id="t-diag">Commissioning</a><a href="#logs" id="t-logs">Logs</a
         ><a href="#system" id="t-system">System</a>
       </div>
     </nav>
@@ -72,6 +75,7 @@
       </div>
       <div id="locknote"></div>
       <section id="s-status">
+        <div id="gate-banner" class="banner banner-bad" style="display: none"></div>
         <div id="gfsvc-banner" class="banner" style="display: none"></div>
         <div id="gates-banner" class="banner banner-bad" style="display: none"></div>
         <div class="card">
@@ -103,8 +107,11 @@
           <video id="camvid" muted playsinline style="display:none"></video>
           <div class="camctl">
             <button class="btn btn-sm btn-outline-secondary" id="live" data-nolock="1" onclick="toggleLive()">Live</button
-            ><button class="btn btn-sm btn-outline-secondary" id="snapbtn" data-nolock="1" onclick="refreshSnap()">Refresh</button>
+            ><button class="btn btn-sm btn-outline-secondary" id="snapbtn" data-nolock="1" onclick="refreshSnap()">Refresh</button
+            ><button class="btn btn-sm btn-outline-secondary" id="camurlbtn" data-nolock="1" onclick="toggleCamUrl()">Camera URL</button
+            ><button class="hlp" data-help="camkey" data-nolock="1" type="button">?</button>
           </div>
+          <div id="camurl" style="display: none"></div>
           <p class="hint" id="cammsg"></p>
         </div>
         <div class="grid2">
@@ -149,11 +156,29 @@
               <label for="gfcloud_home_y">Y<span class="u ulen">mm</span></label
               ><input class="form-control form-control-sm" id="gfcloud_home_y" inputmode="decimal" placeholder="0 (origin)" />
             </div>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Lens<button class="hlp" data-help="lens" data-nolock="1" type="button">?</button></h2>
+          <div class="grid2">
             <div class="frow">
-              <label for="gfcloud_home_z">Z<span class="u ulen">mm</span></label
-              ><input class="form-control form-control-sm" id="gfcloud_home_z" inputmode="decimal" placeholder="top of travel" />
+              <label for="lens_park_z_mm">Park height after a home<span class="u ulen">mm</span></label
+              ><input class="form-control form-control-sm" id="lens_park_z_mm" inputmode="decimal" placeholder="3" />
+            </div>
+            <div class="frow">
+              <label for="lens_hall_edge_z_mm">Focus at the hall reference<span class="u ulen">mm</span></label
+              ><input class="form-control form-control-sm" id="lens_hall_edge_z_mm" inputmode="decimal" placeholder="3.35" />
+            </div>
+            <div class="frow">
+              <label for="lens_stop_below_steps">Free travel below the reference<span class="u">half-steps</span></label
+              ><input class="form-control form-control-sm" id="lens_stop_below_steps" inputmode="numeric" placeholder="10" />
+            </div>
+            <div class="frow">
+              <label for="lens_stop_above_steps">Free travel above the reference<span class="u">half-steps</span></label
+              ><input class="form-control form-control-sm" id="lens_stop_above_steps" inputmode="numeric" placeholder="12" />
             </div>
           </div>
+          <div id="lens_reach" class="small text-body-secondary"></div>
         </div>
         <div class="card">
           <h2>Cooling protection<button class="hlp" data-help="cooling" data-nolock="1" type="button">?</button></h2>
@@ -415,6 +440,28 @@
       </section>
       <section id="s-diag">
         <div class="card">
+          <h2>Checks<button class="hlp" data-help="wizards" data-nolock="1" type="button">?</button></h2>
+          <p class="hint" style="margin-top: 0">
+            Every check the setup ran, with what it found. A check runs again from the setup:
+            open it and choose the check in the rail. A check the machine asks for again is
+            marked required or recommended, with the reason.
+          </p>
+          <div id="wizlist"></div>
+          <div class="btns" style="margin-top: 8px">
+            <a class="btn btn-sm btn-outline-secondary" href="/setup" data-nolock="1">Open the setup</a>
+          </div>
+          <div class="btns" style="margin-top: 12px; align-items: center">
+            <label for="changed-what" style="margin: 0 4px 0 0">What changed?</label
+            ><select class="form-select form-select-sm" id="changed-what" style="width: auto; display: inline-block"></select
+            ><button class="btn btn-sm btn-outline-secondary" id="changed-go" onclick="applyChanged()">Mark it</button
+            ><span class="msg" id="msg-changed"></span>
+          </div>
+          <p class="hint">
+            A replaced part makes the numbers measured on the old one wrong. Name the change and
+            the checks that measure it are asked for again; the setup runs them.
+          </p>
+        </div>
+        <div class="card">
           <h2>Cooling system<button class="hlp" data-help="diag" data-nolock="1" type="button">?</button></h2>
           <p class="hint" style="margin-top: 0">
             These tools take the machine over: the motion controller is stopped, the loop heater
@@ -562,6 +609,31 @@
             ><select class="form-select form-select-sm" id="wifi_country"></select>
           </div>
         </div>
+        <div class="card">
+          <h2>Remote access<button class="hlp" data-help="ssh" data-nolock="1" type="button">?</button></h2>
+          <div id="sshinfo"></div>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" id="sshbtn" data-nolock="1" onclick="toggleSsh()">SSH</button
+            ><span class="msg" id="msg-ssh"></span>
+          </div>
+          <p class="hint">
+            SSH is off at every boot. Turned on here, it stays on until the next reboot. Your panel
+            name and password open it; root does not.
+          </p>
+        </div>
+        <div class="card">
+          <h2>Commissioning<button class="hlp" data-help="commission" data-nolock="1" type="button">?</button></h2>
+          <div id="commissioninfo"></div>
+          <div class="btns">
+            <a class="btn btn-sm btn-outline-secondary" href="/setup" data-nolock="1">Open the setup</a
+            ><a class="btn btn-sm btn-outline-secondary" href="/wiz/record.html" target="_blank" rel="noopener" data-nolock="1">Printable summary</a
+            ><a class="btn btn-sm btn-outline-secondary" href="/wiz/record?download=1" data-nolock="1">Save the record</a>
+          </div>
+          <p class="hint">
+            The record holds what the setup found and wrote: the acknowledgment, the machine facts,
+            every check with its numbers and the settings it set. The log export carries it too.
+          </p>
+        </div>
       </section>
     </main>
     <div id="savebar">
@@ -600,9 +672,11 @@
       </div>
     </div>
     <footer>
-      ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project
+      ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project &middot;
+      <a href="/licenses">Licenses</a>
     </footer>
     <script src="vendor/bootstrap.bundle.min.js"></script>
+    <script src="regions.js"></script>
     <script src="help.js"></script>
     <script src="forms.js"></script>
     <script src="panel.js"></script>

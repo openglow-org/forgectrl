@@ -28,6 +28,19 @@ void cool_diag_heater_pct(double pct);
 void cool_diag_fans_run(void);
 void cool_diag_fans_idle(void);
 void cool_diag_aa(long duty);
+void cool_diag_purge(int on);       /* the head's purge fan */
+void cool_diag_tec(int on);         /* the TEC drive (cooling.tec wizard) */
+/* Hold the flow check: a pending check does not start while held (the
+ * commissioning sheet's flow-load card measures the tube's own heat,
+ * which the check's heater would swamp). The hold clears itself when the
+ * run ends and after COOL_FLOW_HOLD_MAX_S, so a card that dies cannot
+ * leave it. Every other gate stands. */
+#define COOL_FLOW_HOLD_MAX_S 600
+void cool_flow_check_hold(int on);
+/* Every fan off for a listening (the lens stop finder): while held, the
+ * engine's own fan writes go to zero as well; the release puts the
+ * phase's posture back. */
+void cool_quiet_hold(int on);
 
 #define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
 #define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */
@@ -91,6 +104,14 @@ int cool_status_json(char *buf, size_t len);
 /* Seconds since the last job-state report, or -1 if none has ever
  * arrived (the supervisor uses this to see a controller come alive). */
 double cool_report_age(void);
+
+/* The supervisor stopped the controller on purpose: its last report is
+ * forgotten, so the engine has no reporter until the next controller
+ * speaks. A deliberate stop is a death the supervisor covers, not a
+ * hang; without this the hang dead-man would count the seconds since
+ * the last report and stop the supervisor's own liveness probe, the one
+ * program that plays with no controller alive. */
+void cool_controller_stopped(void);
 
 /* The counts the air-assist fan's ground shift adds to a raw coolant
  * thermistor reading at the duty the engine last commanded (more counts

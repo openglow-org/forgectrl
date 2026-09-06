@@ -29,8 +29,20 @@ int super_mode_switch(const char *mode, char *err, size_t elen);
 int super_controller_stop(void);
 void super_controller_start(void);
 
-/* {"mode":"grbl","controller":"running|stopped|standby","pid":N} */
+/* {"mode":"grbl","controller":"running|stopped|standby|gated|motion-fault",
+ *  "pid":N,"motion":"...","gated":bool,"local":bool,"why":"..."} */
 int super_status_json(char *buf, size_t len);
+/* The wizard's posture: while on, the commissioning gate does not
+ * apply and the Grbl controller binds to loopback only. A change
+ * restarts a running Grbl controller with the new bind. */
+void super_set_local(int on);
+/* The motion wizard's visible probe: with the controller stopped, run
+ * the liveness probe sequence on the broker's device. 1 verified, 0 no
+ * motion (the drivers did not recover), 2 could not run; detail says
+ * why. The supervisor's own gate takes the outcome too. */
+int super_probe_motion(char *detail, size_t dlen);
+/* Whether the gate holds controllers back right now, and why. */
+int super_gated(char *why, size_t len);
 
 /* True while the machine is in GRBL mode with its controller process
  * alive: the gate for echoing the controller's published state files

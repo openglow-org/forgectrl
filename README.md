@@ -4,7 +4,7 @@ System control daemon for [ForgeFIRM](https://github.com/openglow-org/forgefirm)
 Glowforge lasers.
 
 forgectrl runs on the factory i.MX6 control board as the machine-services
-daemon (HTTP on port 8080). Motion is executed by exactly one of two
+daemon (HTTP on port 80, HTTPS on port 443). Motion is executed by exactly one of two
 controllers - [grblHAL-glowforge](https://github.com/openglow-org/grblHAL-glowforge)
 (GRBL mode) or the gfcloud web-service client (factory cloud mode) - and
 forgectrl owns everything around them:
@@ -142,7 +142,7 @@ effective levels and offers the reboot.
 |---|---|
 | `GET /logs` | Loggers with configured and effective levels and on-disk sizes, the remote target, `pending_reboot` |
 | `GET /logs/tail?name=&lines=&from=` | The last `lines` of a logger's live file, or everything since byte offset `from` (incremental follow) |
-| `POST /logs/export?sanitize=1\|0` | Streams a `tar.gz` of every logger's files plus a system snapshot (version, dmesg, uptime, memory, disk, processes, effective levels, settings with secrets masked). Sanitized by default: known identifiers (serial, hostname, cloud credentials, panel token, WiFi network) and pattern classes (network addresses, e-mail addresses, bearer/basic credentials, JWTs, key=value secrets, long hex/base64 blobs) become placeholders that stay stable within the bundle (`src/sanitize.c`; `tests/sanitize_test.c` in CI) |
+| `POST /logs/export?sanitize=1\|0` | Streams a `tar.gz` of every logger's files plus a system snapshot (version, dmesg, uptime, memory, disk, processes, effective levels, settings with secrets masked). Sanitized by default: known identifiers (serial, hostname, cloud credentials, panel token, camera key, WiFi network) and pattern classes (network addresses, e-mail addresses, bearer/basic credentials, JWTs, key=value secrets, long hex/base64 blobs) become placeholders that stay stable within the bundle (`src/sanitize.c`; `tests/sanitize_test.c` in CI) |
 
 All three require the panel token. `tests/fflog_e2e.sh` proves the whole
 path on a host against a private rsyslogd (emitter, relay, format,
@@ -162,7 +162,8 @@ fallbacks are described on the documentation site:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FORGECTRL_PORT` | 8080 | HTTP port |
+| `FORGECTRL_PORT` | 80 | HTTP port (the read-only routes to the LAN, everything from the machine itself) |
+| `FORGECTRL_TLS_PORT` | 443 | HTTPS port (the login, the panel, every state change) |
 | `FORGECTRL_STREAM_Q` | 75 | Stream JPEG quality (1-100) |
 | `FORGECTRL_STREAM_FPS` | unset | Stream frame-rate ceiling (frames/s); unset or 0 = sensor max |
 | `FORGECTRL_LAMP` | 132 | Illumination level during capture (0-1023) |
@@ -208,7 +209,7 @@ sees real file names and line numbers, and the open tab reloads whenever
 anything under `src/ui/` is saved (`--bundle` serves the page inlined the
 way the daemon does). API calls from the page go to one of two backends:
 
-- **A real machine.** `GF_HOST` (IP literal, `:port` if not 8080) and
+- **A real machine.** `GF_HOST` (IP literal, `:port` if not 443; the dev server proxies over HTTPS) and
   `GF_TOKEN` (the panel token, `/data/forgefirm/panel.token` on the
   machine) in the environment or in a git-ignored `.env` at the repo root
   (`.env.example` is the template; the file is re-read when it changes).

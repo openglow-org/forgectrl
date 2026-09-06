@@ -88,6 +88,18 @@ int settings_get(const char *key, char *val, size_t len)
     return found;
 }
 
+int settings_get_bool(const char *key, int def)
+{
+    char v[8];
+    if (settings_get(key, v, sizeof(v)) != 0)
+        return def;
+    if (!strcmp(v, "1"))
+        return 1;
+    if (!strcmp(v, "0"))
+        return 0;
+    return def;
+}
+
 int settings_set_many(const char *const *keys, const char *const *vals,
                       size_t count)
 {

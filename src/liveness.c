@@ -160,6 +160,18 @@ static int accel_read(const char *dir, const char *axis, long *out)
     return 0;
 }
 
+int liveness_accel_read(long *x, long *y)
+{
+    static char dir[128];
+    if (!dir[0] && head_accel_path(dir, sizeof(dir)) != 0)
+        return -1;
+    if (accel_read(dir, "x", x) != 0 || accel_read(dir, "y", y) != 0) {
+        dir[0] = '\0';          /* re-resolve next time */
+        return -1;
+    }
+    return 0;
+}
+
 int liveness_probe(int pulse_fd, char *detail, size_t dlen)
 {
     char accel[128], st[24];

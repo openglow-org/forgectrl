@@ -1061,16 +1061,19 @@ struct restore_args {
     char file[160];                  /* archive basename */
 };
 
-static void *restore_worker(void *argp)
+/* Write a factory archive into a slot and verify it. Runs the phases on
+ * the current job; on failure the job is finished with the reason and
+ * -1 is returned. On success `version` holds the restored factory
+ * version and the job is still running for the caller to finish. */
+static int restore_run(const struct slot_target *slot, const char *file,
+                       char *version, size_t vlen)
 {
-    struct restore_args *a = argp;
     char cmd[640], out[512];
 
     job_set_phase("taking update lock");
     if (take_lock() != 0) {
         job_finish("{\"ok\":false,\"error\":\"update lock is held\"}");
-        free(a);
-        return NULL;
+        return -1;
     }
 
     /* The manifest's md5 protects a years-old archive against bit rot
@@ -1081,26 +1084,24 @@ static void *restore_worker(void *argp)
              ARCHIVE_DIR "/manifest | head -n 1); "
              "[ -n \"$M\" ] || exit 2; "
              "echo \"$M  " ARCHIVE_DIR "/%s\" | md5sum -c - >/dev/null 2>&1",
-             a->file, a->file);
+             file, file);
     int rc = run_cmd(out, sizeof(out), cmd);
     if (rc == 2) {
         drop_lock();
         job_finish("{\"ok\":false,\"error\":\"archive not in manifest\"}");
-        free(a);
-        return NULL;
+        return -1;
     }
     if (rc != 0) {
         drop_lock();
         job_finish("{\"ok\":false,\"error\":\"archive checksum MISMATCH - "
                    "not restoring from a corrupt archive\"}");
-        free(a);
-        return NULL;
+        return -1;
     }
 
     job_set_phase("unmounting target");
     snprintf(cmd, sizeof(cmd),
              "for m in $(sed -n 's|^%s \\([^ ]*\\).*|\\1|p' /proc/mounts); "
-             "do umount \"$m\" 2>/dev/null; done", a->slot->dev);
+             "do umount \"$m\" 2>/dev/null; done", slot->dev);
     run_cmd(NULL, 0, cmd);
 
     job_set_phase("writing factory image");
@@ -1109,15 +1110,14 @@ static void *restore_worker(void *argp)
      * wrapper around the interpolated value. */
     snprintf(cmd, sizeof(cmd),
              "set -o pipefail; gzip -dc " ARCHIVE_DIR "/%s | "
-             "dd of=%s bs=1M 2>&1 | tail -n 1", a->file, a->slot->dev);
+             "dd of=%s bs=1M 2>&1 | tail -n 1", file, slot->dev);
     rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
         drop_lock();
         job_finish("{\"ok\":false,\"error\":\"restore write failed - "
                    "slot %s is undefined until rewritten\","
-                   "\"detail\":\"%s\"}", a->slot->name, out);
-        free(a);
-        return NULL;
+                   "\"detail\":\"%s\"}", slot->name, out);
+        return -1;
     }
 
     job_set_phase("verifying written slot");
@@ -1127,19 +1127,170 @@ static void *restore_worker(void *argp)
              "cat /run/ffverify/etc/version 2>/dev/null && "
              "test -f /run/ffverify/boot/zImage; "
              "rc=$?; umount /run/ffverify 2>/dev/null; exit $rc",
-             a->slot->dev);
+             slot->dev);
     rc = run_cmd(out, sizeof(out), cmd);
     drop_lock();
     if (rc != 0) {
         job_finish("{\"ok\":false,\"error\":\"restored slot failed "
                    "verification\",\"detail\":\"%s\"}", out);
+        return -1;
+    }
+    snprintf(version, vlen, "%s", out);
+    return 0;
+}
+
+static void *restore_worker(void *argp)
+{
+    struct restore_args *a = argp;
+    char version[512];
+    if (restore_run(a->slot, a->file, version, sizeof(version)) == 0)
+        job_finish("{\"ok\":true,\"slot\":\"%s\",\"factory_version\":\"%s\"}",
+                   a->slot->name, version);
+    free(a);
+    return NULL;
+}
+
+/* --------------------------------------------- return to the factory */
+
+/* The first-run wizard's exit, and a one-press way back at any time: the
+ * machine goes back to the factory firmware it ran before ForgeFIRM. If
+ * the slot that is not running still holds a factory image, only the
+ * boot selection moves; if an update reused it, the newest archived
+ * factory image is restored into it first. Then the machine reboots. A
+ * reinstall of ForgeFIRM is the install process again, from the
+ * console; the archive and ForgeFIRM's files under /data stay. */
+struct return_args {
+    const struct slot_target *slot;
+    char file[160];                 /* archive to restore, or "" */
+};
+
+static void *factory_return_worker(void *argp)
+{
+    struct return_args *a = argp;
+    char version[512] = "", out[512], cmd[160];
+
+    if (a->file[0] &&
+        restore_run(a->slot, a->file, version, sizeof(version)) != 0) {
+        free(a);
+        return NULL;                /* restore_run finished the job */
+    }
+
+    job_set_phase("selecting the factory slot for the next boot");
+    snprintf(cmd, sizeof(cmd), FFBOOT " %s -n 2>&1", a->slot->ffboot_arg);
+    if (run_cmd(out, sizeof(out), cmd) != 0) {
+        job_finish("{\"ok\":false,\"error\":\"boot selection failed\","
+                   "\"detail\":\"%s\"}", out);
         free(a);
         return NULL;
     }
-    job_finish("{\"ok\":true,\"slot\":\"%s\",\"factory_version\":\"%s\"}",
-               a->slot->name, out);
+
+    job_set_phase("rebooting into the factory firmware");
+    sync();
+    if (system("(sleep 2; reboot) >/dev/null 2>&1 &") != 0) {
+        job_finish("{\"ok\":false,\"error\":\"cannot schedule the reboot\"}");
+        free(a);
+        return NULL;
+    }
+    job_finish("{\"ok\":true,\"slot\":\"%s\",\"restored\":%s,"
+               "\"factory_version\":\"%s\",\"rebooting\":true}",
+               a->slot->name, a->file[0] ? "true" : "false", version);
     free(a);
     return NULL;
+}
+
+/* The slot that is not the booted root, among a and b, with what it
+ * holds per ffboot. Returns the target, or NULL when the inventory
+ * cannot be read; type is "factory", "forgefirm", or "" (empty). */
+static const struct slot_target *inactive_slot(char *type, size_t tlen)
+{
+    char raw[4096];
+    FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
+    if (!p)
+        return NULL;
+    size_t n = fread(raw, 1, sizeof(raw) - 1, p);
+    raw[n] = '\0';
+    pclose(p);
+    type[0] = '\0';
+    const struct slot_target *pick = NULL;
+    for (size_t t = 0; t < N_TARGETS; t++) {
+        if (!targets[t].task || is_booted_root(targets[t].dev))
+            continue;
+        pick = &targets[t];
+        char key[48];
+        snprintf(key, sizeof(key), "slot.%s.type=", targets[t].name);
+        const char *v = strstr(raw, key);
+        if (v) {
+            v += strlen(key);
+            size_t o = 0;
+            while (*v && *v != '\n' && o + 1 < tlen)
+                type[o++] = *v++;
+            type[o] = '\0';
+        }
+        break;
+    }
+    return pick;
+}
+
+/* The newest factory archive by its build date in the name. */
+static int newest_archive(char *out, size_t len)
+{
+    out[0] = '\0';
+    DIR *d = opendir(ARCHIVE_DIR);
+    if (!d)
+        return -1;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "factory-rootfs-", 15))
+            continue;
+        int ok = 1;
+        for (const char *c = e->d_name; *c; c++)
+            if (!isalnum((unsigned char)*c) && *c != '.' && *c != '_' && *c != '-')
+                ok = 0;
+        if (!ok || strstr(e->d_name, ".."))
+            continue;
+        if (!out[0] || strcmp(e->d_name, out) > 0)
+            snprintf(out, len, "%.159s", e->d_name);
+    }
+    closedir(d);
+    return out[0] ? 0 : -1;
+}
+
+int cb_restore_factory_return(const struct _u_request *req,
+                              struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *c = param(req, "confirm");
+    if (!c || strcmp(c, "1"))
+        return reply_err(res, 400, "confirm=1 required");
+    if (update_job_running())
+        return reply_err(res, 409, "an update job is running");
+
+    char type[16];
+    const struct slot_target *t = inactive_slot(type, sizeof(type));
+    if (!t)
+        return reply_err(res, 500, "cannot read the slot inventory");
+    if (!slot_geometry_ok(t))
+        return reply_err(res, 409,
+                         "the other slot is not the 200 MiB factory geometry");
+
+    struct return_args *a = calloc(1, sizeof(*a));
+    if (!a)
+        return reply_err(res, 500, "out of memory");
+    a->slot = t;
+    if (strcmp(type, "factory") != 0) {
+        if (newest_archive(a->file, sizeof(a->file)) != 0) {
+            free(a);
+            return reply_err(res, 409,
+                "no archived factory image on this machine - use the "
+                "factory recovery mode instead");
+        }
+    }
+    int rc = job_start("factory-return", factory_return_worker, a);
+    if (rc != 0)
+        free(a);
+    return job_start_reply(res, rc);
 }
 
 int cb_restore_factory(const struct _u_request *req,

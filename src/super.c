@@ -33,6 +33,7 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
+#include "commission.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -80,6 +81,10 @@ static double spawned_at = 0.0;
 static unsigned backoff_s = RESPAWN_MIN_S;
 static double respawn_at = 0.0;    /* not before this time */
 static unsigned generation = 0;    /* bumped on every state change */
+
+static int local_posture = 0;      /* a wizard owns the controller: loopback only */
+static int gated = 0;              /* the commissioning gate is closed (under mu) */
+static char gate_why[256];
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
 static int probed = 0;             /* liveness gate passed since broker open */
@@ -148,10 +153,11 @@ static void broker_open_locked(void)
  * longer true power-off before re-probing. Returns 1 verified, 0 fault,
  * 2 when the probe could not run (no accelerometer, enclosure open): the
  * machine is not blocked, but motion stays UNVERIFIED and is reported so. */
+static char probe_detail[96];       /* the last probe's outcome text */
 static int probe_sequence(int fd)
 {
     static const int ladder_s[] = { 0, 5, 15, 30 };
-    char detail[96];
+    char *detail = probe_detail;
 
     for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
         if (ladder_s[i] > 0) {
@@ -372,8 +378,15 @@ static void spawn_locked(ctl_t ctl)
         if (ctl == Ctl_Grbl) {
             if (chdir("/data") != 0)
                 _exit(126);
-            execle(GRBL_BIN, GRBL_BIN, "-p", "23",
-                   "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
+            /* In the wizard's posture the Grbl port binds to loopback
+             * only: the wizard's own streamer reaches it, no sender
+             * on the network does. */
+            if (local_posture)
+                execle(GRBL_BIN, GRBL_BIN, "-p", "23", "-b", "::1",
+                       "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
+            else
+                execle(GRBL_BIN, GRBL_BIN, "-p", "23",
+                       "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
         } else {
             execle(CLOUD_BIN, CLOUD_BIN, (char *)NULL, env);
         }
@@ -458,6 +471,11 @@ static void stop_locked(void)
     wr_attr("cnc/laser_latch", "1");
     kill(-pid, SIGTERM);
     kill(pid, SIGTERM);
+    /* The cooling engine's hang dead-man watches the seconds since the
+     * controller's last report; this stop is deliberate, so the report
+     * is forgotten and the liveness probe that may follow plays with
+     * nobody counting. */
+    cool_controller_stopped();
 
     double deadline = wall_s() + STOP_TERM_WAIT_S;
     while (child_pid == pid) {
@@ -524,12 +542,40 @@ static void *super_main(void *arg)
             }
         }
 
+        /* The commissioning gate: no controller for a sender while it
+         * is closed. A wizard's own controller (local posture, loopback
+         * only) passes. A gate that closes on a running controller (a
+         * required re-run raised mid-life) stops it once the machine
+         * is idle, never mid-job. */
+        {
+            char why[256];
+            pthread_mutex_unlock(&mu);
+            int open = commission_gate_open(why, sizeof(why));
+            pthread_mutex_lock(&mu);
+            int now_gated = !open && !local_posture;
+            if (now_gated != gated || (now_gated && strcmp(why, gate_why))) {
+                fflog(now_gated ? LOG_WARNING : LOG_NOTICE,
+                      "super: controller gate %s%s%s",
+                      now_gated ? "closed" : "open",
+                      now_gated ? ": " : "", now_gated ? why : "");
+            }
+            gated = now_gated;
+            snprintf(gate_why, sizeof(gate_why), "%s", why);
+        }
+        if (child_pid > 0 && gated) {
+            pthread_mutex_unlock(&mu);
+            int idle = machine_is_idle();
+            pthread_mutex_lock(&mu);
+            if (idle && child_pid > 0)
+                stop_locked();
+        }
+
         /* Converge on the wanted state. The first spawn after taking
          * the broker passes the motion-liveness gate first (unlocked -
          * the probe and its recovery ladder take a while). */
         if (child_pid > 0 && (suspended || child_ctl != want)) {
             stop_locked();
-        } else if (child_pid == 0 && !suspended && !motion_fault
+        } else if (child_pid == 0 && !suspended && !motion_fault && !gated
                    && want != Ctl_None && wall_s() >= respawn_at) {
             broker_open_locked();
             if (broker_fd >= 0 && !probed) {
@@ -577,8 +623,10 @@ static int pred_child_gone(void)  { return child_pid == 0; }
 static ctl_t configured_mode(void)
 {
     char v[16];
+    /* Cloud mode exists only once the owner turned it on: with
+     * cloud_enabled unset, a stale controller_mode=cloud is grbl. */
     if (settings_get("controller_mode", v, sizeof(v)) == 0
-        && strcmp(v, "cloud") == 0)
+        && strcmp(v, "cloud") == 0 && settings_get_bool("cloud_enabled", 0))
         return Ctl_Cloud;
     return Ctl_Grbl;
 }
@@ -653,6 +701,17 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     else {
         snprintf(err, elen, "mode must be grbl or cloud");
         return -1;
+    }
+    if (target == Ctl_Cloud && !settings_get_bool("cloud_enabled", 0)) {
+        snprintf(err, elen, "cloud mode is not enabled on this machine");
+        return -1;
+    }
+    {
+        char why[256];
+        if (!commission_gate_open(why, sizeof(why)) && !local_posture) {
+            snprintf(err, elen, "controllers are gated: %s", why);
+            return -1;
+        }
     }
 
     if (diag_running()) {
@@ -760,16 +819,78 @@ int super_grbl_running(void)
 int super_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
+    char why[300];
+    size_t o = 0;
+    for (const char *p = gate_why; *p && o + 2 < sizeof(why); p++) {
+        if (*p == '"' || *p == '\\')
+            why[o++] = '\\';
+        why[o++] = *p;
+    }
+    why[o] = '\0';
     snprintf(buf, len,
              "{\"mode\":\"%s\",\"controller\":\"%s\",\"pid\":%d,"
-             "\"motion\":\"%s\"}",
+             "\"motion\":\"%s\",\"gated\":%s,\"local\":%s,\"why\":\"%s\"}",
              ctl_name(want),
              child_pid > 0 ? "running"
+                 : gated ? "gated"
                  : motion_fault ? "motion-fault"
                  : suspended ? "standby" : "stopped",
              (int)child_pid,
              motion_fault ? "fault"
-                 : probed && !probe_skipped ? "verified" : "unverified");
+                 : probed && !probe_skipped ? "verified" : "unverified",
+             gated ? "true" : "false", local_posture ? "true" : "false",
+             gated ? why : "");
     pthread_mutex_unlock(&mu);
     return 0;
+}
+
+int super_probe_motion(char *detail, size_t dlen)
+{
+    pthread_mutex_lock(&mu);
+    if (child_pid > 0) {
+        pthread_mutex_unlock(&mu);
+        snprintf(detail, dlen, "a controller is running");
+        return 2;
+    }
+    broker_open_locked();
+    int fd = broker_fd;
+    pthread_mutex_unlock(&mu);
+    if (fd < 0) {
+        snprintf(detail, dlen, "the pulse device is not held");
+        return 2;
+    }
+    int rc = probe_sequence(fd);
+    pthread_mutex_lock(&mu);
+    probed = rc != 0;
+    probe_skipped = rc == 2;
+    motion_fault = rc == 0;
+    snprintf(detail, dlen, "%s", probe_detail);
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
+void super_set_local(int on)
+{
+    pthread_mutex_lock(&mu);
+    int was = local_posture;
+    local_posture = on ? 1 : 0;
+    /* A posture change re-binds the Grbl port: the running controller
+     * is stopped and the loop respawns it with the new address. */
+    if (was != local_posture && child_pid > 0 && child_ctl == Ctl_Grbl) {
+        fflog(LOG_NOTICE, "super: controller posture %s, restarting",
+              local_posture ? "local" : "normal");
+        stop_locked();
+        respawn_at = 0.0;
+    }
+    pthread_mutex_unlock(&mu);
+}
+
+int super_gated(char *why, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    int g = gated;
+    if (why && len)
+        snprintf(why, len, "%s", gate_why);
+    pthread_mutex_unlock(&mu);
+    return g;
 }

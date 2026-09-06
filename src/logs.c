@@ -24,6 +24,7 @@
 #define _GNU_SOURCE
 #include "logs.h"
 #include "auth.h"
+#include "camkey.h"
 #include "fflog.h"
 #include "sanitize.h"
 #include "settings.h"
@@ -609,6 +610,11 @@ static void load_known(sanitizer_t *san)
     const char *tok = auth_token();
     if (tok && *tok)
         san_add_known(san, "PANEL_TOKEN", tok);
+    /* The camera key: a read secret that lands in sender logs as a URL
+     * parameter. Known by value, not left to the hex pattern. */
+    const char *ck = camkey_get();
+    if (ck && *ck)
+        san_add_known(san, "CAMERA_KEY", ck);
     char hn[128];
     if (gethostname(hn, sizeof(hn)) == 0) {
         hn[sizeof(hn) - 1] = '\0';
@@ -690,7 +696,7 @@ static int has_suffix(const char *s, const char *suf)
 }
 
 logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
-                                 char *err, size_t errlen)
+                                 void (*record_cb)(FILE *), char *err, size_t errlen)
 {
     pthread_mutex_lock(&export_mu);
     if (export_busy) {
@@ -814,6 +820,18 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
             fclose(t);
         }
     }
+    /* the commissioning record: what the setup found and wrote, so a
+     * report carries the machine's own numbers beside its logs */
+    if (record_cb) {
+        FILE *t = tmpfile();
+        if (t) {
+            record_cb(t);
+            rewind(t);
+            snprintf(dst, sizeof(dst), "%s/system/commissioning.json", top);
+            (void)stage_stream(san, t, dst);
+            fclose(t);
+        }
+    }
 
     /* README, written last so it can carry the redaction report */
     snprintf(dst, sizeof(dst), "%s/README.txt", top);
@@ -835,7 +853,9 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                    "  system/          firmware version, kernel ring buffer,"
                    " uptime, memory, disk,\n"
                    "                   processes, effective log levels,"
-                   " settings (secrets masked)\n"
+                   " settings (secrets masked),\n"
+                   "                   and the commissioning record (what"
+                   " the setup found and wrote)\n"
                    "  system/pstore/   crash records the kernel kept across"
                    " its last panic reboots\n"
                    "                   (ramoops), present only when there"

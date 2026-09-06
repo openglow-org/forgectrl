@@ -29,7 +29,7 @@ var HELP = {
     t: 'Controller mode',
     d: 'usage/control-panel/#status',
     p: [
-      'GRBL serves standard Grbl senders on port 23. Factory cloud runs the machine against the Glowforge web service like stock firmware.',
+      'GRBL serves standard Grbl senders on port 23. Factory cloud runs the machine against the Glowforge web service the way stock firmware does, with its software named as ForgeFIRM.',
       'The two are mutually exclusive: switching stops one controller and starts the other (the machine must be idle) and persists across reboots.'
     ]
   },
@@ -57,6 +57,14 @@ var HELP = {
       'The cameras are off while the lid is open; that is the privacy gate, not a fault. Several viewers can watch the same camera; a request for the other camera takes the stream over.'
     ]
   },
+  camkey: {
+    t: 'Camera URL',
+    d: 'usage/cameras/#watching-it',
+    p: [
+      'Another program reads the cameras with a key in the URL instead of a login: LightBurn\'s camera, a stream viewer, a script. The key authorizes the read-only routes (the cameras, the status) and nothing else, over plain HTTP or HTTPS.',
+      'New key makes a fresh one; every URL that carried the old key stops working. Treat the URL like a password for the camera image.'
+    ]
+  },
   units: {
     t: 'Display units',
     d: 'usage/settings/',
@@ -75,6 +83,14 @@ var HELP = {
     p: [
       'Machine coordinates the head is at after a completed homing cycle. For Glowforge web-service homing that is the factory home corner (back left) with the lens at the hall reference; leave blank until a measurement says otherwise.',
       'To calibrate: home, jog to a known reference, and enter the measured offsets.'
+    ]
+  },
+  lens: {
+    t: 'Lens',
+    d: 'usage/commissioning/',
+    p: [
+      "Z is the focal point's height above the tray: a job on 3 mm material runs at Z 3, and a job's Z moves the lens. The commissioning focus card measures the focus height with the lens on its hall reference and finds the free travel each way from it by the head accelerometer; a home puts the lens on the reference and parks the focus at the park height.",
+      "The lens never moves without a reference: before a home, a Z move is refused (a jog with an error, a program with the soft-limit alarm), and after one, a Z beyond the free travel is refused the same way. Blank fields use the built-in values, the bench reference machine's; the free travel counts are half-steps of the lens screw, about 0.34 mm each, and hold the fallback window when the focus card could not find the stops."
     ]
   },
   cooling: {
@@ -200,6 +216,15 @@ var HELP = {
       'Brightness of the lid lamp while the machine is idle; applied immediately, at every start, and after a mode switch. Cloud mode drives the lamp itself while it runs. 0 is dark.'
     ]
   },
+  wizards: {
+    t: 'The commissioning checks',
+    d: 'usage/commissioning/',
+    p: [
+      'The setup runs the checks once: switches, sensors, airflow, motion, cameras, and the coolant loop. Each writes its result to the commissioning record, and the ones that measure write the settings they found.',
+      'A check runs again from the setup, from its entry in the rail. The machine itself asks for one again when something changed: a fan near its floor recommends the airflow check, a coolant flow fault twice in a row requires the flow calibration, a different head requires the machine facts.',
+      'What changed: name a part you replaced (the tube, the pump, the coolant, a fan, the head, the tray) or a service with a cover off. The checks that measured the old part are required again, because their numbers belong to it; the checks that only prove the part are recommended. The gate holds until a required check has run.'
+    ]
+  },
   diag: {
     t: 'Cooling system diagnostics',
     d: 'usage/diagnostics/',
@@ -271,6 +296,23 @@ var HELP = {
     p: [
       'Region rules set the WiFi radio\'s allowed channels and transmit power. Automatic follows the country the access point advertises (802.11d), falling back to the most-restrictive world rules; selecting a country pins it regardless of the AP (2.4 GHz channels 12 and 13 and the 5 GHz bands vary by region).',
       'Applied immediately and at every boot. WiFi power save stays off: on a mains-powered machine it only adds latency.'
+    ]
+  },
+  ssh: {
+    t: 'Remote access',
+    d: 'usage/control-panel/#system',
+    p: [
+      'SSH is off at every boot. Turn it on here when you need a shell; it stays on until the next reboot and then is off again. Your panel name and password open it. Root has no password and cannot log in over SSH; use su from your account at the console or over SSH.',
+      'A development image keeps SSH on at every boot, with root login, for the bench.'
+    ]
+  },
+  commission: {
+    t: 'Commissioning',
+    d: 'usage/commissioning/',
+    p: [
+      'The setup that ran when ForgeFIRM was first opened: the advisories, your account, your preferences, the machine facts, and the cloud decision. Open the setup to run a step again, or when a ForgeFIRM release asks for one.',
+      'The sheet id identifies this machine on its commissioning sheet without revealing the serial number. The certificate fingerprint is what your browser sees; compare it when the browser warns.',
+      'The record is what the setup found and wrote: the acknowledgment with the document hashes, the machine facts, and every check with its numbers and the settings it set, each with the value before. The printable summary is a page to print or save beside the sheet; the saved record is the JSON file itself. The sanitized log export carries the record too. Nothing in it names the serial number, the network, or a credential.'
     ]
   }
 };

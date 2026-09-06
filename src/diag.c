@@ -41,6 +41,7 @@
 #include "settings.h"
 #include "status.h"
 #include "super.h"
+#include "wizdark.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -671,6 +672,12 @@ int diag_start(const char *tool)
     if (st_running) {
         pthread_mutex_unlock(&mu);
         return -1;
+    }
+    /* A dark wizard that is not one of these tools holds the machine
+     * the same way; the tools it wraps come through here with it. */
+    if (wizdark_running() && !wizdark_wraps_diag()) {
+        pthread_mutex_unlock(&mu);
+        return -2;
     }
     if (!machine_is_idle()) {
         pthread_mutex_unlock(&mu);

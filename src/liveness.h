@@ -15,5 +15,8 @@
  * (wedged stepper drivers), -1 = probe could not run. detail gets a
  * short human-readable result line either way. */
 int liveness_probe(int pulse_fd, char *detail, size_t dlen);
+/* One raw reading of the head accelerometer's X and Y (the motion
+ * wizard's witness during a jog). 0, or -1 without the part. */
+int liveness_accel_read(long *x, long *y);
 
 #endif

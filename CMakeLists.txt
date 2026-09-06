@@ -3,24 +3,61 @@ project(forgectrl C)
 
 set(CMAKE_C_STANDARD 11)
 
-# The control panel is a normal static page under src/ui/ (index.html,
-# theme.css, help.js, forms.js, panel.js, and Bootstrap in vendor/).
-# embed.cmake bundles it into one self-contained page, gzips it, and
-# emits the compressed bytes as `index_html_gz[]` (see src/ui.h); the
-# bundled page itself lands in build/ui/index.html for inspection.
+# The pages are normal static files under src/ui/: the control panel
+# (index.html with theme.css, help.js, forms.js, panel.js), the
+# commissioning wizard (wizard.html with wizard.css, md.js, wizard.js),
+# and the login page (login.html with login.js), all on Bootstrap in
+# vendor/. embed.cmake bundles each into one self-contained page, gzips
+# it, and emits the compressed bytes as `<page>_html_gz[]` (see
+# src/ui.h); the bundled pages land in build/ui/ for inspection.
 set(UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ui)
 set(UI_OUT ${CMAKE_CURRENT_BINARY_DIR}/ui)
+set(UI_COMMON ${UI_DIR}/theme.css ${UI_DIR}/vendor/bootstrap.min.css
+    ${UI_DIR}/vendor/bootstrap.bundle.min.js ${UI_DIR}/embed.cmake)
 add_custom_command(
   OUTPUT ${UI_OUT}/ui_blob.c ${UI_OUT}/index.html
   COMMAND ${CMAKE_COMMAND} -E make_directory ${UI_OUT}
-  COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DOUT_HTML=${UI_OUT}/index.html
+  COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DPAGE=index
+          -DOUT_HTML=${UI_OUT}/index.html
           -DOUT_C=${UI_OUT}/ui_blob.c -P ${UI_DIR}/embed.cmake
-  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/theme.css ${UI_DIR}/help.js
-          ${UI_DIR}/forms.js ${UI_DIR}/panel.js
-          ${UI_DIR}/vendor/bootstrap.min.css
-          ${UI_DIR}/vendor/bootstrap.bundle.min.js
-          ${UI_DIR}/embed.cmake
+  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/help.js ${UI_DIR}/forms.js
+          ${UI_DIR}/panel.js ${UI_DIR}/regions.js ${UI_COMMON}
   COMMENT "Bundling the control panel (src/ui -> index_html_gz[])"
+  VERBATIM)
+add_custom_command(
+  OUTPUT ${UI_OUT}/wizard_blob.c ${UI_OUT}/wizard.html
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${UI_OUT}
+  COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DPAGE=wizard
+          -DOUT_HTML=${UI_OUT}/wizard.html
+          -DOUT_C=${UI_OUT}/wizard_blob.c -P ${UI_DIR}/embed.cmake
+  DEPENDS ${UI_DIR}/wizard.html ${UI_DIR}/wizard.css ${UI_DIR}/md.js
+          ${UI_DIR}/regions.js
+          ${UI_DIR}/wizard.js ${UI_COMMON}
+  COMMENT "Bundling the commissioning wizard (src/ui -> wizard_html_gz[])"
+  VERBATIM)
+add_custom_command(
+  OUTPUT ${UI_OUT}/login_blob.c ${UI_OUT}/login.html
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${UI_OUT}
+  COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DPAGE=login
+          -DOUT_HTML=${UI_OUT}/login.html
+          -DOUT_C=${UI_OUT}/login_blob.c -P ${UI_DIR}/embed.cmake
+  DEPENDS ${UI_DIR}/login.html ${UI_DIR}/wizard.css ${UI_DIR}/login.js
+          ${UI_COMMON}
+  COMMENT "Bundling the login page (src/ui -> login_html_gz[])"
+  VERBATIM)
+
+# The advisory documents (docs/advisories/*.md) ride in the binary the
+# same way, uncompressed: the wizard serves them raw and hashes them.
+set(DOCS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/docs/advisories)
+add_custom_command(
+  OUTPUT ${UI_OUT}/advisories_blob.c
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${UI_OUT}
+  COMMAND ${CMAKE_COMMAND} -DDOCS_DIR=${DOCS_DIR}
+          -DOUT_C=${UI_OUT}/advisories_blob.c -P ${UI_DIR}/embed_docs.cmake
+  DEPENDS ${DOCS_DIR}/safety-and-risk.md ${DOCS_DIR}/licenses.md
+          ${DOCS_DIR}/privacy.md ${DOCS_DIR}/cloud-service.md
+          ${UI_DIR}/embed_docs.cmake
+  COMMENT "Embedding the advisory documents (docs/advisories -> advisories_blob.c)"
   VERBATIM)
 
 add_executable(forgectrl
@@ -46,17 +83,42 @@ add_executable(forgectrl
   src/settings.c
   src/status.c
   src/curverec.c
+  src/font_hershey.c
+  src/jobstream.c
+  src/sheet.c
+  src/wizlive.c
   src/super.c
   src/update.c
   src/vpu_h264.c
   src/vpu_jpeg.c
+  src/advisories.c
+  src/button.c
+  src/camkey.c
+  src/commission.c
+  src/recordhtml.c
+  src/led.c
+  src/session.c
+  src/sha256.c
+  src/sheetid.c
+  src/tls.c
+  src/users.c
+  src/wiz.c
+  src/wizcalc.c
+  src/wizdark.c
   ${UI_OUT}/ui_blob.c
+  ${UI_OUT}/wizard_blob.c
+  ${UI_OUT}/login_blob.c
+  ${UI_OUT}/advisories_blob.c
 )
 target_include_directories(forgectrl PRIVATE src)
 target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)
 # dl: the GPU demosaic loads libEGL/libGLESv2 at runtime, so the build
 # has no GL dependency and images without Mesa fall back to NEON.
-target_link_libraries(forgectrl ulfius jpeg z pthread m ${CMAKE_DL_LIBS})
+# jansson: the commissioning record. gnutls: the panel's self-signed
+# certificate (the HTTPS listener itself is libmicrohttpd's). crypt: the
+# account's sha512-crypt hash, shared with the system's shadow file.
+target_link_libraries(forgectrl ulfius jansson gnutls crypt jpeg z pthread m
+                      ${CMAKE_DL_LIBS})
 
 install(TARGETS forgectrl RUNTIME DESTINATION bin)
 
@@ -69,7 +131,8 @@ target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_idle_test m pthread)
 
 # Host unit test for the dose-curve fitter. CI runs it after the build.
-add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/settings.c src/fflog.c)
+add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jobstream.c
+               src/settings.c src/fflog.c)
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
@@ -159,6 +222,76 @@ target_compile_options(auth_peer_test PRIVATE -Wall -Wextra)
 # it after the build.
 add_executable(mp4mux_test tests/mp4mux_test.c src/mp4mux.c)
 target_compile_options(mp4mux_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the digest primitives behind the sheet id, the
+# advisory hashes, and the session comparison: FIPS 180-4 and RFC 4231
+# vectors, and the constant-time compare. CI runs it after the build.
+add_executable(sha256_test tests/sha256_test.c src/sha256.c)
+target_compile_options(sha256_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the sheet id: a fixed salt yields the ids an
+# independent HMAC/base32 implementation yields, and the id never
+# carries the serial. CI runs it after the build.
+add_executable(sheetid_test tests/sheetid_test.c src/sheetid.c src/sha256.c
+               src/fflog.c)
+target_compile_options(sheetid_test PRIVATE -Wall -Wextra)
+target_link_libraries(sheetid_test pthread)
+
+# Host unit test for the commissioning record and the gate: consent,
+# the account, the required table and its versions, engine flags, the
+# override file, a damaged record, and the status document. CI runs it
+# after the build.
+add_executable(commission_test tests/commission_test.c src/commission.c
+               src/advisories.c src/sha256.c src/sheetid.c src/fflog.c
+               ${UI_OUT}/advisories_blob.c)
+target_compile_options(commission_test PRIVATE -Wall -Wextra)
+target_link_libraries(commission_test jansson pthread)
+
+# The record as a printable page: every value escaped, the steps in
+# catalog order with the sentence, the settings written, and the
+# numbers, the flags, and nothing the record does not hold. CI runs it
+# after the build.
+add_executable(recordhtml_test tests/recordhtml_test.c src/recordhtml.c)
+target_compile_options(recordhtml_test PRIVATE -Wall -Wextra)
+target_link_libraries(recordhtml_test jansson)
+
+# Host unit test for the account and the sessions: the name and
+# password rules, create and verify with a real sha512-crypt hash, the
+# reset marker, the session store, cookie parsing, and the per-address
+# login throttle. CI runs it after the build.
+add_executable(users_test tests/users_test.c src/users.c src/session.c
+               src/sha256.c src/fflog.c)
+target_compile_options(users_test PRIVATE -Wall -Wextra)
+target_link_libraries(users_test crypt pthread)
+
+# Host unit test for the camera key: made once, loaded back, constant-time
+# checked, rotated. CI runs it after the build.
+add_executable(camkey_test tests/camkey_test.c src/camkey.c src/sha256.c
+               src/fflog.c)
+target_compile_options(camkey_test PRIVATE -Wall -Wextra)
+target_link_libraries(camkey_test pthread)
+
+# Host unit test for the certificate: made once, loaded back, the
+# fingerprint stable across a reload, the names on it. CI runs it after
+# the build.
+add_executable(wizcalc_test tests/wizcalc_test.c src/wizcalc.c)
+target_compile_options(wizcalc_test PRIVATE -Wall -Wextra)
+target_link_libraries(wizcalc_test m)
+
+# The commissioning sheet: the font table, every card inside its box,
+# the programs, the SVG, the curve inverse.
+add_executable(sheet_test tests/sheet_test.c src/sheet.c src/font_hershey.c)
+target_compile_options(sheet_test PRIVATE -Wall -Wextra)
+target_link_libraries(sheet_test m)
+
+# The daemon's own sender against a mock controller on a local port.
+add_executable(jobstream_test tests/jobstream_test.c src/jobstream.c src/fflog.c)
+target_compile_options(jobstream_test PRIVATE -Wall -Wextra)
+target_link_libraries(jobstream_test pthread)
+
+add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
+target_compile_options(tls_test PRIVATE -Wall -Wextra)
+target_link_libraries(tls_test gnutls pthread)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).
