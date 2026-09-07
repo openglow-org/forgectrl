@@ -38,6 +38,7 @@
 #include "diag.h"
 #include "fflog.h"
 #include "liveness.h"
+#include "paths.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -51,12 +52,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
 #define GRBL_BIN   "/usr/bin/grblHAL_glowforge"
 #define CLOUD_BIN  "/usr/sbin/gfcloud.py"
+/* The GRBL controller's settings store (the $-settings), inside the
+ * data directory. */
+#define GRBL_NVS_FILE "EEPROM-glowforge.DAT"
 #define PULSE_DEV  "/dev/glowforge"
 #define HOMED_ANCHOR "/run/grblhal.homed"
 
@@ -321,9 +326,23 @@ static int spawn_output_relay(const char *tag)
 /* Called with mu held. */
 static int lamp_pending;            /* the idle lamp is owed after a spawn (under mu) */
 
+/* The settings store path, with the data directory present. */
+static void grbl_nvs_path(char *buf, size_t len)
+{
+    const char *dir = ff_data_dir();
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+        fflog(LOG_WARNING, "super: mkdir %s: %s", dir, strerror(errno));
+    snprintf(buf, len, "%s/%s", dir, GRBL_NVS_FILE);
+}
+
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
+
+    const char *data_dir = ff_data_dir();
+    char nvs[256] = "";
+    if (ctl == Ctl_Grbl)
+        grbl_nvs_path(nvs, sizeof nvs);
 
     char **env = build_child_env(ctl, broker_fd);
     if (!env) {
@@ -376,17 +395,17 @@ static void spawn_locked(ctl_t ctl)
             close(ofd);
         }
         if (ctl == Ctl_Grbl) {
-            if (chdir("/data") != 0)
+            if (chdir(data_dir) != 0)
                 _exit(126);
             /* In the wizard's posture the Grbl port binds to loopback
              * only: the wizard's own streamer reaches it, no sender
              * on the network does. */
             if (local_posture)
                 execle(GRBL_BIN, GRBL_BIN, "-p", "23", "-b", "::1",
-                       "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
+                       "-e", nvs, (char *)NULL, env);
             else
                 execle(GRBL_BIN, GRBL_BIN, "-p", "23",
-                       "-e", "/data/EEPROM-glowforge.DAT", (char *)NULL, env);
+                       "-e", nvs, (char *)NULL, env);
         } else {
             execle(CLOUD_BIN, CLOUD_BIN, (char *)NULL, env);
         }
