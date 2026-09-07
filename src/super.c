@@ -168,7 +168,7 @@ static int probe_sequence(int fd)
         }
         wr_attr("cnc/enable", "1");
         sleep(1);
-        int rc = liveness_probe(fd, detail, sizeof(detail));
+        int rc = liveness_probe(fd, detail, sizeof(probe_detail));
         fflog(LOG_INFO, "super: liveness probe: %s - %s",
               rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
               detail);
