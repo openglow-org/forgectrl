@@ -37,6 +37,7 @@ var FIELDS_BASE = [
   'laser_pulse_ticks',
   'laser_pulse_min_ticks',
   'lid_policy',
+  'xy_microsteps',
   'rail_settle_s',
   'lid_lamp_idle',
   'wifi_country',
@@ -49,6 +50,7 @@ function fieldKeys() {
 function appliesWhen(k) {
   if (k.indexOf('log_') === 0 || k.indexOf('syslog_') === 0) return 'reboot';
   if (k.indexOf('cool_') === 0 || k.indexOf('laser_') === 0) return 'job';
+  if (k === 'xy_microsteps') return 'restart';
   return 'now';
 }
 function logPairs() {
@@ -142,7 +144,7 @@ function postSettings(pairs) {
 function saveAll(cb) {
   var p = collect(),
     keys = Object.keys(p),
-    when = { reboot: 0, job: 0, now: 0 },
+    when = { reboot: 0, job: 0, restart: 0, now: 0 },
     i;
   if (!keys.length) {
     if (cb) cb();
@@ -173,6 +175,7 @@ function saveAll(cb) {
       var notes = [];
       if (when.reboot) notes.push('logging changes apply at the next reboot');
       if (when.job) notes.push('cooling changes apply from the next job');
+      if (when.restart) notes.push('the microstep mode applies at the controller start');
       toast(
         'Saved ' + keys.length + ' setting' + (keys.length === 1 ? '' : 's'),
         notes.join('; '),

@@ -37,10 +37,21 @@ void cool_diag_tec(int on);         /* the TEC drive (cooling.tec wizard) */
  * leave it. Every other gate stands. */
 #define COOL_FLOW_HOLD_MAX_S 600
 void cool_flow_check_hold(int on);
-/* Every fan off for a listening (the lens stop finder): while held, the
- * engine's own fan writes go to zero as well; the release puts the
- * phase's posture back. */
+/* The quiet hold for a listening to the head accelerometer. cool_quiet_hold
+ * (the lens stop finder): every fan off, and while held the engine's own
+ * fan writes go to zero as well. cool_quiet_hold_ex with with_pump (the
+ * bench's tools through POST /cool/quiet?pump=1): the coolant pump and
+ * the TEC off too, so the machine is silent; dry by construction (idle
+ * only, the laser latched), the one pump-off state besides the
+ * heater-only flow diagnostics. The release puts the phase's posture
+ * back. The engine releases the hold itself when a run session opens (a
+ * job never runs with the machine held quiet) and after
+ * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. */
+#define COOL_QUIET_HOLD_MAX_S 600
 void cool_quiet_hold(int on);
+void cool_quiet_hold_ex(int on, int with_pump);
+int cool_quiet_held(void);
+int cool_quiet_pump_held(void);
 
 #define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
 #define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */

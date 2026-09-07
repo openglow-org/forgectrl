@@ -668,6 +668,17 @@ static int valid_pulse_bytes(const char *v) { return valid_range(v, 0, 107374182
  * or "hold" (stock grblHAL door hold, cycle start resumes). */
 static int valid_lid_policy(const char *v) { return !strcmp(v, "cancel") || !strcmp(v, "hold"); }
 
+/* The XY microstep mode (8, 16 or 32; unset = 8). One number both
+ * controllers read at their start: the GRBL controller derives
+ * $100/$101, its machine tick and the kernel stop ramp from it. The
+ * key is applied at the next controller start; a change from the panel
+ * restarts an idle GRBL controller on the spot. Cloud mode runs at the
+ * service's own x8 whatever the key says. */
+static int valid_xy_microsteps(const char *v)
+{
+    return !strcmp(v, "8") || !strcmp(v, "16") || !strcmp(v, "32");
+}
+
 /* Two 0/1 switches. cloud_enabled: the owner's decision from the cloud
  * wizard; while it is 0 the cloud controller, the cloud homing method
  * and the cloud tab do not exist. panel_open_reads: the read-only
@@ -744,6 +755,7 @@ static const struct {
     { "pulse_warn_threshold_bytes",   valid_pulse_bytes, 0 },
     { "pulse_reject_threshold_bytes", valid_pulse_bytes, 0 },
     { "lid_policy",             valid_lid_policy,  0 },
+    { "xy_microsteps",          valid_xy_microsteps, 0 },
     { "cloud_enabled",          valid_bool,        0 },
     { "panel_open_reads",       valid_bool,        0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
@@ -1264,6 +1276,22 @@ static int cb_settings_post(const struct _u_request *req,
         return reply_error(res, 400,
             "cool_fire_q2_alert must be below cool_fire_q2_critical");
 
+    /* The XY microstep mode is read by the GRBL controller at its start
+     * only: a change of the stored value restarts an idle GRBL
+     * controller after the write, so the panel's save is the whole
+     * change. Any other controller picks it up at its next start. */
+    int restart_grbl = 0;
+    {
+        const char *xm = setting_param(req, "xy_microsteps");
+        if (xm) {
+            char cur[16];
+            const char *now = settings_get("xy_microsteps", cur, sizeof(cur)) == 0
+                              ? cur : "8";
+            const char *want = xm[0] ? xm : "8";
+            restart_grbl = strcmp(now, want) != 0 && super_grbl_running();
+        }
+    }
+
     /* One atomic write for the whole request: no reader (grblHAL at $H,
      * gfhome at session start) can observe it half-applied, and a
      * concurrent writer cannot interleave between the keys. */
@@ -1318,6 +1346,19 @@ static int cb_settings_post(const struct _u_request *req,
         apply_wifi(1);
     if (setting_param(req, "lid_lamp_idle"))
         cam_lamp_apply_idle();
+    if (restart_grbl) {
+        /* Idle by the gate above; the stop is the supervisor's safed
+         * exit, and the start hands supervision back so the controller
+         * respawns with the new mode. A stop that fails leaves the
+         * running controller in place: the key is stored and applies
+         * at its next start. */
+        if (super_controller_stop() == 0) {
+            super_controller_start();
+            fflog(LOG_NOTICE, "xy_microsteps: controller restarted");
+        } else
+            fflog(LOG_WARNING, "xy_microsteps: controller did not stop; "
+                               "the mode applies at its next start");
+    }
     return reply_settings(res);
 }
 
@@ -1467,6 +1508,40 @@ static int cb_cool_state(const struct _u_request *req,
     if (cool_state_report(mode, armed, duty[0], duty[1], duty[2], &lim) != 0)
         return reply_error(res, 400, "mode must be idle, run or cooldown");
     ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The quiet hold for a listening to the head accelerometer (the bench's
+ * tools): on=1 takes every fan off, the hold the commissioning finder
+ * uses; pump=1 with it takes the coolant pump and the TEC off too, the
+ * machine silent. Taken only from an idle machine with no diagnostic
+ * running; released here, or by the engine itself when a run session
+ * opens or the hold runs out of time (cool.h), so a listener that died
+ * cannot leave the machine quiet. */
+static int cb_cool_quiet(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *on = setting_param(req, "on");
+    const char *pump = setting_param(req, "pump");
+    if (!on || (strcmp(on, "0") && strcmp(on, "1")))
+        return reply_error(res, 400, "on must be 0 or 1");
+    if (pump && strcmp(pump, "0") && strcmp(pump, "1"))
+        return reply_error(res, 400, "pump must be 0 or 1");
+    if (!strcmp(on, "1")) {
+        if (diag_running())
+            return reply_error(res, 409, "a diagnostic is running");
+        if (!machine_is_idle())
+            return reply_error(res, 409, "machine is not idle");
+    }
+    cool_quiet_hold_ex(!strcmp(on, "1"), pump && !strcmp(pump, "1"));
+    char body[48];
+    snprintf(body, sizeof(body), "{\"quiet_hold\":%s}",
+             cool_quiet_held() ? "true" : "false");
+    ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
 }
@@ -2480,6 +2555,7 @@ int main(int argc, char **argv)
         { "POST", "/controller/start",     cb_controller_start, NULL, 0 },
         { "POST", "/cool/state",           cb_cool_state,       NULL, 0 },
         { "GET",  "/cool/status",          cb_cool_status,      NULL, 1 },
+        { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0 },
         { "POST", "/diag/flow-verify",     cb_diag_start,       "flow-verify", 0 },
         { "POST", "/diag/flow-calibrate",  cb_diag_start,       "flow-calibrate", 0 },
         { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0 },

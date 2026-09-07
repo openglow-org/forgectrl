@@ -28,7 +28,7 @@
 /* The scalar fields and the document's own punctuation, at their widest
  * rendering (coolfmt_test measures it; the build fails if it no longer
  * fits under the fragments). */
-#define COOL_STATUS_JSON_SCALARS 256
+#define COOL_STATUS_JSON_SCALARS 288
 
 _Static_assert(COOL_REASON_MAX + COOL_GATES_OFF_JSON_MAX + COOL_LIMITS_JSON_MAX +
                COOL_FAN_GATES_JSON_MAX + COOL_STATUS_JSON_SCALARS <= COOL_STATUS_JSON_MAX,
@@ -56,6 +56,7 @@ int coolfmt_fan_gates(char *buf, size_t len, const coolfmt_fan_t *fans, size_t n
 typedef struct {
     const char *phase, *verdict, *reason, *fire_watch, *accel_watch;
     int fire_ok, hold, armed;
+    int quiet_hold;                     /* every fan held off for a listening */
     double down_c, up_c, report_age_s;
     const char *gates_off, *limits, *fan_gates;
 } coolfmt_status_t;

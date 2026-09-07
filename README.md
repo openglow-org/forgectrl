@@ -92,7 +92,8 @@ restarts.
 | `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
 | `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
 | `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties and limits), level-triggered ~1 Hz |
-| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits`, `fan_gates` |
+| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits`, `fan_gates`, `quiet_hold` |
+| `POST /cool/quiet?on=1|0&pump=0|1` | The quiet hold for a listening to the head accelerometer: every fan off, and with `pump=1` the coolant pump and the TEC too (idle machine only; the engine releases it when a run session opens or after 600 s) |
 
 Position comes from the kernel step counters anchored at the last
 completed homing (`/run/grblhal.homed`, written by the controller) -
@@ -113,6 +114,7 @@ keys:
 | `gf_serial` | Cloud sign-in serial override (digits) |
 | `gf_password` | Cloud sign-in password override (64 hex; write-only - `GET` reports `gf_password_set`) |
 | `ui_units` | Panel display units: `metric` or `imperial` (values are stored and exchanged in metric) |
+| `xy_microsteps` | The X and Y microstep mode: `8` (unset), `16` or `32`. The GRBL controller reads it at its start and derives `$100`/`$101`, its machine tick and the kernel stop ramp from it; a change restarts an idle GRBL controller. Cloud mode runs at the service's own 8 |
 | `cool_*` | Coolant-loop protection tunables (flow-check bands, temperature ceiling/resume, cooldown) - see the Machine tab hints |
 | `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2; unset = automatic (the AP's 802.11d country, else world). Applied via `iw reg reload`/`iw reg set` at startup and on change; power save is pinned off in the same pass |
 | `log_<logger>_disk`, `log_<logger>_remote` | Log level per logger (`forgectrl`, `grblhal`, `gfcloud`, `gfhome`, `kernel`, `system`) and destination: `off`, `error`, `warning`, `notice`, `info` (disk default), `debug`; remote defaults to `off`. Applied at the next reboot |

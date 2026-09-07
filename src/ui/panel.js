@@ -1062,6 +1062,7 @@ function fill(force) {
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('cool_tec_present', S.cool_tec_present || '0');
   setF('lid_policy', S.lid_policy || 'cancel');
+  setF('xy_microsteps', S.xy_microsteps || '8');
   setF('rail_settle_s', S.rail_settle_s);
   setF('lid_lamp_idle', S.lid_lamp_idle);
   setF('wifi_country', S.wifi_country || '00');

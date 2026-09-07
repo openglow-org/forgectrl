@@ -367,6 +367,7 @@ SETTINGS_KEYS = (
     'cloud_pause_backtrack_ticks', 'cloud_resume_lead_ticks',
     'cloud_hold_max_s', 'pulse_warn_threshold_bytes',
     'pulse_reject_threshold_bytes', 'lid_policy',
+    'xy_microsteps',
     'cloud_enabled', 'panel_open_reads',
     'log_forgectrl_disk', 'log_forgectrl_remote',
     'log_grblhal_disk', 'log_grblhal_remote',
@@ -385,6 +386,7 @@ SETTING_CHOICES = {
     'ui_units': ('metric', 'imperial'),
     'cool_tec_present': ('0', '1'),
     'lid_policy': ('cancel', 'hold'),
+    'xy_microsteps': ('8', '16', '32'),
     'cloud_enabled': ('0', '1'),
     'panel_open_reads': ('0', '1'),
     'syslog_proto': ('udp', 'tcp'),
@@ -1105,6 +1107,7 @@ class Mock:
             'report_age_s': age, 'armed': self.rep_armed,
             'fire_watch': 'armed' if watching else 'watch',
             'accel_watch': 'watch',
+            'quiet_hold': getattr(self, 'quiet_hold', False),
             'gates_off': self.gates_off(),
             'limits': {
                 'coolant_max_c': self.gate('cool_temp_max'),
@@ -1684,6 +1687,18 @@ class Mock:
             self.report_at = time.time()
             self.rep_armed = form.get('armed', '0') not in ('', '0')
             return J(200, {'ok': True})
+
+        # The quiet hold for a listening (the bench tools): every fan off,
+        # with pump=1 the pump and the TEC too; idle machine only.
+        if path == '/cool/quiet':
+            on = form.get('on')
+            pump = form.get('pump')
+            if on not in ('0', '1'):
+                return T(400, 'on must be 0 or 1')
+            if pump is not None and pump not in ('0', '1'):
+                return T(400, 'pump must be 0 or 1')
+            self.quiet_hold = on == '1'
+            return J(200, {'quiet_hold': self.quiet_hold})
 
         if path == '/login':
             w = self.wiz

@@ -93,6 +93,14 @@ var HELP = {
       "The lens never moves without a reference: before a home, a Z move is refused (a jog with an error, a program with the soft-limit alarm), and after one, a Z beyond the free travel is refused the same way. Blank fields use the built-in values, the bench reference machine's; the free travel counts are half-steps of the lens screw, about 0.34 mm each, and hold the fallback window when the focus card could not find the stops."
     ]
   },
+  microsteps: {
+    t: 'Stepper drive',
+    d: 'usage/settings/#settings-that-affect-motion',
+    p: [
+      'How finely the X and Y stepper drivers divide a full step. The factory runs at 8. A finer mode moves the motors more smoothly and quietly at the same speeds; the GRBL controller derives its steps per millimeter, its step clock and its stop ramp from the one number, so nothing else needs typing, and a $100 or $101 sent by a program is overwritten.',
+      'Saving restarts an idle GRBL controller, which drops a connected program for a moment. Cloud mode runs at the service\'s own 8 whatever is chosen here. 32 depends on the machine: it asks four times the step rate of 8, and only a test on the machine shows whether it holds speed.'
+    ]
+  },
   cooling: {
     t: 'Cooling protection',
     d: 'usage/cooling-and-fans/',

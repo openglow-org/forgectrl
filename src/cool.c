@@ -412,6 +412,8 @@ static double flow_next_check;
 static int flow_check_active = 0;
 static int flow_check_pending = 0;
 static int quiet_held = 0;              /* cool_quiet_hold: every fan off for a listening */
+static int quiet_pump_held = 0;         /* ...and the pump and the TEC too (the bench tools) */
+static double quiet_since = 0;          /* when the quiet hold was taken */
 static int flow_check_held = 0;         /* cool_flow_check_hold */
 static double flow_hold_since = 0;
 static double flow_pending_since;
@@ -674,6 +676,17 @@ static void fans_quiet(void)
     wr_attr_long("thermal/exhaust_pwm", 0);
     wr_attr_long("thermal/intake_pwm", 0);
     wr_attr("head/purge_air", "0");
+}
+
+/* The pump and the TEC off as well, so the machine is silent: the bench's
+ * accelerometer tools ask for it, and the operator listens too. Idle
+ * only, the laser latched, so the pump-off is dry; the tick leaves the
+ * TEC alone while this stands. The finder keeps the pump running: it was
+ * proven that way. */
+static void pump_quiet(void)
+{
+    wr_attr("thermal/water_pump_on", "0");
+    wr_attr("thermal/tec_on", "0");
 }
 
 static void fans_idle(void)
@@ -1115,20 +1128,55 @@ static int diag_guard(const char *what)
     return own ? 0 : -1;
 }
 
-void cool_quiet_hold(int on)
+void cool_quiet_hold_ex(int on, int with_pump)
 {
     pthread_mutex_lock(&mu);
-    int was = quiet_held;
+    int was = quiet_held, was_pump = quiet_pump_held;
     quiet_held = on ? 1 : 0;
+    quiet_pump_held = (on && with_pump) ? 1 : 0;
+    if (on)
+        quiet_since = wall_s();
     pthread_mutex_unlock(&mu);
-    if (on && !was) {
-        fans_quiet();
-        info("every fan off for the lens stop finder's listening");
-    } else if (!on && was) {
+    if (on) {
+        if (!was) {
+            fans_quiet();
+            info("every fan off for a listening");
+        }
+        if (with_pump && !was_pump) {
+            pump_quiet();
+            info("the pump and the TEC off too: the machine silent");
+        }
+    } else if (was) {
+        if (was_pump) {
+            wr_attr("thermal/water_pump_on", "1");
+            tec_written = -1;           /* the tick rewrites the TEC's state */
+        }
         wr_attr("head/purge_air", "1");
         fans_apply_phase();
-        info("the fans back in their posture after the listening");
+        info(was_pump ? "the fans and the pump back in their posture after the listening"
+                      : "the fans back in their posture after the listening");
     }
+}
+
+void cool_quiet_hold(int on)
+{
+    cool_quiet_hold_ex(on, 0);
+}
+
+int cool_quiet_held(void)
+{
+    pthread_mutex_lock(&mu);
+    int held = quiet_held;
+    pthread_mutex_unlock(&mu);
+    return held;
+}
+
+int cool_quiet_pump_held(void)
+{
+    pthread_mutex_lock(&mu);
+    int held = quiet_pump_held;
+    pthread_mutex_unlock(&mu);
+    return held;
 }
 
 void cool_flow_check_hold(int on)
@@ -1549,6 +1597,22 @@ static void engine_tick(void)
     memcpy(run_duty, duty, sizeof(run_duty));
     int armed_rose = armed && !eff_armed;
     eff_armed = armed;
+    /* A quiet hold (a listening with the fans off) never meets a run
+     * session opening: the opening edge releases it (a session already
+     * open when the hold was taken is the finder's own after a burn,
+     * and stands), and so does the clock, so a listener that died
+     * cannot leave the fans off. */
+    pthread_mutex_lock(&mu);
+    int quiet = quiet_held;
+    double quiet_age = now - quiet_since;
+    pthread_mutex_unlock(&mu);
+    if (quiet && ((flood && !flood_on) || armed_rose)) {
+        cool_quiet_hold(0);
+        warn("quiet hold released: a run session opened");
+    } else if (quiet && quiet_age > (double)COOL_QUIET_HOLD_MAX_S) {
+        cool_quiet_hold(0);
+        warn("quiet hold released: it ran out of time");
+    }
     /* The session's armed history decides its smoke phase: cleared as
      * a session opens (this tick, before flood_apply), set on any tick
      * the window is open. */
@@ -2387,7 +2451,7 @@ static void engine_tick(void)
                            ? "at the coolant floor" : "coolant cooled");
             info(msg);
         }
-        if (tec_written != tec_on_state) {
+        if (tec_written != tec_on_state && !cool_quiet_pump_held()) {
             wr_attr("thermal/tec_on", tec_on_state ? "1" : "0");
             tec_written = tec_on_state;
         }
@@ -2609,6 +2673,7 @@ int cool_status_json(char *buf, size_t len)
     coolfmt_status_t st = {
         .phase = pub_phase, .verdict = pub_verdict, .reason = pub_reason,
         .fire_watch = pub_fire_watch, .accel_watch = pub_accel_watch,
+        .quiet_hold = quiet_held,
         .fire_ok = pub_fire_ok, .hold = pub_hold,
         .armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S),
         .down_c = pub_down, .up_c = pub_up,
