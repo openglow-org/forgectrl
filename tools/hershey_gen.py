@@ -96,7 +96,8 @@ def main():
     w = lines.append
     w('/*')
     w(' * font_hershey.c - the stroke font of the commissioning sheet (generated)')
-    w(' * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>')
+    w(' * Copyright 2026 514 LLC d/b/a OpenGlow')
+    w(' * Written by Scott Wiederhold')
     w(' * SPDX-License-Identifier: MIT')
     w(' *')
     w(' * Hershey Sans 1-stroke (Simplex), the printable ASCII glyphs as')

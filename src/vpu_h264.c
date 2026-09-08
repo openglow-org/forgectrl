@@ -1,6 +1,7 @@
 /*
  * vpu_h264.c - hardware H.264 encoding on the i.MX6 CODA960 VPU
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * V4L2 mem2mem against the mainline coda driver, one MMAP buffer per

@@ -1,6 +1,7 @@
 /*
  * mp4mux.h - fragmented MP4 wrapping for the H.264 stream
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * Wraps CODA960 Annex B access units as the fragmented MP4 a browser's

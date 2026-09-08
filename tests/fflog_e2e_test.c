@@ -1,6 +1,7 @@
 /*
  * fflog_e2e_test.c - emitter half of the host end-to-end logging check
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * Emits a fixed set of messages through the real fflog emitter under

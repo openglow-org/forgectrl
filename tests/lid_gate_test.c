@@ -1,6 +1,7 @@
 /*
  * lid_gate_test.c - host unit test for machine_lid_closed() fail-closed
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The camera privacy gate is only as good as its lid read. Every camera

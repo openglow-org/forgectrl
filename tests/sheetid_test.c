@@ -1,6 +1,7 @@
 /*
  * sheetid_test.c - host test: the commissioning sheet id
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The golden ids come from an independent implementation (Python's

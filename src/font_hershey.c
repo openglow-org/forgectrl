@@ -1,6 +1,7 @@
 /*
  * font_hershey.c - the stroke font of the commissioning sheet (generated)
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * Hershey Sans 1-stroke (Simplex), the printable ASCII glyphs as

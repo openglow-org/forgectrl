@@ -1,6 +1,7 @@
 /*
  * cool_gate_test.c - host unit test for the gate-settings table
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The cooling gates are plain settings whose far end means off, and

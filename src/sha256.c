@@ -1,6 +1,7 @@
 /*
  * sha256.c - SHA-256, HMAC-SHA256, and constant-time comparison
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #include "sha256.h"

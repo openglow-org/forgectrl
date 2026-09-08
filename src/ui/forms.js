@@ -1,6 +1,7 @@
 /*
  * forms.js - forgectrl: one save for every setting, the theme, the toasts
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The settings fields on every tab share one dirty set and one Save. A

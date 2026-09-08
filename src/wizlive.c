@@ -1,6 +1,7 @@
 /*
  * wizlive.c - the sheet wizards: the machine's numbers burned into wood
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The live half of the commissioning: one sheet of wood, the head at

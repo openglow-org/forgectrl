@@ -1,6 +1,7 @@
 /*
  * mp4mux.c - fragmented MP4 wrapping for the H.264 stream
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * ISO/IEC 14496-12 boxes, written big-endian into a growable buffer.

@@ -1,6 +1,7 @@
 #!/bin/sh
 # fflog_e2e.sh - host end-to-end check of the ForgeFIRM logging path
-# Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 #
 # Runs a private rsyslogd on the shipped rsyslog.conf (from the

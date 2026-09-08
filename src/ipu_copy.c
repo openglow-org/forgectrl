@@ -1,6 +1,7 @@
 /*
  * ipu_copy.c - IPU stride-fix crop between the GPU and the encoders
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * V4L2 mem2mem against the mainline imx-csc-scaler (the IPU IC's

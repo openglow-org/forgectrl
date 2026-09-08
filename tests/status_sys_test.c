@@ -1,6 +1,7 @@
 /*
  * status_sys_test.c - host unit test for the machine status JSON sys block
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The /status document carries CPU and memory utilization next to the

@@ -1,7 +1,8 @@
 # embed.cmake - bundle one page's sources into one self-contained page,
 # gzip it, and emit it as C: the compressed bytes in .rodata plus the two
 # lengths the daemon needs to inflate them.
-# Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
 #
 # Run by CMakeLists.txt as a custom command, once per page:

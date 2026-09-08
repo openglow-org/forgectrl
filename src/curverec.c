@@ -32,7 +32,8 @@
  * each arm, so the override applies to the one job and to nothing
  * after it.
  *
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #define _GNU_SOURCE

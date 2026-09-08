@@ -1,6 +1,7 @@
 /*
  * gpu_debayer.h - Bayer demosaic on the i.MX6 GC880 GPU (etnaviv/Mesa)
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * Renders the superpixel half-resolution BGGR -> YUV420 conversion (the

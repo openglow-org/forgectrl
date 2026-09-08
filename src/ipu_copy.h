@@ -1,6 +1,7 @@
 /*
  * ipu_copy.h - IPU stride-fix crop between the GPU and the encoders
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The GC880 can only write byte-exact rows padded to 64-byte multiples,

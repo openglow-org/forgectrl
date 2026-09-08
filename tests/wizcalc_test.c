@@ -1,6 +1,7 @@
 /*
  * wizcalc_test.c - host test: the dark wizards' decisions
- * Copyright (c) 2026 Scott Wiederhold <s.e.wiederhold@gmail.com>
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  */
 #include "../src/wizcalc.h"
