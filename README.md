@@ -1,242 +1,76 @@
 # forgectrl
 
-System control daemon for [ForgeFIRM](https://github.com/openglow-org/forgefirm)-powered
-Glowforge lasers.
+The machine-services daemon for
+[ForgeFIRM](https://github.com/openglow-org/forgefirm)-powered Glowforge
+lasers.
 
-forgectrl runs on the factory i.MX6 control board as the machine-services
-daemon (HTTP on port 80, HTTPS on port 443). Motion is executed by exactly one of two
-controllers - [grblHAL-glowforge](https://github.com/openglow-org/grblHAL-glowforge)
-(GRBL mode) or the gfcloud web-service client (factory cloud mode) - and
-forgectrl owns everything around them:
+It runs on the factory i.MX6 control board and serves HTTPS on port 443, with
+the read-only routes on HTTP port 80. Motion is executed by exactly one of two
+controllers,
+[grblHAL-glowforge](https://github.com/openglow-org/grblHAL-glowforge) in GRBL
+mode or the `gfcloud` web-service client in factory cloud mode, and forgectrl
+owns everything around them: the controller supervisor, the pulse-device
+broker, the motion-liveness gate, the cooling engine, the cameras, telemetry,
+settings, diagnostics, the logging tree, the web control panel, the first-run
+commissioning, and the A/B update system.
 
-- **Controller-mode supervision** - the selected controller runs as a
-  direct child; `POST /mode` switches modes live (idle-gated), a crashed
-  controller is respawned after the machine is safed, and forgectrl
-  itself runs under a respawn wrapper that retakes supervision once the
-  machine is idle.
-- **The pulse-device broker** - forgectrl holds `/dev/glowforge`
-  (exclusive-open) for its lifetime and controllers inherit the fd, so
-  mode switches, homing handovers, and respawns never close the device
-  or cycle the 40 V motor rail; the supervisor is the writers' dead-man.
-- **The motion-liveness gate** - the stepper drivers can come out of a
-  rail power-up unserviceable while every counter runs normally, so
-  before each session's first controller spawn the supervisor commands a
-  small probe move and verifies it *physically happened* via the head
-  accelerometer, with a rail-off recovery ladder and an explicit
-  `motion-fault` state.
-- **The cooling engine** - the single owner of fans, pump, TEC, and the
-  flow-check heater for both modes: coolant-flow verification, over-temp
-  hold/resume policy, and per-job fan profiles, fed by controller
-  job-state reports (`POST /cool/state`) and publishing a verdict file
-  the controllers enforce in-process, plus an airflow floor on every fan
-  (tachometer or current) while the run profile is applied. Every gate is a plain setting
-  with a wide range whose far end turns it off by value; the panel
-  warns outside the recommended band and while any gate is off.
-- The **web control panel**, **camera service**, **telemetry**,
-  **diagnostics**, persisted **machine settings**, the **logging**
-  tree (levels, viewer, sanitized export), and the A/B **update
-  system**.
+## Documentation
 
-The shared contract - switch maps, sensor conversions, hardware
-ownership, the cooling channels, mode supervision, pulse-device
-ownership, and logging - is [forgectrl on the documentation site](https://docs.forgefirm.org/technical/forgefirm/forgectrl/).
+Everything is on **<https://docs.forgefirm.org/>**, which is the source of
+truth for this project. This README is an index card.
 
-## The control panel (`GET /`)
-
-A self-contained single page (no external assets) on Bootstrap, carrying
-the OpenGlow visual identity in a light and a dark theme (the header
-toggle: light, dark, or the system preference). Every settings field on
-every tab shares one save bar: it appears while anything is unsaved,
-posts every change in one request, and leaving a tab or the page with
-unsaved changes asks first. Each card and field has a "?" that opens its
-help, with a link into the documentation site. Tabbed:
-
-- **Status** - the live controller-mode selector (switches through the
-  supervisor; the setting persists for boot), live operational status
-  (motion state and position, coolant temperatures and fan tachometers,
-  safety-switch states, system summary), plus a scaled lid-camera
-  snapshot that switches to the live MJPEG stream on demand.
-- **Machine** - shared settings: display units, homing method and the
-  post-homing position calibration, cooling tunables.
-- **GF Cloud** - Glowforge web-service overrides: machine identity
-  (serial / password; blank = the factory fuse identity) and the
-  homing-session timeout.
-- **GRBL** - controller connection info and the GRBL-mode tunables the
-  controller reads from the shared settings: the laser arm window
-  (button wait, disarm grace) and the motor-rail settle time.
-- **Diagnostics** - tools that take the hardware over (the active
-  controller is suspended through the supervisor for the duration):
-  cooling system verification and calibration.
-- **Logs** - per-logger disk and remote log levels (applied at the next
-  reboot), the remote syslog target, a live log viewer, and the log
-  export (sanitized by default) for issue reports.
-- **System** - firmware slots (A/B boot selection), ForgeFIRM updates,
-  image install/restore, the WiFi regulatory region (power save is
-  kept off), reboot.
-
-The design intent: every machine tunable - shared, cloud-override, and
-GRBL-mode - gets a home in one of these tabs as it appears.
-
-## Machine settings
-
-Settings persist in `/data/forgefirm.conf`, shared with the
-grblHAL-glowforge controller (re-read on every `$H`) and the gfhome
-homing runner (read at session start), so changes apply without
-restarts.
-
-| Endpoint | Purpose |
+| Subject | Page |
 |---|---|
-| `GET /status` | Machine operational status as JSON (state, position when homed, fans, coolant, switches, `gates_off`) |
-| `GET /settings` | Current settings as JSON (plus the system hostname, firmware version, and the `gates` table: range, recommended band, off end and state per gate setting) |
-| `POST /settings?key=value&...` | Set any subset of known keys |
-| `GET /mode` | Supervisor state: mode, controller (`running`/`stopped`/`standby`/`motion-fault`), pid, motion verdict |
-| `POST /mode?controller=grbl\|cloud` | Live idle-gated mode switch; also the retry lever after a motion fault |
-| `POST /cool/state` | Controller job-state report (mode, armed, per-job run fan duties and limits), level-triggered ~1 Hz |
-| `GET /cool/status` | Cooling-engine state: phase, verdict, temps, report age, `gates_off`, the effective `limits`, `fan_gates`, `quiet_hold` |
-| `POST /cool/quiet?on=1|0&pump=0|1` | The quiet hold for a listening to the head accelerometer: every fan off, and with `pump=1` the coolant pump and the TEC too (idle machine only; the engine releases it when a run session opens or after 600 s) |
+| The machine-services contract: the switch map, the safety readbacks, telemetry, mode supervision, pulse-device ownership, the hardware ownership table | [forgectrl](https://docs.forgefirm.org/technical/forgefirm/forgectrl/) |
+| The cooling engine: the gates, flow verification, the job-state reports, the verdict file | [Cooling engine](https://docs.forgefirm.org/technical/forgefirm/cooling-engine/) |
+| The cameras: the privacy gate, the encoders, the demosaic, the sensor profile | [Video pipeline](https://docs.forgefirm.org/technical/forgefirm/video-pipeline/) |
+| Logging: the emitters, the tree, the levels, the export sanitizer | [Logging](https://docs.forgefirm.org/technical/forgefirm/logging/) |
+| The update manager | [Install and update](https://docs.forgefirm.org/technical/forgefirm/install-and-update/) |
+| The control panel, as an operator meets it | [The control panel](https://docs.forgefirm.org/usage/control-panel/) |
+| Every settings key | [Settings](https://docs.forgefirm.org/usage/settings/) |
+| Building it, the environment variables, and working on the panel | [Build](https://docs.forgefirm.org/developers/building/) |
 
-Position comes from the kernel step counters anchored at the last
-completed homing (`/run/grblhal.homed`, written by the controller) -
-the Grbl TCP socket is never queried, since a connection there would
-displace the sender's session.
+## Build and test
 
-An empty value clears a key back to its built-in default (send clears as
-query parameters). Writes are refused (409) unless the machine is idle -
-the controller and the homing runner both read this file mid-run. Known
-keys:
-
-| Key | Meaning |
-|---|---|
-| `controller_mode` | `grbl` or `cloud` - the boot-time mode; `POST /mode` switches live and persists it |
-| `homing_mode` | `$H` behavior: `gfcloud`, `switches`, or `none` |
-| `gfcloud_home_x/y/z` | Machine coordinates after a completed homing (mm) |
-| `gfcloud_home_timeout_s` | Web-service homing session budget (30-3600 s) |
-| `gf_serial` | Cloud sign-in serial override (digits) |
-| `gf_password` | Cloud sign-in password override (64 hex; write-only - `GET` reports `gf_password_set`) |
-| `ui_units` | Panel display units: `metric` or `imperial` (values are stored and exchanged in metric) |
-| `xy_microsteps` | The X and Y microstep mode: `8` (unset), `16` or `32`. The GRBL controller reads it at its start and derives `$100`/`$101`, its machine tick and the kernel stop ramp from it; a change restarts an idle GRBL controller. Cloud mode runs at the service's own 8 |
-| `cool_*` | Coolant-loop protection tunables (flow-check bands, temperature ceiling/resume, cooldown) - see the Machine tab hints |
-| `wifi_country` | WiFi regulatory region, ISO 3166-1 alpha-2; unset = automatic (the AP's 802.11d country, else world). Applied via `iw reg reload`/`iw reg set` at startup and on change; power save is pinned off in the same pass |
-| `log_<logger>_disk`, `log_<logger>_remote` | Log level per logger (`forgectrl`, `grblhal`, `gfcloud`, `gfhome`, `kernel`, `system`) and destination: `off`, `error`, `warning`, `notice`, `info` (disk default), `debug`; remote defaults to `off`. Applied at the next reboot |
-| `syslog_server`, `syslog_port`, `syslog_proto` | Remote syslog target (host or address; 514; `udp` or `tcp`). Nothing is forwarded until a server is set. Applied at the next reboot |
-
-## Logging
-
-Every ForgeFIRM process emits through the system syslog socket
-(forgectrl and the grblHAL driver through the shared non-blocking
-`fflog` emitter in `src/fflog.[ch]`, the Python apps through
-`SysLogHandler`); rsyslog is the only file writer and files each program
-under its own directory, `/data/log/forgefirm/<logger>/`, size-capped
-and rotated. A process emits at the more verbose of its two configured
-levels and rsyslog filters per destination; the kernel's levels only
-filter what printk emits. The stray stdout/stderr of a controller (an
-interpreter traceback, a library message) reaches syslog through a
-`logger` relay under the controller's own name; the daemon's own stray
-output takes the same route through its init script.
-
-`forgectrl --render-syslog` writes the rsyslog rules
-(`/data/forgefirm/rsyslog-forgefirm.conf`) and the log directories from
-the settings; the boot sequence runs it before rsyslog starts, which is
-why level changes apply at reboot. The panel shows configured against
-effective levels and offers the reboot.
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /logs` | Loggers with configured and effective levels and on-disk sizes, the remote target, `pending_reboot` |
-| `GET /logs/tail?name=&lines=&from=` | The last `lines` of a logger's live file, or everything since byte offset `from` (incremental follow) |
-| `POST /logs/export?sanitize=1\|0` | Streams a `tar.gz` of every logger's files plus a system snapshot (version, dmesg, uptime, memory, disk, processes, effective levels, settings with secrets masked). Sanitized by default: known identifiers (serial, hostname, cloud credentials, panel token, camera key, WiFi network) and pattern classes (network addresses, e-mail addresses, bearer/basic credentials, JWTs, key=value secrets, long hex/base64 blobs) become placeholders that stay stable within the bundle (`src/sanitize.c`; `tests/sanitize_test.c` in CI) |
-
-All three require the panel token. `tests/fflog_e2e.sh` proves the whole
-path on a host against a private rsyslogd (emitter, relay, format,
-per-logger filtering).
-
-## Camera service
-
-Both cameras (lid and head) stream and snapshot through the mainline
-imx-media pipeline: MJPEG (`GET /cam/stream`), H.264 in fragmented MP4
-(`GET /cam/h264`), single JPEGs (`GET /cam/snapshot`), and the
-mjpg-streamer-compatible aliases on `/`. The engine, the sensor profiles
-(OV5648 and OV8856), the GPU demosaic, the VPU encoders and their CPU
-fallbacks are described on the documentation site:
-[Video pipeline](https://docs.forgefirm.org/technical/forgefirm/video-pipeline/).
-
-## Environment
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `FORGECTRL_PORT` | 80 | HTTP port (the read-only routes to the LAN, everything from the machine itself) |
-| `FORGECTRL_TLS_PORT` | 443 | HTTPS port (the login, the panel, every state change) |
-| `FORGECTRL_STREAM_Q` | 75 | Stream JPEG quality (1-100) |
-| `FORGECTRL_STREAM_FPS` | unset | Stream frame-rate ceiling (frames/s); unset or 0 = sensor max |
-| `FORGECTRL_LAMP` | 132 | Illumination level during capture (0-1023) |
-| `FORGECTRL_NO_VPU` | unset | Force the libjpeg software encoder |
-| `FORGECTRL_NO_NEON` | unset | Force the scalar demosaic |
-| `FORGECTRL_NO_CACHED_BUFS` | unset | Force uncached capture buffers + bounce copy |
-| `FORGECTRL_NEON_CHECK` | unset | One-shot NEON/scalar equivalence check (logged) |
-| `FORGECTRL_NO_GPU` | unset | Force the CPU demosaic (no GPU) |
-| `FORGECTRL_GPU_CHECK` | unset | One-shot GPU/CPU demosaic equivalence check (logged) |
-| `FORGECTRL_GPU_PASSES` | unset | GPU render passes per frame (tuning) |
-| `FORGECTRL_NO_H264` | unset | Serve no H.264 stream |
-| `FORGECTRL_H264_KBPS`, `FORGECTRL_H264_GOP` | engine defaults | H.264 bit rate and GOP length |
-| `FORGECTRL_NO_HW_SKIP` | unset | Encode every frame (no hardware frame skipping) |
-| `FFLOG_LEVEL` | from settings | Override the emit level (`off`..`debug`) |
-| `FFLOG_STDERR` | unset | Echo log lines to stderr even when it is not a terminal (harnesses) |
-| `FFLOG_CONF`, `FFLOG_SOCK` | `/data/forgefirm.conf`, `/dev/log` | Settings file and syslog socket (host tests) |
-
-## Building
-
-CMake; links against ulfius, libjpeg and zlib. Runtime needs Linux with imx-media,
-the coda VPU driver, and v4l-utils (`media-ctl`/`v4l2-ctl`) on the target.
-The ForgeFIRM Yocto layer (`meta-forgefirm` in the forgefirm repo) carries
-the recipe, which also installs the sysvinit script from `init/`.
-
-## Developing the panel
-
-The panel is a plain static page under `src/ui/` - `index.html`,
-`theme.css` (the OpenGlow theme: every color as a token, light and dark,
-mapped onto Bootstrap's component variables), `help.js` (the help text,
-one entry per "?" button, each with its documentation link), `forms.js`
-(the shared dirty set, the save bar, the tab guard, the theme toggle,
-toasts), `panel.js` (the tabs, telemetry rendering, and every action),
-and Bootstrap under `vendor/` (pinned, with its license; no external
-assets, no build tooling beyond CMake). The build bundles them into one
-self-contained page, gzips it, and embeds the compressed bytes in the
-daemon (`src/ui/embed.cmake`, run by CMake; the bundled page also lands
-in `build/ui/index.html`); the daemon inflates it once at first request
-and substitutes the token, so what ships is still a single plain
-response. The page lives compressed in the binary because the rootfs is
-raw ext4: bytes in `.rodata` are bytes on the image. `tools/devserver.py` (Python 3, standard
-library only) serves the files as they are, with live reload: the browser
-sees real file names and line numbers, and the open tab reloads whenever
-anything under `src/ui/` is saved (`--bundle` serves the page inlined the
-way the daemon does). API calls from the page go to one of two backends:
-
-- **A real machine.** `GF_HOST` (IP literal, `:port` if not 443; the dev server proxies over HTTPS) and
-  `GF_TOKEN` (the panel token, `/data/forgefirm/panel.token` on the
-  machine) in the environment or in a git-ignored `.env` at the repo root
-  (`.env.example` is the template; the file is re-read when it changes).
-  The token is embedded in the served page exactly as the daemon does it,
-  requests are proxied with the machine's address-literal `Host`, and the
-  MJPEG stream passes through - so the panel shows live data and its
-  actions reach the hardware.
-- **The built-in mock** (`--mock`, or automatically without `GF_HOST`):
-  in-memory settings, status, diagnostics, slots, logs and a placeholder
-  camera, with the daemon's token check mirrored on state-changing calls.
-
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
+cmake --build build
 ```
+
+Then run the test binaries under `build/`. A warning is a failure. The host
+tests live in `tests/`; `tests/fflog_e2e.sh` proves the whole logging path
+against a private rsyslogd.
+
+It builds with CMake and links against ulfius, libjpeg and zlib. The target
+needs Linux with imx-media, the coda VPU driver, and v4l-utils (`media-ctl`
+and `v4l2-ctl`). The `meta-forgefirm` layer in the `forgefirm` repository
+carries the recipe, which also installs the sysvinit script from `init/`.
+
+For the board binary, cross-compile with
+`forgefirm/scripts/bench/build-forgectrl.sh`. Never use a native host build as
+proof.
+
+### The control panel
+
+The panel is a plain static page under `src/ui/`, bundled into the daemon at
+build time. `tools/devserver.py` serves it against a real machine or a
+built-in mock, with live reload:
+
+```sh
 cp .env.example .env            # then fill in GF_HOST / GF_TOKEN
 python3 tools/devserver.py      # http://127.0.0.1:8081
 python3 tools/devserver.py --mock
-python3 tools/devserver.py --dump > panel.html   # the bundled page
 ```
 
-`.devcontainer/` packages this for VS Code (Dev Containers, Docker or
-Podman): Ubuntu 24.04 with the host build dependencies, so `cmake -B build
-&& cmake --build build` and the CI unit tests also run inside; the "panel:
-dev server" task starts the dev server when the folder opens and port
-8081 is forwarded. Interactive shells in the container export `.env`, so
-the ForgeFIRM bench tools see `GF_HOST` / `GF_TOKEN` too.
+`.devcontainer/` packages the same thing for VS Code.
+[Build](https://docs.forgefirm.org/developers/building/) describes both.
+
+## Contributing
+
+[AGENTS.md](AGENTS.md) carries the rules for this repository and for the
+project: safety ordering, proof before done, the push order, and the writing
+rules. They apply to human contributors too.
 
 ## License
 
-MIT - see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

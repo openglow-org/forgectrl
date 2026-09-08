@@ -1192,10 +1192,10 @@ static int burn(live_t *L, build_t *b, const char *id, int alone, double z, int 
     wiz_phase("the program goes to the controller, the button lights at the arm");
     char err[160];
     /* The controller acknowledges the program end when the stream is
-     * produced, seconds before the pulse engine has played it (BRINGUP
-     * item 9): the run follows the tube until it has been dark for a
-     * while, and then the kernel is waited for before anything else
-     * touches the controller. */
+     * produced, one queue depth before the pulse engine has played it:
+     * the run follows the tube until it has been dark for a while, and
+     * then the kernel is waited for before anything else touches the
+     * controller. */
     g->tail_s = end_dark_s < 2.0 ? 2.0 : end_dark_s;
     rc = stream(g, run, g->tail_s, err, sizeof(err));
     sheet_text_free(&pg);
