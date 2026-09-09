@@ -11,9 +11,12 @@
  * here (GF_SYSFS_DIR) and the step cadence is shortened (GF_LENS_STEP_US),
  * so each case is a file layout rather than a broken machine.
  *
- * The one case with real hardware behind it, the sweep that finds the
- * edge, is staged by flipping the sensor's file from a child process
- * while the sweep runs.
+ * The healthy sweep needs a carriage that moves, and it is driven by the
+ * steps the sweep itself writes rather than by a clock: a child watches
+ * the step attribute and answers the sensor after the same counts the
+ * bench reference gives. Nothing here depends on how fast the machine
+ * running the test happens to be, and the sweep cannot run past a
+ * transition, because the transition is what its own stepping causes.
  */
 #define _GNU_SOURCE
 #include "../src/lenshome.h"
@@ -25,13 +28,23 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* The bench reference's counts: the carriage starts on the sensor, comes
+ * off it in three full steps, and trips it again three steps later. */
+#define STEPS_TO_CLEAR 3
+#define STEPS_TO_TRIP  6
+
 static char root[128];
 static int failures;
+
+static void path_of(char *buf, size_t len, const char *rel)
+{
+    snprintf(buf, len, "%s/%s", root, rel);
+}
 
 static void put(const char *rel, const char *val)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s", root, rel);
+    path_of(path, sizeof(path), rel);
     FILE *f = fopen(path, "w");
     if (f == NULL) {
         printf("FAIL cannot stage %s\n", path);
@@ -42,17 +55,33 @@ static void put(const char *rel, const char *val)
     fclose(f);
 }
 
+/* The sensor is rewritten under a running sweep, so it is replaced whole:
+ * a truncated file caught mid-write would read as a head that went away. */
+static void put_atomic(const char *rel, const char *val)
+{
+    char path[256], tmp[300];
+    path_of(path, sizeof(path), rel);
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    FILE *f = fopen(tmp, "w");
+    if (f == NULL)
+        return;
+    fputs(val, f);
+    fclose(f);
+    if (rename(tmp, path) != 0)
+        unlink(tmp);
+}
+
 static void rm(const char *rel)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s", root, rel);
+    path_of(path, sizeof(path), rel);
     unlink(path);
 }
 
 static int marker_present(void)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/run/lens.home", root);
+    path_of(path, sizeof(path), "run/lens.home");
     return access(path, R_OK) == 0;
 }
 
@@ -60,11 +89,11 @@ static int marker_present(void)
 static void stage(const char *hall)
 {
     char dir[256];
-    snprintf(dir, sizeof(dir), "%s/head", root);
+    path_of(dir, sizeof(dir), "head");
     mkdir(dir, 0755);
-    snprintf(dir, sizeof(dir), "%s/cnc", root);
+    path_of(dir, sizeof(dir), "cnc");
     mkdir(dir, 0755);
-    snprintf(dir, sizeof(dir), "%s/run", root);
+    path_of(dir, sizeof(dir), "run");
     mkdir(dir, 0755);
     put("cnc/z_step", "");
     put("head/z_enable", "");
@@ -74,6 +103,36 @@ static void stage(const char *hall)
         put("head/hall_sensor", hall);
     else
         rm("head/hall_sensor");
+}
+
+/* The carriage: every step the sweep writes moves it, and the sensor
+ * answers the count. Runs until the sweep has stepped it past the edge. */
+static void carriage(void)
+{
+    char step[256];
+    struct stat st;
+    struct timespec last = { 0, 0 };
+    int seen = 0, steps = 0;
+
+    path_of(step, sizeof(step), "cnc/z_step");
+    for (;;) {
+        if (stat(step, &st) == 0) {
+            if (st.st_mtim.tv_sec != last.tv_sec ||
+                st.st_mtim.tv_nsec != last.tv_nsec) {
+                if (seen)
+                    steps++;
+                seen = 1;
+                last = st.st_mtim;
+                if (steps == STEPS_TO_CLEAR)
+                    put_atomic("head/hall_sensor", "1");
+                else if (steps == STEPS_TO_TRIP)
+                    put_atomic("head/hall_sensor", "0");
+            }
+        }
+        if (steps >= STEPS_TO_TRIP)
+            _exit(0);
+        usleep(200);
+    }
 }
 
 static void expect(const char *what, int got, int want, int want_marker)
@@ -90,14 +149,14 @@ static void expect(const char *what, int got, int want, int want_marker)
 
 int main(void)
 {
-    char detail[96];
+    char detail[80];
+    char run[256];
 
     snprintf(root, sizeof(root), "/tmp/lenshome_test.%d", (int)getpid());
     mkdir(root, 0755);
     setenv("GF_SYSFS_DIR", root, 1);
-    setenv("GF_LENS_STEP_US", "1000", 1);
-    char run[256];
-    snprintf(run, sizeof(run), "%s/run", root);
+    setenv("GF_LENS_STEP_US", "2000", 1);
+    path_of(run, sizeof(run), "run");
     setenv("GF_RUN_DIR", run, 1);
 
     /* Not this hardware: no lens interface at all. The machine is not
@@ -116,24 +175,18 @@ int main(void)
     stage("1");
     expect("sensor stuck clear", lenshome_run(detail, sizeof(detail)), 0, 0);
 
-    /* A dead sensor stuck tripped, or a carriage that cannot move off
-     * it: the sweep away from the sensor runs out its bound. */
+    /* A dead sensor stuck tripped, or a carriage that cannot move off it:
+     * the sweep away from the sensor runs out its bound. */
     stage("0");
     expect("sensor stuck tripped", lenshome_run(detail, sizeof(detail)), 0, 0);
 
-    /* The healthy sweep. The carriage starts over the sensor, comes off
-     * it, and trips it again on the way back: the child stands in for the
-     * mechanism, clearing the sensor and then tripping it. */
+    /* The healthy sweep, against a carriage the sweep's own steps move. */
     stage("0");
     pid_t child = fork();
-    if (child == 0) {
-        usleep(20000);
-        put("head/hall_sensor", "1");
-        usleep(20000);
-        put("head/hall_sensor", "0");
-        _exit(0);
-    }
+    if (child == 0)
+        carriage();
     int rc = lenshome_run(detail, sizeof(detail));
+    kill(child, SIGKILL);
     waitpid(child, NULL, 0);
     expect("edge found", rc, 1, 1);
 
