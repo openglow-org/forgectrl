@@ -237,7 +237,7 @@ class MockTest(unittest.TestCase):
         m = self.mock()
         doc = self.get_json(m, '/mode')
         self.assertEqual(set(doc), c_keys(src, 'super_status_json'))
-        states = set(re.findall(r'"(running|motion-fault|standby|stopped)"',
+        states = set(re.findall(r'"(running|motion-fault|waiting|gated|standby|stopped)"',
                                 src))
         self.assertIn(doc['controller'], states)
         for mode in accepted:

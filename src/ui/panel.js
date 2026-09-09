@@ -686,25 +686,42 @@ function renderMode() {
   if (!el || !MD) return;
   var st = MD.controller || '';
   var fault = st === 'motion-fault';
-  el.textContent = st ? 'controller ' + st + (MD.pid ? ' (pid ' + MD.pid + ')' : '') : '';
+  /* why: what is open while the motion check waits, or the probe's own
+   * words behind an unverified or faulted verdict (the gate's reason
+   * goes to the banner instead). */
+  var note = !MD.gated && MD.why ? ' - ' + MD.why : '';
+  el.textContent = st ? 'controller ' + st + (MD.pid ? ' (pid ' + MD.pid + ')' : '') + note : '';
   el.className = 'msg ' + (fault ? 'b-bad' : st === 'running' ? 'b-ok' : 'b-warn');
   $('ctl-retry').style.display = fault ? '' : 'none';
   renderGate();
 }
-/* The commissioning gate: while it is closed no controller runs for a
- * sender, and the banner says why and where to go. */
+/* The banner under the mode selector: the commissioning gate (no
+ * controller for a sender while it is closed, and where to go), or the
+ * motion check waiting for the lid or the interlock to close. */
 function renderGate() {
   var b = $('gate-banner');
-  if (!MD || !MD.gated) {
-    b.style.display = 'none';
+  if (MD && MD.gated) {
+    b.className = 'banner banner-bad';
+    b.innerHTML =
+      '⚠ The machine is waiting for commissioning: ' +
+      esc(MD.why || 'a required step is not complete') +
+      '. Controllers stay off until it is done. ' +
+      "<a href='/setup'>Continue the setup</a>";
+    b.style.display = '';
     return;
   }
-  b.innerHTML =
-    '⚠ The machine is waiting for commissioning: ' +
-    esc(MD.why || 'a required step is not complete') +
-    '. Controllers stay off until it is done. ' +
-    "<a href='/setup'>Continue the setup</a>";
-  b.style.display = '';
+  if (MD && MD.controller === 'waiting') {
+    var why = MD.why || 'the lid or the interlock is open';
+    b.className = 'banner';
+    b.innerHTML =
+      '⚠ ' + esc(why.charAt(0).toUpperCase() + why.slice(1)) +
+      '. The machine checks its motion before the controller starts, and that check moves the ' +
+      'head, so no controller runs until the enclosure is closed. Close the lid; the button ' +
+      'blinks amber until you do.';
+    b.style.display = '';
+    return;
+  }
+  b.style.display = 'none';
 }
 /* Cloud mode exists on the panel only once the owner turned it on. */
 function applyCloudSurface() {

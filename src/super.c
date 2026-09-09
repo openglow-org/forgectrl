@@ -38,6 +38,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "led.h"
 #include "lenshome.h"
 #include "liveness.h"
 #include "paths.h"
@@ -98,6 +99,8 @@ static int probed = 0;             /* liveness gate passed since broker open */
 static int probe_skipped = 0;      /* ...but the probe itself could not run */
 static int motion_fault = 0;       /* probe failed after recovery - no spawn */
 static int standby_takeover = 0;   /* unmanaged controller found: retake at idle */
+static int enclosure_wait = 0;     /* the gate waits for the lid or the interlock */
+static char wait_why[96];          /* ...and this is what is open */
 
 static void wr_attr(const char *attr, const char *val);
 
@@ -155,12 +158,42 @@ static void broker_open_locked(void)
     fflog(LOG_INFO, "super: holding " PULSE_DEV " (broker)");
 }
 
+/* The gate's wait for the enclosure. The probe moves the gantry, so it
+ * does not run while a lid or the interlock is open, or while the
+ * switches cannot be read: no controller until the enclosure closes,
+ * /mode says "waiting" and why, and the button blinks amber so the
+ * machine itself asks for the lid. Called with mu held. */
+static void wait_enter_locked(const char *why)
+{
+    if (enclosure_wait && strcmp(why, wait_why) == 0)
+        return;
+    fflog(LOG_WARNING, "super: %s - the motion check waits for it to "
+                       "close; no controller until then", why);
+    snprintf(wait_why, sizeof(wait_why), "%s", why);
+    enclosure_wait = 1;
+    generation++;
+    led_set(LED_BLINK_AMBER);
+}
+
+static void wait_leave_locked(const char *how)
+{
+    if (!enclosure_wait)
+        return;
+    fflog(LOG_NOTICE, "super: motion check %s", how);
+    enclosure_wait = 0;
+    wait_why[0] = '\0';
+    generation++;
+    led_release();
+}
+
 /* Motion-liveness gate, run with mu NOT held (takes seconds; the
  * recovery ladder takes a minute). The DRV8825 drivers can come out of
  * a rail power-up unserviceable; each recovery attempt gives them a
  * longer true power-off before re-probing. Returns 1 verified, 0 fault,
- * 2 when the probe could not run (no accelerometer, enclosure open): the
- * machine is not blocked, but motion stays UNVERIFIED and is reported so. */
+ * 2 when the probe could not run (no accelerometer): the machine is not
+ * blocked, but motion stays UNVERIFIED and is reported so; 3 when the
+ * enclosure opened between the gate's own check and the move: nothing
+ * moved, and the gate waits for the enclosure again. */
 static char probe_detail[96];       /* the last probe's outcome text */
 static int probe_sequence(int fd)
 {
@@ -199,6 +232,8 @@ static int probe_sequence(int fd)
             }
             return 1;
         }
+        if (rc == -2)
+            return 3;   /* the enclosure opened under the probe: wait for it */
         if (rc < 0)
             return 2;   /* cannot probe (no accel?): do not block the machine */
     }
@@ -618,15 +653,35 @@ static void *super_main(void *arg)
                    && want != Ctl_None && wall_s() >= respawn_at) {
             broker_open_locked();
             if (broker_fd >= 0 && !probed) {
-                int fd = broker_fd;
+                /* The probe moves the gantry: not with a lid or the
+                 * interlock open, and never blind. The gate waits for
+                 * the enclosure and says so instead of starting a
+                 * controller unverified; the loop looks again every
+                 * pass, so the probe runs the moment the lid closes. */
+                char why[96];
                 pthread_mutex_unlock(&mu);
-                int rc = probe_sequence(fd);
+                int enc = liveness_enclosure(why, sizeof(why));
                 pthread_mutex_lock(&mu);
-                probed = rc != 0;
-                probe_skipped = rc == 2;
-                motion_fault = rc == 0;
+                if (enc != 0) {
+                    wait_enter_locked(why);
+                } else {
+                    wait_leave_locked("runs: the enclosure is closed");
+                    int fd = broker_fd;
+                    pthread_mutex_unlock(&mu);
+                    int rc = probe_sequence(fd);
+                    pthread_mutex_lock(&mu);
+                    if (rc != 3) {
+                        probed = rc != 0;
+                        probe_skipped = rc == 2;
+                        motion_fault = rc == 0;
+                    }
+                }
             } else
                 spawn_locked(want);
+        } else if (enclosure_wait) {
+            wait_leave_locked(suspended ? "no longer waits: supervision suspended"
+                              : gated ? "no longer waits: controllers gated"
+                              : "no longer waits");
         }
         int lamp = lamp_pending;
         lamp_pending = 0;
@@ -705,6 +760,7 @@ void super_shutdown(void)
     int was = th_run;
     th_run = 0;
     suspended = 1;
+    wait_leave_locked("no longer waits: shutdown");
     if (child_pid > 0) {
         /* A busy controller survives a forgectrl stop: it reparents to
          * init and finishes its job (its own device fd carries the
@@ -787,6 +843,15 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
      * (re-)probe runs first, so allow for it. */
     double sw_deadline = wall_s() + 90.0;
     while (!(child_pid > 0 && child_ctl == target)) {
+        if (enclosure_wait) {
+            /* The gate waits for the enclosure: the switch itself is
+             * done (the mode is stored, the controller starts when the
+             * lid closes) and the reply carries the waiting state. */
+            fflog(LOG_NOTICE, "super: mode %s selected; %s - the controller "
+                              "starts when it is closed", mode, wait_why);
+            pthread_mutex_unlock(&mu);
+            return 0;
+        }
         if (wall_s() > sw_deadline) {
             pthread_mutex_unlock(&mu);
             snprintf(err, elen, "controller did not start");
@@ -858,9 +923,15 @@ int super_grbl_running(void)
 int super_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
+    /* why: what holds the machine (the gate's reason, or what is open
+     * while the motion check waits), else the probe's own words behind
+     * a faulted or unverified verdict. */
+    const char *src = gated ? gate_why
+                    : enclosure_wait ? wait_why
+                    : (motion_fault || probe_skipped) ? probe_detail : "";
     char why[300];
     size_t o = 0;
-    for (const char *p = gate_why; *p && o + 2 < sizeof(why); p++) {
+    for (const char *p = src; *p && o + 2 < sizeof(why); p++) {
         if (*p == '"' || *p == '\\')
             why[o++] = '\\';
         why[o++] = *p;
@@ -873,12 +944,13 @@ int super_status_json(char *buf, size_t len)
              child_pid > 0 ? "running"
                  : gated ? "gated"
                  : motion_fault ? "motion-fault"
+                 : enclosure_wait ? "waiting"
                  : suspended ? "standby" : "stopped",
              (int)child_pid,
              motion_fault ? "fault"
                  : probed && !probe_skipped ? "verified" : "unverified",
              gated ? "true" : "false", local_posture ? "true" : "false",
-             gated ? why : "");
+             why);
     pthread_mutex_unlock(&mu);
     return 0;
 }

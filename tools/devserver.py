@@ -1060,12 +1060,32 @@ class Mock:
 
     def mode_reply(self):
         gated = not self.wiz_gate_open()
+        # why: the gate's reason, or what is open while the motion check
+        # waits (the daemon also carries the probe's words behind an
+        # unverified or faulted verdict; the mock's probe never fails).
+        why = self.wiz_why() if gated else (
+            getattr(self, 'wait_why', '') if self.controller == 'waiting' else '')
         return {'mode': self.mode,
                 'controller': 'gated' if gated and self.controller != 'running'
                 else self.controller,
                 'pid': self.pid, 'motion': self.motion,
                 'gated': gated, 'local': False,
-                'why': self.wiz_why() if gated else ''}
+                'why': why}
+
+    def controller_start(self):
+        """The supervisor's spawn, as the mock sees it: with a lid open the
+        motion gate waits instead (no pid, why names the lid)."""
+        if not self.status['switches']['lid']:
+            self.controller = 'waiting'
+            self.wait_why = 'the lid is open'
+            self.pid = 0
+            self.motion = 'unverified'
+            self._log('super: the lid is open - the motion check waits for it to close')
+            return
+        self.controller = 'running'
+        self.pid += 1
+        self.report_at = time.time()
+        self._log('super: controller started pid %d' % self.pid)
 
     def status_reply(self):
         self.status['diag'] = self.diag['running']
@@ -1776,10 +1796,7 @@ class Mock:
         if path == '/controller/start':
             if self.diag['running']:
                 return T(409, 'a diagnostic owns the hardware')
-            self.controller = 'running'
-            self.pid += 1
-            self.report_at = time.time()
-            self._log('super: controller started pid %d' % self.pid)
+            self.controller_start()
             return J(200, {'started': True})
         if path.startswith('/diag/') and path != '/diag/abort':
             tool = path[6:]

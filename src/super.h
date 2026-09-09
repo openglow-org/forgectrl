@@ -30,8 +30,12 @@ int super_mode_switch(const char *mode, char *err, size_t elen);
 int super_controller_stop(void);
 void super_controller_start(void);
 
-/* {"mode":"grbl","controller":"running|stopped|standby|gated|motion-fault",
- *  "pid":N,"motion":"...","gated":bool,"local":bool,"why":"..."} */
+/* {"mode":"grbl","controller":"running|stopped|standby|waiting|gated|motion-fault",
+ *  "pid":N,"motion":"verified|unverified|fault","gated":bool,"local":bool,
+ *  "why":"..."}
+ * waiting: the motion gate holds the spawn until a lid or the interlock
+ * closes. why names what holds the machine (the gate, the enclosure),
+ * else the probe's own words behind a faulted or unverified verdict. */
 int super_status_json(char *buf, size_t len);
 /* The wizard's posture: while on, the commissioning gate does not
  * apply and the Grbl controller binds to loopback only. A change

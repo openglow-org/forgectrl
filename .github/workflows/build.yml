@@ -36,6 +36,8 @@ jobs:
         run: ./build/debayer_test
       - name: Camera privacy gate fails closed
         run: ./build/lid_gate_test
+      - name: Motion gate enclosure read
+        run: ./build/enclosure_wait_test
       - name: Capture frame-health ladder
         run: ./build/camhealth_test
       - name: Gate settings table
