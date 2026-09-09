@@ -16,7 +16,7 @@
  * while the sweep runs.
  */
 #define _GNU_SOURCE
-#include "lenshome.h"
+#include "../src/lenshome.h"
 
 #include <stdio.h>
 #include <stdlib.h>
