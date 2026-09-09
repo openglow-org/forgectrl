@@ -74,6 +74,25 @@ int main(void)
     set_state("idle\n");
     CHECK(machine_is_idle() == 1, "trailing newline still reads idle");
 
+    /* "disabled" is the power-on state, and the state a machine holds
+     * for the whole of its first run (the steppers are energized by the
+     * liveness probe, which runs at a controller spawn, which the
+     * commissioning gate holds back). Steppers off with no program in
+     * progress is idle for every caller of this predicate; reading it
+     * as busy locked the setup out of its own machine. */
+    set_state("disabled");
+    CHECK(machine_is_idle() == 1, "reads idle when cnc/state is \"disabled\"");
+    set_state("disabled\n");
+    CHECK(machine_is_idle() == 1, "trailing newline still reads disabled as idle");
+
+    /* The two states that need an acknowledgment before the machine is
+     * anyone's to take stay busy: a driver fault needs an enable, and an
+     * underrun leaves the position untrusted until it is acknowledged. */
+    set_state("fault");
+    CHECK(machine_is_idle() == 0, "reads busy when cnc/state is \"fault\"");
+    set_state("underrun");
+    CHECK(machine_is_idle() == 0, "reads busy when cnc/state is \"underrun\"");
+
     set_state(NULL);
     CHECK(machine_is_idle() == 0, "fails closed when cnc/state is missing");
 
