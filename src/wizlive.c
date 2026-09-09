@@ -608,12 +608,15 @@ static int live_begin(live_t *L, const sheet_card_t *card, int need_place, int z
      * reference the session just took, inside the travel, so the session
      * lifts the lock and drives the motor at its run current; the end
      * puts both back. */
+    /* Taken as soon as the first write lands, so a later one failing
+     * still hands the motor back at the end: the lock is lifted by then,
+     * and leaving it lifted would let a sender's Z drive the lens. */
+    L->z_taken = 1;
     if (wiz_wr_attr("cnc/motor_lock", "0") != 0 || wiz_wr_attr("head/z_current", "0") != 0 ||
         wiz_wr_attr("head/z_mode", "1") != 0 || wiz_wr_attr("head/z_enable", "0") != 0) {
         wiz_finish_err("cannot take the lens motor for the session");
         return -1;
     }
-    L->z_taken = 1;
     return 0;
 }
 

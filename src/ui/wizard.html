@@ -50,9 +50,15 @@
           <circle cx="34" cy="8" r="2" fill="#e8262a" />
           <text x="0" y="31" font-size="20" font-family="inherit"><tspan fill="#fff" font-weight="600">Open</tspan><tspan fill="#b9bac9" font-weight="300">Glow</tspan></text></svg
         ><span class="appname">ForgeFIRM</span><span id="host"></span
+        ><button id="logsbtn" type="button" onclick="exportSetupLogs()" title="Download a log bundle to attach to a support request">Download logs</button
         ><button id="themebtn" type="button" onclick="cycleTheme()" title="Theme">Theme</button>
       </div>
     </header>
+    <!-- The setup can stop on something the machine will not explain in
+         words, and the panel's Logs tab is not reachable until the setup
+         is done. The bundle is here, on every step, so an operator who is
+         stuck can attach it to a report without a console or a login. -->
+    <div class="wz-logs-msg"><span class="msg" id="msg-setup-logs"></span></div>
 
     <div class="wz-wrap">
       <aside class="wz-rail">

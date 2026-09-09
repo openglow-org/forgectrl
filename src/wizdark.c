@@ -802,7 +802,9 @@ static void run_airflow(void)
     finish_ok(1, r, applied);
 out:
     if (took) {
-        cool_diag_purge(0);
+        /* cool_diag_fans_idle restores the whole idle posture, purge air
+         * included: this check switches purge off to read its off
+         * current, and leaving by any path must put it back. */
         cool_diag_fans_idle();
         cool_diag_release();
     }

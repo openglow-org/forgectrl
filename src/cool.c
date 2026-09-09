@@ -1217,11 +1217,19 @@ void cool_diag_fans_run(void)
     }
 }
 
+/* Stand the machine back down to the idle posture a diagnostic borrowed
+ * it from. Purge air is part of that posture: the engine holds it on
+ * continuously, the factory does the same, and the idle phase never
+ * re-applies its own duties, so a diagnostic that switched it off (the
+ * airflow check reads its off current) would leave it off until the
+ * daemon restarted. The next job then judged it against the floor that
+ * same check had just written and was held mid-cut. */
 void cool_diag_fans_idle(void)
 {
     if (diag_guard("diag fan write") == 0) {
         wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
         wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+        wr_attr("head/purge_air", "1");
     }
 }
 

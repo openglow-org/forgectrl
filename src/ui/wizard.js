@@ -171,6 +171,50 @@ function post(u, params) {
       });
   });
 }
+/* The log bundle, from inside the setup. The panel's Logs tab lives
+ * behind a completed setup, so an operator whose setup stops on
+ * something the page cannot explain has no way to get the logs off the
+ * machine without a serial console. This is that way: sanitized by
+ * default, the same bundle the Logs tab builds. */
+function exportSetupLogs() {
+  var m = $('msg-setup-logs'),
+    btn = $('logsbtn');
+  if (m) m.textContent = 'building the bundle…';
+  if (btn) btn.disabled = true;
+  fx('/logs/export?sanitize=1', { method: 'POST' })
+    .then(function (r) {
+      if (!r.ok)
+        return r.text().then(function (t) {
+          throw t;
+        });
+      var cd = r.headers.get('Content-Disposition') || '',
+        f = /filename="([^"]+)"/.exec(cd);
+      return r.blob().then(function (b) {
+        return { b: b, n: f ? f[1] : 'forgefirm-logs.tar.gz' };
+      });
+    })
+    .then(function (o) {
+      var u = URL.createObjectURL(o.b),
+        a = document.createElement('a');
+      a.href = u;
+      a.download = o.n;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () {
+        URL.revokeObjectURL(u);
+      }, 10000);
+      if (m) m.textContent = o.n;
+      if (btn) btn.disabled = false;
+    })
+    .catch(function (e) {
+      /* The machine refuses an export mid-cut (409): say so plainly
+       * rather than leaving a dead button. */
+      if (m) m.textContent = String(e || 'the export failed');
+      if (btn) btn.disabled = false;
+    });
+}
+
 function toast(title, body, ok) {
   var el = document.createElement('div');
   el.className = 'toast ' + (ok ? 't-ok' : 't-bad');
