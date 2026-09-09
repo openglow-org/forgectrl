@@ -219,9 +219,9 @@ int lenshome_run(char *detail, size_t dlen)
         return 0;
     }
     if (rc == -1) {
-        snprintf(detail, dlen, "the hall edge never appeared in %d steps "
-                               "(wedged lens motor, jammed carriage, or a "
-                               "dead sensor)", MAX_SWEEP_STEPS);
+        snprintf(detail, dlen, "no hall edge in %d steps (wedged lens motor, "
+                               "jammed carriage, or dead sensor)",
+                               MAX_SWEEP_STEPS);
         return 0;
     }
 

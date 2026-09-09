@@ -186,7 +186,9 @@ static int probe_sequence(int fd)
              * its hall edge is broken hardware, so it gates the spawn the
              * same way dead drivers do: the focal height would otherwise
              * be a guess. */
-            char lens[96];
+            /* Sized to leave room for the prefix below inside
+             * probe_detail, which this shares with the probe. */
+            char lens[80];
             int lrc = lenshome_run(lens, sizeof(lens));
             fflog(lrc == 0 ? LOG_CRIT : LOG_INFO,
                   "super: lens reference: %s - %s",
