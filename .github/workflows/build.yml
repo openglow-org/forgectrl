@@ -46,6 +46,8 @@ jobs:
         run: ./build/airflow_test
       - name: Crash-watch tiers
         run: ./build/accel_test
+      - name: Lens hall-edge reference
+        run: ./build/lenshome_test
       - name: Cooling status document
         run: ./build/coolfmt_test
       - name: Loopback peer check

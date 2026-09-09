@@ -580,25 +580,46 @@ function stateBadge(st) {
 function posN(v) {
   return dLen(v).toFixed(isImp() ? 3 : 2);
 }
+// Which axes hold a reference: the letters when any do, so a partial
+// reference reads as what it is rather than as a plain no.
+function homedAxesText(ax) {
+  if (!ax) return 'no';
+  var n = [];
+  if (ax & 1) n.push('X');
+  if (ax & 2) n.push('Y');
+  if (ax & 4) n.push('Z');
+  return n.join('') + (ax === 7 ? '' : ' only');
+}
+
 function renderMotion() {
   var g = '';
   g += stateBadge(M.state || 'unknown');
+  // Axes carry their reference one at a time: the lens takes its own on
+  // the hall edge at every start, while X and Y wait for a home. An axis
+  // reads its value once it is referenced and a dash until then.
+  var ax = M.homed_axes === undefined ? (M.homed ? 7 : 0) : M.homed_axes;
+  // X and Y still count while unreferenced, so they keep reading out,
+  // relative to wherever counting started and painted as unreferenced.
+  // The lens is not in the counters at all, so Z has nothing to show
+  // until it holds a reference.
+  var axis = function (name, val, bit, counts) {
+    var on = (ax & bit) !== 0;
+    return (
+      "<span class='mono" + (on ? '' : ' b-bad') + "'>" + name + ' ' +
+      (on || counts ? posN(val) : '\u2014') + '</span>'
+    );
+  };
   if (M.pos)
     g += kv(
       'Position',
-      "<span class='mono" +
-        (M.homed ? '' : ' b-bad') +
-        "'>X " +
-        posN(M.pos.x) +
-        ' &nbsp;Y ' +
-        posN(M.pos.y) +
-        ' &nbsp;Z ' +
-        (M.homed ? posN(M.pos.z) : '\u2014') +
-        ' ' +
-        uL() +
-        '</span>'
+      axis('X', M.pos.x, 1, true) +
+        ' &nbsp;' +
+        axis('Y', M.pos.y, 2, true) +
+        ' &nbsp;' +
+        axis('Z', M.pos.z, 4, false) +
+        "<span class='mono'> " + uL() + '</span>'
     );
-  g += txt('Homed', M.homed ? 'yes' : 'no', M.homed ? 'b-ok' : 'b-dim');
+  g += txt('Homed', homedAxesText(ax), ax === 7 ? 'b-ok' : 'b-dim');
   if (M.lens) {
     var reach =
       'Z ' + posN(M.lens.reach_min) + ' to ' + posN(M.lens.reach_max) + ' ' + uL() +

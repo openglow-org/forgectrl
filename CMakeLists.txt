@@ -76,6 +76,7 @@ add_executable(forgectrl
   src/gates.c
   src/gpu_debayer.c
   src/ipu_copy.c
+  src/lenshome.c
   src/liveness.c
   src/logs.c
   src/mp4mux.c
@@ -199,6 +200,13 @@ target_link_libraries(airflow_test m)
 # the session reset, the axis names. CI runs it after the build.
 add_executable(accel_test tests/accel_test.c src/accel.c)
 target_compile_options(accel_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the lens hall-edge reference: the failures that
+# gate a controller spawn (no head, a sensor stuck either way) cannot be
+# staged on working hardware, so the head's sysfs is a scratch tree here
+# and each fault is a file layout. CI runs it after the build.
+add_executable(lenshome_test tests/lenshome_test.c src/lenshome.c src/fflog.c)
+target_compile_options(lenshome_test PRIVATE -Wall -Wextra)
 
 # Host unit test for the /cool/status document: the widest legal
 # rendering of every fragment fits the buffer the engine uses, the

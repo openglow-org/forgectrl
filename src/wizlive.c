@@ -693,12 +693,8 @@ static int gen_init(gen_t *g, const live_t *L, double z, const char *body, int s
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "$X");
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G21");
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G90");
-    /* The lens was referenced by the session on the hall edge: tell the
-     * controller (its Z soft limit opens to the free travel), then the
-     * sheet's origin. */
-    int down, up;
-    lens_window(&down, &up);
-    snprintf(g->head[g->nhead++], sizeof(g->head[0]), "M103 Z%.2f P%d Q%d", edge_z(), down, up);
+    /* The lens is referenced on the hall edge at the controller's start,
+     * so the Z envelope is already open: set the sheet's origin. */
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G92 X%.3f Y%.3f Z%.2f", x, y, edge_z());
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G0 Z%.2f", z);
     g->body = body;

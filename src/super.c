@@ -38,6 +38,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "lenshome.h"
 #include "liveness.h"
 #include "paths.h"
 #include "settings.h"
@@ -150,6 +151,7 @@ static void broker_open_locked(void)
         fflog(LOG_ERR, "super: flock on " PULSE_DEV " failed");
     probed = 0;     /* a fresh hold means unverified motion */
     probe_skipped = 0;
+    lenshome_clear();   /* ...and an unreferenced lens */
     fflog(LOG_INFO, "super: holding " PULSE_DEV " (broker)");
 }
 
@@ -178,8 +180,23 @@ static int probe_sequence(int fd)
         fflog(LOG_INFO, "super: liveness probe: %s - %s",
               rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
               detail);
-        if (rc == 1)
+        if (rc == 1) {
+            /* The gantry moves; now the lens takes its one reference,
+             * while the machine is still ours. A lens that cannot reach
+             * its hall edge is broken hardware, so it gates the spawn the
+             * same way dead drivers do: the focal height would otherwise
+             * be a guess. */
+            char lens[96];
+            int lrc = lenshome_run(lens, sizeof(lens));
+            fflog(lrc == 0 ? LOG_CRIT : LOG_INFO,
+                  "super: lens reference: %s - %s",
+                  lrc == 1 ? "ON EDGE" : lrc == 0 ? "NO EDGE" : "SKIPPED", lens);
+            if (lrc == 0) {
+                snprintf(detail, sizeof(probe_detail), "lens: %s", lens);
+                return 0;
+            }
             return 1;
+        }
         if (rc < 0)
             return 2;   /* cannot probe (no accel?): do not block the machine */
     }

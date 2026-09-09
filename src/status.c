@@ -164,18 +164,27 @@ static long fan_rpm(long period_ns)
  * then counters-only, i.e. relative to wherever the head was when
  * counting started (the UI paints it red). Returns 0 with xyz and
  * homed filled, or -1 when the counters themselves are unreadable. */
-static int read_position(double *x, double *y, double *z, int *homed)
+static int read_position(double *x, double *y, double *z, int *homed,
+                         unsigned *axes)
 {
     char pos_path[160];
     snprintf(pos_path, sizeof(pos_path), "%scnc/position", gf_sysfs_root());
     double hx = 0, hy = 0, hz = 0;
     FILE *f = fopen(HOMED_ANCHOR, "r");
     *homed = 0;
+    *axes = 0;
     if (f) {
-        *homed = fscanf(f, "%lf %lf %lf", &hx, &hy, &hz) == 3;
+        /* The fourth field names the axes the anchor actually
+         * references; an anchor written without it references all
+         * three, which is what a full home always wrote. */
+        unsigned m = 0;
+        int got = fscanf(f, "%lf %lf %lf %u", &hx, &hy, &hz, &m);
         fclose(f);
-        if (!*homed)
+        if (got >= 3)
+            *axes = got == 4 ? (m & 7u) : 7u;
+        if (!*axes)
             hx = hy = hz = 0;
+        *homed = *axes == 7u;
     }
 
     uint8_t raw[32];
@@ -543,7 +552,8 @@ int machine_status_json(char *buf, size_t len, const char *extra)
 
     double x, y, z;
     int homed = 0;
-    int have_pos = read_position(&x, &y, &z, &homed) == 0;
+    unsigned homed_axes = 0;
+    int have_pos = read_position(&x, &y, &z, &homed, &homed_axes) == 0;
 
     long t1 = rd_attr_long("pic/water_temp_1", -1);
     long t2 = rd_attr_long("pic/water_temp_2", -1);
@@ -580,8 +590,8 @@ int machine_status_json(char *buf, size_t len, const char *extra)
         edge_z, below, above, stops_found ? "true" : "false",
         edge_z - below * half, edge_z + above * half);
     append(buf, len, &off,
-        "\"state\":\"%s\",\"homed\":%s,\"diag\":%s,",
-        state[0] ? state : "unknown", homed ? "true" : "false",
+        "\"state\":\"%s\",\"homed\":%s,\"homed_axes\":%u,\"diag\":%s,",
+        state[0] ? state : "unknown", homed ? "true" : "false", homed_axes,
         diag_running() ? "true" : "false");
     if (have_pos)
         append(buf, len, &off,
