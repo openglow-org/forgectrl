@@ -764,7 +764,7 @@ class Mock:
         self.status = {
             'lens': {'edge_z': 3.48, 'below': 14, 'above': 20, 'stops_found': True,
                      'reach_min': -1.31, 'reach_max': 10.32},
-            'state': 'idle', 'homed': True, 'diag': False,
+            'state': 'idle', 'homed': True, 'homed_axes': 7, 'diag': False,
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
             'laser': {'emission_samples': 0, 'pgood_samples': 255},
