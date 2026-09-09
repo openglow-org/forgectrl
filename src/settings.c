@@ -29,7 +29,7 @@
 
 static pthread_mutex_t settings_mu = PTHREAD_MUTEX_INITIALIZER;
 
-#define SETTINGS_PATH_DEF "/data/forgefirm.conf"
+#define SETTINGS_PATH_DEF "/data/forgefirm/forgefirm.conf"
 #define LINE_MAX_LEN      512
 #define FILE_MAX_LINES    256
 
@@ -37,6 +37,21 @@ static const char *settings_path(void)
 {
     const char *v = getenv("FORGECTRL_CONF");
     return (v && *v) ? v : SETTINGS_PATH_DEF;
+}
+
+/* The settings file lives with the rest of ForgeFIRM's own files, under
+ * /data/forgefirm, so the first write on a machine whose data directory
+ * does not exist yet makes it rather than failing. Best effort: a write
+ * into a directory that cannot be made reports itself below. */
+static void settings_dir_ready(const char *path)
+{
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash || slash == dir)
+        return;
+    *slash = '\0';
+    (void)mkdir(dir, 0755);
 }
 
 /* Parse "key = value" into trimmed pointers inside line (modified in
@@ -170,6 +185,7 @@ int settings_set_many(const char *const *keys, const char *const *vals,
     }
 
     char tmp[300];
+    settings_dir_ready(path);
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     /* The file carries the cloud password: owner-only from creation. */
     int tfd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);

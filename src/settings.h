@@ -10,7 +10,7 @@
 #include <stddef.h>
 
 /* Read a key from the shared config file (FORGECTRL_CONF, default
- * /data/forgefirm.conf). Returns 0 and fills val, or -1 if absent. */
+ * /data/forgefirm/forgefirm.conf). Returns 0 and fills val, or -1 if absent. */
 int settings_get(const char *key, char *val, size_t len);
 /* A 0/1 key: 1 when the value is "1", 0 when "0", def when absent or
  * anything else. */

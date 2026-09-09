@@ -461,7 +461,7 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
 /* ------------------------------------------------------------- settings */
 
 /* Machine settings shared with the grblHAL-glowforge controller and the
- * gfhome homing runner through /data/forgefirm.conf. The controller
+ * gfhome homing runner through /data/forgefirm/forgefirm.conf. The controller
  * re-reads the file on every $H and the runner at every session start,
  * so changes apply without restarts. Every key is validated here; an
  * empty value removes the key (back to the built-in default) and must
