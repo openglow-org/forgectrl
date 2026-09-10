@@ -708,11 +708,39 @@ static void fans_idle(void)
 /* The run profile: the configured duties, or the job's own where it
  * gave one, which may only raise a fan while the laser is armed
  * (airflow_run_duty). */
+/* What the fans were told to do, and what decided it: the machine's run
+ * duty, the job's own where its report gave one, and the armed window,
+ * which puts the machine's back when a job asked for less. A fan judged
+ * against its floor while it sits at a duty that cannot reach that floor
+ * is what an unexplainable airflow hold looks like from the readings
+ * alone, and the readings are all the log kept. Written when the answer
+ * changes, not on every pass. */
+static void fans_log_duty(void)
+{
+    static long was[3] = {-2, -2, -2};
+    static int was_quiet = -1, was_armed = -1;
+    if (cmd_duty[0] == was[0] && cmd_duty[1] == was[1] && cmd_duty[2] == was[2] &&
+        quiet_held == was_quiet && eff_armed == was_armed)
+        return;
+    was[0] = cmd_duty[0];
+    was[1] = cmd_duty[1];
+    was[2] = cmd_duty[2];
+    was_quiet = quiet_held;
+    was_armed = eff_armed;
+    fflog(LOG_INFO, "cool: fan duty: air assist %ld (machine %d, job %ld), exhaust %ld "
+          "(machine %d, job %ld), intake %ld (machine %d, job %ld); armed %d%s",
+          cmd_duty[0], AIR_ASSIST_RUN, run_duty[0],
+          cmd_duty[1], EXHAUST_RUN, run_duty[1],
+          cmd_duty[2], INTAKE_RUN, run_duty[2], eff_armed,
+          quiet_held ? "; the quiet hold stands, the fans are held off instead" : "");
+}
+
 static void fans_run(void)
 {
     cmd_duty[0] = airflow_run_duty(AIR_ASSIST_RUN, run_duty[0], eff_armed);
     cmd_duty[1] = airflow_run_duty(EXHAUST_RUN, run_duty[1], eff_armed);
     cmd_duty[2] = airflow_run_duty(INTAKE_RUN, run_duty[2], eff_armed);
+    fans_log_duty();
     if (quiet_held) {
         fans_quiet();
         return;
