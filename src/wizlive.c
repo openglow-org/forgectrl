@@ -87,7 +87,12 @@ static void lens_window(int *down, int *up);
 #define PICK_TIMEOUT_S 1800     /* a look at the sheet after a burn: the burn is not repeated */
 #define RUN_TIMEOUT_S 1500.0
 #define DOSE_DARK_S    20.0     /* the recorder's end rule */
-#define LOAD_TAIL_S   100.0     /* the tube's heat reaches the sensor 10 to 60 s late */
+#define LOAD_TAIL_S   100.0     /* the tube's heat reaches the sensor late: 80 s on the bench reference */
+#define LOAD_TAIL_MIN_S 45.0    /* never cut the tail before this much dark */
+#define PEAK_BUCKET_S   5.0     /* the mean the peak is judged on, as in the analysis */
+#define PEAK_RISE_C     0.3     /* the rise that says the heat arrived (the lag threshold) */
+#define PEAK_FALL_C     0.05    /* below the peak: off the shoulder, not sensor noise */
+#define PEAK_FALL_N     3       /* buckets falling in a row before the tail ends */
 #define SETTLE_MIN_S   60.0
 #define SETTLE_MAX_S  240.0
 #define SETTLE_SLOPE   0.02     /* C per second over the last 30 s: quiet */
@@ -674,6 +679,17 @@ typedef struct {
     double *t1, *down, *up;
     int n1, hold;
     int tick;
+    int peak_tail;              /* this card's tail may end at the coolant peak */
+    /* The dark tail's early end, for a card whose measurement is the
+     * downstream coolant peak: jobstream reads end_dark_s every tick, so
+     * shortening it here ends the tail as soon as the peak has clearly
+     * passed. NULL leaves the tail at its full length. */
+    double *dark_cut;
+    double pk_base;             /* the coolant before the fire */
+    double pk_t0, pk_sum;       /* the bucket being filled */
+    int pk_n;
+    double pk_max;              /* the highest bucket mean so far */
+    int pk_fall;                /* buckets below it, in a row */
 } gen_t;
 
 static void gen_free(gen_t *g)
@@ -829,6 +845,49 @@ static int gen_next(void *ctx, char *buf, size_t len)
     }
 }
 
+/* The downstream coolant peak, watched as it happens, so the dark tail
+ * can end when the peak has passed instead of running its full length.
+ * The tube's heat reaches the sensor late and the peak is the whole
+ * measurement, so the rule only ever shortens the tail, never the
+ * measurement: nothing is cut before LOAD_TAIL_MIN_S of dark, the rise
+ * must have cleared the same 0.3 C the lag uses, and the mean must have
+ * fallen for PEAK_FALL_N buckets in a row. A loop that peaks late keeps
+ * the full tail, as before. */
+static void peak_watch(gen_t *g, double t)
+{
+    if (!g->dark_cut || !g->lit || g->n1 < 1)
+        return;
+    if (g->pk_n == 0)
+        g->pk_t0 = t;
+    g->pk_sum += g->down[g->n1 - 1];
+    g->pk_n++;
+    if (t - g->pk_t0 < PEAK_BUCKET_S)
+        return;
+    double m = g->pk_sum / g->pk_n;
+    g->pk_sum = 0;
+    g->pk_n = 0;
+    if (g->pk_base == 0)
+        g->pk_base = m;                 /* the first bucket: before the fire */
+    if (m > g->pk_max) {
+        g->pk_max = m;
+        g->pk_fall = 0;
+        return;
+    }
+    if (g->pk_max < g->pk_base + PEAK_RISE_C)
+        return;                         /* the heat has not arrived yet */
+    if (m > g->pk_max - PEAK_FALL_C)
+        return;                         /* still on the shoulder */
+    if (++g->pk_fall < PEAK_FALL_N)
+        return;
+    double dark = t - g->t_lit_last;
+    if (dark < LOAD_TAIL_MIN_S)
+        return;
+    *g->dark_cut = 1.0;                 /* jobstream reads this every tick */
+    g->dark_cut = NULL;
+    wiz_log("the downstream peak has passed (%.2f C over the baseline, %.0f s dark): "
+            "the tail ends here", g->pk_max - g->pk_base, dark);
+}
+
 static void gen_sample(void *ctx, const jobstream_sample_t *s)
 {
     gen_t *g = ctx;
@@ -891,6 +950,7 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
                 g->down[g->n1] = atof(d + 9);
                 g->up[g->n1] = atof(u + 7);
                 g->n1++;
+                peak_watch(g, s->t);
             }
         }
     }
@@ -908,7 +968,13 @@ static int stream(gen_t *g, jobstream_run_t *run, double end_dark_s, char *err, 
         .abort_flag = wiz_abort_flag(), .wait_timeout_s = WAIT_TIMEOUT_S,
         .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = end_dark_s,
     };
-    return jobstream_run(&cfg, run, err, elen);
+    /* A card that watches the coolant peak may end its own tail early:
+     * jobstream reads end_dark_s every tick, and cfg outlives the run. */
+    if (g->peak_tail)
+        g->dark_cut = &cfg.end_dark_s;
+    int rc = jobstream_run(&cfg, run, err, elen);
+    g->dark_cut = NULL;
+    return rc;
 }
 
 /* The emission witnesses into the result: all three must have seen
@@ -1189,6 +1255,10 @@ static int burn(live_t *L, build_t *b, const char *id, int alone, double z, int 
         return -1;
     }
     g->tail_what = tail_what;
+    /* The flow-load card's measurement is the downstream coolant peak,
+     * so its tail may end as soon as that peak has passed (peak_watch).
+     * Set after gen_init, which clears the generator. */
+    g->peak_tail = !strcmp(id, "cooling.flow-load");
     wiz_phase("the program goes to the controller, the button lights at the arm");
     char err[160];
     /* The controller acknowledges the program end when the stream is

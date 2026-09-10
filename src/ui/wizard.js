@@ -302,8 +302,13 @@ function renderRail(active) {
     if (id === active || (active === 'press' && id === 'advisories')) cls += ' on';
     /* On a completed setup the rail is the navigation: a re-runnable
      * step, and any step the record has opened again (the advisories
-     * after a document changed, the account after a reset), is a link. */
-    var again = done && (RERUN.indexOf(id) >= 0 || !stepDone(id));
+     * after a document changed, the account after a reset), is a link.
+     * The last step is always a link there, because it carries the way
+     * out: an update that adds a required check opens that check again
+     * on a machine that finished its setup long ago, and without this
+     * the page lands on it with no way to the control panel but the
+     * address bar. */
+    var again = done && (RERUN.indexOf(id) >= 0 || !stepDone(id) || id === 'done');
     if (again) cls += ' link';
     h += '<li class="' + cls + '"' + (again ? ' onclick="go(\'' + id + '\')"' : '') + '>' + esc(TITLES[id]);
     var r = railResult(id);
