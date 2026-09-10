@@ -1237,11 +1237,22 @@ void cool_diag_heater_pct(double pct)
 /* The tools' airflow profile, kept exactly as the flow bands were
  * characterized: exhaust and intake at the configured run duty, the
  * air assist untouched. */
+/* The whole run posture, not a part of it. Every fan the engine drives at
+ * a run, and purge air, which the engine holds on continuously: a
+ * diagnostic that measures the fans has to measure them where a job
+ * would find them. Air assist was left out, so the airflow check read it
+ * at its idle duty for the whole window, called that its steady speed at
+ * the run profile, and wrote a floor from it - a floor no job could then
+ * meet, because a job does raise the fan. Purge is asserted for the same
+ * reason: it is part of the posture, and something that switched it off
+ * would otherwise stay off through a check that judges it. */
 void cool_diag_fans_run(void)
 {
     if (diag_guard("diag fan write") == 0) {
         wr_attr_long("thermal/exhaust_pwm", EXHAUST_RUN);
         wr_attr_long("thermal/intake_pwm", INTAKE_RUN);
+        aa_write(AIR_ASSIST_RUN);
+        wr_attr("head/purge_air", "1");
     }
 }
 
@@ -1257,6 +1268,7 @@ void cool_diag_fans_idle(void)
     if (diag_guard("diag fan write") == 0) {
         wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
         wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+        aa_write(AIR_ASSIST_IDLE);
         wr_attr("head/purge_air", "1");
     }
 }
