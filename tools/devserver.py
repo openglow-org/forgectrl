@@ -404,6 +404,7 @@ MOCK_VERSION = '20260101000000 (mock)'
 MOCK_RELEASE = '0.0.2'          # what /update/check offers
 MOCK_FINGERPRINT = ':'.join(['%02X' % ((i * 37 + 11) & 0xff)
                              for i in range(32)])
+MOCK_HOSTNAME = 'forgefirm-b00a'    # the name a machine takes from its MAC
 MOCK_SHEET_ID = 'UL5UU-LS5PI'
 MOCK_MANIFEST = ('PACKAGE NAME: forgectrl\nPACKAGE VERSION: 0.0.1\n'
                  'RECIPE NAME: forgectrl\nLICENSE: MIT\n\n'
@@ -1668,8 +1669,8 @@ class Mock:
                 return 200, {'Content-Type': 'text/html; charset=utf-8'}, (
                     '<!doctype html><title>ForgeFIRM certificate</title>'
                     '<h1>This machine\'s certificate</h1><dl><dt>SHA-256</dt><dd><code>'
-                    + MOCK_FINGERPRINT + '</code></dd><dt>Names</dt><dd>forgefirm.local '
-                    + self.machine_id + '.local</dd></dl>'
+                    + MOCK_FINGERPRINT + '</code></dd><dt>Names</dt><dd>'
+                    + MOCK_HOSTNAME + '</dd></dl>'
                     '<p><a href="/cert.pem">Download the certificate (PEM)</a></p>').encode()
             if path == '/cert.pem':
                 return 200, {'Content-Type': 'application/x-pem-file'}, (

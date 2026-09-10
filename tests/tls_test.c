@@ -13,8 +13,6 @@
 #include <string.h>
 #include <unistd.h>
 
-void machine_id(char *buf, size_t len) { snprintf(buf, len, "ABC-123"); }
-
 static int failures;
 #define CHECK(cond, name) do { \
     if (cond) printf("ok   %s\n", name); \
@@ -41,7 +39,13 @@ int main(void)
     gnutls_datum_t d = { (unsigned char *)tls_cert_pem(), (unsigned)strlen(tls_cert_pem()) };
     gnutls_x509_crt_init(&crt);
     CHECK(gnutls_x509_crt_import(crt, &d, GNUTLS_X509_FMT_PEM) == 0, "the certificate parses");
-    int have_local = 0, have_host = 0;
+    char self[64];
+    if (gethostname(self, sizeof(self)) != 0)
+        self[0] = '\0';
+    self[sizeof(self) - 1] = '\0';
+    if (!self[0])
+        snprintf(self, sizeof(self), "forgefirm");
+    int have_host = 0, others = 0;
     for (unsigned i = 0; i < 8; i++) {
         char name[64];
         size_t nl = sizeof(name);
@@ -50,12 +54,13 @@ int main(void)
         if (rc < 0)
             break;
         name[nl < sizeof(name) ? nl : sizeof(name) - 1] = '\0';
-        if (!strcmp(name, "forgefirm.local"))
-            have_local = 1;
-        if (!strcmp(name, "ABC-123.local"))
+        if (!strcmp(name, self))
             have_host = 1;
+        else
+            others++;
     }
-    CHECK(have_local && have_host, "forgefirm.local and the fuse hostname are on it");
+    CHECK(have_host, "the machine's hostname is on it");
+    CHECK(others == 0, "it carries that one name and nothing else");
     gnutls_x509_crt_deinit(crt);
 
     /* A second daemon start loads the same certificate. */

@@ -1,6 +1,6 @@
 # Licenses and notices
 
-Revision: 1 (2026-09-06)
+Revision: 2 (2026-09-10)
 
 This document names the major software on this machine and the license of each part. It is a notice, not a contract. Tick the box when you have read it.
 
@@ -42,7 +42,6 @@ This document names the major software on this machine and the license of each p
 | Mesa | GPU drivers for the camera image pipeline | MIT |
 | libjpeg-turbo | JPEG encode and decode for the cameras | IJG, BSD-3-Clause, and zlib |
 | wpa_supplicant | WiFi | BSD |
-| avahi | Network discovery, so the panel is reachable by name | LGPL-2.1 |
 | Bootstrap | The layout and styles of the control panel | MIT |
 | NXP i.MX firmware | VPU firmware for the i.MX6 | NXP EULA, shipped at /usr/share/licenses/firmware-imx/EULA |
 | TI WL18xx firmware | The WiFi module firmware | TI firmware license, shipped with linux-firmware |

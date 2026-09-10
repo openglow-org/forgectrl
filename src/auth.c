@@ -12,12 +12,12 @@
  * the one thing no LAN client can do is what needs the machine button
  * held (an unsigned install, the fuse identity). Three cheap layers:
  *
- *  1. Host must be an address literal, localhost, or one of the machine's
- *     own names (forgefirm, forgefirm.local, the fuse hostname). A
- *     rebinding attacker reaches the daemon under their own hostname,
- *     which is none of those, so the pages (and the token in them)
- *     cannot be read back, and no state-changing call from that origin
- *     is honored.
+ *  1. Host must be an address literal, localhost, or the machine's own
+ *     hostname (forgefirm-<xxxx>, one label, no domain). A rebinding
+ *     attacker reaches the daemon under their own hostname, which is
+ *     none of those, so the pages (and the token in them) cannot be
+ *     read back, and no state-changing call from that origin is
+ *     honored.
  *  2. Sec-Fetch-Site, when the browser sends it, must be same-origin or
  *     none; a cross-site request is refused. An Origin header, when
  *     present, must itself be an address literal.
@@ -153,8 +153,8 @@ static int token_eq(const char *a)
 }
 
 /* A host string (Host header value, or an Origin's authority) is
- * accepted as an address literal, localhost, or one of the machine's
- * own names; never any other DNS name, which is the vehicle for a
+ * accepted as an address literal, localhost, or the machine's own
+ * hostname; never any other DNS name, which is the vehicle for a
  * rebinding attack. */
 static int host_is_literal(const char *h)
 {
@@ -171,25 +171,27 @@ static int host_is_literal(const char *h)
 
     if (!hb[0])
         return 0;
-    /* The machine's own names pass with the literals: they are what the
-     * certificate carries and what mDNS answers to, and a rebinding
-     * attacker cannot make a browser send them. Compared without case
-     * (DNS names are case-insensitive), a trailing dot stripped. */
+    /* The machine's own hostname passes with the literals: it is what
+     * the certificate carries, and a rebinding attacker cannot make a
+     * browser send it. The single label only: a name with a domain on
+     * it can be registered by anyone, so it stays refused, and a client
+     * that reaches the machine through a dynamic-DNS domain uses the
+     * address or the bare name from its own search list. Compared
+     * without case (DNS names are case-insensitive), a trailing dot
+     * stripped. */
     size_t n = strlen(hb);
     if (n > 1 && hb[n - 1] == '.')
         hb[--n] = '\0';
     for (size_t i = 0; hb[i]; i++)
         hb[i] = (char)tolower((unsigned char)hb[i]);
-    if (!strcmp(hb, "localhost") || !strcmp(hb, "forgefirm") ||
-        !strcmp(hb, "forgefirm.local"))
+    if (!strcmp(hb, "localhost"))
         return 1;
-    char mid[16], midl[32];
-    machine_id(mid, sizeof(mid));
-    if (mid[0]) {
-        for (size_t i = 0; mid[i]; i++)
-            mid[i] = (char)tolower((unsigned char)mid[i]);
-        snprintf(midl, sizeof(midl), "%s.local", mid);
-        if (!strcmp(hb, mid) || !strcmp(hb, midl))
+    char self[64];
+    if (gethostname(self, sizeof(self)) == 0) {
+        self[sizeof(self) - 1] = '\0';
+        for (size_t i = 0; self[i]; i++)
+            self[i] = (char)tolower((unsigned char)self[i]);
+        if (self[0] && !strcmp(hb, self))
             return 1;
     }
     for (size_t i = 0; hb[i]; i++)

@@ -619,7 +619,10 @@ static void load_known(sanitizer_t *san)
     char hn[128];
     if (gethostname(hn, sizeof(hn)) == 0) {
         hn[sizeof(hn) - 1] = '\0';
-        if (strcmp(hn, "glowforge") && strcmp(hn, "localhost"))
+        /* The names that identify no machine: the image default before
+         * forgefirm-hostname has read the MAC address, and the two
+         * build-time defaults. forgefirm-<xxxx> is a machine and goes. */
+        if (strcmp(hn, "forgefirm") && strcmp(hn, "glowforge") && strcmp(hn, "localhost"))
             san_add_known(san, "HOSTNAME", hn);
     }
     add_wpa_known(san, "/data/etc/wpa_supplicant.conf");

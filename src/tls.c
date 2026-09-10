@@ -10,11 +10,13 @@
  * once at first start and kept in the data directory (it survives
  * updates, so the browser's one-time exception holds). An ECDSA P-256
  * key: instant to make on the board's single core and accepted by
- * every current browser. The subject and the alternative names are
- * the fuse hostname and forgefirm.local, which is what the address
- * bar shows. Validity is limited to what the strictest browsers accept
- * for a trusted leaf; an expired certificate is replaced at the next
- * start, and the fingerprint the panel shows changes with it.
+ * every current browser. The subject and the alternative name are the
+ * machine's own hostname (forgefirm-<xxxx>), which is what a network
+ * with dynamic DNS publishes and what the address bar shows when the
+ * panel is reached by name rather than by address. Validity is limited
+ * to what the strictest browsers accept for a trusted leaf; an expired
+ * certificate is replaced at the next start, and so is one that names
+ * another machine. The fingerprint the panel shows changes with it.
  *
  * What this buys: a passive listener on the LAN sees no password and
  * no session. What it does not buy: protection against an active
@@ -40,8 +42,6 @@
 
 #define VALID_DAYS 820              /* under the 825-day leaf limit */
 
-void machine_id(char *buf, size_t len);   /* logs.c */
-
 static char *key_pem, *cert_pem;
 static char fingerprint[3 * 32];
 static char names[256];
@@ -56,6 +56,16 @@ static void iso_utc(time_t t, char *buf, size_t len)
     }
     gmtime_r(&t, &tm);
     strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &tm);
+}
+
+/* The machine's own name, which is the name the certificate carries. */
+static void self_name(char *buf, size_t len)
+{
+    if (gethostname(buf, len) != 0)
+        buf[0] = '\0';
+    buf[len - 1] = '\0';                /* truncation leaves it unterminated */
+    if (!buf[0])
+        snprintf(buf, len, "forgefirm");
 }
 
 static void path_of(const char *name, char *buf, size_t len)
@@ -157,12 +167,18 @@ static int load_existing(void)
         free(c);
         return -1;
     }
+    char self[64];
+    self_name(self, sizeof(self));
     gnutls_x509_crt_t crt;
     gnutls_datum_t d = { (unsigned char *)c, (unsigned)strlen(c) };
     int ok = gnutls_x509_crt_init(&crt) == 0;
     int valid = 0;
+    /* A stored certificate that does not name the machine is replaced,
+     * the same way an expired one is: the name follows the MAC address,
+     * so an image that named the machine differently leaves one behind.
+     * The fingerprint changes with it, and the panel shows the new one. */
     if (ok && gnutls_x509_crt_import(crt, &d, GNUTLS_X509_FMT_PEM) == 0 &&
-        inspect(crt, &valid) == 0 && valid) {
+        inspect(crt, &valid) == 0 && valid && !strcmp(names, self)) {
         gnutls_x509_crt_deinit(crt);
         key_pem = k;
         cert_pem = c;
@@ -182,10 +198,8 @@ static int generate(void)
     gnutls_x509_crt_t crt = NULL;
     int rc = -1, r = 0;
     const char *step = NULL;            /* the step that failed, for the log */
-    char mid[16] = "", host[32], local[48];
-    machine_id(mid, sizeof(mid));
-    snprintf(host, sizeof(host), "%s", mid[0] ? mid : "forgefirm");
-    snprintf(local, sizeof(local), "%s.local", host);
+    char host[64];
+    self_name(host, sizeof(host));
 
     step = "object init";
     if ((r = gnutls_x509_privkey_init(&key)) < 0 || (r = gnutls_x509_crt_init(&crt)) < 0)
@@ -224,14 +238,8 @@ static int generate(void)
         (r = gnutls_x509_crt_set_expiration_time(crt, now + (time_t)VALID_DAYS * 86400)) < 0)
         goto out;
     step = "alternative names";
-    if ((r = gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME,
-                                                  "forgefirm.local", 15, GNUTLS_FSAN_SET)) < 0 ||
-        (r = gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME, local,
-                                                  (unsigned)strlen(local), GNUTLS_FSAN_APPEND)) < 0 ||
-        (r = gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME, host,
-                                                  (unsigned)strlen(host), GNUTLS_FSAN_APPEND)) < 0 ||
-        (r = gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME, "forgefirm", 9,
-                                                  GNUTLS_FSAN_APPEND)) < 0)
+    if ((r = gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME, host,
+                                                  (unsigned)strlen(host), GNUTLS_FSAN_SET)) < 0)
         goto out;
     step = "key usage";
     if ((r = gnutls_x509_crt_set_key_usage(crt, GNUTLS_KEY_DIGITAL_SIGNATURE)) < 0 ||
