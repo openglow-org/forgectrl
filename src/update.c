@@ -20,15 +20,15 @@
  * happens implicitly: it is its own explicit action, probe-gated by
  * ffboot itself.
  *
- * Release downloads resolve the version WITHOUT the GitHub API: the
- * fixed-name asset URL redirects to .../download/v<ver>/forgefirm.fw,
- * so a HEAD request's effective URL carries the version - no rate
- * limits, no JSON.
+ * The release check (relcheck.c) resolves the published version from
+ * the fixed-name asset URL's first redirect, without the GitHub API;
+ * the download follows the same URL to the file.
  */
 #define _GNU_SOURCE
 #include "update.h"
 #include "auth.h"
 #include "diag.h"
+#include "relcheck.h"
 #include "status.h"
 
 #include <ctype.h>
@@ -54,8 +54,6 @@
 #define LOCK_FILE   DATA_DIR "/update.lock"
 #define KEY_RELEASE "/etc/forgefirm/keys/forgefirm-release.pub"
 #define KEY_GF_DIR  "/etc/forgefirm/keys/gf"
-#define LATEST_URL \
-    "https://github.com/openglow-org/forgefirm/releases/latest/download/forgefirm.fw"
 /* An upload larger than any plausible archive is cut off (slot is
  * 200 MiB; a .fw compresses well below that). */
 #define UPLOAD_MAX  (256UL * 1024 * 1024)
@@ -698,15 +696,6 @@ int cb_update_check(const struct _u_request *req, struct _u_response *res,
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
 
-    /* HEAD through the redirect chain; the effective URL carries the
-     * release tag. */
-    char out[512];
-    int rc = run_cmd(out, sizeof(out),
-        "curl -sIL -o /dev/null -w '%{http_code} %{url_effective}' "
-        "--max-time 20 " LATEST_URL " 2>/dev/null");
-    if (rc != 0)
-        return reply_err(res, 502, "release check failed (offline?)");
-
     char cur[48] = "";
     FILE *f = fopen("/etc/forgefirm-version", "r");
     if (f) {
@@ -720,32 +709,9 @@ int cb_update_check(const struct _u_request *req, struct _u_response *res,
         fclose(f);
     }
 
-    int http = atoi(out);
-    char ver[48] = "";
-    char *m = strstr(out, "/download/");
-    if (m) {
-        m += 10;
-        size_t o = 0;
-        while (*m && *m != '/' && o + 1 < sizeof(ver))
-            ver[o++] = *m++;
-        ver[o] = '\0';
-    }
     char body[256];
-    if (http != 200 || !ver[0]) {
-        /* 404 = no published release with a forgefirm.fw asset (the
-         * expected state before the first release), distinct from a
-         * transport/proxy error. */
-        const char *detail = (http == 404 || http == 0)
-            ? "no published release found"
-            : "release server error";
-        snprintf(body, sizeof(body),
-                 "{\"available\":false,\"current\":\"%s\","
-                 "\"detail\":\"%s (HTTP %d)\"}", cur, detail, http);
-    } else
-        snprintf(body, sizeof(body),
-                 "{\"available\":true,\"version\":\"%s\","
-                 "\"current\":\"%s\",\"new\":%s}",
-                 ver, cur, strcmp(ver, cur) ? "true" : "false");
+    if (relcheck(body, sizeof(body), cur, run_cmd) != 0)
+        return reply_err(res, 502, "release check failed (offline?)");
     return reply_json(res, 200, body);
 }
 
@@ -764,7 +730,7 @@ static void *dl_worker(void *arg)
     char out[512];
     int rc = run_cmd(out, sizeof(out),
                      "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
-                     " -o " DL_FW " " LATEST_URL " 2>&1");
+                     " -o " DL_FW " " RELCHECK_LATEST_URL " 2>&1");
     if (rc != 0) {
         unlink(DL_FW);
         job_finish("{\"ok\":false,\"error\":\"download failed\","

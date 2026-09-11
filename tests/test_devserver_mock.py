@@ -320,7 +320,7 @@ class MockTest(unittest.TestCase):
                          c_keys(src, 'cb_update_status'))
         code, hdrs, body = self.call(m, 'POST', '/update/check')
         self.assertTrue(set(json.loads(body)) <=
-                        c_keys(src, 'cb_update_check'))
+                        c_keys(read('src/relcheck.c'), 'relcheck'))
         code, hdrs, body = self.call(m, 'POST', '/boot', {'target': 'c'})
         self.assertEqual(json.loads(body),
                          {'error': 'target must be sd, a, b, or legacy'})

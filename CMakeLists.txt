@@ -90,6 +90,7 @@ add_executable(forgectrl
   src/sheet.c
   src/wizlive.c
   src/super.c
+  src/relcheck.c
   src/update.c
   src/vpu_h264.c
   src/vpu_jpeg.c
@@ -314,6 +315,12 @@ target_link_libraries(jobstream_test pthread)
 add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
 target_compile_options(tls_test PRIVATE -Wall -Wextra)
 target_link_libraries(tls_test gnutls pthread)
+
+# The published-release check against a model of curl and the release
+# redirect chain: the tag is read from the first hop, where it lives, not
+# from the end of the chain, where the asset store's URL carries none.
+add_executable(relcheck_test tests/relcheck_test.c src/relcheck.c)
+target_compile_options(relcheck_test PRIVATE -Wall -Wextra)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).
