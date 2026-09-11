@@ -435,18 +435,27 @@ long supply_temp_raw(void)
 }
 
 /* CPU utilization from the /proc/stat aggregate line: busy percent over
- * the interval since the previous status read (the panel polls about
- * once a second, so that is the window the number describes). The first
- * read only primes the counters and reports no value. The daemon is
- * thread-per-connection, so the counters sit behind a mutex. Returns
- * -1 when unreadable or unprimed. */
+ * the interval since the previous status read that moved the counters
+ * (the panel polls about once a second, so that is the window the
+ * number describes). The first read only primes the counters and
+ * reports no value. The document has concurrent readers (the panel and
+ * the acceptance tool read it at once), so two reads can land inside
+ * one scheduler tick, where the counters stand still: such a read
+ * repeats the last percent instead of reporting none. The idle field
+ * carries iowait, which the kernel may lower between reads, so an idle
+ * step backward repeats the last percent too and an idle step past the
+ * interval reads as no busy time. The daemon is thread-per-connection,
+ * so the counters sit behind a mutex. GF_PROC_STAT overrides the file
+ * for host tests. Returns -1 when unreadable or unprimed. */
 static double cpu_used_pct(void)
 {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     static unsigned long long prev_total, prev_idle;
+    static double last = -1;
     static int primed;
 
-    FILE *f = fopen("/proc/stat", "r");
+    const char *path = getenv("GF_PROC_STAT");
+    FILE *f = fopen(path && *path ? path : "/proc/stat", "r");
     if (!f)
         return -1;
     unsigned long long v[8] = {0};
@@ -461,11 +470,12 @@ static double cpu_used_pct(void)
     unsigned long long idle = v[3] + v[4];      /* idle + iowait */
 
     pthread_mutex_lock(&lock);
-    double pct = -1;
     if (primed && total > prev_total && idle >= prev_idle) {
         unsigned long long dt = total - prev_total;
-        pct = 100.0 * (double)(dt - (idle - prev_idle)) / (double)dt;
+        unsigned long long di = idle - prev_idle;
+        last = di >= dt ? 0.0 : 100.0 * (double)(dt - di) / (double)dt;
     }
+    double pct = last;
     prev_total = total;
     prev_idle = idle;
     primed = 1;
