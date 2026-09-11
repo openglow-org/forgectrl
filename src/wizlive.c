@@ -31,6 +31,7 @@
 #include "hooks.h"
 #include "jobstream.h"
 #include "led.h"
+#include "lens.h"
 #include "settings.h"
 #include "sheet.h"
 #include "sheetid.h"
@@ -52,29 +53,21 @@
 /* The lens. Z is the focal point's height above the tray: Z 0 focuses
  * on the bed, Z 3 on the top of 3 mm material. The lens is a 2 in lens
  * under a collimated beam, so the focal point moves 1:1 with the lens
- * and +Z is lens up. Every head shares the screw (36 half-steps over the
- * carriage's 0.485 in, the head drawing) and the travel; what differs
- * from head to head is the step along the travel at which the hall
- * sensor trips. That rising edge (the first position reading home going
- * up) is the one reference every live session takes, and the focus card
- * measures the one number the head needs: the focal height when the
- * lens sits on it (lens_hall_edge_z_mm). The wizard counts the lens in
- * half-steps from that edge, up positive. The focus card also finds the
- * head's two stops by the head accelerometer, one half-step at a time
- * from the edge, without a slip (lens_stop_below_steps and
- * lens_stop_above_steps, the free half-steps each way); when they cannot
- * be found on a head, every move keeps a fallback window that clears the
- * stops on any head, and the user is told. */
-#define TRAVEL_MM     12.32     /* the carriage's travel, 0.485 in */
-#define TRAVEL_HALF   36        /* the travel in half-steps of the screw, a half-step of leeway at each end */
-#define Z_MM_PER_HALF (TRAVEL_MM / TRAVEL_HALF)   /* the screw's scale, 1/$102 */
+ * and +Z is lens up. The head's one reference is the hall sensor's
+ * rising edge (the first position reading home going up), which every
+ * live session takes before its controller starts; the wizard counts the
+ * lens in half-steps from that edge, up positive. The edge's focal
+ * height, the free half-steps each way, and the reach they give are the
+ * lens frame (lens.h), read from the same settings the controller opens
+ * its Z soft limit from, so a Z sent from here is one the controller
+ * takes. The focus card measures the head's numbers: it finds the two
+ * stops by the head accelerometer, one half-step at a time from the
+ * edge, without a slip, and writes them before its controller starts;
+ * when they cannot be found on a head, the fallback window stands and
+ * the user is told. */
 #define Z_STEP_MS     180       /* the direct-step cadence of every lens reference and the finder */
-#define EDGE_Z_DEFAULT 3.35     /* the bench reference machine's edge, until this head's is measured */
-#define LENS_DOWN     10        /* the fallback window: half-steps below the edge every head reaches */
-#define LENS_UP       12        /* and above it (the bench reference machine's stops sit 18 below and 20 above) */
 static double edge_z(void);
 static double z_of_k(double k);
-static void lens_window(int *down, int *up);
 #define FLOOR_STEP    2.0
 /* Every look at the sheet carries this: the cards share one datum. */
 #define STILL "Look, but do not move the sheet: every card after this is placed from the same datum."
@@ -154,6 +147,15 @@ static double focus_z(const place_t *p)
     lens_window(&down, &up);
     double lo = z_of_k(-down), hi = z_of_k(up);
     return p->thickness < lo ? lo : p->thickness > hi ? hi : p->thickness;
+}
+
+/* The Z a card's program starts at: the focus card burns its text on
+ * the reference and steps the ladder from there; every other card runs
+ * at the focus for the sheet. One answer for the run and for the program
+ * the page serves. */
+static double card_z(const char *id, const place_t *p)
+{
+    return !strcmp(id, "laser.focus") ? edge_z() : focus_z(p);
 }
 
 static void now_utc(char *buf, size_t len, const char *fmt)
@@ -266,39 +268,20 @@ static int steps_per_mm(double *sx, double *sy, double *sz)
 
 /* ----------------------------------------------------- the lens frame */
 
-/* The controller's Z steps per mm, read when a session is live. */
-static double z_spm = 1.0 / Z_MM_PER_HALF;
+/* The controller's Z steps per mm ($102), read when a session is live. */
+static double z_spm = LENS_STEPS_PER_MM;
 
 /* The focal height when the lens is on the hall edge: the focus card's
  * number for this head, else the bench reference machine's. */
 static double edge_z(void)
 {
-    double z = wiz_setting_num("lens_hall_edge_z_mm", -1000.0);
-    return z < -500.0 ? EDGE_Z_DEFAULT : z;
+    return lens_edge_z();
 }
 
 /* Lens half-steps from the hall edge (up positive) into Z. */
 static double z_of_k(double k)
 {
-    return edge_z() + k / z_spm;
-}
-
-/* The window the lens moves in, half-steps below and above the edge:
- * the live session's own finding, else the focus card's settings for
- * this head, else the fallback. */
-static int session_down, session_up;
-
-static void lens_window(int *down, int *up)
-{
-    if (session_down > 0 && session_up > 0) {
-        *down = session_down;
-        *up = session_up;
-        return;
-    }
-    double b = wiz_setting_num("lens_stop_below_steps", 0);
-    double a = wiz_setting_num("lens_stop_above_steps", 0);
-    *down = b >= 1 && b <= 40 ? (int)b : LENS_DOWN;
-    *up = a >= 1 && a <= 40 ? (int)a : LENS_UP;
+    return lens_z_of_k(edge_z(), z_spm, k);
 }
 
 /* ---------------------------------------------------- the lens stops */
@@ -522,6 +505,7 @@ typedef struct {
     float dx, dy;               /* the card's offset when alone */
     int z_taken;                /* the lens unlocked for the session */
     int find_stops;             /* the focus card: find the stops after the reference */
+    json_t *applied;            /* the card's settings record, for the window the finder writes */
     zstops_t stops;
 } live_t;
 
@@ -549,8 +533,10 @@ static int engine_ready(void *ctx)
 static int live_begin(live_t *L, const sheet_card_t *card, int need_place, int zpasses, json_t *r)
 {
     int find_stops = L->find_stops;
+    json_t *applied = L->applied;
     memset(L, 0, sizeof(*L));
     L->find_stops = find_stops;
+    L->applied = applied;
     place_read(&L->place);
     if (need_place && !L->place.have) {
         wiz_finish_err("place the sheet first (the Place the sheet step)");
@@ -575,8 +561,25 @@ static int live_begin(live_t *L, const sheet_card_t *card, int need_place, int z
         }
         if (L->find_stops) {
             z_find_stops(&L->stops, r);
-            session_down = L->stops.found ? L->stops.below : LENS_DOWN;
-            session_up = L->stops.found ? L->stops.above : LENS_UP;
+            /* The window is written now, before the controller starts:
+             * the controller opens its Z soft limit from these same keys
+             * at its start, so the ladder and the limit are one window
+             * by construction. Stops not found: the fallback, written the
+             * same way, so the two still agree. */
+            int down = L->stops.found ? L->stops.below : LENS_WINDOW_DOWN;
+            int up = L->stops.found ? L->stops.above : LENS_WINDOW_UP;
+            char vd[8], vu[8], err[96];
+            snprintf(vd, sizeof(vd), "%d", down);
+            snprintf(vu, sizeof(vu), "%d", up);
+            const char *keys[] = { "lens_stop_below_steps", "lens_stop_above_steps" };
+            const char *vals[] = { vd, vu };
+            if (!L->applied || wiz_write_settings(keys, vals, 2, L->applied, err, sizeof(err)) != 0) {
+                wiz_finish_err("cannot write the lens window before the controller starts");
+                return -1;
+            }
+            wiz_log("the lens window: %d half-steps below the reference, %d above (%s), written "
+                    "before the controller starts so its Z limit is the ladder's window",
+                    down, up, L->stops.found ? "the stops found" : "the fallback");
         }
     }
     if (read_counters(&L->cx, &L->cy, &L->cz) != 0) {
@@ -631,7 +634,6 @@ static void live_end(live_t *L)
      * is stopped; a stop at Idle would discard the tail. */
     wiz_phase("the machine goes back to its normal posture");
     wiz_kernel_wait_idle(600.0);
-    session_down = session_up = 0;
     if (L->z_taken) {
         wiz_wr_attr("cnc/motor_lock", "8");
         wiz_wr_attr("head/z_current", "1");
@@ -650,6 +652,28 @@ static void sheet_pos(const live_t *L, double *x, double *y)
 {
     *x = (L->cx - L->place.ox) / L->spmx;
     *y = (L->cy - L->place.oy) / L->spmy;
+}
+
+/* The tail every program ends with: the lens back on the reference the
+ * G92 declared, the head back at the datum, then the program end, which
+ * the controller acknowledges once the stream is produced. The lens
+ * reference is a height in this head's window, so it is read from the
+ * head and never written as a literal. 0 past the last line. */
+static int tail_line(int i, char *buf, size_t len)
+{
+    switch (i) {
+    case 0:
+        snprintf(buf, len, "G0 Z%.2f", edge_z());
+        return 1;
+    case 1:
+        snprintf(buf, len, "G0 X0 Y0");
+        return 1;
+    case 2:
+        snprintf(buf, len, "M2");
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /* ------------------------------------------------ the program generator */
@@ -784,15 +808,11 @@ static int gen_next(void *ctx, char *buf, size_t len)
         while (*p == '\n' || *p == '\r')
             p++;
         if (!*p) {
-            /* The tail: the lens back at its reference, the head back at
-             * the datum, then the program end, which the controller
-             * acknowledges once the stream is produced. */
-            static const char *const tail[] = { "G0 Z" "10.6", "G0 X0 Y0", "M2" };
-            if (g->tail >= 3) {
+            if (!tail_line(g->tail, buf, len)) {
                 g->ended = 1;
                 return 0;
             }
-            snprintf(buf, len, "%s", tail[g->tail++]);
+            g->tail++;
             return 1;
         }
         const char *nl = strchr(p, '\n');
@@ -1029,10 +1049,9 @@ static void build_defaults(build_t *b)
      * its top and the bottom line at its bottom, on whole half-steps. */
     int down, up;
     lens_window(&down, &up);
-    for (int i = 0; i < SHEET_FOCUS_N; i++) {
-        b->focus_k[i] = (int)lround(up - (double)(up + down) * i / (SHEET_FOCUS_N - 1));
+    lens_ladder_k(down, up, SHEET_FOCUS_N, b->focus_k);
+    for (int i = 0; i < SHEET_FOCUS_N; i++)
         b->focus_z[i] = z_of_k(b->focus_k[i]);
-    }
     for (int i = 0; i < SHEET_FLOOR_N; i++)
         b->floor_d[i] = FLOOR_STEP * (i + 1);
     static const double g[SHEET_CORNER_N] = { 1.0, 1.25, 1.5, 1.75, 2.0 };
@@ -1122,10 +1141,18 @@ int wizlive_program(const char *id, sheet_text_t *out)
     sheet_paths_init(&pv);
     sheet_text_init(&pg);
     sheet_text_line(out, "; ForgeFIRM commissioning: %s, the body the wizard streams after", id);
-    sheet_text_line(out, "; $X G21 G90 and G92 (the sheet origin) and G0 Z%.2f; M2 closes it.", focus_z(&p));
+    sheet_text_line(out, "; the head the wizard sends first: $X G21 G90, G92 at the sheet"
+                         " origin, G0 Z%.2f", card_z(id, &p));
     int rc = build_card(id, b, p.alone && sheet_card(id) != NULL, &pv, &pg);
     if (rc == 0 && pg.buf)
         sheet_text_append(out, pg.buf, pg.len);
+    /* The tail the wizard streams after the body, as it streams it. */
+    for (int i = 0; rc == 0; i++) {
+        char line[80];
+        if (!tail_line(i, line, sizeof(line)))
+            break;
+        sheet_text_line(out, "%s", line);
+    }
     sheet_paths_free(&pv);
     sheet_text_free(&pg);
     free(b);
@@ -1233,9 +1260,57 @@ out:
     json_decref(r);
 }
 
+/* One line against the reach; 1 with `why` when it asks a Z outside it. */
+static int z_off_reach(const char *line, int n, double lo, double hi, char *why, size_t wlen)
+{
+    double z;
+    if (!lens_line_z(line, &z) || (z >= lo - 0.01 && z <= hi + 0.01))
+        return 0;
+    snprintf(why, wlen, "line %d asks Z %.2f, outside the lens reach %.2f to %.2f (%s)", n, z, lo, hi,
+             line);
+    return 1;
+}
+
+/* Every Z the program will command, head to tail, against the reach the
+ * lens has now. A Z outside the reach is one the controller refuses with
+ * its soft-limit alarm, and it refuses it at parse time, while the body
+ * is still burning, so the program is judged whole before its first line
+ * goes out and a card that cannot run burns nothing. 0 fits; -1 with the
+ * offending line in `why`. */
+static int program_fits(const gen_t *g, const char *body, char *why, size_t wlen)
+{
+    int down, up, n = 0;
+    lens_window(&down, &up);
+    double lo, hi;
+    lens_reach(edge_z(), z_spm, down, up, &lo, &hi);
+    for (int i = 0; i < g->nhead; i++)
+        if (z_off_reach(g->head[i], ++n, lo, hi, why, wlen))
+            return -1;
+    for (const char *p = body; p && *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        char line[96];
+        if (len >= sizeof(line))
+            len = sizeof(line) - 1;
+        memcpy(line, p, len);
+        line[len] = '\0';
+        if (z_off_reach(line, ++n, lo, hi, why, wlen))
+            return -1;
+        p = nl ? nl + 1 : p + len;
+    }
+    for (int i = 0;; i++) {
+        char line[80];
+        if (!tail_line(i, line, sizeof(line)))
+            break;
+        if (z_off_reach(line, ++n, lo, hi, why, wlen))
+            return -1;
+    }
+    return 0;
+}
+
 /* One armed burn of a build: the program streamed, the witnesses read
  * into r. 0 witnessed, -1 (the error is set). */
-static int burn(live_t *L, build_t *b, const char *id, int alone, double z, int store25, int store1,
+static int burn(live_t *L, build_t *b, const char *id, int alone, int store25, int store1,
                 double end_dark_s, const char *tail_what, gen_t *g, jobstream_run_t *run, json_t *r)
 {
     sheet_paths_t pv;
@@ -1249,9 +1324,16 @@ static int burn(live_t *L, build_t *b, const char *id, int alone, double z, int 
         wiz_finish_err("the program could not be built");
         return -1;
     }
-    if (gen_init(g, L, z, pg.buf, store25, store1) != 0) {
+    if (gen_init(g, L, card_z(id, &L->place), pg.buf, store25, store1) != 0) {
         sheet_text_free(&pg);
         wiz_finish_err("out of memory");
+        return -1;
+    }
+    char why[200];
+    if (program_fits(g, pg.buf, why, sizeof(why)) != 0) {
+        sheet_text_free(&pg);
+        g->body = NULL;
+        wiz_finish_err("the program does not fit the lens: %s", why);
         return -1;
     }
     g->tail_what = tail_what;
@@ -1316,7 +1398,7 @@ static void run_frame(void)
         if (wiz_ask_continue("frame-arm", arm_q) != 0)
             goto out;
         b->text_s = b->mark_s;
-        if (burn(&L, b, "sheet.frame", 0, focus_z(&L.place), 0, 0, 0, NULL, &g, &run, r) != 0)
+        if (burn(&L, b, "sheet.frame", 0, 0, 0, 0, NULL, &g, &run, r) != 0)
             goto out;
         gen_free(&g);
         wiz_progress(60 + attempt * 10);
@@ -1366,6 +1448,7 @@ static void run_focus(void)
         goto out;
     }
     L.find_stops = 1;
+    L.applied = applied;
     if (live_begin(&L, sheet_card("laser.focus"), 1, 2, r) != 0)
         goto out;
     build_defaults(b);
@@ -1391,8 +1474,15 @@ static void run_focus(void)
              wiz_len(down / z_spm, u3, sizeof(u3)));
     if (wiz_ask_continue("focus-arm", text) != 0)
         goto out;
-    if (burn(&L, b, "laser.focus", L.place.alone, edge_z(), 0, 0, 0,
-             NULL, &g, &run, r) != 0)
+    /* The ladder as it burns, for the record: the twelve heights and the
+     * window they span. */
+    json_t *ladder = json_array();
+    for (int i = 0; i < SHEET_FOCUS_N; i++)
+        json_array_append_new(ladder, json_real(b->focus_z[i]));
+    json_object_set_new(r, "ladder_z", ladder);
+    json_object_set_new(r, "window", json_pack("{s:i,s:i,s:f,s:f}", "below", down, "above", up,
+                                               "reach_min", z_of_k(-down), "reach_max", z_of_k(up)));
+    if (burn(&L, b, "laser.focus", L.place.alone, 0, 0, 0, NULL, &g, &run, r) != 0)
         goto out;
     wiz_progress(70);
     const char *opts[SHEET_FOCUS_N];
@@ -1452,14 +1542,14 @@ static void run_focus(void)
     double k = (b->focus_k[lo - 1] + b->focus_k[hi - 1]) / 2.0;
     double edge = thickness - k / z_spm;
     double z_lo = edge - down / z_spm, z_hi = edge + up / z_spm;
-    char v[16], vd[8], vu[8];
+    /* The window went into the settings before the ladder burned
+     * (live_begin); the edge is the card's other number. */
+    char v[16];
     snprintf(v, sizeof(v), "%.2f", edge);
-    snprintf(vd, sizeof(vd), "%d", down);
-    snprintf(vu, sizeof(vu), "%d", up);
-    const char *keys[] = { "lens_hall_edge_z_mm", "lens_stop_below_steps", "lens_stop_above_steps" };
-    const char *vals[] = { v, vd, vu };
+    const char *keys[] = { "lens_hall_edge_z_mm" };
+    const char *vals[] = { v };
     char err[96];
-    if (wiz_write_settings(keys, vals, 3, applied, err, sizeof(err)) != 0) {
+    if (wiz_write_settings(keys, vals, 1, applied, err, sizeof(err)) != 0) {
         wiz_finish_err("%s", err);
         goto out;
     }
@@ -1523,7 +1613,7 @@ static void run_floor(void)
              wiz_len(sheet_ladder_len(sheet_card("laser.floor")), u1, sizeof(u1)));
     if (wiz_ask_continue("floor-arm", text) != 0)
         goto out;
-    if (burn(&L, b, "laser.floor", L.place.alone, focus_z(&L.place), 0, 0, 0, NULL, &g, &run, r) != 0)
+    if (burn(&L, b, "laser.floor", L.place.alone, 0, 0, 0, NULL, &g, &run, r) != 0)
         goto out;
     curverec_override_end();
     wiz_progress(70);
@@ -1591,7 +1681,7 @@ static void run_dose(void)
                          "reading each. The curve fits itself. Lid closed. Continue, then press "
                          "the button when it lights white; this page says when.") != 0)
         goto out;
-    if (burn(&L, b, "laser.dose-curve", L.place.alone, focus_z(&L.place), 2, 0, DOSE_DARK_S,
+    if (burn(&L, b, "laser.dose-curve", L.place.alone, 2, 0, DOSE_DARK_S,
              "the fit needs the dark tail", &g, &run, r) != 0)
         goto out;
     curverec_override_end();
@@ -1662,7 +1752,7 @@ static void run_corner(void)
                          "2.0 under velocity-scaled power at 30 percent. Lid closed. Continue, "
                          "then press the button when it lights white; this page says when.") != 0)
         goto out;
-    if (burn(&L, b, "laser.corner", L.place.alone, focus_z(&L.place), 0, 0, 0, NULL, &g, &run, r) != 0)
+    if (burn(&L, b, "laser.corner", L.place.alone, 0, 0, 0, NULL, &g, &run, r) != 0)
         goto out;
     curverec_override_end();
     wiz_progress(70);
@@ -1801,7 +1891,7 @@ static void run_flowload(void)
                          "for 100 s after. About four minutes in all. Lid closed. Continue, then "
                          "press the button when it lights white; this page says when.") != 0)
         goto out;
-    if (burn(&L, b, "cooling.flow-load", L.place.alone, focus_z(&L.place), 1, 1, LOAD_TAIL_S,
+    if (burn(&L, b, "cooling.flow-load", L.place.alone, 1, 1, LOAD_TAIL_S,
              "the coolant sensors follow the heat", &g, &run, r) != 0)
         goto out;
     cool_flow_check_hold(0);

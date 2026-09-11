@@ -22,6 +22,7 @@
 #include "super.h"
 #include "cool.h"
 #include "diag.h"
+#include "lens.h"
 #include "settings.h"
 
 #include <dirent.h>
@@ -65,10 +66,10 @@ static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
 #define GF_LATEST_FILE "/data/forgefirm/gf-latest.json"
 
 /* Kernel step counters -> millimeters (factory-derived constants: 0.15 mm
- * per full step X/Y at the live microstep mode; Z counts half-steps at
- * 0.70612 mm per full step). */
+ * per full step X/Y at the live microstep mode; Z counts half-steps of
+ * the lens screw, two per full step). */
 #define XY_MM_PER_FULL_STEP 0.15
-#define Z_MM_PER_FULL_STEP  0.68444    /* the lens screw: 12.32 mm over 18 full steps */
+#define Z_MM_PER_FULL_STEP  (2.0 / LENS_STEPS_PER_MM)
 
 /* The sysfs root is fixed in production; GF_SYSFS_ROOT overrides it for
  * host unit tests (the same test-seam idiom as GF_VERDICT_FILE), letting
@@ -578,28 +579,18 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     long ilk = rd_attr_long("cnc/interlock_circuit", -1);
     unsigned long sw = read_switches();
 
-    /* The lens: the focus card's numbers and the reach they give. */
-    char sv[32];
-    double edge_z = 3.35;
-    int below = 10, above = 12, stops_found = 0;
-    if (settings_get("lens_hall_edge_z_mm", sv, sizeof(sv)) == 0 && sv[0])
-        edge_z = atof(sv);
-    if (settings_get("lens_stop_below_steps", sv, sizeof(sv)) == 0 && sv[0] && atoi(sv) >= 1) {
-        below = atoi(sv);
-        stops_found = 1;
-    }
-    if (settings_get("lens_stop_above_steps", sv, sizeof(sv)) == 0 && sv[0] && atoi(sv) >= 1)
-        above = atoi(sv);
-    else
-        stops_found = 0;
-    double half = Z_MM_PER_FULL_STEP / 2.0;
+    /* The lens: the head's reference and the reach around it, from the
+     * same keys the controller opens its Z limit from (lens.h). */
+    int below, above;
+    int stops_found = lens_window(&below, &above);
+    double edge_z = lens_edge_z(), reach_lo, reach_hi;
+    lens_reach(edge_z, LENS_STEPS_PER_MM, below, above, &reach_lo, &reach_hi);
 
     size_t off = 0;
     append(buf, len, &off,
         "{\"lens\":{\"edge_z\":%.2f,\"below\":%d,\"above\":%d,\"stops_found\":%s,"
         "\"reach_min\":%.2f,\"reach_max\":%.2f},",
-        edge_z, below, above, stops_found ? "true" : "false",
-        edge_z - below * half, edge_z + above * half);
+        edge_z, below, above, stops_found ? "true" : "false", reach_lo, reach_hi);
     append(buf, len, &off,
         "\"state\":\"%s\",\"homed\":%s,\"homed_axes\":%u,\"diag\":%s,",
         state[0] ? state : "unknown", homed ? "true" : "false", homed_axes,

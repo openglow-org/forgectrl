@@ -76,6 +76,7 @@ add_executable(forgectrl
   src/gates.c
   src/gpu_debayer.c
   src/ipu_copy.c
+  src/lens.c
   src/lenshome.c
   src/liveness.c
   src/logs.c
@@ -127,7 +128,7 @@ install(TARGETS forgectrl RUNTIME DESTINATION bin)
 # a read failure - including fd exhaustion under a connection flood -
 # must report not-idle. Built everywhere, installed nowhere; CI runs it
 # after the build.
-add_executable(status_idle_test tests/status_idle_test.c src/status.c)
+add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c)
 target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_idle_test m pthread)
 
@@ -137,11 +138,11 @@ add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jo
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
-add_executable(status_grbl_test tests/status_grbl_test.c src/status.c)
+add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c)
 target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_grbl_test m pthread)
 
-add_executable(status_sys_test tests/status_sys_test.c src/status.c)
+add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c)
 target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_sys_test m pthread)
 
@@ -154,7 +155,7 @@ target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
 # Host unit test for the camera privacy gate's lid read: every way it
 # can fail must land on "not closed", or the cameras could capture with
 # the enclosure open. CI runs it after the build.
-add_executable(lid_gate_test tests/lid_gate_test.c src/status.c)
+add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c)
 target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(lid_gate_test m pthread)
 
@@ -298,6 +299,12 @@ target_link_libraries(wizcalc_test m)
 add_executable(sheet_test tests/sheet_test.c src/sheet.c src/font_hershey.c)
 target_compile_options(sheet_test PRIVATE -Wall -Wextra)
 target_link_libraries(sheet_test m)
+
+# The lens frame: the window read as the controller reads it, the reach
+# inside the controller's Z envelope, the ladder inside the reach.
+add_executable(lens_test tests/lens_test.c src/lens.c)
+target_compile_options(lens_test PRIVATE -Wall -Wextra)
+target_link_libraries(lens_test m)
 
 # The daemon's own sender against a mock controller on a local port.
 add_executable(jobstream_test tests/jobstream_test.c src/jobstream.c src/fflog.c)

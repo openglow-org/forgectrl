@@ -26,6 +26,8 @@ jobs:
         run: ./build/curverec_fit_test
       - name: sheet_test (the commissioning sheet renderer)
         run: ./build/sheet_test
+      - name: lens_test (the lens frame: every Z inside the controller's window)
+        run: ./build/lens_test
       - name: jobstream_test (the daemon's own sender)
         run: ./build/jobstream_test
       - name: Machine status JSON sys block
