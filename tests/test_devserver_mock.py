@@ -318,9 +318,21 @@ class MockTest(unittest.TestCase):
                         doc_keys(self.get_json(m, '/slots')))
         self.assertEqual(set(self.get_json(m, '/update/status')),
                          c_keys(src, 'cb_update_status'))
-        code, hdrs, body = self.call(m, 'POST', '/update/check')
-        self.assertTrue(set(json.loads(body)) <=
-                        c_keys(read('src/relcheck.c'), 'relcheck'))
+        # The release check's reply is packed by the encoder in
+        # reply_release: its keys are the quoted names of the pack call.
+        rel = re.search(r'^[\w \*]*\breply_release\(', src, re.M)
+        rel_body = src[rel.start():src.index('\n}\n', rel.start())]
+        rel_keys = set(re.findall(r'"(\w+)",', rel_body))
+        self.assertTrue(rel_keys)
+        for method, path, form in (('POST', '/update/check', None),
+                                   ('GET', '/update/release', None),
+                                   ('POST', '/update/dismiss', {'version': 'v0.0.0'}),
+                                   ('POST', '/update/dismiss', {'version': ''})):
+            code, hdrs, body = self.call(m, method, path, form)
+            self.assertEqual((path, code, set(json.loads(body))), (path, 200, rel_keys))
+        code, hdrs, body = self.call(m, 'POST', '/update/dismiss', {'version': 'v0.0.1;rm'})
+        self.assertEqual((code, json.loads(body)),
+                         (400, {'error': 'version is not a release tag'}))
         code, hdrs, body = self.call(m, 'POST', '/boot', {'target': 'c'})
         self.assertEqual(json.loads(body),
                          {'error': 'target must be sd, a, b, or legacy'})
