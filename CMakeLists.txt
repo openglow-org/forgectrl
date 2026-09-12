@@ -4,7 +4,7 @@ project(forgectrl C)
 set(CMAKE_C_STANDARD 11)
 
 # The pages are normal static files under src/ui/: the control panel
-# (index.html with theme.css, help.js, forms.js, panel.js), the
+# (index.html with theme.css, md.js, help.js, forms.js, panel.js), the
 # commissioning wizard (wizard.html with wizard.css, md.js, wizard.js),
 # and the login page (login.html with login.js), all on Bootstrap in
 # vendor/. embed.cmake bundles each into one self-contained page, gzips
@@ -20,8 +20,9 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -DUI_DIR=${UI_DIR} -DPAGE=index
           -DOUT_HTML=${UI_OUT}/index.html
           -DOUT_C=${UI_OUT}/ui_blob.c -P ${UI_DIR}/embed.cmake
-  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/help.js ${UI_DIR}/forms.js
-          ${UI_DIR}/panel.js ${UI_DIR}/regions.js ${UI_COMMON}
+  DEPENDS ${UI_DIR}/index.html ${UI_DIR}/md.js ${UI_DIR}/help.js
+          ${UI_DIR}/forms.js ${UI_DIR}/panel.js ${UI_DIR}/regions.js
+          ${UI_COMMON}
   COMMENT "Bundling the control panel (src/ui -> index_html_gz[])"
   VERBATIM)
 add_custom_command(
@@ -316,11 +317,13 @@ add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
 target_compile_options(tls_test PRIVATE -Wall -Wextra)
 target_link_libraries(tls_test gnutls pthread)
 
-# The published-release check against a model of curl and the release
-# redirect chain: the tag is read from the first hop, where it lives, not
-# from the end of the chain, where the asset store's URL carries none.
+# The published-release check against a scripted releases API: the
+# release, its notes and its file are read from the API's answer, and the
+# file's own URL (the one GitHub counts as a download) is never requested;
+# with the version order the alert is raised by.
 add_executable(relcheck_test tests/relcheck_test.c src/relcheck.c)
 target_compile_options(relcheck_test PRIVATE -Wall -Wextra)
+target_link_libraries(relcheck_test jansson)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
 # drives it against a private rsyslogd; manual, not CI).

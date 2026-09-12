@@ -20,21 +20,27 @@
  * happens implicitly: it is its own explicit action, probe-gated by
  * ffboot itself.
  *
- * The release check (relcheck.c) resolves the published version from
- * the fixed-name asset URL's first redirect, without the GitHub API;
- * the download follows the same URL to the file.
+ * The release check (relcheck.c) asks the GitHub releases API for the
+ * latest release: once a day on its own, and on request. The last
+ * answer is kept here and served to the panel, which raises an alert
+ * for a release newer than the installed version until the operator
+ * dismisses that release. Only the download requests the firmware
+ * file's URL, once, so GitHub's download counter counts installs.
  */
 #define _GNU_SOURCE
 #include "update.h"
 #include "auth.h"
 #include "diag.h"
+#include "fflog.h"
 #include "relcheck.h"
+#include "settings.h"
 #include "status.h"
 
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jansson.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -60,6 +66,16 @@
 /* The same bound on the release download, enforced by curl before the
  * signature check can discard an oversized file. */
 #define DL_MAX_BYTES "268435456"
+/* The installed version, as the image wrote it. */
+#define VERSION_FILE "/etc/forgefirm-version"
+/* The release the operator dismissed the alert for (a settings key). */
+#define DISMISSED_KEY "update_dismissed"
+/* The release check's own clock: the first check after the daemon
+ * starts waits for the network to come up; a check that got an answer
+ * is repeated daily; one that did not is retried hourly. */
+#define RELCHECK_FIRST_S  120
+#define RELCHECK_DAILY_S  (24 * 3600)
+#define RELCHECK_RETRY_S  3600
 
 /* ------------------------------------------------------------- state */
 
@@ -689,30 +705,164 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
 
 /* ------------------------------------------------------ release check */
 
+/* The last answer of the release check, and when it was had. The
+ * check runs on its own clock (rel_thread) and on request; both go
+ * through release_refresh, one at a time. */
+static pthread_mutex_t rel_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t rel_fetch_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct relcheck_result rel;
+static time_t rel_checked;              /* 0: never answered */
+static char   rel_current[48];          /* the installed version */
+
+/* Fetch a URL with curl: the body, raw, and the status from curl's own
+ * report on the last line. Negative when curl got no answer at all. */
+static int fetch_url(const char *url, char *body, size_t len, int *http)
+{
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd),
+             "curl -s -H 'Accept: application/vnd.github+json' "
+             "--max-time 20 --max-filesize %zu -w '\\n%%{http_code}' "
+             "'%s' 2>/dev/null", len - 1, url);
+    body[0] = '\0';
+    *http = 0;
+    FILE *p = popen(cmd, "r");
+    if (!p)
+        return -1;
+    size_t n = fread(body, 1, len - 1, p);
+    body[n] = '\0';
+    while (fgetc(p) != EOF)
+        ;
+    int st = pclose(p);
+    if (st < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return -1;
+    char *nl = strrchr(body, '\n');
+    if (!nl)
+        return -1;
+    *http = atoi(nl + 1);
+    *nl = '\0';
+    return *http > 0 ? 0 : -1;
+}
+
+/* Run the check and keep its answer. 0 when the server answered
+ * (available or not), -1 when it could not be reached (the last answer
+ * stays). */
+static int release_refresh(void)
+{
+    struct relcheck_result *fresh = calloc(1, sizeof(*fresh));
+    if (!fresh)
+        return -1;
+    pthread_mutex_lock(&rel_fetch_mu);
+    int rc = relcheck(fresh, fetch_url);
+    if (rc == 0) {
+        pthread_mutex_lock(&rel_mu);
+        rel = *fresh;
+        rel_checked = time(NULL);
+        pthread_mutex_unlock(&rel_mu);
+        if (fresh->available)
+            fflog(LOG_INFO, "update: the latest release is %s (%s)",
+                  fresh->version,
+                  relcheck_is_newer(fresh->version, rel_current)
+                      ? "newer than the installed version"
+                      : "not newer than the installed version");
+        else
+            fflog(LOG_INFO, "update: release check: %s", fresh->detail);
+    } else {
+        fflog(LOG_NOTICE, "update: release check: the release server "
+                          "could not be reached");
+    }
+    pthread_mutex_unlock(&rel_fetch_mu);
+    free(fresh);
+    return rc;
+}
+
+static void *rel_thread(void *arg)
+{
+    (void)arg;
+    sleep(RELCHECK_FIRST_S);
+    for (;;) {
+        int rc = release_refresh();
+        pthread_mutex_lock(&rel_mu);
+        int answered = rc == 0 && (rel.http == 200 || rel.http == 404);
+        pthread_mutex_unlock(&rel_mu);
+        sleep(answered ? RELCHECK_DAILY_S : RELCHECK_RETRY_S);
+    }
+    return NULL;
+}
+
+/* The release the alert is dismissed for, "" when none. */
+static void dismissed_release(char *out, size_t len)
+{
+    if (settings_get(DISMISSED_KEY, out, len) != 0)
+        out[0] = '\0';
+}
+
+/* The reply of /update/release and /update/check: the last answer,
+ * the installed version, whether the release is newer, and whether the
+ * operator dismissed the alert for it. Built by the encoder, so the
+ * notes and the API's detail are carried as data whatever they hold. */
+static int reply_release(struct _u_response *res)
+{
+    char dismissed[48];
+    dismissed_release(dismissed, sizeof(dismissed));
+    pthread_mutex_lock(&rel_mu);
+    int newer = rel.available && relcheck_is_newer(rel.version, rel_current);
+    json_t *o = json_pack(
+        "{s:b, s:s, s:s, s:b, s:s, s:I, s:s, s:s, s:I, s:b}",
+        "available", rel.available,
+        "version", rel.version,
+        "current", rel_current,
+        "new", newer,
+        "published", rel.published,
+        "bytes", (json_int_t)rel.bytes,
+        "notes", rel.notes,
+        "detail", rel_checked ? rel.detail : "not checked yet",
+        "checked", (json_int_t)rel_checked,
+        "dismissed", rel.available && !strcmp(dismissed, rel.version));
+    pthread_mutex_unlock(&rel_mu);
+    char *s = o ? json_dumps(o, JSON_COMPACT) : NULL;
+    if (o)
+        json_decref(o);
+    if (!s)
+        return reply_err(res, 500, "cannot encode the release");
+    int rc = reply_json(res, 200, s);
+    free(s);
+    return rc;
+}
+
+int cb_update_release(const struct _u_request *req, struct _u_response *res,
+                      void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    return reply_release(res);
+}
+
 int cb_update_check(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
 {
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-
-    char cur[48] = "";
-    FILE *f = fopen("/etc/forgefirm-version", "r");
-    if (f) {
-        if (fgets(cur, sizeof(cur), f)) {
-            char tmp[48];
-            jsan(tmp, sizeof(tmp), cur);
-            snprintf(cur, sizeof(cur), "%s", tmp);
-        } else {
-            cur[0] = '\0';
-        }
-        fclose(f);
-    }
-
-    char body[256];
-    if (relcheck(body, sizeof(body), cur, run_cmd) != 0)
+    if (release_refresh() != 0)
         return reply_err(res, 502, "release check failed (offline?)");
-    return reply_json(res, 200, body);
+    return reply_release(res);
+}
+
+int cb_update_dismiss(const struct _u_request *req, struct _u_response *res,
+                      void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *v = param(req, "version");
+    if (!v)
+        return reply_err(res, 400, "version required (empty to undo)");
+    if (*v && (!relcheck_tag_ok(v) || strlen(v) >= 48))
+        return reply_err(res, 400, "version is not a release tag");
+    if (settings_set(DISMISSED_KEY, v) != 0)
+        return reply_err(res, 500, "cannot record the dismissal");
+    return reply_release(res);
 }
 
 /* --------------------------------------------------- download worker */
@@ -720,6 +870,27 @@ int cb_update_check(const struct _u_request *req, struct _u_response *res,
 static void *dl_worker(void *arg)
 {
     (void)arg;
+    /* The file of the release the last check found; a download before
+     * any check runs the check first. The tag was whitelisted by the
+     * check, so it is safe on the command line. */
+    pthread_mutex_lock(&rel_mu);
+    int known = rel.available;
+    pthread_mutex_unlock(&rel_mu);
+    if (!known) {
+        job_set_phase("checking for a release");
+        release_refresh();
+    }
+    char tag[48];
+    pthread_mutex_lock(&rel_mu);
+    known = rel.available;
+    snprintf(tag, sizeof(tag), "%s", rel.version);
+    pthread_mutex_unlock(&rel_mu);
+    if (!known) {
+        job_finish("{\"ok\":false,\"error\":\"no published release to "
+                   "download\"}");
+        return NULL;
+    }
+
     job_set_phase("downloading");
     pthread_mutex_lock(&mu);
     snprintf(progress_file, sizeof(progress_file), "%s", DL_FW);
@@ -727,10 +898,11 @@ static void *dl_worker(void *arg)
 
     mkdir(DATA_DIR, 0755);
     unlink(DL_FW);
-    char out[512];
-    int rc = run_cmd(out, sizeof(out),
-                     "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
-                     " -o " DL_FW " " RELCHECK_LATEST_URL " 2>&1");
+    char cmd[512], out[512];
+    snprintf(cmd, sizeof(cmd),
+             "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
+             " -o " DL_FW " " RELCHECK_DOWNLOAD_FMT " 2>&1", tag);
+    int rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
         unlink(DL_FW);
         job_finish("{\"ok\":false,\"error\":\"download failed\","
@@ -1350,4 +1522,23 @@ void update_init(void)
     mkdir(DATA_DIR, 0755);
     /* A stale lock file from a crash is harmless: flock state dies with
      * the holder. Partial staged files are re-verified before use. */
+
+    /* The installed version, read once: the file lives on the rootfs
+     * and does not change while the daemon runs. */
+    FILE *f = fopen(VERSION_FILE, "r");
+    if (f) {
+        char line[96] = "";
+        if (fgets(line, sizeof(line), f))
+            jsan(rel_current, sizeof(rel_current), line);
+        fclose(f);
+    }
+
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, rel_thread, NULL) != 0)
+        fflog(LOG_ERR, "update: cannot start the release check; only "
+                       "a manual check will run");
+    pthread_attr_destroy(&at);
 }

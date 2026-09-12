@@ -21,6 +21,10 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
                      void *user_data);
 int cb_update_check(const struct _u_request *req, struct _u_response *res,
                     void *user_data);
+int cb_update_release(const struct _u_request *req, struct _u_response *res,
+                      void *user_data);
+int cb_update_dismiss(const struct _u_request *req, struct _u_response *res,
+                      void *user_data);
 int cb_update_download(const struct _u_request *req, struct _u_response *res,
                        void *user_data);
 int cb_update_apply(const struct _u_request *req, struct _u_response *res,

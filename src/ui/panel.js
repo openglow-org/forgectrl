@@ -356,7 +356,6 @@ function setMode(m) {
     });
 }
 var TABS = ['status', 'machine', 'gfcloud', 'grbl', 'diag', 'logs', 'system'],
-  sysChecked = false,
   curTab = null,
   hashRevert = false;
 function tabOf(hash) {
@@ -388,10 +387,6 @@ function tab() {
     var t = TABS[i];
     $('s-' + t).className = t === h ? 'on' : '';
     $('t-' + t).className = t === h ? 'on' : '';
-  }
-  if (h === 'system' && !sysChecked) {
-    sysChecked = true;
-    checkUpd();
   }
   if (h === 'system') {
     loadSsh();
@@ -1495,6 +1490,71 @@ function doReboot() {
       $('msg-slot').textContent = j.rebooting ? 'rebooting\u2026' : j.error || '?';
     });
 }
+/* ---- The ForgeFIRM release ------------------------------------------
+ * The daemon checks the published release once a day, and on the Check
+ * now button, and keeps the answer. The page reads it at load and every
+ * half hour, raises the alert on every tab for a release newer than the
+ * installed version until that release is dismissed, and runs the whole
+ * install from one dialog: download, verify, write the other slot,
+ * select it for the next boot, restart, and reload this page when the
+ * machine is back, so the browser takes the new panel. */
+var REL = null,
+  relModal = null,
+  relJob = null;
+function relDate(iso) {
+  var d = new Date(iso);
+  return isNaN(d.getTime()) ? iso || '?' : d.toLocaleDateString();
+}
+function relSize(b) {
+  return b > 0 ? (b / 1048576).toFixed(1) + ' MB' : '?';
+}
+function renderRelease() {
+  var j = REL || {};
+  var alert = !!(j.available && j['new'] && !j.dismissed);
+  $('rel-banner').style.display = alert && !relJob ? '' : 'none';
+  $('rel-banner-ver').textContent = j.version || '';
+  var g =
+    "<div class='kv'><span>Installed</span><span class='mono'>" +
+    esc(j.current || S.version || '?') +
+    '</span></div>';
+  if (j.available)
+    g +=
+      "<div class='kv'><span>Latest release</span><span class='mono'>" +
+      esc(j.version) +
+      (j['new']
+        ? " <span class='b-run'>update available</span>" +
+          (j.dismissed ? ' (alert dismissed)' : '')
+        : " <span class='b-ok'>up to date</span>") +
+      '</span></div>';
+  else
+    g +=
+      "<div class='kv'><span>Latest release</span><span>" +
+      esc(j.detail || 'not checked yet') +
+      '</span></div>';
+  if (j.checked)
+    g +=
+      "<div class='kv'><span>Last check</span><span>" +
+      esc(new Date(j.checked * 1000).toLocaleString()) +
+      '</span></div>';
+  $('updinfo').innerHTML = g;
+  var b = $('relbtn');
+  b.style.display = j.available ? '' : 'none';
+  b.textContent = j['new'] ? 'Install ' + j.version : 'Release notes';
+  b.className = 'btn btn-sm ' + (j['new'] ? 'btn-primary' : 'btn-outline-secondary');
+  $('relundo').style.display = j.available && j['new'] && j.dismissed ? '' : 'none';
+}
+function loadRelease() {
+  fx('/update/release')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (j.error) return;
+      REL = j;
+      renderRelease();
+    })
+    .catch(function () {});
+}
 function checkUpd() {
   $('msg-u').textContent = 'checking\u2026';
   fx('/update/check', { method: 'POST' })
@@ -1507,29 +1567,306 @@ function checkUpd() {
         return;
       }
       $('msg-u').textContent = '';
-      var g =
-        "<div class='kv'><span>Installed</span><span class='mono'>" +
-        esc(j.current || '?') +
-        '</span></div>';
-      if (j.available)
-        g +=
-          "<div class='kv'><span>Latest release</span><span class='mono'>" +
-          esc(j.version) +
-          (j['new']
-            ? " <span class='b-run'>update available</span>"
-            : " <span class='b-ok'>up to date</span>") +
-          '</span></div>';
-      else
-        g +=
-          "<div class='kv'><span>Latest release</span><span>" +
-          esc(j.detail || 'none') +
-          '</span></div>';
-      $('updinfo').innerHTML = g;
-      $('dlbtn').style.display = j.available && j['new'] ? '' : 'none';
+      REL = j;
+      renderRelease();
     })
     .catch(function () {
       $('msg-u').textContent = 'check failed';
     });
+}
+function setDismissed(v) {
+  fx('/update/dismiss?version=' + encodeURIComponent(v), { method: 'POST' })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (j.error) {
+        toast('Release', j.error, false);
+        return;
+      }
+      REL = j;
+      renderRelease();
+    })
+    .catch(function () {});
+}
+function dismissRelease() {
+  if (!REL || !REL.version) return;
+  setDismissed(REL.version);
+  if (relModal && !relJob) relModal.hide();
+}
+function undismissRelease() {
+  setDismissed('');
+}
+/* The slot the install writes: the a/b slot that is present and not the
+ * booted one. `next` when the saved boot selection already points at
+ * it, which the daemon refuses to overwrite. */
+function relTargetSlot() {
+  var sl = SL.slots || {},
+    t = ['a', 'b'],
+    booted = null,
+    target = null;
+  for (var i = 0; i < t.length; i++) {
+    var s = sl[t[i]] || {};
+    if (s.booted) booted = t[i];
+    else if (s.present === 'yes') target = t[i];
+  }
+  return { target: target, booted: booted, next: !!(target && sl[target].next) };
+}
+function openRelease() {
+  if (!REL || !REL.available) return;
+  if (!relModal)
+    relModal = new bootstrap.Modal($('relmodal'), { backdrop: 'static', keyboard: false });
+  if (!relJob) relShowView();
+  relModal.show();
+}
+function relShowView() {
+  var j = REL,
+    t = relTargetSlot();
+  $('rel-title').textContent = 'ForgeFIRM ' + j.version;
+  $('rel-cur').textContent = j.current || S.version || '?';
+  $('rel-ver').textContent = j.version;
+  $('rel-pub').textContent = relDate(j.published);
+  $('rel-size').textContent = relSize(j.bytes);
+  $('rel-notes').innerHTML = j.notes
+    ? mdRender(j.notes)
+    : "<p class='hint'>This release has no notes.</p>";
+  $('rel-notes').scrollTop = 0;
+  var plan = '';
+  if (j['new'])
+    plan = t.target
+      ? 'Install and restart downloads the release, verifies its signature, writes it to ' +
+        SLNAME[t.target] +
+        ' (the slot not running), selects that slot for the next boot, and restarts the ' +
+        'machine. The running firmware stays in ' +
+        (SLNAME[t.booted] || 'its slot') +
+        ', where the boot selector can go back to it.'
+      : 'No firmware slot is free to write: the inventory shows no present slot other than ' +
+        'the running one.';
+  $('rel-plan').textContent = plan;
+  $('rel-view').hidden = false;
+  $('rel-run').hidden = true;
+  $('rel-close').style.display = '';
+  $('rel-later').style.display = '';
+  $('rel-later').textContent = 'Not now';
+  $('rel-dismiss').style.display = j['new'] && !j.dismissed ? '' : 'none';
+  $('rel-install').style.display = j['new'] && t.target ? '' : 'none';
+  $('rel-reload').style.display = 'none';
+}
+function relStep(step, pct, phase) {
+  relJob.step = step;
+  var li = $('rel-steps').children,
+    past = true;
+  for (var i = 0; i < li.length; i++) {
+    var s = li[i].getAttribute('data-step');
+    if (s === step) {
+      li[i].className = 'cur';
+      past = false;
+    } else li[i].className = past ? 'done' : '';
+  }
+  var bar = $('rel-bar');
+  bar.style.width = pct + '%';
+  bar.parentNode.setAttribute('aria-valuenow', pct);
+  bar.className =
+    'progress-bar' + (relJob.striped ? ' progress-bar-striped progress-bar-animated' : '');
+  if (phase !== undefined) $('rel-phase').textContent = phase;
+}
+function relFail(msg) {
+  relJob = null;
+  $('rel-err').textContent = msg;
+  $('rel-err').style.display = '';
+  $('rel-phase').textContent = '';
+  $('rel-bar').className = 'progress-bar bg-danger';
+  $('rel-close').style.display = '';
+  $('rel-later').style.display = '';
+  $('rel-later').textContent = 'Close';
+  renderRelease();
+  loadSlots();
+  jobPoll();
+}
+function relInstall() {
+  var t = relTargetSlot();
+  if (!t.target) return;
+  relJob = {
+    slot: t.target,
+    booted: t.booted,
+    next: t.next,
+    step: '',
+    striped: false,
+    oldVersion: S.version || ''
+  };
+  $('rel-view').hidden = true;
+  $('rel-run').hidden = false;
+  $('rel-err').style.display = 'none';
+  $('rel-close').style.display = 'none';
+  $('rel-later').style.display = 'none';
+  $('rel-dismiss').style.display = 'none';
+  $('rel-install').style.display = 'none';
+  $('rel-banner').style.display = 'none';
+  relStep('download', 2, 'starting the download');
+  relPost('/update/download', function () {
+    relWatchJob('download');
+  });
+}
+/* A write on the flow's behalf: a started, ok, or rebooting reply
+ * continues it; anything else ends it with the daemon's reason. */
+function relPost(url, next) {
+  fx(url, { method: 'POST' })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (!relJob) return;
+      if (j.started || j.ok || j.rebooting) next(j);
+      else relFail((j.error || 'the machine refused ' + url) + (j.detail ? ': ' + j.detail : ''));
+    })
+    .catch(function () {
+      if (relJob) relFail('the machine did not answer (' + url + ')');
+    });
+}
+/* Follow the daemon's job to its end: the download, then the apply. */
+function relWatchJob(kind) {
+  var poll = function () {
+    if (!relJob) return;
+    fetch('/update/status')
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (j) {
+        if (!relJob) return;
+        if (j.running || j.kind !== kind || !j.result) {
+          if (j.running) relJobProgress(kind, j);
+          setTimeout(poll, 1000);
+          return;
+        }
+        if (j.result.ok === false) {
+          relFail(
+            (j.result.error || kind + ' failed') + (j.result.detail ? ': ' + j.result.detail : '')
+          );
+          return;
+        }
+        if (kind === 'download') relApply();
+        else relSelect();
+      })
+      .catch(function () {
+        setTimeout(poll, 2000);
+      });
+  };
+  poll();
+}
+var APPLY_PCT = {
+  'taking update lock': 52,
+  'verifying archive': 55,
+  'unmounting target': 58,
+  'writing slot': 60,
+  'verifying written slot': 88
+};
+function relJobProgress(kind, j) {
+  var ph = j.phase || '',
+    pct;
+  relJob.striped = false;
+  if (kind === 'download') {
+    if (ph === 'verifying signature') {
+      relStep('verify', 47, 'verifying the signature');
+      return;
+    }
+    if (ph === 'downloading') {
+      var mb = j.progress_bytes > 0 ? Math.round(j.progress_bytes / 1048576) : 0;
+      if (REL.bytes > 0 && j.progress_bytes >= 0)
+        pct = 5 + Math.min(40, Math.round((40 * j.progress_bytes) / REL.bytes));
+      else {
+        pct = 20;
+        relJob.striped = true;
+      }
+      relStep('download', pct, 'downloading: ' + mb + ' MB of ' + relSize(REL.bytes));
+      return;
+    }
+    relStep('download', 3, ph);
+    return;
+  }
+  pct = APPLY_PCT[ph];
+  if (ph === 'writing slot') {
+    pct = Math.min(84, 60 + Math.floor((j.elapsed || 0) / 4));
+    relJob.striped = true;
+  }
+  relStep('apply', pct || 52, ph);
+}
+function relApply() {
+  var go = function () {
+    relStep('apply', 50, 'starting the install');
+    relPost('/update/apply?file=download&slot=' + relJob.slot, function () {
+      relWatchJob('apply');
+    });
+  };
+  /* A slot already selected for the next boot is refused for writing:
+   * point the next boot back at the running slot first. */
+  if (relJob.next && relJob.booted) relPost('/boot?target=' + relJob.booted, go);
+  else go();
+}
+function relSelect() {
+  relStep('select', 92, 'selecting ' + SLNAME[relJob.slot] + ' for the next boot');
+  relPost('/boot?target=' + relJob.slot, function () {
+    relStep('reboot', 96, 'restarting the machine');
+    relPost('/system/reboot?confirm=1', relWait);
+  });
+}
+/* The machine goes down, then comes back: then the page reloads, so the
+ * browser takes the panel the new firmware serves. A machine that never
+ * seems to go down (a restart faster than the polling) is caught by its
+ * version changing, or reloaded after three minutes regardless. */
+function relWait() {
+  relJob.striped = true;
+  relJob.down = false;
+  relJob.waitT0 = Date.now();
+  relStep('wait', 100, 'the machine is restarting');
+  var reload = function (why) {
+    $('rel-phase').textContent = why;
+    relJob = null;
+    setTimeout(function () {
+      location.reload();
+    }, 1500);
+  };
+  var tick = function () {
+    if (!relJob) return;
+    var age = Date.now() - relJob.waitT0;
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = ctl
+      ? setTimeout(function () {
+          ctl.abort();
+        }, 2500)
+      : null;
+    fetch('/status', { cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        if (!r.ok) throw new Error('down');
+        return r.json();
+      })
+      .then(function (s) {
+        if (timer) clearTimeout(timer);
+        if (!relJob) return;
+        if (relJob.down) reload('the machine is back; reloading the page');
+        else if (s.version && s.version !== relJob.oldVersion)
+          reload('the machine reports ' + s.version + '; reloading the page');
+        else if (age > 3 * 60000) reload('reloading the page');
+        else setTimeout(tick, 2000);
+      })
+      .catch(function () {
+        if (timer) clearTimeout(timer);
+        if (!relJob) return;
+        if (!relJob.down) {
+          relJob.down = true;
+          $('rel-phase').textContent = 'the machine is restarting; waiting for it to come back';
+        }
+        if (age > 8 * 60000) {
+          relFail(
+            'The machine has not come back after eight minutes. Check the machine, then ' +
+              'reload this page.'
+          );
+          $('rel-reload').style.display = '';
+          return;
+        }
+        setTimeout(tick, 3000);
+      });
+  };
+  setTimeout(tick, 3000);
 }
 function jobPoll() {
   fetch('/update/status')
@@ -1594,9 +1931,6 @@ function startJob(url, q, msgid) {
       if (j.started) jobPoll();
       else $(msgid).textContent = j.error || '?';
     });
-}
-function dlUpd() {
-  startJob('/update/download', '', 'msg-u');
 }
 function applyStaged(f, ver) {
   var t = tgt();
@@ -1891,6 +2225,8 @@ loadWizards();
 setInterval(loadWizards, 10000);
 loadSlots();
 jobPoll();
+loadRelease();
+setInterval(loadRelease, 1800000);
 renderGrbl();
 $('curverec-start').onclick = function () {
   fx('/curve/record', { method: 'POST' }).then(function (r) { return r.json(); }).then(curverecRender).catch(function () {});

@@ -54,8 +54,8 @@ TOKEN_MARK = '__FFTOKEN__'          # in panel.js; the daemon substitutes it
 # The files index.html links, in load order: the list embed.cmake inlines,
 # one marker tag per file.
 CSS_FILES = ('vendor/bootstrap.min.css', 'theme.css')
-JS_FILES = ('vendor/bootstrap.bundle.min.js', 'regions.js', 'help.js', 'forms.js',
-            'panel.js')
+JS_FILES = ('vendor/bootstrap.bundle.min.js', 'regions.js', 'md.js', 'help.js',
+            'forms.js', 'panel.js')
 
 DEFAULT_PORT = 8081
 DEVICE_PORT = 443                # the machine's HTTPS listener; the dev server proxies over TLS
@@ -401,7 +401,26 @@ DIAG_TOOLS = ('flow-verify', 'flow-calibrate', 'aa-offset-calibrate')
 SLOT_TARGETS = {'sd': '/dev/mmcblk1p1', 'a': '/dev/mmcblk2p1',
                 'b': '/dev/mmcblk2p2', 'legacy': '/dev/mmcblk2p4'}
 MOCK_VERSION = '20260101000000 (mock)'
-MOCK_RELEASE = '0.0.2'          # what /update/check offers
+MOCK_RELEASE = 'v0.0.4'         # the release /update/release offers
+MOCK_RELEASE_BYTES = 87654321
+MOCK_RELEASE_NOTES = (
+    '## What is new\n\n'
+    '- The release check asks the releases API and never touches the '
+    'download counter.\n'
+    '- The machine checks once a day and raises an alert for a newer '
+    'release.\n'
+    '- The update runs from one dialog: download, verify, write, select, '
+    'restart.\n\n'
+    '## Fixes\n\n'
+    '- The lens frame: the focus ladder and the tail no longer raise '
+    '`ALARM:2`.\n'
+    '- `/status` reports the last CPU percent when two readers share a '
+    'tick.\n\n'
+    '| Component | Version |\n|---|---|\n| forgectrl | 0.1.22 |\n'
+    '| grblHAL-glowforge | 0.1.6 |\n\n'
+    'See the [documentation](https://docs.forgefirm.org/install/updating/) '
+    'for the update steps.\n')
+MOCK_REBOOT_S = 10              # seconds the mock is 'down' after a reboot
 MOCK_FINGERPRINT = ':'.join(['%02X' % ((i * 37 + 11) & 0xff)
                              for i in range(32)])
 MOCK_HOSTNAME = 'forgefirm-b00a'    # the name a machine takes from its MAC
@@ -720,6 +739,14 @@ class Mock:
         self.t0 = time.time()
         self.version = MOCK_VERSION
         self.machine_id = 'ABC-123'
+        # The release check's last answer (the daemon keeps it and the
+        # page reads it), the dismissed release, and the reboot clock:
+        # after /system/reboot the mock answers nothing for
+        # MOCK_REBOOT_S seconds, then comes back on the release version
+        # when the next-boot slot holds it.
+        self.rel_checked = int(self.t0) - 3600
+        self.dismissed = ''
+        self.down_until = 0.0
         self.settings = dict.fromkeys(SETTINGS_KEYS, '')
         self.settings.update({'controller_mode': 'grbl',
                               'homing_mode': 'gfcloud'})
@@ -1250,7 +1277,10 @@ class Mock:
             phases = JOB_PHASES[u['kind']]
             u['phase'] = phases[min(el * len(phases) // JOB_S,
                                     len(phases) - 1)]
-            if u['kind'] != 'download':
+            if u['kind'] == 'download':
+                u['progress_bytes'] = (min(el, JOB_S) * MOCK_RELEASE_BYTES
+                                       // JOB_S)
+            else:
                 u['progress_bytes'] = min(el, JOB_S) * 25000000
             if el >= JOB_S:
                 self._job_end()
@@ -1538,8 +1568,34 @@ class Mock:
                                    {'slot': 'b', 'archive': {'version': '2.6.0'}}, J)
         return J(404, {'error': 'mock: no such endpoint'})
 
+    def release_reply(self):
+        """GET /update/release and the replies of /update/check and
+        /update/dismiss: the daemon's shape."""
+        new = self.version != MOCK_RELEASE
+        return {'available': True, 'version': MOCK_RELEASE,
+                'current': self.version, 'new': new,
+                'published': '2026-09-11T20:30:15Z',
+                'bytes': MOCK_RELEASE_BYTES, 'notes': MOCK_RELEASE_NOTES,
+                'detail': '', 'checked': self.rel_checked,
+                'dismissed': self.dismissed == MOCK_RELEASE}
+
     def handle(self, method, path, q, headers, body):
         with self.lock:
+            now = time.time()
+            if now < self.down_until:
+                return (503, {'Content-Type': 'text/plain'},
+                        b'mock: the machine is restarting')
+            if self.down_until:
+                self.down_until = 0.0
+                for k, s in self.slots['slots'].items():
+                    if s.get('next'):
+                        s['booted'] = True
+                        self.version = s.get('version') or self.version
+                    else:
+                        s['booted'] = False
+                self.slots['booted'] = self.slots['env'].get('mmcroot', '')
+                self._log('mock: back after the restart, version %s'
+                          % self.version)
             self._tick()
             return self._handle(method, path, q, headers, body)
 
@@ -1584,6 +1640,8 @@ class Mock:
                 return J(200, self.slots)
             if path == '/update/status':
                 return J(200, self.update)
+            if path == '/update/release':
+                return J(200, self.release_reply())
             # Token-gated reads: log content and the fuse identity.
             if path in ('/logs', '/logs/tail', '/fuse-identity'):
                 if not self._authorized(headers, q):
@@ -1868,11 +1926,21 @@ class Mock:
                 return J(409, {'error': 'an update job is running'})
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
-            self._log('system: reboot requested (mock, no-op)')
+            self._log('system: reboot requested (mock: down for %d s)'
+                      % MOCK_REBOOT_S)
+            self.down_until = time.time() + 1.5 + MOCK_REBOOT_S
             return J(200, {'rebooting': True})
         if path == '/update/check':
-            return J(200, {'available': True, 'version': MOCK_RELEASE,
-                           'current': self.version, 'new': True})
+            self.rel_checked = int(time.time())
+            return J(200, self.release_reply())
+        if path == '/update/dismiss':
+            v = form.get('version')
+            if v is None:
+                return J(400, {'error': 'version required (empty to undo)'})
+            if v and not re.match(r'^[A-Za-z0-9._+-]+$', v):
+                return J(400, {'error': 'version is not a release tag'})
+            self.dismissed = v
+            return J(200, self.release_reply())
         if path == '/update/download':
             return self._job_start('download', {}, J)
         if path == '/update/apply':

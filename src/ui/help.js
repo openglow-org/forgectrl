@@ -283,7 +283,8 @@ var HELP = {
     t: 'ForgeFIRM update',
     d: 'install/updating/',
     p: [
-      'Downloads are verified against the ForgeFIRM release signing key before anything can be written. Installing writes the selected slot; the running system is untouched until you set next boot and reboot.'
+      'The machine asks the release host once a day which release is published, and on Check now. A release newer than the installed version raises an alert on every tab; a development build counts as older than every release. Dismiss hides the alert for that release only.',
+      'Install and restart runs the whole update from the release dialog: the download is verified against the ForgeFIRM release signing key before anything is written, the release goes to the slot not running, that slot is selected for the next boot, and the machine restarts. The page reloads when the machine is back. The firmware that was running stays in its slot for the boot selector.'
     ]
   },
   install: {

@@ -75,6 +75,11 @@
         keep a fire extinguisher within reach.
       </div>
       <div id="locknote"></div>
+      <div id="rel-banner" class="banner" style="display: none">
+        <b>ForgeFIRM <span id="rel-banner-ver"></span> is available.</b>
+        <a href="#" onclick="openRelease(); return false;" data-nolock="1">See what is new and install</a>
+        &middot; <a href="#" onclick="dismissRelease(); return false;" data-nolock="1">Dismiss this release</a>
+      </div>
       <section id="s-status">
         <div id="gate-banner" class="banner banner-bad" style="display: none"></div>
         <div id="gfsvc-banner" class="banner" style="display: none"></div>
@@ -581,10 +586,16 @@
           <h2>ForgeFIRM update<button class="hlp" data-help="update" data-nolock="1" type="button">?</button></h2>
           <div id="updinfo"></div>
           <div class="btns">
-            <button class="btn btn-sm btn-primary" onclick="checkUpd()">Check for updates</button
-            ><button class="btn btn-sm btn-outline-secondary" id="dlbtn" style="display: none" onclick="dlUpd()">Download</button
+            <button class="btn btn-sm btn-primary" id="relbtn" style="display: none" onclick="openRelease()">Install</button
+            ><button class="btn btn-sm btn-outline-secondary" onclick="checkUpd()">Check now</button
+            ><button class="btn btn-sm btn-outline-secondary" id="relundo" style="display: none" onclick="undismissRelease()">Show the alert again</button
             ><span class="msg" id="msg-u"></span>
           </div>
+          <p class="hint">
+            The machine checks for a new release once a day and shows an alert on every tab when
+            one is newer than the installed version. The alert stays until you install the release
+            or dismiss it; a later release raises it again.
+          </p>
         </div>
         <div class="card">
           <h2>Install or restore firmware<button class="hlp" data-help="install" data-nolock="1" type="button">?</button></h2>
@@ -656,6 +667,52 @@
         ><span id="sb-msg"></span>
       </div>
     </div>
+    <div class="modal fade" id="relmodal" tabindex="-1" aria-labelledby="rel-title" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="rel-title">ForgeFIRM release</h5>
+            <button type="button" class="btn-close" id="rel-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <div id="rel-view">
+              <div class="kv"><span>Installed</span><span class="mono" id="rel-cur"></span></div>
+              <div class="kv"><span>Release</span><span class="mono" id="rel-ver"></span></div>
+              <div class="kv"><span>Published</span><span id="rel-pub"></span></div>
+              <div class="kv"><span>Download</span><span id="rel-size"></span></div>
+              <h3>What is new</h3>
+              <div class="relnotes" id="rel-notes"></div>
+              <p class="hint" id="rel-plan"></p>
+            </div>
+            <div id="rel-run" hidden>
+              <div class="relwarn">
+                <b>Do not switch the machine off.</b> The update takes a few minutes. The machine
+                restarts by itself, and this page reloads when it is back.
+              </div>
+              <ol class="relsteps" id="rel-steps">
+                <li data-step="download">Download the release</li>
+                <li data-step="verify">Verify its signature</li>
+                <li data-step="apply">Write it to the other firmware slot and verify the slot</li>
+                <li data-step="select">Select that slot for the next boot</li>
+                <li data-step="reboot">Restart the machine</li>
+                <li data-step="wait">Wait for the machine to come back</li>
+              </ol>
+              <div class="progress" role="progressbar" aria-label="update progress" aria-valuemin="0" aria-valuemax="100">
+                <div class="progress-bar" id="rel-bar" style="width: 0%"></div>
+              </div>
+              <p class="mono" id="rel-phase"></p>
+              <div class="banner banner-bad" id="rel-err" style="display: none"></div>
+            </div>
+          </div>
+          <div class="modal-footer" id="rel-foot">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="rel-dismiss" onclick="dismissRelease()">Dismiss this release</button
+            ><button type="button" class="btn btn-sm btn-outline-secondary" id="rel-later" data-bs-dismiss="modal">Not now</button
+            ><button type="button" class="btn btn-sm btn-primary" id="rel-install" onclick="relInstall()">Install and restart</button
+            ><button type="button" class="btn btn-sm btn-primary" id="rel-reload" style="display: none" onclick="location.reload()">Reload the page</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="modal fade" id="guard" tabindex="-1" aria-labelledby="guard-title" aria-hidden="true">
       <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content">
@@ -689,6 +746,7 @@
     </footer>
     <script src="vendor/bootstrap.bundle.min.js"></script>
     <script src="regions.js"></script>
+    <script src="md.js"></script>
     <script src="help.js"></script>
     <script src="forms.js"></script>
     <script src="panel.js"></script>

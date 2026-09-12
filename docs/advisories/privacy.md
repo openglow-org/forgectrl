@@ -10,7 +10,7 @@ The machine talks to these places, and to nothing else:
 
 - **Your own network.** A responder on the machine announces the panel's names and addresses on the local network so other devices can find it.
 - **Time sync.** The clock has no battery. At boot, and at intervals after that, the machine asks a public NTP pool for the time. The pool sees the machine's network address.
-- **The release check.** The machine checks for a new release only when you ask for it in the panel. The check asks the release host what is published. It does not send your version or your identity. The check follows a redirect, so the release host and the asset host both see the machine's network address. The request uses the HTTP client's own name, not ForgeFIRM.
+- **The release check.** The machine checks for a new release once a day, and when you ask for it in the panel. The check asks the release host's API what is published. It does not send your version or your identity. The release host sees the machine's network address. The request uses the HTTP client's own name, not ForgeFIRM. The panel shows an alert when a newer release is published; the machine downloads nothing until you start the install.
 - **The Glowforge service.** The machine contacts it only if you turn cloud mode on, or if you choose cloud homing for GRBL. The session and the socket name this firmware as `ForgeFIRM/<version>`. Image uploads go to a storage host the service names, with a different client name. Cloud mode also contacts the vendor status host and asks what factory version is current. The Glowforge cloud service document says the rest of what it sends.
 - **Remote logging.** The machine forwards log lines only if you set a log server in the panel. It is off by default.
 

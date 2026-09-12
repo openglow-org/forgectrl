@@ -28,7 +28,7 @@ endforeach()
 
 if(PAGE STREQUAL "index")
   set(CSS_FILES vendor/bootstrap.min.css theme.css)
-  set(JS_FILES vendor/bootstrap.bundle.min.js regions.js help.js forms.js panel.js)
+  set(JS_FILES vendor/bootstrap.bundle.min.js regions.js md.js help.js forms.js panel.js)
 elseif(PAGE STREQUAL "wizard")
   set(CSS_FILES vendor/bootstrap.min.css theme.css wizard.css)
   set(JS_FILES vendor/bootstrap.bundle.min.js regions.js md.js wizard.js)

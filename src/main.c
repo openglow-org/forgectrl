@@ -2575,6 +2575,8 @@ int main(int argc, char **argv)
         { "GET",  "/system/licenses/manifest", cb_licenses_manifest, NULL, 1 },
         { "POST", "/system/camera-key",    cb_camkey_rotate,    NULL, 0 },
         { "POST", "/update/check",         cb_update_check,     NULL, 0 },
+        { "GET",  "/update/release",       cb_update_release,   NULL, 0 },
+        { "POST", "/update/dismiss",       cb_update_dismiss,   NULL, 0 },
         { "POST", "/update/download",      cb_update_download,  NULL, 0 },
         { "POST", "/update/apply",         cb_update_apply,     NULL, 0 },
         { "POST", "/update/upload",        cb_update_upload,    NULL, 0 },
