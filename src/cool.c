@@ -586,11 +586,11 @@ static void safing_write(const char *attr, const char *val)
               strerror(errno));
 }
 
-static void wr_attr_long(const char *attr, long val)
+static int wr_attr_long(const char *attr, long val)
 {
     char v[24];
     snprintf(v, sizeof(v), "%ld", val);
-    wr_attr(attr, v);
+    return wr_attr(attr, v);
 }
 
 static long rd_long(const char *attr)
@@ -648,12 +648,76 @@ static void heater_set_pct(uint32_t pct)
     wr_attr_long("thermal/heater_pwm", (long)pct * 65535 / 100);
 }
 
-/* Every air-assist write goes through here: the coolant readings'
- * correction follows the duty the engine last commanded. */
+/* The three fans the engine drives, every write to them read back. The
+ * head's air-assist register and the two thermal PWMs report the duty in
+ * force, so a write the bus dropped, or a value the device did not take,
+ * is caught here, tried again at once, and named when the tries run out.
+ * Without this a lost write left the engine believing its command while
+ * the fan sat at the idle duty it had, and the fan was then judged
+ * against its floor and held the job as a slow fan. fan_cmd is the duty
+ * last commanded on each, what the tick's readback is held to. */
+enum { Fx_AirAssist = 0, Fx_Exhaust = 1, Fx_Intake = 2 };
+static const char *const fan_attr[3] = {
+    "head/air_assist_pwm", "thermal/exhaust_pwm", "thermal/intake_pwm" };
+static long fan_cmd[3] = {-1, -1, -1};
+#define FAN_WRITE_TRIES 3
+
+static int fan_write(int ix, long duty)
+{
+    fan_cmd[ix] = duty;
+    if (ix == Fx_AirAssist)
+        aa_cmd = duty;                  /* the coolant readings' correction
+                                         * follows the duty commanded */
+    long back = -1;
+    for (int t = 1; t <= FAN_WRITE_TRIES; t++) {
+        int wr = wr_attr_long(fan_attr[ix], duty);
+        back = rd_long(fan_attr[ix]);
+        if (wr == 0 && back == duty) {
+            if (t > 1)
+                fflog(LOG_INFO, "cool: %s took %ld on try %d",
+                      fan_attr[ix], duty, t);
+            return 0;
+        }
+    }
+    fflog(LOG_WARNING, "cool: %s did not take %ld: it reads %ld after %d "
+                       "tries", fan_attr[ix], duty, back, FAN_WRITE_TRIES);
+    return -1;
+}
+
 static void aa_write(long duty)
 {
-    aa_cmd = duty;
-    wr_attr_long("head/air_assist_pwm", duty);
+    fan_write(Fx_AirAssist, duty);
+}
+
+/* The duties in force, read back once a tick: a value a device lost
+ * since it was written (a reset, a dropped transaction) is put back and
+ * named, so a fan is never judged against a duty it was not given. A
+ * fan whose duty was raised back gets its spin-up grace again, up to a
+ * few times a session: a device that keeps losing its value is judged
+ * at the tach like any other, not excused forever. fan_back is what each
+ * read this tick, for the fault line. */
+#define FAN_LOST_GRACE_MAX 3
+static long fan_back[3] = {-1, -1, -1};
+static int  fan_lost[3];                /* rewrites this session */
+
+static void fans_verify(double now)
+{
+    for (int i = 0; i < 3; i++) {
+        long back = rd_long(fan_attr[i]);
+        fan_back[i] = back;
+        if (fan_cmd[i] < 0 || back < 0 || back == fan_cmd[i])
+            continue;
+        long cmd = fan_cmd[i];
+        int ok = fan_write(i, cmd) == 0;
+        fan_lost[i]++;
+        fflog(LOG_WARNING, "cool: %s read %ld with %ld commanded: %s",
+              fan_attr[i], back, cmd,
+              ok ? "put back" : "the rewrite did not take");
+        if (ok && cmd > back && cool_state == Cool_Run &&
+            fan_lost[i] <= FAN_LOST_GRACE_MAX &&
+            fan_grace_until < now + (double)fan_grace_s)
+            fan_grace_until = now + (double)fan_grace_s;
+    }
 }
 
 long cool_coolant_offset_counts(void)
@@ -674,8 +738,8 @@ long cool_coolant_offset_counts(void)
 static void fans_quiet(void)
 {
     aa_write(0);
-    wr_attr_long("thermal/exhaust_pwm", 0);
-    wr_attr_long("thermal/intake_pwm", 0);
+    fan_write(Fx_Exhaust, 0);
+    fan_write(Fx_Intake, 0);
     wr_attr("head/purge_air", "0");
 }
 
@@ -698,8 +762,8 @@ static void fans_idle(void)
         return;
     }
     aa_write(AIR_ASSIST_IDLE);
-    wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
-    wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+    fan_write(Fx_Exhaust, EXHAUST_IDLE);
+    fan_write(Fx_Intake, INTAKE_IDLE);
     start_cool = 0;
 }
 
@@ -746,8 +810,8 @@ static void fans_run(void)
         return;
     }
     aa_write(cmd_duty[0]);
-    wr_attr_long("thermal/exhaust_pwm", cmd_duty[1]);
-    wr_attr_long("thermal/intake_pwm", cmd_duty[2]);
+    fan_write(Fx_Exhaust, cmd_duty[1]);
+    fan_write(Fx_Intake, cmd_duty[2]);
 }
 
 static void fans_cool(void)
@@ -757,8 +821,8 @@ static void fans_cool(void)
         return;
     }
     aa_write(AIR_ASSIST_IDLE);
-    wr_attr_long("thermal/exhaust_pwm", EXHAUST_COOL);
-    wr_attr_long("thermal/intake_pwm", INTAKE_COOL);
+    fan_write(Fx_Exhaust, EXHAUST_COOL);
+    fan_write(Fx_Intake, INTAKE_COOL);
 }
 
 /* Reapply the fan profile the current phase calls for (used when an
@@ -1249,8 +1313,8 @@ void cool_diag_heater_pct(double pct)
 void cool_diag_fans_run(void)
 {
     if (diag_guard("diag fan write") == 0) {
-        wr_attr_long("thermal/exhaust_pwm", EXHAUST_RUN);
-        wr_attr_long("thermal/intake_pwm", INTAKE_RUN);
+        fan_write(Fx_Exhaust, EXHAUST_RUN);
+        fan_write(Fx_Intake, INTAKE_RUN);
         aa_write(AIR_ASSIST_RUN);
         wr_attr("head/purge_air", "1");
     }
@@ -1266,8 +1330,8 @@ void cool_diag_fans_run(void)
 void cool_diag_fans_idle(void)
 {
     if (diag_guard("diag fan write") == 0) {
-        wr_attr_long("thermal/exhaust_pwm", EXHAUST_IDLE);
-        wr_attr_long("thermal/intake_pwm", INTAKE_IDLE);
+        fan_write(Fx_Exhaust, EXHAUST_IDLE);
+        fan_write(Fx_Intake, INTAKE_IDLE);
         aa_write(AIR_ASSIST_IDLE);
         wr_attr("head/purge_air", "1");
     }
@@ -1438,6 +1502,7 @@ static void flood_apply(int on, double now)
         airflow_alarm = 0;
         fans_up = 0;
         fans_up_at = -1.0;
+        memset(fan_lost, 0, sizeof(fan_lost));
         fan_would_warned = 0;
         memset(fan_margin_noted, 0, sizeof(fan_margin_noted));
         critical_alarm = 0;
@@ -1935,6 +2000,7 @@ static void engine_tick(void)
      * needs around it. An off gate (floor 0) still measures and names
      * the first reading that would have tripped the shipped default. */
     {
+        fans_verify(now);
         fan_reading[Fan_Exhaust] = airflow_rpm(rd_long("thermal/tach_exhaust"), 1e9, 2);
         fan_reading[Fan_Intake1] = airflow_rpm(rd_long("thermal/tach_intake_1"), 1e9, 2);
         fan_reading[Fan_Intake2] = airflow_rpm(rd_long("thermal/tach_intake_2"), 1e9, 2);
@@ -1975,12 +2041,19 @@ static void engine_tick(void)
                 }
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;
-                    char msg[96];
+                    /* The duty commanded and the duty in force beside
+                     * the reading: a fan that never got its duty reads
+                     * as that, not as a slow fan. */
+                    char duty[40] = "";
+                    if (dx >= 0)
+                        snprintf(duty, sizeof(duty), " (duty %ld, reads %ld)",
+                                 fan_cmd[dx], fan_back[dx]);
+                    char msg[COOL_REASON_MAX];
                     snprintf(msg, sizeof(msg),
-                             "AIRFLOW: %s %.0f under the %.0f floor for %d s - "
+                             "AIRFLOW: %s %.0f under the %.0f floor for %d s%s - "
                              "hold, no resume this job",
                              fan_name[i], fan_reading[i], fan_floor[i],
-                             AIRFLOW_DEBOUNCE_TICKS);
+                             AIRFLOW_DEBOUNCE_TICKS, duty);
                     warn(msg);
                 }
                 if (st == Air_Off && !in_grace && !fan_would_warned &&

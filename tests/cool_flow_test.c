@@ -36,6 +36,16 @@
 #define GF_SYSFS    "cool-flow-test/sys/"
 #define VERDICT_DIR "cool-flow-test/run"
 #define clock_gettime fake_clock_gettime
+/* The fake tree is plain files: a write must truncate, as a sysfs store
+ * replaces, or a short duty leaves the tail of a longer one for the
+ * engine's readback to find. */
+#include <fcntl.h>
+#include <unistd.h>
+static int fake_open(const char *path, int flags, ...)
+{
+    return openat(AT_FDCWD, path, (flags & O_WRONLY) ? (flags | O_TRUNC) : flags, 0644);
+}
+#define open fake_open
 
 #include "../src/cool.c"
 
@@ -163,6 +173,10 @@ static void make_tree(void)
     put_long("head/purge_air_current", 629);
     put_long("thermal/heater_pwm", 0);
     put_long("pic/hv_current", 0);
+    /* The fan duties the engine writes and reads back. */
+    put_long("head/air_assist_pwm", 204);
+    put_long("thermal/exhaust_pwm", 0);
+    put_long("thermal/intake_pwm", 0);
 }
 
 /* --- the loop model --------------------------------------------------- */

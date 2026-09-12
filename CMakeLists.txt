@@ -198,6 +198,15 @@ add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c s
 target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_flow_test m pthread)
 
+# Host unit test for the verified fan writes: every duty read back and
+# retried, a duty a device lost put back by the tick with the spin-up
+# grace, and the airflow fault naming the duty commanded and the duty in
+# force. Includes the engine source against a fake sysfs tree whose writes
+# can be dropped or refused; CI runs it after the build.
+add_executable(cool_fanwrite_test tests/cool_fanwrite_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c)
+target_compile_options(cool_fanwrite_test PRIVATE -Wall -Wextra)
+target_link_libraries(cool_fanwrite_test m pthread)
+
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs
 # it after the build.
