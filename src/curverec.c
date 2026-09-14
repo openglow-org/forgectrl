@@ -394,7 +394,7 @@ int curverec_start(char *err, size_t elen)
         snprintf(err, elen, "out of memory");
         return -1;
     }
-    if (jobstream_sender_connected() == 1) {
+    if (jobstream_sender_blocks()) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "a sender is connected to the machine - close it "
                  "first (the recorder streams the ladder itself)");

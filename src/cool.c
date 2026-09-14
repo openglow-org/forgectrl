@@ -106,7 +106,8 @@
  *   pause tier (verdict FLAME, hold, fire blocked; released once the
  *   reading is back under for five ticks) - at least three of the four
  *   channels lit well past the lamp. Over its critical threshold is
- *   the fail tier: motion stopped, latch locked, verdict FIRE with
+ *   the fail tier: motion stopped, latch locked, the controller ended
+ *   through the supervisor (cool_fail_tier_stop), verdict FIRE with
  *   hold until the next run session, smoke airflow held. Zero is a
  *   tier off; the thresholds sit above a fully lit lid lamp by
  *   construction, so the lamp never trips them - and a candle-sized
@@ -469,6 +470,8 @@ static int forced_cool = 0;         /* over-temp overrode the phase fans */
 static int flood_on = 0;            /* effective run window */
 static int silent_warned = 0;
 static int silent_safed = 0;        /* hang dead-man fired this episode */
+
+void (*cool_fail_tier_stop)(const char *why) = NULL;
 
 /* Physical-evidence witnesses. */
 static float fire_q1_alert = 275.0f;    /* the factory's header defaults */
@@ -1853,6 +1856,11 @@ static void engine_tick(void)
             safing_write("cnc/laser_latch", "1");
             fans_run();     /* full smoke-clear airflow */
             warn(msg);
+            /* The kernel writes come first and stand on their own; the
+             * controller is ended as well, so no run start can relight
+             * what was just locked and the sender sees the job end. */
+            if (cool_fail_tier_stop)
+                cool_fail_tier_stop("lid IR fire signal");
         } else if (!crit && ir_over_ticks >= FIRE_IR_TICKS && !flame_alert
                    && !fire_alarm) {
             flame_alert = 1;
@@ -1953,6 +1961,8 @@ static void engine_tick(void)
                     safing_write("cnc/stop", "1");
                     safing_write("cnc/laser_latch", "1");
                     warn(msg);
+                    if (cool_fail_tier_stop)
+                        cool_fail_tier_stop("head crash signal");
                     break;
                 case CrashEv_Alert:
                     snprintf(msg, sizeof(msg),
@@ -2579,10 +2589,12 @@ static void engine_tick(void)
         }
     }
 
-    /* Publish. Enforcement is the controller's: hold asks for a feed
-     * hold, resume_ok (= !hold) signals recovery, fire_ok gates the
-     * laser. fire_ok additionally requires a live report: an armed
-     * window the engine cannot see must not fire. */
+    /* Publish. Enforcement of the pause tier is the controller's: hold
+     * asks for a feed hold, resume_ok (= !hold) signals recovery,
+     * fire_ok gates the laser. The fail tiers do not wait for it: their
+     * kernel writes have landed and the controller is being ended.
+     * fire_ok additionally requires a live report: an armed window the
+     * engine cannot see must not fire. */
     int warming = cool_state == Cool_Warmup;
     const char *verdict = fire_alarm ? "FIRE"
                         : crash_w.alarm ? "CRASH"

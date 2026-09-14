@@ -203,9 +203,17 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
         snprintf(detail, dlen, "head accelerometer not found");
         return -1;
     }
-    if (rd_attr("cnc/state", st, sizeof(st)) != 0 || strcmp(st, "idle")) {
-        snprintf(detail, dlen, "kernel not idle (%s)", st);
+    if (rd_attr("cnc/state", st, sizeof(st)) != 0) {
+        snprintf(detail, dlen, "kernel state unreadable");
         return -1;
+    }
+    if (strcmp(st, "idle")) {
+        /* The last program is still playing (a controller that died
+         * mid-move, a ramp): the probe waits for the kernel rather than
+         * writing over it, and rather than skipping and starting a
+         * controller unverified. */
+        snprintf(detail, dlen, "kernel not idle (%s) - the probe waits", st);
+        return -3;
     }
     char why[64];
     if (liveness_enclosure(why, sizeof(why)) != 0) {

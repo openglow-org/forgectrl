@@ -117,13 +117,20 @@ int cool_status_json(char *buf, size_t len);
  * arrived (the supervisor uses this to see a controller come alive). */
 double cool_report_age(void);
 
-/* The supervisor stopped the controller on purpose: its last report is
- * forgotten, so the engine has no reporter until the next controller
- * speaks. A deliberate stop is a death the supervisor covers, not a
- * hang; without this the hang dead-man would count the seconds since
- * the last report and stop the supervisor's own liveness probe, the one
- * program that plays with no controller alive. */
+/* The supervisor stopped the controller on purpose, or reaped one that
+ * died: its last report is forgotten, so the engine has no reporter
+ * until the next controller speaks. A stop and a death are the
+ * supervisor's, not a hang; without this the hang dead-man would count
+ * the seconds since the last report and stop the supervisor's own
+ * liveness probe, the one program that plays with no controller alive. */
 void cool_controller_stopped(void);
+
+/* The fail tiers (FIRE, CRASH) end the controller: after the engine's
+ * own kernel writes (motion stopped, latch locked) this is called with
+ * the reason, once per episode. main.c points it at the supervisor's
+ * restart; a host test counts the calls. NULL means the kernel writes
+ * stand alone. */
+extern void (*cool_fail_tier_stop)(const char *why);
 
 /* The counts the air-assist fan's ground shift adds to a raw coolant
  * thermistor reading at the duty the engine last commanded (more counts

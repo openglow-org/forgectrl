@@ -979,7 +979,7 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
 /* Stream the program; the run's outcome in `run`. */
 static int stream(gen_t *g, jobstream_run_t *run, double end_dark_s, char *err, size_t elen)
 {
-    if (jobstream_sender_connected() == 1) {
+    if (jobstream_sender_blocks()) {
         snprintf(err, elen, "a sender is connected to the machine");
         return -1;
     }

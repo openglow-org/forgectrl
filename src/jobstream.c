@@ -59,6 +59,11 @@ int jobstream_sender_connected(void)
     return -1;
 }
 
+int jobstream_sender_blocks(void)
+{
+    return jobstream_sender_connected() != 0;
+}
+
 static long rd_long(const char *attr, long fallback)
 {
     char path[192], text[32];

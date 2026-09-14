@@ -40,6 +40,8 @@ jobs:
         run: ./build/lid_gate_test
       - name: Motion gate enclosure read
         run: ./build/enclosure_wait_test
+      - name: Controller-mode supervisor
+        run: ./build/super_test
       - name: Capture frame-health ladder
         run: ./build/camhealth_test
       - name: Gate settings table

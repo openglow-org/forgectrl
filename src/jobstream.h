@@ -70,6 +70,10 @@ typedef struct {
 /* Is a sender on the Grbl socket (from the controller's published
  * state)? 1, 0, or -1 when the state is unreadable. */
 int jobstream_sender_connected(void);
+/* Whether a run of the daemon's own must be refused for a sender: a
+ * connected one, and a state that cannot be read - an unreadable state
+ * is no license to displace whoever holds the socket. */
+int jobstream_sender_blocks(void);
 
 /* Run a program. 0 when every line was acknowledged and the end
  * condition held; -1 with the reason in err (the controller's error or

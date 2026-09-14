@@ -168,6 +168,17 @@ target_link_libraries(lid_gate_test m pthread)
 add_executable(enclosure_wait_test tests/enclosure_wait_test.c src/liveness.c)
 target_compile_options(enclosure_wait_test PRIVATE -Wall -Wextra)
 
+# Host unit test for the controller-mode supervisor: one lifecycle pass
+# at a time against a fake sysfs tree, a fake clock and fakes of the
+# process calls. Controller death as a signal, the homing runner ended
+# before a respawn, the respawn's wait for the kernel, the enclosure
+# check before every spawn, the probe's waits and skips, the stop lever
+# reaching a probe, the safing write's retries, the broker failing
+# closed, the engine's fail-tier restart. Includes super.c directly.
+add_executable(super_test tests/super_test.c)
+target_compile_options(super_test PRIVATE -Wall -Wextra)
+target_link_libraries(super_test pthread)
+
 # Host unit test for the raw-frame front end: the 10-bit -> 8-bit
 # narrowing the 8 MP (OV8856) capture path depends on, and the Bayer
 # phase surviving it. CI runs it after the build.

@@ -32,10 +32,22 @@
  *                           and asked for again once the sensors read
  *   J. blind under the floor: COLD keeps its state through SENSOR
  *   K. blind in a warm-up:  the heater goes off and comes back
+ *   M. the hang dead-man:   silence while armed stops and locks once;
+ *                           silence while the kernel runs repeats every tick
+ *   N. the fail tiers:      FIRE and CRASH end the controller through the
+ *                           supervisor's hook, once, after the kernel writes
+ *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
  */
 #define GF_SYSFS    "cool-flow-test/sys/"
 #define VERDICT_DIR "cool-flow-test/run"
 #define clock_gettime fake_clock_gettime
+/* The head accelerometer's interrupt generators, faked: the engine's
+   calls land here (the real ones open an i2c bus this host lacks). */
+#define crash_hw_open   fake_crash_open
+#define crash_hw_arm    fake_crash_arm
+#define crash_hw_poll   fake_crash_poll
+#define crash_hw_disarm fake_crash_disarm
+#define crash_hw_close  fake_crash_close
 /* The fake tree is plain files: a write must truncate, as a sysfs store
  * replaces, or a short duty leaves the tail of a longer one for the
  * engine's readback to find. */
@@ -78,6 +90,8 @@ int settings_get(const char *key, char *val, size_t len)
 
 static char last_log[256];
 
+static char logs[8192];             /* every line since a case cleared it */
+
 void fflog(int prio, const char *fmt, ...)
 {
     (void)prio;
@@ -85,11 +99,38 @@ void fflog(int prio, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
     va_end(ap);
+    size_t n = strlen(logs);
+    if (n + strlen(last_log) + 2 < sizeof(logs))
+        snprintf(logs + n, sizeof(logs) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
 }
 
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
+
+/* The faked crash watch hardware: armed on request, and the next poll
+   reports what the test put in src1/src2. */
+static int crash_armed_fake;
+static unsigned crash_src1, crash_src2;
+int fake_crash_open(void) { return 0; }
+int fake_crash_arm(int x, int y, int abort) { (void)x; (void)y; (void)abort; crash_armed_fake = 1; return 0; }
+int fake_crash_poll(unsigned *s1, unsigned *s2) { *s1 = crash_src1; *s2 = crash_src2; return 0; }
+void fake_crash_disarm(void) { crash_armed_fake = 0; }
+void fake_crash_close(void) { }
+
+/* The supervisor's stop, counted: what the kernel attributes read at
+   the moment of the call is the proof the writes came first. */
+static int stops;
+static char stop_why[64];
+static long stop_seen_stop, stop_seen_latch;
+static long get_long(const char *attr);
+static void fake_stop(const char *why)
+{
+    stops++;
+    snprintf(stop_why, sizeof(stop_why), "%s", why);
+    stop_seen_stop = get_long("cnc/stop");
+    stop_seen_latch = get_long("cnc/laser_latch");
+}
 int machine_is_idle(void) { return 1; }
 static char last_flag[160];
 int setup_flag(const char *id, const char *level, const char *reason)
@@ -574,6 +615,117 @@ int main(void)
     close_session(&L);
 
     test_ack_waits_for_fans(&L);
+
+    /* The safing attributes the engine writes: present in the tree as
+       "0" so a write can be seen, and put back to "0" between ticks so
+       a repeat can be told from a single write. */
+    printf("M. the hang dead-man: once while armed, every tick while the kernel runs\n");
+    open_session(&L);
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    logs[0] = '\0';
+    fake_now += 6.0;                    /* past REPORT_TIMEOUT_S with no report */
+    loop_tick(&L);
+    engine_tick();
+    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
+          "silence while armed: motion stopped and the latch locked");
+    CHECK(strstr(logs, "silent while armed") != NULL, "and the engine says so");
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    fake_now += 1.0;
+    loop_tick(&L);
+    engine_tick();
+    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch") == 0,
+          "the armed case writes once per silence");
+    put("cnc/state", "running\n");
+    for (int i = 0; i < 3; i++) {
+        put("cnc/stop", "0\n");
+        put("cnc/laser_latch", "0\n");
+        fake_now += 1.0;
+        loop_tick(&L);
+        engine_tick();
+        CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
+              "the kernel still running: the pair is written again this tick");
+    }
+    put("cnc/state", "idle\n");
+    close_session(&L);
+
+    printf("N. the fail tiers end the controller through the supervisor, once\n");
+    cool_fail_tier_stop = fake_stop;
+    stops = 0;
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 100);
+    }
+    open_session(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && stops == 0, "a lit lid at its baseline: OK, no stop");
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 4000);                       /* every quartile past critical */
+    }
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "FIRE"), "the lid IR past its critical threshold: FIRE");
+    CHECK(stops == 1 && !strcmp(stop_why, "lid IR fire signal"),
+          "FIRE ends the controller through the hook, once, naming the signal");
+    CHECK(stop_seen_stop == 1 && stop_seen_latch == 1,
+          "the kernel writes had landed when the hook was called");
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(stops == 1 && !strcmp(pub_verdict, "FIRE"), "the tier stands, the hook is not called again");
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 100);
+    }
+    close_session(&L);
+    stops = 0;
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    crash_src1 = crash_src2 = 0;
+    open_session(&L);
+    CHECK(crash_armed_fake && stops == 0, "the crash watch is armed with the session, no stop");
+    crash_src2 = 0x40 | 0x02;                       /* IG2: the abort generator, X */
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "CRASH"), "the abort generator: CRASH");
+    CHECK(stops == 1 && !strcmp(stop_why, "head crash signal"),
+          "CRASH ends the controller through the hook, once, naming the signal");
+    CHECK(stop_seen_stop == 1 && stop_seen_latch == 1,
+          "the kernel writes had landed when the hook was called");
+    run_tick(&L);
+    CHECK(stops == 1, "the tier stands, the hook is not called again");
+    crash_src2 = 0;
+    close_session(&L);
+
+    printf("O. the pause tiers hold the job and call nothing\n");
+    stops = 0;
+    open_session(&L);
+    crash_src1 = 0x40 | 0x08;                       /* IG1: the alert generator, Y */
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "BUMP") && stops == 0, "the alert generator: BUMP, no stop");
+    crash_src1 = 0;
+    for (int i = 0; i < 6; i++)
+        run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && stops == 0, "quiet polls release the bump, no stop");
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 500);                        /* past alert, under critical */
+    }
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "FLAME") && stops == 0, "the lid IR over its alert threshold: FLAME, no stop");
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 100);
+    }
+    close_session(&L);
+    cool_fail_tier_stop = NULL;
 
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the flow check reads means, takes the tube's share off, "

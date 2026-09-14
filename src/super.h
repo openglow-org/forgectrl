@@ -29,6 +29,14 @@ int super_mode_switch(const char *mode, char *err, size_t elen);
  * controller that comes back is the selected mode's - whichever that is. */
 int super_controller_stop(void);
 void super_controller_start(void);
+/* The cooling engine's fail tier (a fire signal, a head crash): the
+ * controller is stopped the deliberate way (the safing pair before the
+ * signal) and started again at once by the lifecycle thread. Never
+ * blocks; safe from any thread. */
+void super_controller_restart(const char *why);
+/* SIGCHLD wakes the lifecycle thread (super_init installs it; a host
+ * test installs it alone). */
+void super_sigchld_init(void);
 
 /* {"mode":"grbl","controller":"running|stopped|standby|waiting|gated|motion-fault",
  *  "pid":N,"motion":"verified|unverified|fault","gated":bool,"local":bool,

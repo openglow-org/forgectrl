@@ -13,10 +13,12 @@
  * PHYSICALLY happened via the head accelerometer. Requires the kernel
  * idle and no motion controller running (the supervisor guarantees
  * both). Returns 1 = motion confirmed, 0 = the gantry did not move
- * (wedged stepper drivers), -1 = probe could not run, -2 = a lid or the
- * interlock is open (or the switches cannot be read): the gantry was
- * not moved. detail gets a short human-readable result line either
- * way. */
+ * (wedged stepper drivers), -1 = probe could not run (no head
+ * accelerometer, a write failed), -2 = a lid or the interlock is open
+ * (or the switches cannot be read), -3 = the kernel is still playing
+ * a program: with -2 and -3 the gantry was not moved and the caller
+ * waits and asks again. detail gets a short human-readable result
+ * line either way. */
 int liveness_probe(int pulse_fd, char *detail, size_t dlen);
 /* The enclosure as the probe sees it: 0 = closed (the gantry may move),
  * 1 = a lid or the interlock is open, -1 = the switch device cannot be

@@ -274,14 +274,17 @@ static void test_sender_check(void)
     snprintf(path, sizeof(path), "%s/grbl.state", dir);
     unlink(path);
     CHECK(jobstream_sender_connected() == -1, "no file reads as known");
+    CHECK(jobstream_sender_blocks(), "an unreadable state blocks a run (it is no license to displace a sender)");
     FILE *f = fopen(path, "w");
     fprintf(f, "{\"sender\":{\"connected\":true,\"generation\":3}}\n");
     fclose(f);
     CHECK(jobstream_sender_connected() == 1, "connected not read");
+    CHECK(jobstream_sender_blocks(), "a connected sender blocks a run");
     f = fopen(path, "w");
     fprintf(f, "{\"sender\":{\"connected\":false}}\n");
     fclose(f);
     CHECK(jobstream_sender_connected() == 0, "disconnected not read");
+    CHECK(!jobstream_sender_blocks(), "no sender: a run may go");
 }
 
 int main(void)

@@ -2518,6 +2518,7 @@ int main(int argc, char **argv)
     cam_engine_init();
     curverec_init();
     cool_init();
+    cool_fail_tier_stop = super_controller_restart;
     super_init();
     diag_init();            /* its marker recovery drives the supervisor: after it */
     wizdark_init();

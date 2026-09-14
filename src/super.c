@@ -9,7 +9,8 @@
  * at a time, spawned as a direct child of this daemon. The parent-child
  * relationship is load-bearing: it is how the pulse-device broker hands
  * the controller its fd at spawn, and how a controller death is
- * detected the moment it happens.
+ * detected the moment it happens: SIGCHLD wakes the lifecycle thread,
+ * which safes the machine within milliseconds of the exit.
  *
  * One thread owns the whole lifecycle (spawn, reap, respawn, stop) and
  * everything else talks to it through a small request mailbox - there
@@ -18,7 +19,15 @@
  * SIGKILL escalation - safes the machine (cnc/stop + laser latch):
  * under the broker a child exit is not a final close of the pulse
  * device, so these writes are the safing mechanism. Unexpected deaths
- * additionally respawn with backoff.
+ * additionally respawn with backoff, once the homing runner the
+ * controller may have left behind is gone and the kernel has finished
+ * what it was playing. The cooling engine's fail tiers (a fire signal,
+ * a head crash) end the controller through the same stop path, and the
+ * loop respawns it.
+ *
+ * The enclosure check (the lid and the interlock closed, the switches
+ * readable) runs before every spawn, respawns included; the motion
+ * probe runs once per broker hold.
  *
  * The mode-switch sequence (POST /mode) is idle-gated: stop the active
  * controller, persist controller_mode, start the other, wait for its
@@ -49,11 +58,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -65,7 +77,14 @@
 /* The GRBL controller's settings store (the $-settings), inside the
  * data directory. */
 #define GRBL_NVS_FILE "EEPROM-glowforge.DAT"
+/* The sysfs tree and the pulse device: the host unit test points both
+ * at a directory of plain files. */
+#ifndef GF_SYSFS
+#define GF_SYSFS "/sys/glowforge/"
+#endif
+#ifndef PULSE_DEV
 #define PULSE_DEV  "/dev/glowforge"
+#endif
 #define HOMED_ANCHOR "/run/grblhal.homed"
 
 #define STOP_TERM_WAIT_S   5      /* SIGTERM grace before SIGKILL */
@@ -73,6 +92,12 @@
 #define RESPAWN_MAX_S      30
 #define HEALTHY_UPTIME_S   60     /* uptime that resets the backoff */
 #define REPORT_WAIT_S      15     /* mode switch: first /cool/state */
+#define LOOP_TICK_MS       200    /* the lifecycle pass, when nothing wakes it */
+#define RUNNER_TERM_WAIT_S 5      /* the homing runner's SIGTERM grace */
+#define RESPAWN_IDLE_WAIT_S 10    /* a respawn waits this long for the kernel */
+#define BROKER_RETRY_S     2      /* the broker open is tried again after this */
+#define WR_ATTR_TRIES      3      /* a safing write is tried this often... */
+#define WR_ATTR_RETRY_US   10000  /* ...this far apart */
 
 typedef enum { Ctl_None = 0, Ctl_Grbl, Ctl_Cloud } ctl_t;
 
@@ -95,14 +120,29 @@ static int gated = 0;              /* the setup gate is closed (under mu) */
 static char gate_why[256];
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
+static int broker_warned = 0;      /* the broker's refusal is said once per episode */
 static int probed = 0;             /* liveness gate passed since broker open */
 static int probe_skipped = 0;      /* ...but the probe itself could not run */
 static int motion_fault = 0;       /* probe failed after recovery - no spawn */
+static int probing = 0;            /* a probe sequence is in flight (under mu) */
+static int probe_abort = 0;        /* ...and the stop lever asked it to end */
 static int standby_takeover = 0;   /* unmanaged controller found: retake at idle */
 static int enclosure_wait = 0;     /* the gate waits for the lid or the interlock */
 static char wait_why[96];          /* ...and this is what is open */
+static int runner_check = 0;       /* a GRBL reap: look for its homing runner */
+static int respawn_wait_idle = 0;  /* the respawn waits for the kernel to finish */
+static double died_at = 0.0;       /* ...counted from this unexpected death */
+static int restart_pending = 0;    /* the engine asked for a stop and a respawn */
+static int chld_efd = -1;          /* SIGCHLD lands here; the loop waits on it */
 
-static void wr_attr(const char *attr, const char *val);
+static int wr_attr(const char *attr, const char *val);
+
+static double wall_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
 
 /* Stop an unmanaged (legacy- or orphan-started) controller the legacy
  * way so the supervisor can take over. Called with mu NOT held. */
@@ -114,14 +154,66 @@ static void takeover_unmanaged(void)
     (void)!system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
     (void)!system("pkill -x grblHAL_glowfor 2>/dev/null");
     (void)!system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
+    (void)!system("pkill -x gfhome.py 2>/dev/null");
     sleep(1);
 }
 
-static double wall_s(void)
+/* The lifecycle thread's wake: SIGCHLD (a controller exit) and the
+ * requests other threads post. The handler may only write. */
+static void on_sigchld(int sig)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+    (void)sig;
+    uint64_t one = 1;
+    if (chld_efd >= 0)
+        (void)!write(chld_efd, &one, sizeof(one));
+}
+
+static void wake(void)
+{
+    on_sigchld(0);
+}
+
+/* One pass's wait: the tick, or sooner when a child exits or a
+ * request lands. */
+static void loop_wait(int ms)
+{
+    if (chld_efd < 0) {
+        usleep((useconds_t)ms * 1000);
+        return;
+    }
+    struct pollfd p = { .fd = chld_efd, .events = POLLIN };
+    if (poll(&p, 1, ms) > 0) {
+        uint64_t n;
+        (void)!read(chld_efd, &n, sizeof(n));
+    }
+}
+
+/* The GRBL controller's homing runner (gfhome.py) runs in its own
+ * process group and inherits the pulse fd: a controller that dies
+ * during $H leaves it alive, with the ring writable. It is gone before
+ * anything else may write the ring. Called with mu NOT held. */
+static int runner_running(void)
+{
+    return system("pgrep -x gfhome.py >/dev/null 2>&1") == 0;
+}
+
+static void runner_reap(void)
+{
+    if (!runner_running())
+        return;
+    fflog(LOG_WARNING, "super: the homing runner outlived its controller - "
+                       "stopping it");
+    (void)!system("pkill -TERM -x gfhome.py 2>/dev/null");
+    double deadline = wall_s() + RUNNER_TERM_WAIT_S;
+    while (runner_running() && wall_s() < deadline)
+        usleep(100 * 1000);
+    if (runner_running()) {
+        fflog(LOG_WARNING, "super: escalating the homing runner to SIGKILL");
+        (void)!system("pkill -KILL -x gfhome.py 2>/dev/null");
+        deadline = wall_s() + 1.0;
+        while (runner_running() && wall_s() < deadline)
+            usleep(100 * 1000);
+    }
 }
 
 /* The pulse-device broker: one open for the daemon's lifetime, handed
@@ -145,13 +237,29 @@ static void broker_open_locked(void)
         if (broker_fd < 0)
             usleep(100 * 1000);
     }
+    /* No broker, no controller: a controller that opens the device
+     * itself settles the rail on its own open (the one path that cycles
+     * the 40 V), and a description without the lock has no dead-man.
+     * The loop tries again; the refusal is said once per episode. */
     if (broker_fd < 0) {
-        fflog(LOG_ERR, "super: cannot open " PULSE_DEV
-                       " - controllers will self-open (no broker)");
+        if (!broker_warned)
+            fflog(LOG_CRIT, "super: cannot open " PULSE_DEV ": %s - no "
+                            "controller until the broker holds it",
+                  strerror(errno));
+        broker_warned = 1;
         return;
     }
-    if (flock(broker_fd, LOCK_EX) != 0)
-        fflog(LOG_ERR, "super: flock on " PULSE_DEV " failed");
+    if (flock(broker_fd, LOCK_EX) != 0) {
+        if (!broker_warned)
+            fflog(LOG_CRIT, "super: flock on " PULSE_DEV " failed: %s - the "
+                            "kernel dead-man would be unarmed; no controller "
+                            "until it locks", strerror(errno));
+        broker_warned = 1;
+        close(broker_fd);
+        broker_fd = -1;
+        return;
+    }
+    broker_warned = 0;
     probed = 0;     /* a fresh hold means unverified motion */
     probe_skipped = 0;
     lenshome_clear();   /* ...and an unreferenced lens */
@@ -186,14 +294,41 @@ static void wait_leave_locked(const char *how)
     led_release();
 }
 
+/* The stop lever's reach into a probe in flight: the ladder looks
+ * between its steps, so a stop lands within a step's wait. Called with
+ * mu NOT held; 1 when the probe must end. */
+static int probe_aborted(void)
+{
+    pthread_mutex_lock(&mu);
+    int a = probe_abort;
+    pthread_mutex_unlock(&mu);
+    return a;
+}
+
+static int probe_wait(unsigned s)
+{
+    double until = wall_s() + s;
+    while (wall_s() < until) {
+        if (probe_aborted())
+            return 1;
+        usleep(100 * 1000);
+    }
+    return 0;
+}
+
 /* Motion-liveness gate, run with mu NOT held (takes seconds; the
  * recovery ladder takes a minute). The DRV8825 drivers can come out of
  * a rail power-up unserviceable; each recovery attempt gives them a
  * longer true power-off before re-probing. Returns 1 verified, 0 fault,
  * 2 when the probe could not run (no accelerometer): the machine is not
  * blocked, but motion stays UNVERIFIED and is reported so; 3 when the
- * enclosure opened between the gate's own check and the move: nothing
- * moved, and the gate waits for the enclosure again. */
+ * probe must wait and run again - the enclosure opened between the
+ * gate's own check and the move, or the kernel is still playing the
+ * last program: nothing moved, nothing is decided; 4 when the stop
+ * lever ended it. The fans are not quieted for the probe: its verdict
+ * is peak-to-peak over a commanded move, and the moving and dead
+ * thresholds sit twice away from what the bench reference reads with
+ * its fans at their idle duty. */
 static char probe_detail[96];       /* the last probe's outcome text */
 static int probe_sequence(int fd)
 {
@@ -205,14 +340,20 @@ static int probe_sequence(int fd)
             fflog(LOG_WARNING, "super: motion dead - rail off %d s "
                                "and re-probing (%zu/3)", ladder_s[i], i);
             wr_attr("cnc/disable", "1");
-            sleep((unsigned)ladder_s[i]);
+            if (probe_wait((unsigned)ladder_s[i]))
+                goto aborted;
         }
+        if (probe_aborted())
+            goto aborted;
         wr_attr("cnc/enable", "1");
-        sleep(1);
+        if (probe_wait(1))
+            goto aborted;
         int rc = liveness_probe(fd, detail, sizeof(probe_detail));
-        fflog(LOG_INFO, "super: liveness probe: %s - %s",
-              rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION" : "ERROR",
-              detail);
+        fflog(rc == -3 ? LOG_NOTICE : LOG_INFO, "super: liveness probe: %s - %s",
+              rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION"
+              : rc == -3 ? "WAITS" : "ERROR", detail);
+        if (rc == -3)
+            return 3;   /* the kernel is busy: wait for it, then probe */
         if (rc == 1) {
             /* The gantry moves; now the lens takes its one reference,
              * while the machine is still ours. A lens that cannot reach
@@ -241,25 +382,43 @@ static int probe_sequence(int fd)
                    "did not recover; a full power cycle may be required. "
                    "Controllers stay down (retry via POST /mode).");
     return 0;
+
+aborted:
+    /* The lever ended the probe: whatever the rung had started stops,
+     * and nothing is decided about motion. */
+    wr_attr("cnc/stop", "1");
+    snprintf(detail, sizeof(probe_detail), "motion probe ended by the stop lever");
+    fflog(LOG_NOTICE, "super: %s", detail);
+    return 4;
 }
 
 /* The safing writes (cnc/stop, cnc/laser_latch) are the real safing
- * mechanism under the device broker, so a write that fails is named at
- * the highest severity rather than lost. */
-static void wr_attr(const char *attr, const char *val)
+ * mechanism under the device broker: a write that fails is tried again
+ * before it is named at the highest severity, and the callers on the
+ * safing paths repeat the pair once more. Returns 0 when the value
+ * landed. */
+static int wr_attr(const char *attr, const char *val)
 {
     char path[96];
-    snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0) {
-        fflog(LOG_CRIT, "super: cannot open %s to write %s: %s", attr, val,
-              strerror(errno));
-        return;
+    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    int err = 0;
+    for (int i = 0; i < WR_ATTR_TRIES; i++) {
+        if (i)
+            usleep(WR_ATTR_RETRY_US);
+        int fd = open(path, O_WRONLY | O_CLOEXEC);
+        if (fd < 0) {
+            err = errno;
+            continue;
+        }
+        ssize_t w = write(fd, val, strlen(val));
+        err = w < 0 ? errno : 0;
+        close(fd);
+        if (!err)
+            return 0;
     }
-    if (write(fd, val, strlen(val)) < 0)
-        fflog(LOG_CRIT, "super: writing %s to %s failed: %s", val, attr,
-              strerror(errno));
-    close(fd);
+    fflog(LOG_CRIT, "super: writing %s to %s failed %d times: %s", val, attr,
+          WR_ATTR_TRIES, strerror(err));
+    return -1;
 }
 
 static const char *ctl_name(ctl_t c)
@@ -494,7 +653,7 @@ static void reap_locked(int status)
     generation++;
     pthread_cond_broadcast(&cv);
 
-    int expected = suspended || want != died;
+    int expected = suspended || want != died || restart_pending;
     fflog(expected ? LOG_NOTICE : LOG_WARNING,
           "super: %s controller exited (status 0x%x, up %.0f s)%s",
           ctl_name(died), (unsigned)status, up,
@@ -513,6 +672,18 @@ static void reap_locked(int status)
      * it anchors) or into a respawn. A fresh GRBL controller starts
      * unreferenced and re-homes. */
     unlink(HOMED_ANCHOR);
+    /* A GRBL controller may have left its homing runner behind, alive
+     * on the inherited fd: the loop finds and ends it before anything
+     * else may write the ring. */
+    runner_check = died == Ctl_Grbl;
+    /* The kernel may still be playing what the controller queued: the
+     * respawn waits for it (bounded) so the new controller's init never
+     * overlaps a ramp, and the engine forgets the dead reporter the way
+     * it forgets a stopped one, so the hang dead-man does not count the
+     * silence of a controller that is already gone. */
+    cool_controller_stopped();
+    respawn_wait_idle = 1;
+    died_at = wall_s();
 
     if (expected)
         return;
@@ -545,6 +716,10 @@ static void stop_locked(void)
     wr_attr("cnc/laser_latch", "1");
     kill(-pid, SIGTERM);
     kill(pid, SIGTERM);
+    /* Once more after the signal: a write that failed its retries the
+     * first time gets a second chance while the controller leaves. */
+    wr_attr("cnc/stop", "1");
+    wr_attr("cnc/laser_latch", "1");
     /* The cooling engine's hang dead-man watches the seconds since the
      * controller's last report; this stop is deliberate, so the report
      * is forgotten and the liveness probe that may follow plays with
@@ -585,12 +760,13 @@ static void stop_locked(void)
 
 /* ------------------------------------------------------ thread body */
 
-static void *super_main(void *arg)
+/* One pass of the lifecycle. Called with mu held; drops it around
+ * everything slow. */
+static void pass_locked(void)
 {
-    (void)arg;
-    pthread_mutex_lock(&mu);
-    while (th_run) {
-        /* Reap. */
+    {
+        /* Reap. A SIGCHLD woke the loop for this, so the safing in
+         * reap_locked lands within milliseconds of the exit. */
         if (child_pid > 0) {
             pid_t pid = child_pid;
             pthread_mutex_unlock(&mu);
@@ -599,6 +775,26 @@ static void *super_main(void *arg)
             pthread_mutex_lock(&mu);
             if (r == pid)
                 reap_locked(status);
+        }
+        /* The engine's fail tier: stop the controller the deliberate
+         * way (the safing pair before the signal) and start it again
+         * at once - the job cannot go on, and the sender gets a clean
+         * disconnect instead of a dark job. */
+        if (restart_pending) {
+            if (child_pid > 0) {
+                fflog(LOG_WARNING, "super: stopping the %s controller on the "
+                                   "engine's fail tier", ctl_name(child_ctl));
+                stop_locked();
+            }
+            restart_pending = 0;
+            respawn_at = 0.0;
+        }
+        /* A GRBL controller's homing runner must not outlive it. */
+        if (runner_check) {
+            runner_check = 0;
+            pthread_mutex_unlock(&mu);
+            runner_reap();
+            pthread_mutex_lock(&mu);
         }
         /* Standing by next to an unmanaged controller (found at start,
          * or left orphaned by a previous forgectrl): retake supervision
@@ -644,51 +840,96 @@ static void *super_main(void *arg)
                 stop_locked();
         }
 
-        /* Converge on the wanted state. The first spawn after taking
-         * the broker passes the motion-liveness gate first (unlocked -
+        /* Converge on the wanted state. Every spawn passes the
+         * enclosure check first; the first spawn after taking the
+         * broker passes the motion-liveness gate as well (unlocked -
          * the probe and its recovery ladder take a while). */
         if (child_pid > 0 && (suspended || child_ctl != want)) {
             stop_locked();
         } else if (child_pid == 0 && !suspended && !motion_fault && !gated
                    && want != Ctl_None && wall_s() >= respawn_at) {
-            broker_open_locked();
-            if (broker_fd >= 0 && !probed) {
-                /* The probe moves the gantry: not with a lid or the
-                 * interlock open, and never blind. The gate waits for
-                 * the enclosure and says so instead of starting a
-                 * controller unverified; the loop looks again every
-                 * pass, so the probe runs the moment the lid closes. */
-                char why[96];
+            int go = 1;
+            if (respawn_wait_idle) {
+                /* The kernel finishes what the dead controller queued
+                 * before another controller may touch it. A kernel
+                 * that has not gone idle in the bound is halted: an
+                 * endless ramp is not a state to hand over. */
                 pthread_mutex_unlock(&mu);
-                int enc = liveness_enclosure(why, sizeof(why));
+                int idle = machine_is_idle();
                 pthread_mutex_lock(&mu);
-                if (enc != 0) {
-                    wait_enter_locked(why);
+                if (idle)
+                    respawn_wait_idle = 0;
+                else if (wall_s() - died_at < RESPAWN_IDLE_WAIT_S)
+                    go = 0;
+                else {
+                    fflog(LOG_CRIT, "super: the kernel is still running %d s "
+                                    "after the controller left - halting it "
+                                    "before the respawn", RESPAWN_IDLE_WAIT_S);
+                    wr_attr("cnc/halt", "1");
+                    respawn_wait_idle = 0;
+                }
+            }
+            if (go) {
+                broker_open_locked();
+                if (broker_fd < 0) {
+                    /* No broker: no controller. Try again soon. */
+                    respawn_at = wall_s() + BROKER_RETRY_S;
                 } else {
-                    wait_leave_locked("runs: the enclosure is closed");
-                    int fd = broker_fd;
+                    /* Nothing spawns with a lid or the interlock open,
+                     * or with the switches unreadable: the gate waits
+                     * for the enclosure and says so, and looks again
+                     * every pass. The probe (once per broker hold)
+                     * moves the gantry, so it runs behind the same
+                     * check; a busy kernel or a stop makes it wait. */
+                    char why[96];
                     pthread_mutex_unlock(&mu);
-                    int rc = probe_sequence(fd);
+                    int enc = liveness_enclosure(why, sizeof(why));
                     pthread_mutex_lock(&mu);
-                    if (rc != 3) {
-                        probed = rc != 0;
-                        probe_skipped = rc == 2;
-                        motion_fault = rc == 0;
+                    if (enc != 0) {
+                        wait_enter_locked(why);
+                    } else if (!probed) {
+                        wait_leave_locked("runs: the enclosure is closed");
+                        int fd = broker_fd;
+                        probing = 1;
+                        probe_abort = 0;
+                        pthread_mutex_unlock(&mu);
+                        int rc = probe_sequence(fd);
+                        pthread_mutex_lock(&mu);
+                        probing = 0;
+                        pthread_cond_broadcast(&cv);
+                        if (rc == 3)
+                            respawn_at = wall_s() + 1.0;    /* look again in a moment */
+                        else if (rc != 4) {
+                            probed = rc != 0;
+                            probe_skipped = rc == 2;
+                            motion_fault = rc == 0;
+                        }
+                    } else {
+                        wait_leave_locked("no longer waits: the enclosure is closed");
+                        spawn_locked(want);
                     }
                 }
-            } else
-                spawn_locked(want);
+            }
         } else if (enclosure_wait) {
             wait_leave_locked(suspended ? "no longer waits: supervision suspended"
                               : gated ? "no longer waits: controllers gated"
                               : "no longer waits");
         }
+    }
+}
+
+static void *super_main(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&mu);
+    while (th_run) {
+        pass_locked();
         int lamp = lamp_pending;
         lamp_pending = 0;
         pthread_mutex_unlock(&mu);
         if (lamp)
             cam_lamp_apply_idle();
-        usleep(200 * 1000);
+        loop_wait(LOOP_TICK_MS);
         pthread_mutex_lock(&mu);
     }
     pthread_mutex_unlock(&mu);
@@ -710,7 +951,7 @@ static int wait_for(int (*pred)(void), double timeout_s)
     return 0;
 }
 
-static int pred_child_gone(void)  { return child_pid == 0; }
+static int pred_child_gone(void)  { return child_pid == 0 && !probing; }
 
 /* --------------------------------------------------------------- api */
 
@@ -730,11 +971,34 @@ static ctl_t configured_mode(void)
 static int unmanaged_controller_running(void)
 {
     return system("pgrep -x grblHAL_glowfor >/dev/null 2>&1") == 0 ||
-           system("pgrep -f '[g]fcloud\\.py' >/dev/null 2>&1") == 0;
+           system("pgrep -f '[g]fcloud\\.py' >/dev/null 2>&1") == 0 ||
+           system("pgrep -x gfhome.py >/dev/null 2>&1") == 0;
+}
+
+/* Controller death is a signal, not a poll: SIGCHLD wakes the
+ * lifecycle thread through an eventfd (the handler may only write). */
+void super_sigchld_init(void)
+{
+    if (chld_efd >= 0)
+        return;
+    chld_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (chld_efd < 0) {
+        fflog(LOG_ERR, "super: eventfd: %s - controller deaths are polled",
+              strerror(errno));
+        return;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigchld;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGCHLD, &sa, NULL) != 0)
+        fflog(LOG_ERR, "super: sigaction(SIGCHLD): %s", strerror(errno));
 }
 
 void super_init(void)
 {
+    super_sigchld_init();
     pthread_mutex_lock(&mu);
     want = configured_mode();
     if (unmanaged_controller_running()) {
@@ -894,6 +1158,12 @@ int super_controller_stop(void)
 {
     pthread_mutex_lock(&mu);
     suspended = 1;
+    /* A probe in flight is the gantry moving with no controller: the
+     * lever reaches it too. The sequence looks between its steps. */
+    if (probing) {
+        probe_abort = 1;
+        wr_attr("cnc/stop", "1");
+    }
     int ok = wait_for(pred_child_gone, 15.0) == 0;
     if (!ok)
         suspended = 0;  /* takeover failed: resume normal supervision so
@@ -910,6 +1180,18 @@ void super_controller_start(void)
     respawn_at = 0.0;
     backoff_s = RESPAWN_MIN_S;
     pthread_mutex_unlock(&mu);
+    wake();
+}
+
+void super_controller_restart(const char *why)
+{
+    pthread_mutex_lock(&mu);
+    int had = child_pid > 0;
+    restart_pending = 1;
+    pthread_mutex_unlock(&mu);
+    fflog(LOG_WARNING, "super: %s - the controller is stopped and started again%s",
+          why, had ? "" : " (none running)");
+    wake();
 }
 
 int super_grbl_running(void)
@@ -963,18 +1245,30 @@ int super_probe_motion(char *detail, size_t dlen)
         snprintf(detail, dlen, "a controller is running");
         return 2;
     }
+    if (probing) {
+        pthread_mutex_unlock(&mu);
+        snprintf(detail, dlen, "a motion probe is already running");
+        return 2;
+    }
     broker_open_locked();
     int fd = broker_fd;
-    pthread_mutex_unlock(&mu);
     if (fd < 0) {
+        pthread_mutex_unlock(&mu);
         snprintf(detail, dlen, "the pulse device is not held");
         return 2;
     }
+    probing = 1;
+    probe_abort = 0;
+    pthread_mutex_unlock(&mu);
     int rc = probe_sequence(fd);
     pthread_mutex_lock(&mu);
-    probed = rc != 0;
-    probe_skipped = rc == 2;
-    motion_fault = rc == 0;
+    probing = 0;
+    pthread_cond_broadcast(&cv);
+    if (rc != 3 && rc != 4) {
+        probed = rc != 0;
+        probe_skipped = rc == 2;
+        motion_fault = rc == 0;
+    }
     snprintf(detail, dlen, "%s", probe_detail);
     pthread_mutex_unlock(&mu);
     return rc;
