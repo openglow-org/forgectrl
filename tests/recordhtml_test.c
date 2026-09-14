@@ -1,5 +1,5 @@
 /*
- * recordhtml_test.c - host test: the commissioning record as a page
+ * recordhtml_test.c - host test: the setup record as a page
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT

@@ -1,5 +1,5 @@
 /*
- * sheetid_test.c - host test: the commissioning sheet id
+ * sheetid_test.c - host test: the setup sheet id
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT

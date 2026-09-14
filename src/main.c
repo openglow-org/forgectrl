@@ -37,7 +37,7 @@
 #include "button.h"
 #include "cam.h"
 #include "camkey.h"
-#include "commission.h"
+#include "setup.h"
 #include "mp4mux.h"
 #include "cool.h"
 #include "curverec.h"
@@ -575,8 +575,8 @@ static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start"
 static int valid_tec_on(const char *v)     { return valid_gate("cool_tec_on_c", v); }
 static int valid_tec_off(const char *v)    { return valid_gate("cool_tec_off_c", v); }
 static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v, "1"); }
-/* The coolant sensors' per-machine offset: a room thermometer's word,
- * within 5 C either way. */
+/* The coolant sensors' per-machine correction, a settings-file value
+ * within 5 C either way; no setup step writes it. */
 static int valid_temp_offset(const char *v)
 {
     char *end;
@@ -803,11 +803,11 @@ static void settings_snapshot(FILE *out)
     }
 }
 
-/* The commissioning record for the log export, indented so the
+/* The setup record for the log export, indented so the
  * sanitizer sees one value per line. */
 static void record_snapshot(FILE *out)
 {
-    char *text = commission_record_dump(1);
+    char *text = setup_record_dump(1);
     if (!text)
         return;
     fputs(text, out);
@@ -1514,7 +1514,7 @@ static int cb_cool_state(const struct _u_request *req,
 }
 
 /* The quiet hold for a listening to the head accelerometer (the bench's
- * tools): on=1 takes every fan off, the hold the commissioning finder
+ * tools): on=1 takes every fan off, the hold the setup finder
  * uses; pump=1 with it takes the coolant pump and the TEC off too, the
  * machine silent. Taken only from an idle machine with no diagnostic
  * running; released here, or by the engine itself when a run session
@@ -1757,7 +1757,7 @@ static int cb_root_page(const struct _u_request *req, struct _u_response *res,
     if (!auth_origin_ok(req, res))
         return U_CALLBACK_COMPLETE;
     int session = auth_session_ok(req);
-    if (commission_first_run() || users_reset_pending()) {
+    if (setup_first_run() || users_reset_pending()) {
         if (users_exist() && !session)
             return redirect_login(req, res);
         return serve_page(res, PAGE_WIZARD);
@@ -1768,7 +1768,7 @@ static int cb_root_page(const struct _u_request *req, struct _u_response *res,
     return serve_page(res, PAGE_PANEL);
 }
 
-/* The wizard on demand, after the first run (re-runs, the Commissioning
+/* The wizard on demand, after the first run (re-runs, the Setup
  * tab's "continue"). */
 static int cb_setup_page(const struct _u_request *req, struct _u_response *res,
                          void *user_data)
@@ -2407,7 +2407,7 @@ static int cb_http_local(const struct _u_request *req, struct _u_response *res,
 /* ------------------------------------------------------------------ main */
 
 /* A requirement's fact outside the machine block: the cloud decision. */
-static int commission_fact(const char *fact)
+static int setup_fact(const char *fact)
 {
     if (!strcmp(fact, "cloud_enabled"))
         return settings_get_bool("cloud_enabled", 0);
@@ -2506,13 +2506,13 @@ int main(int argc, char **argv)
         led_set(LED_BLINK_AMBER);
         if (button_held_for(10)) {
             users_mark_reset();
-            commission_init();
-            commission_clear_account();
+            setup_init();
+            setup_clear_account();
             fflog(LOG_WARNING, "account reset by the button hold at start");
         }
         led_release();
     }
-    commission_init();
+    setup_init();
     int have_tls = tls_init() == 0;
     wiz_init();
     cam_engine_init();
@@ -2521,7 +2521,7 @@ int main(int argc, char **argv)
     super_init();
     diag_init();            /* its marker recovery drives the supervisor: after it */
     wizdark_init();
-    commission_fact_hook = commission_fact;
+    setup_fact_hook = setup_fact;
     update_init();
     apply_wifi(0);
     cam_lamp_apply_idle();

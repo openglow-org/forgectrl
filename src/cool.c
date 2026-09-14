@@ -98,7 +98,7 @@
  *   stops motion and locks the latch; laser power-good degradation
  *   during an armed window is warned. The four lid IR channels are
  *   polled every tick: their run-start baseline and session peaks are
- *   logged every job (the commissioning dataset), and through the run,
+ *   logged every job (the setup dataset), and through the run,
  *   smoke and thermal phases the four readings sorted ascending (the
  *   quartiles, the factory's statistic) are judged against two tiers
  *   per quartile, the factory's own shape and defaults. A first or
@@ -128,7 +128,7 @@
 #include "accel.h"
 #include "airflow.h"
 #include "cool.h"
-#include "commission.h"
+#include "setup.h"
 #include "coolfmt.h"
 #include "fflog.h"
 #include "gates.h"
@@ -387,7 +387,7 @@ static int start_cool;              /* the busy-start cooldown airflow still sta
 static flow_verdict_t flow_verdict = Flow_Normal;
 static uint32_t smoke_s = COOLDOWN_SMOKE_S;
 static uint32_t cooldown_max_s = COOLDOWN_MAX_S;
-static float temp_offset_c = 0.0f;     /* the sensors wizard's room-thermometer offset */
+static float temp_offset_c = 0.0f;     /* the per-machine correction (a settings-file value) */
 static float temp_max_c = TEMP_MAX_C_DEFAULT;
 static float temp_resume_c = TEMP_RESUME_C_DEFAULT;
 static float temp_critical_c = TEMP_CRITICAL_C_DEFAULT;
@@ -616,7 +616,7 @@ static int read_temp(const char *attr, float *c)
     /* The air-assist ground shift lifts the raw counts (more counts read
      * colder): take them off before the conversion. */
     long raw_c = raw - cool_coolant_offset_counts();
-    /* The per-machine offset from the sensors wizard's room reading. */
+    /* The per-machine correction from the settings file. */
     *c = (float)coolant_degc(raw_c > 0 ? raw_c : raw) + temp_offset_c;
     return 1;
 }
@@ -1281,7 +1281,7 @@ void cool_flow_check_hold(int on)
         flow_hold_since = wall_s();
     pthread_mutex_unlock(&mu);
     if (on && !was)
-        info("flow check held for a commissioning card");
+        info("flow check held for a setup card");
     else if (!on && was)
         info("flow check hold released");
 }
@@ -1357,7 +1357,7 @@ void cool_diag_tec(int on)
     }
 }
 
-/* Engine-raised commissioning flags: a flow fault twice in a row makes
+/* Engine-raised setup flags: a flow fault twice in a row makes
  * the flow calibration required; a fan that starts a job within 10
  * percent of its floor recommends the airflow wizard. Each is raised
  * once. */
@@ -1367,7 +1367,7 @@ static int fan_margin_noted[Fan_N];
 static void flow_fault_noted(void)
 {
     if (++flow_fault_streak == 2)
-        commission_flag("cooling.flow", "required", "a coolant flow fault twice in a row");
+        setup_flag("cooling.flow", "required", "a coolant flow fault twice in a row");
 }
 
 static void flow_fault_cleared(void)
@@ -1629,7 +1629,7 @@ static void flood_apply(int on, double now)
             }
             info(msg);
         }
-        /* The commissioning dataset: one line per job of what the fire
+        /* The setup dataset: one line per job of what the fire
          * and HV sensors saw. */
         if (ir_base[0] >= 0) {
             char msg[160];
@@ -1809,7 +1809,7 @@ static void engine_tick(void)
         last_faults = faults;
 
     /* Lid IR fire watch + HV range. The run-session baseline and peaks
-     * build the commissioning dataset; the tiers judge the sorted
+     * build the setup dataset; the tiers judge the sorted
      * readings (the quartiles) against the factory-shaped thresholds
      * through the whole session tail. */
     long ir[4];
@@ -2037,7 +2037,7 @@ static void engine_tick(void)
                     char why[96];
                     snprintf(why, sizeof(why), "%s ran within 10 percent of its floor (%.0f of %.0f)",
                              fan_name[i], fan_reading[i], fan_floor[i]);
-                    commission_flag("airflow", "recommended", why);
+                    setup_flag("airflow", "recommended", why);
                 }
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;
@@ -2479,7 +2479,7 @@ static void engine_tick(void)
 
     /* Gate: a pending check only starts from a settled loop - sensors
      * in agreement AND the downstream reading stationary - and not
-     * while a commissioning card holds it. */
+     * while a setup card holds it. */
     if (flow_check_pending && !flow_check_active && !flow_check_held && have_down && have_up) {
         int stationary = down_hist_n >= FLOW_SETTLE_WIN;
         if (stationary) {

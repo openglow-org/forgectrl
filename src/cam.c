@@ -707,7 +707,7 @@ static int ctrls_ov5648(const char *subdev, cam_id_t cam)
  *
  * UNPROVEN: these are the OV5648 defaults translated into the OV8856's
  * units - the same fraction of the frame (76%) and the same gain multiple
- * (3.1x lid, 12.5x head). They are a starting point for commissioning on a
+ * (3.1x lid, 12.5x head). They are a starting point for setup on a
  * real 8 MP machine, not measured values, and the driver publishes no
  * red/blue balance controls at all, so white balance is uncorrected. */
 static int ctrls_ov8856(const char *subdev, cam_id_t cam)

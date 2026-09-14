@@ -1,15 +1,15 @@
 /*
- * wiz.c - the commissioning wizards and their routes
+ * wiz.c - the setup wizards and their routes
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
  * The first run of the panel is a sequence of wizards, each a module
- * that can also run alone from the Commissioning tab. This file holds
+ * that can also run alone from the Setup tab. This file holds
  * the form wizards, the ones that need no hardware slot: advisories,
  * account, preferences, machine facts, and the cloud decision. Each
  * validates what the page sends, writes settings through the ordinary
- * validated path, and records its completion in the commissioning
+ * validated path, and records its completion in the setup
  * record with what it found and what it wrote. The hardware wizards
  * (dark validation, the sheet) build on the same record and catalog.
  *
@@ -24,7 +24,7 @@
 #include "auth.h"
 #include "button.h"
 #include "cam.h"
-#include "commission.h"
+#include "setup.h"
 #include "fflog.h"
 #include "hooks.h"
 #include "led.h"
@@ -50,7 +50,7 @@
 
 /* The catalog: every wizard the page can show, in first-run order. The
  * version is the schema version the record stores on completion; the
- * required table in commission.c names the versions this image needs. */
+ * required table in setup.c names the versions this image needs. */
 typedef struct {
     const char *id;
     const char *title;
@@ -93,7 +93,7 @@ static void head_info(char *hw_id, size_t hl, char *serial, size_t sl,
 static void check_head_change(void)
 {
     char recorded[32], hw[24], ser[24], ver[24], now[32] = "";
-    commission_head_hash(recorded, sizeof(recorded));
+    setup_head_hash(recorded, sizeof(recorded));
     if (!recorded[0])
         return;
     head_info(hw, sizeof(hw), ser, sizeof(ser), ver, sizeof(ver));
@@ -102,7 +102,7 @@ static void check_head_change(void)
     sheetid_derive(ser, now, sizeof(now));
     if (strcmp(recorded, now)) {
         fflog(LOG_NOTICE, "wiz: the head changed since the record was made");
-        commission_flag("machine", "required", "the head changed");
+        setup_flag("machine", "required", "the head changed");
     }
 }
 
@@ -288,7 +288,7 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
         return U_CALLBACK_COMPLETE;
 
     char cs[8192];
-    if (commission_status_json(cs, sizeof(cs)) < 0)
+    if (setup_status_json(cs, sizeof(cs)) < 0)
         return reply_error(res, 500, "record unavailable");
     json_error_t jerr;
     json_t *st = json_loads(cs, 0, &jerr);
@@ -302,11 +302,11 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
         json_object_set_new(w, "title", json_string(catalog[i].title));
         json_object_set_new(w, "version", json_integer(catalog[i].version));
         json_object_set_new(w, "class", json_string(catalog[i].cls));
-        json_object_set_new(w, "done", json_integer(commission_wizard_version(catalog[i].id)));
+        json_object_set_new(w, "done", json_integer(setup_wizard_version(catalog[i].id)));
         json_array_append_new(cat, w);
     }
     json_object_set_new(st, "wizards", cat);
-    json_object_set_new(st, "changes", commission_changes_json());
+    json_object_set_new(st, "changes", setup_changes_json());
     char ds[8192], who[SESSION_ID_HEX + 1];
     requester(req, who, sizeof(who));
     json_t *dark = wizdark_status_json(ds, sizeof(ds), who) >= 0 ? json_loads(ds, 0, NULL) : NULL;
@@ -344,13 +344,13 @@ int cb_wiz_record(const struct _u_request *req, struct _u_response *res, void *u
     if (!record_ok(req, res))
         return U_CALLBACK_COMPLETE;
     const char *dl = u_map_get(req->map_url, "download");
-    char *text = commission_record_dump(dl != NULL);
+    char *text = setup_record_dump(dl != NULL);
     if (!text)
         return reply_error(res, 500, "record unavailable");
     if (dl) {
         char sid[SHEETID_LEN + 1] = "", fn[96];
         sheetid_get(sid, sizeof(sid));
-        snprintf(fn, sizeof(fn), "attachment; filename=\"forgefirm-commissioning-%s.json\"",
+        snprintf(fn, sizeof(fn), "attachment; filename=\"forgefirm-setup-%s.json\"",
                  sid[0] ? sid : "record");
         ulfius_add_header_to_response(res, "Content-Disposition", fn);
     }
@@ -368,7 +368,7 @@ int cb_wiz_record_html(const struct _u_request *req, struct _u_response *res, vo
     (void)ud;
     if (!record_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    json_t *rec = commission_record_copy();
+    json_t *rec = setup_record_copy();
     if (!rec)
         return reply_error(res, 500, "record unavailable");
     json_t *docs = json_array(), *wiz = json_array();
@@ -402,7 +402,7 @@ int cb_wiz_changed(const struct _u_request *req, struct _u_response *res, void *
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     const char *what = param(req, "what");
-    if (commission_change_apply(what) != 0)
+    if (setup_change_apply(what) != 0)
         return reply_error(res, 400, "what must name a change from the menu");
     return cb_wiz_status(req, res, NULL);
 }
@@ -441,7 +441,7 @@ int cb_wiz_agree(const struct _u_request *req, struct _u_response *res, void *ud
         if (!phrase || strcmp(phrase, d->phrase))
             return reply_error(res, 400, "type the phrase exactly as shown");
     }
-    if (commission_advisory_accept(id, hash, d->consent) != 0)
+    if (setup_advisory_accept(id, hash, d->consent) != 0)
         return reply_error(res, 500, "cannot record the acceptance");
     fflog(LOG_NOTICE, "wiz: advisory '%s' accepted (%s)", id, d->consent);
     return cb_wiz_status(req, res, NULL);
@@ -452,7 +452,7 @@ int cb_wiz_press_start(const struct _u_request *req, struct _u_response *res, vo
     (void)ud;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (!commission_advisories_complete())
+    if (!setup_advisories_complete())
         return reply_error(res, 409, "accept every document first");
     if (button_wait_start(PRESS_TIMEOUT_S) != 0 &&
         strcmp(button_state(), "waiting") != 0)
@@ -472,11 +472,11 @@ int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, v
     int accepted = 0;
     if (!strcmp(state, "pressed") && button_take_pressed()) {
         led_release();
-        if (commission_acceptance_pressed() == 0) {
+        if (setup_acceptance_pressed() == 0) {
             accepted = 1;
             fflog(LOG_NOTICE, "wiz: the advisories were accepted at the machine");
             /* The consent wizard is complete at this press. */
-            commission_wizard_done("advisories", 1, NULL, NULL);
+            setup_wizard_done("advisories", 1, NULL, NULL);
         }
         state = "pressed";
     } else if (!strcmp(state, "timeout") || !strcmp(state, "cancelled")) {
@@ -484,7 +484,7 @@ int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, v
     }
     json_t *o = json_object();
     json_object_set_new(o, "button", json_string(state));
-    json_object_set_new(o, "accepted", json_boolean(accepted || commission_acceptance_done()));
+    json_object_set_new(o, "accepted", json_boolean(accepted || setup_acceptance_done()));
     return reply_obj(res, 200, o);
 }
 
@@ -507,7 +507,7 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
     (void)ud;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (!commission_acceptance_done())
+    if (!setup_acceptance_done())
         return reply_error(res, 409, "accept the advisories first");
     /* Once an account exists, only a logged-in session (or the reset)
      * may replace it. */
@@ -518,8 +518,8 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
     char reason[128];
     if (users_create(name, pw, reason, sizeof(reason)) != 0)
         return reply_error(res, 400, reason);
-    commission_set_account(name, USERS_UID);
-    commission_wizard_done("account", 1, NULL, NULL);
+    setup_set_account(name, USERS_UID);
+    setup_wizard_done("account", 1, NULL, NULL);
 
     /* Log this browser in. */
     char sid[SESSION_ID_HEX + 1], cookie[256];
@@ -572,7 +572,7 @@ int cb_wiz_preferences(const struct _u_request *req, struct _u_response *res, vo
     }
     json_object_set_new(result, "clock_was_set", json_boolean(now >= CLOCK_UNSET_BEFORE));
     json_object_set_new(result, "clock_set_from_browser", json_boolean(clock_set));
-    commission_wizard_done("preferences", 1, result, applied);
+    setup_wizard_done("preferences", 1, result, applied);
     return cb_wiz_status(req, res, NULL);
 }
 
@@ -603,8 +603,8 @@ int cb_wiz_machine(const struct _u_request *req, struct _u_response *res, void *
     json_object_set_new(facts, "model", json_string(model));
     json_object_set_new(facts, "tec", json_boolean(tec_on));
     json_t *result = json_deep_copy(facts);
-    commission_set_machine(facts);
-    commission_wizard_done("machine", 1, result, applied);
+    setup_set_machine(facts);
+    setup_wizard_done("machine", 1, result, applied);
     return cb_wiz_status(req, res, NULL);
 }
 
@@ -667,7 +667,7 @@ int cb_wiz_cloud(const struct _u_request *req, struct _u_response *res, void *ud
         }
         json_object_set_new(result, "enabled", json_false());
     }
-    commission_wizard_done("cloud", 1, result, applied);
+    setup_wizard_done("cloud", 1, result, applied);
     return cb_wiz_status(req, res, NULL);
 }
 
@@ -683,7 +683,7 @@ int cb_wiz_dark_start(const struct _u_request *req, struct _u_response *res, voi
     const char *id = u_map_get(req->map_url, "id");
     if (!wizdark_known(id))
         return reply_error(res, 404, "no such wizard");
-    if (!commission_advisories_complete() || !commission_acceptance_done())
+    if (!setup_advisories_complete() || !setup_acceptance_done())
         return reply_error(res, 409, "accept the advisories first");
     char err[128], who[SESSION_ID_HEX + 1];
     requester(req, who, sizeof(who));
@@ -824,14 +824,14 @@ int cb_wiz_complete(const struct _u_request *req, struct _u_response *res, void 
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     char why[256];
-    if (!commission_gate_open(why, sizeof(why)) || commission_override_active()) {
-        if (!commission_gate_open(why, sizeof(why)))
+    if (!setup_gate_open(why, sizeof(why)) || setup_override_active()) {
+        if (!setup_gate_open(why, sizeof(why)))
             return reply_error(res, 409, why[0] ? why : "not every step is complete");
     }
-    if (commission_complete() != 0)
+    if (setup_complete() != 0)
         return reply_error(res, 500, "cannot write the record");
     led_set(LED_SOLID_GREEN);
     finish_lit = 1;
-    fflog(LOG_NOTICE, "wiz: commissioning complete");
+    fflog(LOG_NOTICE, "wiz: setup complete");
     return cb_wiz_status(req, res, NULL);
 }

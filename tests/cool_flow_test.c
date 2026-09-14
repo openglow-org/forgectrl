@@ -92,7 +92,7 @@ int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int machine_is_idle(void) { return 1; }
 static char last_flag[160];
-int commission_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *level, const char *reason)
 {
     snprintf(last_flag, sizeof(last_flag), "%s:%s:%s", id, level, reason);
     return 0;

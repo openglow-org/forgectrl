@@ -6,7 +6,7 @@
  *
  * Three self-contained pages (HTML/CSS/JS, no external assets),
  * gzip-compressed at build time from src/ui/ by src/ui/embed.cmake: the
- * control panel (index.html), the commissioning wizard (wizard.html),
+ * control panel (index.html), the setup wizard (wizard.html),
  * and the login page (login.html). For each: the compressed bytes, how
  * many there are, and the size they inflate to. main.c inflates each
  * once and substitutes the token placeholder before serving.

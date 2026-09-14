@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hershey_gen.py - the stroke font table for the commissioning sheet.
+"""hershey_gen.py - the stroke font table for the setup sheet.
 
 Reads the Hershey Sans 1-stroke (Simplex) font in SVG-font form and
 writes src/font_hershey.c: the printable ASCII glyphs (32 to 126) as
@@ -95,7 +95,7 @@ def main():
     lines = []
     w = lines.append
     w('/*')
-    w(' * font_hershey.c - the stroke font of the commissioning sheet (generated)')
+    w(' * font_hershey.c - the stroke font of the setup sheet (generated)')
     w(' * Copyright 2026 514 LLC d/b/a OpenGlow')
     w(' * Written by Scott Wiederhold')
     w(' * SPDX-License-Identifier: MIT')

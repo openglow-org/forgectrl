@@ -455,7 +455,7 @@ DARK = ('switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offse
 # are stood in for by a drawing of the card's box.
 LIVE = ('sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
         'laser.corner', 'cooling.flow-load')
-# The what-changed menu (commission.c): a change, its title, its reason,
+# The what-changed menu (setup.c): a change, its title, its reason,
 # and the wizards it flags with their levels.
 CHANGES = (
     ('tube', 'The laser tube was replaced', 'the tube was replaced',
@@ -491,7 +491,7 @@ def sheet_svg(card):
            "<rect width='200' height='150' fill='#e7d3ac' stroke='#9c8a66' stroke-width='0.4'/>",
            "<rect x='10' y='10' width='180' height='130' fill='none' stroke='#3a2a12' stroke-width='0.3'/>",
            "<text x='58' y='20' font-size='6' fill='#3a2a12'>OpenGlow ForgeFIRM</text>",
-           "<text x='58' y='27' font-size='4' fill='#3a2a12'>Hardware Commissioning (mock)</text>"]
+           "<text x='58' y='27' font-size='4' fill='#3a2a12'>Hardware Setup (mock)</text>"]
     boxes = list(SHEET_CARDS) if card in ('sheet.place', 'sheet.frame') else \
         [card] if card in SHEET_CARDS else []
     for k in boxes:
@@ -519,7 +519,6 @@ DARK_PROMPTS = {
     'laser.corner': ('choice', 'corner-pick', 'Which pattern has the most even corners?',
                      ['1.00', '1.25', '1.50', '1.75', '2.00']),
     'switches': ('wait', 'lid-open', 'Open the lid.', []),
-    'sensors': ('number', 'room-temp', 'Optional: the room temperature in C.', ['Set', 'Skip']),
     'cameras': ('confirm', 'lid-view', 'This is the lid camera. Can you see the bed?', ['Yes', 'No']),
     'motion': ('continue', 'jogs', 'The head moves 50 mm each way on X, then on Y.', ['Continue']),
     'cloud.header': ('continue', 'print', 'In the Glowforge app, place any small design and press '
@@ -614,7 +613,6 @@ DARK_APPLIED = {
     'laser.corner': {'laser_corner_gamma': {'from': '2', 'to': '1.50'}},
     'cooling.flow-load': {'cool_laser_heat_density': {'from': '2.7e-05', 'to': '3.1e-05'},
                           'cool_laser_heat_cw': {'from': '3.5e-05', 'to': '4e-05'}},
-    'sensors': {'cool_temp_offset_c': {'from': '0', 'to': '0.5'}},
 }
 PRESS_S = 3                     # seconds until the mock button 'presses'
 JOB_S = 8                       # seconds a mock update job runs
@@ -759,7 +757,7 @@ class Mock:
         self.report_at = self.t0
         self.rep_armed = False
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
-        # The commissioning record (GET /wiz): the mock starts commissioned
+        # The setup record (GET /wiz): the mock starts with the setup complete
         # unless GF_MOCK_FIRST_RUN=1, so the panel is what the dev server
         # shows by default and the wizard on request.
         first = os.environ.get('GF_MOCK_FIRST_RUN') == '1'
@@ -985,7 +983,7 @@ class Mock:
         if not w['account'] or w['reset']:
             return 'no account exists'
         missing = self.wiz_missing()
-        return 'commissioning required: ' + ', '.join(missing) if missing else ''
+        return 'setup required: ' + ', '.join(missing) if missing else ''
 
     def wiz_record(self):
         w = self.wiz
@@ -1011,10 +1009,10 @@ class Mock:
         rec = self.wiz_record()
         titles = dict(WIZARDS)
         h = ['<!doctype html><html lang="en"><head><meta charset="utf-8">'
-             '<title>Commissioning record %s</title><style>body{font:14px/1.5 sans-serif;'
+             '<title>Setup record %s</title><style>body{font:14px/1.5 sans-serif;'
              'padding:28px 32px;max-width:900px}h2{border-bottom:1px solid #ddd}'
              'th{text-align:left;color:#666;font-weight:500;padding-right:14px}</style></head>'
-             '<body><h1>ForgeFIRM commissioning record</h1><p>Sheet id <b>%s</b> &middot; '
+             '<body><h1>ForgeFIRM setup record</h1><p>Sheet id <b>%s</b> &middot; '
              'firmware %s (mock)</p>' % (MOCK_SHEET_ID, MOCK_SHEET_ID, self.version)]
         h.append('<h2>Operator acknowledgment</h2><table>')
         for d in ADVISORY_DOCS:
@@ -1543,7 +1541,7 @@ class Mock:
                         if w['flags'].get(wid, ('',))[0] == 'required' and level != 'required':
                             continue
                         w['flags'][wid] = (level, reason)
-                    self._log('commission: %s: the wizards it needs are flagged' % reason)
+                    self._log('setup: %s: the wizards it needs are flagged' % reason)
                     return J(200, self.wiz_reply())
             return J(400, {'error': 'what must name a change from the menu'})
         if path == '/system/ssh':
@@ -1675,7 +1673,7 @@ class Mock:
                 card = q.get('card', '')
                 if card not in LIVE:
                     return J(404, {'error': 'no such card'})
-                body = ('; ForgeFIRM commissioning: %s (mock)\nM3 S400\nG0 X10 Y10\nG1 X190 Y10 F3000\n'
+                body = ('; ForgeFIRM setup: %s (mock)\nM3 S400\nG0 X10 Y10\nG1 X190 Y10 F3000\n'
                         'G1 X190 Y140 F3000\nG1 X10 Y140 F3000\nG1 X10 Y10 F3000\nM5\n' % card)
                 return 200, {'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store'}, \
                     body.encode()
@@ -1690,7 +1688,7 @@ class Mock:
                 hdrs = {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}
                 if 'download' in q:
                     hdrs['Content-Disposition'] = \
-                        'attachment; filename="forgefirm-commissioning-%s.json"' % MOCK_SHEET_ID
+                        'attachment; filename="forgefirm-setup-%s.json"' % MOCK_SHEET_ID
                 return 200, hdrs, json.dumps(self.wiz_record(), indent=2).encode()
             if path == '/wiz/record.html':
                 return 200, {'Content-Type': 'text/html; charset=utf-8',

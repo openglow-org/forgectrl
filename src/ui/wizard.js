@@ -1,5 +1,5 @@
 /*
- * wizard.js - forgectrl: the commissioning wizard
+ * wizard.js - forgectrl: the setup wizard
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -73,8 +73,7 @@ var DARK_TEXT = {
     'stays locked. About three minutes.',
   sensors: 'Ten seconds of readings at rest: both coolant temperatures, the chassis and the ' +
     'processor, the lid infrared sensors, the accelerometer, the laser supply, and the fans ' +
-    'at idle. If you have a room thermometer, one reading gives the coolant sensors a ' +
-    'per-machine offset. About one minute.',
+    'at idle. About one minute.',
   airflow: 'The fans run at the cut profile for 35 seconds. Each fan speed and its spin-up ' +
     'time set the floor the airflow gate watches. The purge fan current is measured on and ' +
     'off. The motion controller stops for the run. About one minute.',
@@ -1150,7 +1149,7 @@ initWelcome();
 load(function () {
   var first = firstOpen();
   /* /setup?step=<id> opens one step on a completed setup (the panel's
-   * Commissioning tab links there). */
+   * Setup tab links there). */
   var want = new URLSearchParams(location.search).get('step');
   if (want && W.completed && ((RERUN.indexOf(want) >= 0 && darkApplicable(want)) ||
       (ORDER.indexOf(want) >= 0 && !stepDone(want)))) {

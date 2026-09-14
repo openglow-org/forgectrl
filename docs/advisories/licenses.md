@@ -1,6 +1,6 @@
 # Licenses and notices
 
-Revision: 2 (2026-09-10)
+Revision: 3 (2026-09-14)
 
 This document names the major software on this machine and the license of each part. It is a notice, not a contract. Tick the box when you have read it.
 
@@ -55,7 +55,7 @@ The NXP EULA stays on the machine at the path in the table. Keep it there in eac
 
 ## The Hershey fonts
 
-The text burned on the commissioning sheet uses the Hershey fonts. Their notice asks for these acknowledgments:
+The text burned on the setup sheet uses the Hershey fonts. Their notice asks for these acknowledgments:
 
 - The Hershey Fonts were originally created by Dr. A. V. Hershey while working at the U.S. National Bureau of Standards.
 - The format of the font data in this distribution was originally created by James Hurt, Cognition, Inc., 900 Technology Park Drive, Billerica, MA 01821 (mit-eddie!ci-dandelion!hurt).

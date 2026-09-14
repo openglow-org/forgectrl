@@ -1,16 +1,16 @@
 /*
- * sheetid.c - the commissioning sheet id
+ * sheetid.c - the setup sheet id
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The commissioning sheet is meant to be photographed and shared. It
+ * The setup sheet is meant to be photographed and shared. It
  * must identify the machine to its owner without revealing the serial
  * number, and the panel's machine id is out too: that id is the serial
  * in base 23, so it reverses. The sheet id is an HMAC-SHA256 of the
  * fuse serial under a 256-bit secret salt that never leaves the
  * machine, rendered as ten base32 characters. It is stable for the
- * machine, shown on the Commissioning tab so an owner can match a
+ * machine, shown on the Setup tab so an owner can match a
  * sheet, and useless to anyone without the salt.
  *
  * The salt follows the panel token's rules: created once from

@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 
 # The pages are normal static files under src/ui/: the control panel
 # (index.html with theme.css, md.js, help.js, forms.js, panel.js), the
-# commissioning wizard (wizard.html with wizard.css, md.js, wizard.js),
+# setup wizard (wizard.html with wizard.css, md.js, wizard.js),
 # and the login page (login.html with login.js), all on Bootstrap in
 # vendor/. embed.cmake bundles each into one self-contained page, gzips
 # it, and emits the compressed bytes as `<page>_html_gz[]` (see
@@ -34,7 +34,7 @@ add_custom_command(
   DEPENDS ${UI_DIR}/wizard.html ${UI_DIR}/wizard.css ${UI_DIR}/md.js
           ${UI_DIR}/regions.js
           ${UI_DIR}/wizard.js ${UI_COMMON}
-  COMMENT "Bundling the commissioning wizard (src/ui -> wizard_html_gz[])"
+  COMMENT "Bundling the setup wizard (src/ui -> wizard_html_gz[])"
   VERBATIM)
 add_custom_command(
   OUTPUT ${UI_OUT}/login_blob.c ${UI_OUT}/login.html
@@ -98,7 +98,7 @@ add_executable(forgectrl
   src/advisories.c
   src/button.c
   src/camkey.c
-  src/commission.c
+  src/setup.c
   src/recordhtml.c
   src/led.c
   src/session.c
@@ -118,7 +118,7 @@ target_include_directories(forgectrl PRIVATE src)
 target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)
 # dl: the GPU demosaic loads libEGL/libGLESv2 at runtime, so the build
 # has no GL dependency and images without Mesa fall back to NEON.
-# jansson: the commissioning record. gnutls: the panel's self-signed
+# jansson: the setup record. gnutls: the panel's self-signed
 # certificate (the HTTPS listener itself is libmicrohttpd's). crypt: the
 # account's sha512-crypt hash, shared with the system's shadow file.
 target_link_libraries(forgectrl ulfius jansson gnutls crypt jpeg z pthread m
@@ -264,15 +264,15 @@ add_executable(sheetid_test tests/sheetid_test.c src/sheetid.c src/sha256.c
 target_compile_options(sheetid_test PRIVATE -Wall -Wextra)
 target_link_libraries(sheetid_test pthread)
 
-# Host unit test for the commissioning record and the gate: consent,
+# Host unit test for the setup record and the gate: consent,
 # the account, the required table and its versions, engine flags, the
 # override file, a damaged record, and the status document. CI runs it
 # after the build.
-add_executable(commission_test tests/commission_test.c src/commission.c
+add_executable(setup_test tests/setup_test.c src/setup.c
                src/advisories.c src/sha256.c src/sheetid.c src/fflog.c
                ${UI_OUT}/advisories_blob.c)
-target_compile_options(commission_test PRIVATE -Wall -Wextra)
-target_link_libraries(commission_test jansson pthread)
+target_compile_options(setup_test PRIVATE -Wall -Wextra)
+target_link_libraries(setup_test jansson pthread)
 
 # The record as a printable page: every value escaped, the steps in
 # catalog order with the sentence, the settings written, and the
@@ -305,7 +305,7 @@ add_executable(wizcalc_test tests/wizcalc_test.c src/wizcalc.c)
 target_compile_options(wizcalc_test PRIVATE -Wall -Wextra)
 target_link_libraries(wizcalc_test m)
 
-# The commissioning sheet: the font table, every card inside its box,
+# The setup sheet: the font table, every card inside its box,
 # the programs, the SVG, the curve inverse.
 add_executable(sheet_test tests/sheet_test.c src/sheet.c src/font_hershey.c)
 target_compile_options(sheet_test PRIVATE -Wall -Wextra)

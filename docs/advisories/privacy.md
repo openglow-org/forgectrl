@@ -1,6 +1,6 @@
 # Privacy
 
-Revision: 1 (2026-09-06)
+Revision: 2 (2026-09-14)
 
 This document says what the machine sends, what it keeps, and who can see it. Tick the box when you have read it.
 
@@ -24,7 +24,7 @@ The reason is where the lid camera points. When you raise the lid, the lid camer
 
 On the ordinary path the machine reads a frame from the camera, encodes it, sends it, and frees it. It does not write an image file.
 
-The commissioning camera check is an exception. It keeps the last lid picture and the last head picture in memory until a new check replaces them or the machine services restart. Those pictures are served on the local network at a read route while open reads are allowed.
+The setup camera check is an exception. It keeps the last lid picture and the last head picture in memory until a new check replaces them or the machine services restart. Those pictures are served on the local network at a read route while open reads are allowed.
 
 In cloud mode, the Glowforge service asks for images. The machine sends them to the storage host the service names. That is the only way an image leaves your network.
 
@@ -36,7 +36,7 @@ The control panel uses an encrypted connection. Its certificate is one the machi
 
 Before you accept the warning, open `http://<the-machine>/cert` on the same network. That page shows the certificate fingerprint. Compare it with the fingerprint your browser shows. Accept the certificate only if they match. After that, the System tab shows the same fingerprint so you can check it again.
 
-The panel login is the username and password you set during commissioning. There is no default password. The panel password, and everything you change, travel encrypted on your network.
+The panel login is the username and password you set during setup. There is no default password. The panel password, and everything you change, travel encrypted on your network.
 
 The status view and the camera views are different. Any device on your network can read them unless you close the open-read setting. That setting has no control on the panel. It is `panel_open_reads`, on by default. Turning it off closes every read route, not only status and cameras: settings, mode, cooling, the wizards, the documents, the licenses, and the rest. Set it through the settings interface.
 
@@ -48,10 +48,10 @@ The machine logs its own programs: the machine services, the controller, the clo
 
 You can download a log export from the panel. By default the export is sanitized. It replaces the serial number, the machine name, and the network names with placeholders. It also replaces network addresses, credentials, the camera key, and other secrets it recognizes. The sanitizer removes what it knows and what it can recognize. Skim the export before you send it.
 
-## The commissioning sheet id
+## The setup sheet id
 
-The commissioning sheet carries an id. The id is a code derived from the serial number with a secret kept on the machine. It does not reveal the serial number. Nobody can compute the serial number from the id without the secret. The sheet carries no serial number, no machine name, and no network address. You can share a photo of the sheet.
+The setup sheet carries an id. The id is a code derived from the serial number with a secret kept on the machine. It does not reveal the serial number. Nobody can compute the serial number from the id without the secret. The sheet carries no serial number, no machine name, and no network address. You can share a photo of the sheet.
 
 ## A request to beta testers
 
-The project learns from real machines. Please send a sanitized log export to the project by private message on the community forum at https://community.openglow.org. Send it after commissioning, and after any fault you do not understand. Do not post it in a public thread. This is voluntary. The machine never sends a log to the project on its own. A maintainer uses your log to diagnose your machine and then deletes it. The project does not publish it and does not keep a log archive.
+The project learns from real machines. Please send a sanitized log export to the project by private message on the community forum at https://community.openglow.org. Send it after setup, and after any fault you do not understand. Do not post it in a public thread. This is voluntary. The machine never sends a log to the project on its own. A maintainer uses your log to diagnose your machine and then deletes it. The project does not publish it and does not keep a log archive.

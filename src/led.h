@@ -16,7 +16,7 @@ typedef enum {
     LED_BREATHE_TEAL,   /* "press me to accept" */
     LED_BREATHE_WHITE,  /* a long step is running */
     LED_BLINK_AMBER,    /* attention: the lid, an error, the reset hold */
-    LED_SOLID_GREEN,    /* commissioned */
+    LED_SOLID_GREEN,    /* setup complete */
 } led_pattern_t;
 
 void led_set(led_pattern_t p);

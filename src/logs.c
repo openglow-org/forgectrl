@@ -824,14 +824,14 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
             fclose(t);
         }
     }
-    /* the commissioning record: what the setup found and wrote, so a
+    /* the setup record: what the setup found and wrote, so a
      * report carries the machine's own numbers beside its logs */
     if (record_cb) {
         FILE *t = tmpfile();
         if (t) {
             record_cb(t);
             rewind(t);
-            snprintf(dst, sizeof(dst), "%s/system/commissioning.json", top);
+            snprintf(dst, sizeof(dst), "%s/system/setup.json", top);
             (void)stage_stream(san, t, dst);
             fclose(t);
         }
@@ -858,7 +858,7 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                    " uptime, memory, disk,\n"
                    "                   processes, effective log levels,"
                    " settings (secrets masked),\n"
-                   "                   and the commissioning record (what"
+                   "                   and the setup record (what"
                    " the setup found and wrote)\n"
                    "  system/pstore/   crash records the kernel kept across"
                    " its last panic reboots\n"

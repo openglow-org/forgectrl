@@ -34,7 +34,7 @@
  */
 #define _GNU_SOURCE
 #include "cam.h"
-#include "commission.h"
+#include "setup.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -91,7 +91,7 @@ static double respawn_at = 0.0;    /* not before this time */
 static unsigned generation = 0;    /* bumped on every state change */
 
 static int local_posture = 0;      /* a wizard owns the controller: loopback only */
-static int gated = 0;              /* the commissioning gate is closed (under mu) */
+static int gated = 0;              /* the setup gate is closed (under mu) */
 static char gate_why[256];
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
@@ -616,7 +616,7 @@ static void *super_main(void *arg)
             }
         }
 
-        /* The commissioning gate: no controller for a sender while it
+        /* The setup gate: no controller for a sender while it
          * is closed. A wizard's own controller (local posture, loopback
          * only) passes. A gate that closes on a running controller (a
          * required re-run raised mid-life) stops it once the machine
@@ -624,7 +624,7 @@ static void *super_main(void *arg)
         {
             char why[256];
             pthread_mutex_unlock(&mu);
-            int open = commission_gate_open(why, sizeof(why));
+            int open = setup_gate_open(why, sizeof(why));
             pthread_mutex_lock(&mu);
             int now_gated = !open && !local_posture;
             if (now_gated != gated || (now_gated && strcmp(why, gate_why))) {
@@ -803,7 +803,7 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     }
     {
         char why[256];
-        if (!commission_gate_open(why, sizeof(why)) && !local_posture) {
+        if (!setup_gate_open(why, sizeof(why)) && !local_posture) {
             snprintf(err, elen, "controllers are gated: %s", why);
             return -1;
         }

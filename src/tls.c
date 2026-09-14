@@ -21,7 +21,7 @@
  * What this buys: a passive listener on the LAN sees no password and
  * no session. What it does not buy: protection against an active
  * attacker who presents a certificate of their own; the fingerprint
- * on the panel's Commissioning card and the /cert page is the check
+ * on the panel's Setup card and the /cert page is the check
  * for that.
  */
 #define _GNU_SOURCE

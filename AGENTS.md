@@ -8,7 +8,7 @@ contributor is welcome to read it too: it is the same set of rules.
 `forgectrl` is the machine-services daemon: the controller supervisor, the
 pulse-device broker, the motion-liveness gate, the cooling engine, the
 cameras, telemetry, settings, diagnostics, the logging tree, the web control
-panel, the first-run commissioning, and the A/B update system. It serves
+panel, the first-run setup, and the A/B update system. It serves
 HTTPS on port 443, with the read-only routes on HTTP port 80.
 
 This page of the site is this repository's contract:

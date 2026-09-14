@@ -37,7 +37,7 @@ void super_controller_start(void);
  * closes. why names what holds the machine (the gate, the enclosure),
  * else the probe's own words behind a faulted or unverified verdict. */
 int super_status_json(char *buf, size_t len);
-/* The wizard's posture: while on, the commissioning gate does not
+/* The wizard's posture: while on, the setup gate does not
  * apply and the Grbl controller binds to loopback only. A change
  * restarts a running Grbl controller with the new bind. */
 void super_set_local(int on);

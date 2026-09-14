@@ -1,5 +1,5 @@
 /*
- * sheet.h - the commissioning sheet: paths, text, layout, and programs
+ * sheet.h - the setup sheet: paths, text, layout, and programs
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT

@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT
  *
  * A small, dependency-free implementation for the daemon's own needs:
- * the commissioning sheet id (an HMAC of the serial under a secret
+ * the setup sheet id (an HMAC of the serial under a secret
  * salt), the hash of each advisory document the record stores, and
  * the session id comparison. The vectors in tests/sha256_test.c pin it
  * to FIPS 180-4 and RFC 4231.

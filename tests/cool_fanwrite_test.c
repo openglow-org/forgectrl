@@ -128,7 +128,7 @@ static int log_has(const char *needle)
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int machine_is_idle(void) { return 1; }
-int commission_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *level, const char *reason)
 {
     (void)id; (void)level; (void)reason;
     return 0;

@@ -1,5 +1,5 @@
 /*
- * wiz.h - the commissioning wizards and their routes (see wiz.c)
+ * wiz.h - the setup wizards and their routes (see wiz.c)
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT

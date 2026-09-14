@@ -16,7 +16,7 @@
 #include "accel.h"
 #include "airflow.h"
 #include "cam.h"
-#include "commission.h"
+#include "setup.h"
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
@@ -325,7 +325,7 @@ static void finish_err(const char *fmt, ...)
 }
 
 /* The wizard completed. finish_ok borrows result and applied: the caller
- * still owns them and decrefs them. commission_wizard_done consumes what
+ * still owns them and decrefs them. setup_wizard_done consumes what
  * it is handed, so it gets its own references; a NULL applied means the
  * empty object. */
 static void finish_ok(int version, json_t *result, json_t *applied)
@@ -338,7 +338,7 @@ static void finish_ok(int version, json_t *result, json_t *applied)
         json_decref(S.applied);
     S.applied = applied ? json_incref(applied) : NULL;
     pthread_mutex_unlock(&mu);
-    if (commission_wizard_done(S.id, version, json_incref(result),
+    if (setup_wizard_done(S.id, version, json_incref(result),
                                applied ? json_incref(applied) : json_object()) != 0)
         finish_err("the record could not be written");
     else
@@ -457,7 +457,7 @@ static void run_switches(void)
      * 7 head (status.c). */
     json_t *r = json_object();
     char model[24] = "";
-    commission_machine_str("model", model, sizeof(model));
+    setup_machine_str("model", model, sizeof(model));
     int pro = !strcmp(model, "pro");
     unsigned long bits = machine_switch_bits();
     wlog("switches at start: 0x%02lx", bits);
@@ -625,41 +625,9 @@ static void run_sensors(void)
         json_decref(r);
         goto out;
     }
-    progress(90);
-    /* The optional room temperature: one point that gives the coolant
-     * sensors a per-machine offset. */
-    json_t *applied = json_object();
-    static const char *const o[] = { "Set", "Skip" };
-    char a[32];
-    int rc = ask("number", "room-temp",
-                 "Optional: if you have a thermometer, enter the room temperature in C and the "
-                 "coolant readings get a per-machine offset. Otherwise skip.", o, 2, a, sizeof(a));
-    if (rc == -1) {
-        json_decref(r);
-        json_decref(applied);
-        goto out;
-    }
-    if (rc == 0 && a[0] && strcasecmp(a, "skip")) {
-        double room = strtod(a, NULL);
-        double mean = (s.down_c + s.up_c) / 2.0;
-        double offset = room - mean;
-        char val[24];
-        snprintf(val, sizeof(val), "%.1f", offset);
-        const char *keys[] = { "cool_temp_offset_c" };
-        const char *vals[] = { val };
-        char err[96];
-        if (fabs(offset) > 5.0)
-            wlog("room %.1f C is %.1f C from the coolant reading: no offset written (limit 5)", room, offset);
-        else if (write_settings(keys, vals, 1, applied, err, sizeof(err)) == 0) {
-            json_object_set_new(r, "temp_offset_c", json_real(round(offset * 10) / 10));
-            wlog("coolant offset %.1f C from a room reading of %.1f C", offset, room);
-        } else
-            wlog("offset not written: %s", err);
-    }
     progress(100);
-    finish_ok(1, r, applied);
+    finish_ok(1, r, NULL);
     json_decref(r);
-    json_decref(applied);
 out:
     if (crash) {
         crash_hw_disarm();
@@ -986,13 +954,13 @@ static void run_cooling_flow_verify(void)
     if (!pass) {
         finish_err("the flow check does not separate flow from no-flow at the threshold: run the "
                    "calibration");
-        commission_flag("cooling.flow", "required", "the flow check failed to separate the bands");
+        setup_flag("cooling.flow", "required", "the flow check failed to separate the bands");
         json_decref(res);
         return;
     }
     if (thin) {
         wlog("the margin is thin: a calibration is recommended");
-        commission_flag("cooling.flow", "recommended", "the flow check margin is thin");
+        setup_flag("cooling.flow", "recommended", "the flow check margin is thin");
     }
     progress(100);
     finish_ok(1, res, NULL);
@@ -1003,7 +971,7 @@ static void run_cooling_tec(void)
 {
     int stopped = 0, took = 0;
     json_t *r = NULL, *applied = NULL;
-    if (!commission_machine_bool("tec")) {
+    if (!setup_machine_bool("tec")) {
         r = json_object();
         json_object_set_new(r, "tec", json_false());
         json_object_set_new(r, "skipped", json_string("no TEC on this machine"));

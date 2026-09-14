@@ -4,7 +4,7 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The live half of the commissioning: one sheet of wood, the head at
+ * The live half of the setup: one sheet of wood, the head at
  * its home as the datum, and one press per card. Every wizard here
  * runs on the runner's worker (wizdark.c) with the same prompts and
  * record, takes the controller in loopback posture, references the
@@ -23,7 +23,7 @@
 #include "wizcalc.h"
 #include "wizrun.h"
 #include "cam.h"
-#include "commission.h"
+#include "setup.h"
 #include "cool.h"
 #include "curverec.h"
 #include "accel.h"
@@ -104,7 +104,7 @@ typedef struct {
 static void place_read(place_t *p)
 {
     memset(p, 0, sizeof(*p));
-    json_t *r = commission_wizard_result("sheet.place");
+    json_t *r = setup_wizard_result("sheet.place");
     if (!r)
         return;
     p->have = 1;
@@ -117,7 +117,7 @@ static void place_read(place_t *p)
 
 static double result_num(const char *wiz, const char *key, double def)
 {
-    json_t *r = commission_wizard_result(wiz);
+    json_t *r = setup_wizard_result(wiz);
     if (!r)
         return def;
     json_t *v = json_object_get(r, key);
@@ -177,7 +177,7 @@ static void header_facts(sheet_header_t *h, header_bufs_t *b)
     char *p = strstr(b->version, " (dev)");
     if (p)
         *p = '\0';
-    commission_machine_str("model", b->model, sizeof(b->model));
+    setup_machine_str("model", b->model, sizeof(b->model));
     if (!b->model[0])
         snprintf(b->model, sizeof(b->model), "model ?");
     struct cam_status st;
@@ -1140,7 +1140,7 @@ int wizlive_program(const char *id, sheet_text_t *out)
     sheet_text_t pg;
     sheet_paths_init(&pv);
     sheet_text_init(&pg);
-    sheet_text_line(out, "; ForgeFIRM commissioning: %s, the body the wizard streams after", id);
+    sheet_text_line(out, "; ForgeFIRM setup: %s, the body the wizard streams after", id);
     sheet_text_line(out, "; the head the wizard sends first: $X G21 G90, G92 at the sheet"
                          " origin, G0 Z%.2f", card_z(id, &p));
     int rc = build_card(id, b, p.alone && sheet_card(id) != NULL, &pv, &pg);
@@ -1211,7 +1211,7 @@ static void run_place(void)
     wiz_progress(70);
     static const char *const kinds[] = { "Full sheet", "One card" };
     char size[32], kind_q[200];
-    snprintf(kind_q, sizeof(kind_q), "Is this the full commissioning sheet (%s or more), or a "
+    snprintf(kind_q, sizeof(kind_q), "Is this the full setup sheet (%s or more), or a "
              "smaller piece for one card?", sheet_size_text(size, sizeof(size)));
     if (wiz_ask("choice", "sheet-kind", kind_q, kinds, 2, a, sizeof(a)) != 0)
         goto out;

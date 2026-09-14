@@ -1,5 +1,5 @@
 /*
- * commission.c - the commissioning record and the controller gate
+ * setup.c - the setup record and the controller gate
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -21,7 +21,7 @@
  * done", which closes the gate and serves the wizard.
  */
 #define _GNU_SOURCE
-#include "commission.h"
+#include "setup.h"
 #include "advisories.h"
 #include "fflog.h"
 #include "paths.h"
@@ -41,7 +41,7 @@
  * again on every machine that updates to this build. The form wizards
  * of the initial run are listed first; the hardware wizards join as
  * they land. */
-static const commission_req_t image_required[] = {
+static const setup_req_t image_required[] = {
     { "advisories",        1, NULL },
     { "account",           1, NULL },
     { "preferences",       1, NULL },
@@ -67,9 +67,9 @@ static const commission_req_t image_required[] = {
     { "cooling.flow-load", 1, NULL },
 };
 
-int (*commission_fact_hook)(const char *fact);
+int (*setup_fact_hook)(const char *fact);
 
-/* The what-changed menu (the panel's Commissioning tab). The settings a
+/* The what-changed menu (the panel's Setup tab). The settings a
  * card measured belong to the part it measured them on: a new tube has
  * its own floor, dose curve, and heat coefficient; a new pump or
  * coolant its own flow bands; a new fan its own floor; a new head its
@@ -77,7 +77,7 @@ int (*commission_fact_hook)(const char *fact);
  * the boot check also flags). Those are required, so the gate holds
  * until the numbers are the new part's. The checks that only prove a
  * part are recommended. */
-static const commission_change_t changes[] = {
+static const setup_change_t changes[] = {
     { "tube", "The laser tube was replaced", "the tube was replaced",
       { { "laser.floor", "required" }, { "laser.dose-curve", "required" },
         { "cooling.flow-load", "required" }, { "laser.corner", "recommended" } } },
@@ -97,7 +97,7 @@ static const commission_change_t changes[] = {
       { { "switches", "recommended" }, { "motion", "recommended" } } },
 };
 
-static const commission_req_t *required = image_required;
+static const setup_req_t *required = image_required;
 static size_t nrequired = sizeof(image_required) / sizeof(*image_required);
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -111,12 +111,12 @@ static char g_why[256];
 
 static void record_path(char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/commissioning.json", ff_data_dir());
+    snprintf(buf, len, "%s/setup.json", ff_data_dir());
 }
 
 static void override_path(char *buf, size_t len)
 {
-    snprintf(buf, len, "%s/commissioning-override", ff_run_dir());
+    snprintf(buf, len, "%s/setup-override", ff_run_dir());
 }
 
 static void now_iso(char *buf, size_t len)
@@ -142,7 +142,7 @@ static json_t *fresh_record(void)
     char ts[32], sid[SHEETID_LEN + 1];
     now_iso(ts, sizeof(ts));
     json_t *r = json_object();
-    json_object_set_new(r, "schema", json_integer(COMMISSION_SCHEMA));
+    json_object_set_new(r, "schema", json_integer(SETUP_SCHEMA));
     json_object_set_new(r, "created", json_string(ts));
     if (sheetid_get(sid, sizeof(sid)) == 0)
         json_object_set_new(r, "sheet_id", json_string(sid));
@@ -167,7 +167,7 @@ static int save_locked(void)
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
         free(text);
-        fflog(LOG_ERR, "commission: cannot write %s: %s", tmp, strerror(errno));
+        fflog(LOG_ERR, "setup: cannot write %s: %s", tmp, strerror(errno));
         return -1;
     }
     size_t len = strlen(text), off = 0;
@@ -185,7 +185,7 @@ static int save_locked(void)
     free(text);
     if (!ok || rename(tmp, path) != 0) {
         unlink(tmp);
-        fflog(LOG_ERR, "commission: cannot save the record: %s", strerror(errno));
+        fflog(LOG_ERR, "setup: cannot save the record: %s", strerror(errno));
         return -1;
     }
     int dfd = open(ff_data_dir(), O_RDONLY | O_DIRECTORY);
@@ -243,7 +243,7 @@ static int req_applies_locked(size_t i)
     json_t *f = json_object_get(m, required[i].when);
     if (f)
         return json_is_true(f);
-    return commission_fact_hook ? commission_fact_hook(required[i].when) : 0;
+    return setup_fact_hook ? setup_fact_hook(required[i].when) : 0;
 }
 
 static void evaluate_locked(void)
@@ -287,7 +287,7 @@ static void evaluate_locked(void)
     else if (!account)
         snprintf(g_why, sizeof(g_why), "no account exists");
     else if (!wizards && !g_override)
-        snprintf(g_why, sizeof(g_why), "commissioning required: %s", missing);
+        snprintf(g_why, sizeof(g_why), "setup required: %s", missing);
     else if (!wizards && g_override)
         snprintf(g_why, sizeof(g_why), "override active (required: %s)", missing);
     else
@@ -295,14 +295,32 @@ static void evaluate_locked(void)
     g_gate = consent && account && (wizards || g_override);
 }
 
+/* A record written under the file's earlier name (commissioning.json)
+ * is taken over once: moved to the current name when no record is at
+ * it yet, so the consent, the account, and every wizard's result stay
+ * with the machine across the rename. */
+static void adopt_earlier_record(const char *path)
+{
+    char old[256];
+    snprintf(old, sizeof(old), "%s/commissioning.json", ff_data_dir());
+    if (access(path, F_OK) == 0 || access(old, F_OK) != 0)
+        return;
+    if (rename(old, path) == 0)
+        fflog(LOG_NOTICE, "setup: the record moved from %s to %s", old, path);
+    else
+        fflog(LOG_ERR, "setup: cannot move the record %s to %s: %s", old, path,
+              strerror(errno));
+}
+
 static void load_locked(void)
 {
     char path[256];
     record_path(path, sizeof(path));
+    adopt_earlier_record(path);
     json_error_t err;
     json_t *r = json_load_file(path, 0, &err);
     if (r && json_is_object(r) &&
-        json_integer_value(json_object_get(r, "schema")) == COMMISSION_SCHEMA) {
+        json_integer_value(json_object_get(r, "schema")) == SETUP_SCHEMA) {
         rec = r;
         /* The sheet id can arrive later than the record (a salt made
          * after a record that was seeded); fill it when it is known. */
@@ -318,29 +336,29 @@ static void load_locked(void)
     }
     if (r) {
         json_decref(r);
-        fflog(LOG_WARNING, "commission: %s is not a schema %d record, "
-                           "starting a new one", path, COMMISSION_SCHEMA);
+        fflog(LOG_WARNING, "setup: %s is not a schema %d record, "
+                           "starting a new one", path, SETUP_SCHEMA);
     } else if (access(path, F_OK) == 0) {
-        fflog(LOG_WARNING, "commission: %s unreadable (%s), starting a new "
+        fflog(LOG_WARNING, "setup: %s unreadable (%s), starting a new "
                            "record", path, err.text);
     }
     rec = fresh_record();
 }
 
-void commission_init(void)
+void setup_init(void)
 {
     pthread_mutex_lock(&mu);
     if (rec)
         json_decref(rec);
     load_locked();
     evaluate_locked();
-    fflog(LOG_INFO, "commission: first_run=%d gate=%s override=%d%s%s",
+    fflog(LOG_INFO, "setup: first_run=%d gate=%s override=%d%s%s",
           g_first_run, g_gate ? "open" : "closed", g_override,
           g_why[0] ? " why=" : "", g_why);
     pthread_mutex_unlock(&mu);
 }
 
-void commission_set_required(const commission_req_t *reqs, size_t n)
+void setup_set_required(const setup_req_t *reqs, size_t n)
 {
     pthread_mutex_lock(&mu);
     required = reqs ? reqs : image_required;
@@ -350,7 +368,7 @@ void commission_set_required(const commission_req_t *reqs, size_t n)
     pthread_mutex_unlock(&mu);
 }
 
-int commission_first_run(void)
+int setup_first_run(void)
 {
     pthread_mutex_lock(&mu);
     if (rec)
@@ -360,7 +378,7 @@ int commission_first_run(void)
     return v;
 }
 
-int commission_gate_open(char *why, size_t len)
+int setup_gate_open(char *why, size_t len)
 {
     pthread_mutex_lock(&mu);
     if (rec)
@@ -372,7 +390,7 @@ int commission_gate_open(char *why, size_t len)
     return v;
 }
 
-int commission_override_active(void)
+int setup_override_active(void)
 {
     char path[256];
     override_path(path, sizeof(path));
@@ -386,7 +404,7 @@ static int commit_locked(void)
     return rc;
 }
 
-int commission_advisory_accept(const char *doc_id, const char *hash,
+int setup_advisory_accept(const char *doc_id, const char *hash,
                                 const char *method)
 {
     const advisory_t *d = advisories_find(doc_id);
@@ -408,7 +426,7 @@ int commission_advisory_accept(const char *doc_id, const char *hash,
     return rc;
 }
 
-int commission_acceptance_pressed(void)
+int setup_acceptance_pressed(void)
 {
     char ts[32];
     now_iso(ts, sizeof(ts));
@@ -424,7 +442,7 @@ int commission_acceptance_pressed(void)
     return rc;
 }
 
-int commission_set_account(const char *name, long uid)
+int setup_set_account(const char *name, long uid)
 {
     if (!name || !*name)
         return -1;
@@ -441,7 +459,7 @@ int commission_set_account(const char *name, long uid)
     return rc;
 }
 
-int commission_clear_account(void)
+int setup_clear_account(void)
 {
     pthread_mutex_lock(&mu);
     json_object_del(rec, "account");
@@ -450,7 +468,7 @@ int commission_clear_account(void)
     return rc;
 }
 
-int commission_set_machine(json_t *machine)
+int setup_set_machine(json_t *machine)
 {
     if (!json_is_object(machine)) {
         if (machine)
@@ -464,7 +482,7 @@ int commission_set_machine(json_t *machine)
     return rc;
 }
 
-int commission_wizard_done(const char *id, int version, json_t *result,
+int setup_wizard_done(const char *id, int version, json_t *result,
                            json_t *applied)
 {
     if (!id || version < 1) {
@@ -490,7 +508,7 @@ int commission_wizard_done(const char *id, int version, json_t *result,
     return rc;
 }
 
-int commission_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *level, const char *reason)
 {
     if (!id)
         return -1;
@@ -511,7 +529,7 @@ int commission_flag(const char *id, const char *level, const char *reason)
     return rc;
 }
 
-int commission_complete(void)
+int setup_complete(void)
 {
     char ts[32];
     now_iso(ts, sizeof(ts));
@@ -522,7 +540,7 @@ int commission_complete(void)
     return rc;
 }
 
-int commission_record_json(char *buf, size_t len)
+int setup_record_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     char *text = json_dumps(rec, JSON_COMPACT | JSON_SORT_KEYS);
@@ -534,7 +552,7 @@ int commission_record_json(char *buf, size_t len)
     return n >= (int)len ? -1 : n;
 }
 
-char *commission_record_dump(int indent)
+char *setup_record_dump(int indent)
 {
     pthread_mutex_lock(&mu);
     char *text = json_dumps(rec, (indent ? JSON_INDENT(2) : JSON_COMPACT) | JSON_SORT_KEYS);
@@ -542,7 +560,7 @@ char *commission_record_dump(int indent)
     return text;
 }
 
-json_t *commission_record_copy(void)
+json_t *setup_record_copy(void)
 {
     pthread_mutex_lock(&mu);
     json_t *out = json_deep_copy(rec);
@@ -550,16 +568,16 @@ json_t *commission_record_copy(void)
     return out;
 }
 
-const commission_change_t *commission_changes(size_t *n)
+const setup_change_t *setup_changes(size_t *n)
 {
     if (n)
         *n = sizeof(changes) / sizeof(*changes);
     return changes;
 }
 
-int commission_change_apply(const char *what)
+int setup_change_apply(const char *what)
 {
-    const commission_change_t *c = NULL;
+    const setup_change_t *c = NULL;
     for (size_t i = 0; i < sizeof(changes) / sizeof(*changes); i++)
         if (what && !strcmp(changes[i].id, what))
             c = &changes[i];
@@ -567,7 +585,7 @@ int commission_change_apply(const char *what)
         return -1;
     pthread_mutex_lock(&mu);
     json_t *flags = obj_get_or_make(rec, "flags");
-    for (size_t i = 0; i < COMMISSION_CHANGE_WIZ && c->wizards[i].id; i++) {
+    for (size_t i = 0; i < SETUP_CHANGE_WIZ && c->wizards[i].id; i++) {
         /* A required flag never drops to recommended. */
         json_t *old = json_object_get(flags, c->wizards[i].id);
         const char *ol = json_string_value(json_object_get(old, "level"));
@@ -581,11 +599,11 @@ int commission_change_apply(const char *what)
     int rc = commit_locked();
     pthread_mutex_unlock(&mu);
     if (rc == 0)
-        fflog(LOG_NOTICE, "commission: %s: the wizards it needs are flagged", c->reason);
+        fflog(LOG_NOTICE, "setup: %s: the wizards it needs are flagged", c->reason);
     return rc;
 }
 
-json_t *commission_changes_json(void)
+json_t *setup_changes_json(void)
 {
     json_t *out = json_array();
     for (size_t i = 0; i < sizeof(changes) / sizeof(*changes); i++) {
@@ -593,7 +611,7 @@ json_t *commission_changes_json(void)
         json_object_set_new(c, "id", json_string(changes[i].id));
         json_object_set_new(c, "title", json_string(changes[i].title));
         json_t *w = json_array();
-        for (size_t k = 0; k < COMMISSION_CHANGE_WIZ && changes[i].wizards[k].id; k++)
+        for (size_t k = 0; k < SETUP_CHANGE_WIZ && changes[i].wizards[k].id; k++)
             json_array_append_new(w, json_pack("{s:s,s:s}", "id", changes[i].wizards[k].id,
                                                "level", changes[i].wizards[k].level));
         json_object_set_new(c, "wizards", w);
@@ -602,7 +620,7 @@ json_t *commission_changes_json(void)
     return out;
 }
 
-int commission_advisories_complete(void)
+int setup_advisories_complete(void)
 {
     pthread_mutex_lock(&mu);
     int v = advisories_complete_locked();
@@ -610,7 +628,7 @@ int commission_advisories_complete(void)
     return v;
 }
 
-int commission_acceptance_done(void)
+int setup_acceptance_done(void)
 {
     pthread_mutex_lock(&mu);
     int v = acceptance_done_locked();
@@ -618,7 +636,7 @@ int commission_acceptance_done(void)
     return v;
 }
 
-void commission_machine_str(const char *key, char *buf, size_t len)
+void setup_machine_str(const char *key, char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     const char *v = json_string_value(json_object_get(json_object_get(rec, "machine"), key));
@@ -626,7 +644,7 @@ void commission_machine_str(const char *key, char *buf, size_t len)
     pthread_mutex_unlock(&mu);
 }
 
-int commission_machine_bool(const char *key)
+int setup_machine_bool(const char *key)
 {
     pthread_mutex_lock(&mu);
     int v = json_is_true(json_object_get(json_object_get(rec, "machine"), key));
@@ -634,7 +652,7 @@ int commission_machine_bool(const char *key)
     return v;
 }
 
-void commission_head_hash(char *buf, size_t len)
+void setup_head_hash(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     json_t *head = json_object_get(json_object_get(rec, "machine"), "head");
@@ -643,7 +661,7 @@ void commission_head_hash(char *buf, size_t len)
     pthread_mutex_unlock(&mu);
 }
 
-int commission_wizard_version(const char *id)
+int setup_wizard_version(const char *id)
 {
     pthread_mutex_lock(&mu);
     int v = wizard_version_locked(id);
@@ -651,7 +669,7 @@ int commission_wizard_version(const char *id)
     return v;
 }
 
-json_t *commission_wizard_result(const char *id)
+json_t *setup_wizard_result(const char *id)
 {
     pthread_mutex_lock(&mu);
     json_t *w = json_object_get(json_object_get(rec, "wizards"), id ? id : "");
@@ -661,7 +679,7 @@ json_t *commission_wizard_result(const char *id)
     return out;
 }
 
-void commission_completed_at(char *buf, size_t len)
+void setup_completed_at(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     const char *c = json_string_value(json_object_get(rec, "completed"));
@@ -669,7 +687,7 @@ void commission_completed_at(char *buf, size_t len)
     pthread_mutex_unlock(&mu);
 }
 
-int commission_status_json(char *buf, size_t len)
+int setup_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
     evaluate_locked();

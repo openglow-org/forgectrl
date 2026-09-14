@@ -1,5 +1,5 @@
 /*
- * sheet.c - the commissioning sheet: paths, text, layout, and programs
+ * sheet.c - the setup sheet: paths, text, layout, and programs
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -257,7 +257,7 @@ void sheet_frame(sheet_paths_t *s, const sheet_header_t *h)
     sheet_mark(s, 12, 12, 10);
     sheet_text(s, 12, 37.5f, SHEET_CAP_BODY, "forgefirm.org", text_x - 14);
     sheet_text(s, text_x, 20, SHEET_CAP_TITLE, "OpenGlow ForgeFIRM", text_w);
-    sheet_text(s, text_x, 27, SHEET_CAP_CARD, "Hardware Commissioning", text_w);
+    sheet_text(s, text_x, 27, SHEET_CAP_CARD, "Hardware Setup", text_w);
     char facts[160];
     snprintf(facts, sizeof(facts), "%s %s - %s - %s", h->version ? h->version : "",
              h->build ? h->build : "", h->model ? h->model : "", h->camera ? h->camera : "");

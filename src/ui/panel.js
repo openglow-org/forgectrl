@@ -17,7 +17,7 @@
  *             plus the fuse-identity viewer (modal, on demand)
  *   #grbl     GRBL-mode settings (controller info; tunables land here
  *             as the driver exposes them)
- *   #diag     commissioning - the checks the setup ran and what the
+ *   #diag     setup - the checks the setup ran and what the
  *             machine asks for again, and the cooling tools that take
  *             the hardware over (the motion controller is stopped for
  *             the duration): verification and calibration
@@ -390,7 +390,7 @@ function tab() {
   }
   if (h === 'system') {
     loadSsh();
-    loadCommission();
+    loadSetup();
   }
   if (h === 'logs') {
     loadLogs();
@@ -690,7 +690,7 @@ function renderMode() {
   $('ctl-retry').style.display = fault ? '' : 'none';
   renderGate();
 }
-/* The banner under the mode selector: the commissioning gate (no
+/* The banner under the mode selector: the setup gate (no
  * controller for a sender while it is closed, and where to go), or the
  * motion check waiting for the lid or the interlock to close. */
 function renderGate() {
@@ -698,7 +698,7 @@ function renderGate() {
   if (MD && MD.gated) {
     b.className = 'banner banner-bad';
     b.innerHTML =
-      '⚠ The machine is waiting for commissioning: ' +
+      '⚠ The machine is waiting for setup: ' +
       esc(MD.why || 'a required step is not complete') +
       '. Controllers stay off until it is done. ' +
       "<a href='/setup'>Continue the setup</a>";
@@ -815,7 +815,7 @@ function rotateCamKey() {
     })
     .catch(function () {});
 }
-function loadCommission() {
+function loadSetup() {
   fetch('/wiz')
     .then(function (r) {
       return r.json();
@@ -835,11 +835,11 @@ function loadCommission() {
       if (w.override) g += txt('Override', 'active until the next reboot');
       g += kv('Sheet id', "<span class='mono'>" + esc(w.sheet_id || '') + '</span>');
       g += kv('Certificate', "<span class='mono brk'>" + esc(w.tls_fingerprint || '') + '</span>');
-      $('commissioninfo').innerHTML = g;
+      $('setupinfo').innerHTML = g;
     })
     .catch(function () {});
 }
-/* The Commissioning tab's list: every wizard the setup knows, the version
+/* The Setup tab's list: every wizard the setup knows, the version
  * it completed at, and what the machine asks for again. */
 function loadWizards() {
   fetch('/wiz')

@@ -378,7 +378,7 @@ int curverec_start(char *err, size_t elen)
     }
     if (wizdark_running()) {
         pthread_mutex_unlock(&mu);
-        snprintf(err, elen, "a commissioning wizard holds the machine");
+        snprintf(err, elen, "a setup wizard holds the machine");
         return -1;
     }
     if (thread_live) {

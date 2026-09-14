@@ -1,5 +1,5 @@
 /*
- * recordhtml.c - the commissioning record as a printable page
+ * recordhtml.c - the setup record as a printable page
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -282,11 +282,11 @@ char *record_html(const json_t *rec, const json_t *docs, const json_t *wizards,
 
     sb_put(&b, "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
                "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-               "<title>Commissioning record ");
+               "<title>Setup record ");
     sb_esc(&b, sid);
     sb_put(&b, "</title><style>");
     sb_put(&b, css);
-    sb_put(&b, "</style></head><body>\n<h1>ForgeFIRM commissioning record</h1>\n<p class=\"sub\">");
+    sb_put(&b, "</style></head><body>\n<h1>ForgeFIRM setup record</h1>\n<p class=\"sub\">");
     if (*sid) {
         sb_put(&b, "Sheet id <span class=\"mono\">");
         sb_esc(&b, sid);

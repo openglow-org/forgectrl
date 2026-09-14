@@ -12,7 +12,7 @@ mode or the `gfcloud` web-service client in factory cloud mode, and forgectrl
 owns everything around them: the controller supervisor, the pulse-device
 broker, the motion-liveness gate, the cooling engine, the cameras, telemetry,
 settings, diagnostics, the logging tree, the web control panel, the first-run
-commissioning, and the A/B update system.
+setup, and the A/B update system.
 
 ## Documentation
 

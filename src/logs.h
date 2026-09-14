@@ -52,7 +52,7 @@ char *logs_tail_json(const char *name, long lines, long long from);
  * and removes the staging. Only one export runs at a time: begin()
  * fails with err="busy" otherwise. settings_cb writes the settings
  * snapshot (secrets already masked) into the given stream; record_cb
- * writes the commissioning record (system/commissioning.json), which
+ * writes the setup record (system/setup.json), which
  * the sanitizer then treats like any other text. Either may be NULL. */
 typedef struct logs_export logs_export_t;
 logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),

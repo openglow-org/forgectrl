@@ -24,7 +24,7 @@ jobs:
         run: ./build/status_grbl_test
       - name: Dose-curve fitter test
         run: ./build/curverec_fit_test
-      - name: sheet_test (the commissioning sheet renderer)
+      - name: sheet_test (the setup sheet renderer)
         run: ./build/sheet_test
       - name: lens_test (the lens frame, every Z inside the controller's window)
         run: ./build/lens_test
@@ -62,11 +62,11 @@ jobs:
         run: ./build/mp4mux_test
       - name: Digest primitives (SHA-256, HMAC, constant-time compare)
         run: ./build/sha256_test
-      - name: Commissioning sheet id
+      - name: Setup sheet id
         run: ./build/sheetid_test
-      - name: Commissioning record and gate
-        run: ./build/commission_test
-      - name: Commissioning record as a page
+      - name: Setup record and gate
+        run: ./build/setup_test
+      - name: Setup record as a page
         run: ./build/recordhtml_test
       - name: Account and sessions
         run: ./build/users_test

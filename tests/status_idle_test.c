@@ -77,7 +77,7 @@ int main(void)
     /* "disabled" is the power-on state, and the state a machine holds
      * for the whole of its first run (the steppers are energized by the
      * liveness probe, which runs at a controller spawn, which the
-     * commissioning gate holds back). Steppers off with no program in
+     * setup gate holds back). Steppers off with no program in
      * progress is idle for every caller of this predicate; reading it
      * as busy locked the setup out of its own machine. */
     set_state("disabled");

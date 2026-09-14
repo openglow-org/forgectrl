@@ -305,7 +305,7 @@ int machine_is_idle(void)
      * asks about. It is the state a machine sits in for the whole of
      * its first run, because the steppers are energized by the
      * supervisor's liveness probe and the probe runs at a controller
-     * spawn, which the commissioning gate holds back. Reading it as
+     * spawn, which the setup gate holds back. Reading it as
      * busy locked the setup out of its own machine: the sensors check
      * refused to start, settings writes answered 409, and the cooling
      * engine held cooldown airflow (the fans at full) from boot.

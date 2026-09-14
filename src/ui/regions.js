@@ -4,7 +4,7 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * Shared by the control panel (the Wireless card) and the commissioning
+ * Shared by the control panel (the Wireless card) and the setup
  * wizard (the preferences step). fillRegions(select) adds the automatic
  * entry (00) and every region, in this order.
  */
