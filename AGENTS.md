@@ -47,6 +47,16 @@ The board binary is a cross-build, never a native one:
 - **The supervisor safes the machine before it signals a child**, on every
   transition out of a running controller, and again after any escalation to
   `SIGKILL`.
+- **Controller death is a signal, not a poll.** `SIGCHLD` wakes the
+  lifecycle thread; the safing follows within milliseconds.
+- **The enclosure check runs before every spawn, respawns included.** The
+  motion probe runs once per broker hold.
+- **A respawn waits** for the homing runner to be gone and the kernel idle.
+- **A fail-tier verdict stops the controller through the supervisor.** The
+  kernel writes come first; they are never the only action.
+- `super.c` and `cool.c` are unit-tested by inclusion (`tests/super_test.c`,
+  `tests/cool_flow_test.c`). A new supervisor or engine path gets a case
+  there.
 - The control panel under `src/ui/` is bundled into the binary by
   `embed.cmake`. `tools/devserver.py` serves it against a live board or the
   built-in mock.
@@ -128,6 +138,9 @@ does.
   test with the fix, in the same commit, never after.
 - Position counters, homing anchors, and a homed flag are not proof of
   physical motion. The head accelerometer is, and so are the operator's eyes.
+- Unreadable is fail-closed. A failed read of a safety input, a state file,
+  or a verdict is never treated as "still running" or "keep waiting" without
+  a bound.
 
 ### Proof before done
 
