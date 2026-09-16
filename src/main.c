@@ -669,7 +669,7 @@ static int valid_pulse_bytes(const char *v) { return valid_range(v, 0, 107374182
  * or "hold" (stock grblHAL door hold, cycle start resumes). */
 static int valid_lid_policy(const char *v) { return !strcmp(v, "cancel") || !strcmp(v, "hold"); }
 
-/* The XY microstep mode (8, 16 or 32; unset = 8). One number both
+/* The XY microstep mode (8, 16 or 32; unset = 32). One number both
  * controllers read at their start: the GRBL controller derives
  * $100/$101, its machine tick and the kernel stop ramp from it. The
  * key is applied at the next controller start; a change from the panel
