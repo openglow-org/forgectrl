@@ -2,7 +2,7 @@
  * font_hershey.c - the stroke font of the setup sheet (generated)
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: MIT AND LicenseRef-Hershey
  *
  * Hershey Sans 1-stroke (Simplex), the printable ASCII glyphs as
  * polylines in the font's own units (cap height 662), made by
