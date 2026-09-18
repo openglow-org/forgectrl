@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -289,6 +290,12 @@ static void test_sender_check(void)
 
 int main(void)
 {
+    /* The daemon ignores SIGPIPE process-wide (main.c), so jobstream's
+     * writes to a controller that went away return EPIPE and take the
+     * error path. This test links jobstream without main.c, so without
+     * the same disposition the mock closing a connection mid-write kills
+     * the test with SIGPIPE (exit 141) instead of exercising that path. */
+    signal(SIGPIPE, SIG_IGN);
     snprintf(root, sizeof(root), "/tmp/jobstream_test.%d", (int)getpid());
     char sub[256];
     mkdir(root, 0700);
