@@ -1,4 +1,8 @@
 #!/bin/sh
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 # Runs once when the dev container is created (devcontainer.json
 # postCreateCommand), from the repo root.
 set -e

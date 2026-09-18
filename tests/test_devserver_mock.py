@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Copyright 2026 514 LLC d/b/a OpenGlow
+# Written by Scott Wiederhold
+# https://community.openglow.org
+# SPDX-License-Identifier:    MIT
 """Host test: the panel dev server's mock mirrors the daemon.
 
 The mock in tools/devserver.py is a static copy of what forgectrl
