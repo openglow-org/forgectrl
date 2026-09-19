@@ -699,6 +699,49 @@ static int has_suffix(const char *s, const char *suf)
     return n >= m && !strcmp(s + n - m, suf);
 }
 
+/* Directories of the tree that no logger feeds: each is written by its
+ * own tool and rides the export beside the loggers. The installer writes
+ * install/install.log on factory firmware, before the first ForgeFIRM
+ * boot, so a machine that a newer installer has not touched has none. */
+static const char *const tree_extra_names[] = {
+    "install",
+};
+#define N_TREE_EXTRA (sizeof(tree_extra_names) / sizeof(*tree_extra_names))
+
+/* Stage LOGS_ROOT/<name>/ into <top>/logs/<name>/, through the sanitizer
+ * when there is one. A logger's directory is in every bundle; an extra
+ * one only when the tree has it. */
+static void stage_tree_dir(sanitizer_t *san, const char *top, const char *name,
+                           int always)
+{
+    char d[256], sd[160], src[640], dst[640];
+    snprintf(sd, sizeof(sd), "%s/%s", LOGS_ROOT, name);
+    snprintf(d, sizeof(d), "%s/logs/%s", top, name);
+    DIR *dp = opendir(sd);
+    if (dp || always)
+        (void)mkdir(d, 0700);
+    if (!dp)
+        return;
+    struct dirent *de;
+    while ((de = readdir(dp)) != NULL) {
+        if (de->d_name[0] == '.')
+            continue;
+        snprintf(src, sizeof(src), "%s/%s", sd, de->d_name);
+        snprintf(dst, sizeof(dst), "%s/%s", d, de->d_name);
+        struct stat st;
+        if (stat(src, &st) != 0 || !S_ISREG(st.st_mode) ||
+            st.st_size > EXPORT_MAX_FILE ||
+            export_staged_bytes + st.st_size > EXPORT_MAX_TOTAL)
+            continue;
+        export_staged_bytes += st.st_size;
+        if (has_suffix(de->d_name, ".gz"))
+            (void)stage_gz(san, src, dst);
+        else
+            (void)stage_file(san, src, dst);
+    }
+    closedir(dp);
+}
+
 logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                                  void (*record_cb)(FILE *), char *err, size_t errlen)
 {
@@ -739,34 +782,11 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
     if (mkdir(d, 0700) != 0)
         goto fail_stage;
 
-    /* the log tree */
-    for (size_t i = 0; i < logs_count; i++) {
-        snprintf(d, sizeof(d), "%s/logs/%s", top, logs_names[i]);
-        (void)mkdir(d, 0700);
-        char sd[160];
-        snprintf(sd, sizeof(sd), "%s/%s", LOGS_ROOT, logs_names[i]);
-        DIR *dp = opendir(sd);
-        if (!dp)
-            continue;
-        struct dirent *de;
-        while ((de = readdir(dp)) != NULL) {
-            if (de->d_name[0] == '.')
-                continue;
-            snprintf(src, sizeof(src), "%s/%s", sd, de->d_name);
-            snprintf(dst, sizeof(dst), "%s/%s", d, de->d_name);
-            struct stat st;
-            if (stat(src, &st) != 0 || !S_ISREG(st.st_mode) ||
-                st.st_size > EXPORT_MAX_FILE ||
-                export_staged_bytes + st.st_size > EXPORT_MAX_TOTAL)
-                continue;
-            export_staged_bytes += st.st_size;
-            if (has_suffix(de->d_name, ".gz"))
-                (void)stage_gz(san, src, dst);
-            else
-                (void)stage_file(san, src, dst);
-        }
-        closedir(dp);
-    }
+    /* the log tree: the loggers, then what their tools left beside them */
+    for (size_t i = 0; i < logs_count; i++)
+        stage_tree_dir(san, top, logs_names[i], 1);
+    for (size_t i = 0; i < N_TREE_EXTRA; i++)
+        stage_tree_dir(san, top, tree_extra_names[i], 0);
 
     /* system snapshot */
     snprintf(dst, sizeof(dst), "%s/system/version.txt", top);
@@ -854,6 +874,10 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                    " grblhal, gfcloud, gfhome,\n"
                    "                   kernel, system): the live .log and"
                    " rotated .N.gz files\n"
+                   "  logs/install/    the installer's own log, one block per"
+                   " run, written on\n"
+                   "                   factory firmware; present only when the"
+                   " installer left one\n"
                    "  system/          firmware version, kernel ring buffer,"
                    " uptime, memory, disk,\n"
                    "                   processes, effective log levels,"
