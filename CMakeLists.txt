@@ -75,6 +75,7 @@ add_executable(forgectrl
   src/debayer.c
   src/diag.c
   src/fflog.c
+  src/fwproduct.c
   src/gates.c
   src/gpu_debayer.c
   src/ipu_copy.c
@@ -378,6 +379,10 @@ target_link_libraries(auth_scoped_test ulfius pthread)
 add_executable(builtin_test tests/builtin_test.c src/builtin.c src/settings.c src/fflog.c)
 target_compile_options(builtin_test PRIVATE -Wall -Wextra)
 target_link_libraries(builtin_test pthread)
+
+# The product gate on the firmware paths: firmware only, by signature class.
+add_executable(fwproduct_test tests/fwproduct_test.c src/fwproduct.c)
+target_compile_options(fwproduct_test PRIVATE -Wall -Wextra)
 
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)

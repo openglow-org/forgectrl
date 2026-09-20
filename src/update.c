@@ -29,6 +29,7 @@
  */
 #define _GNU_SOURCE
 #include "update.h"
+#include "fwproduct.h"
 #include "auth.h"
 #include "diag.h"
 #include "fflog.h"
@@ -925,6 +926,12 @@ static void *dl_worker(void *arg)
                    "failed - archive discarded\"}");
         return NULL;
     }
+    const char *not_fw = fwproduct_gate(DL_FW, FWCLASS_RELEASE);
+    if (not_fw) {
+        unlink(DL_FW);
+        job_finish("{\"ok\":false,\"error\":\"%s - archive discarded\"}", not_fw);
+        return NULL;
+    }
     char ver[48];
     fw_meta_version(DL_FW, ver, sizeof(ver));
     struct stat st;
@@ -980,6 +987,15 @@ static void *apply_worker(void *argp)
         job_finish("{\"ok\":false,\"error\":\"archive is not signed with "
                    "the ForgeFIRM release key (confirm_unsigned=1 to "
                    "apply anyway)\"}");
+        free(a);
+        return NULL;
+    }
+    /* The product gate, before fwup -a: a signature says who made the
+     * archive, not what it is, and fwup applies whatever task it finds. */
+    const char *not_fw = fwproduct_gate(a->file, cls);
+    if (not_fw) {
+        drop_lock();
+        job_finish("{\"ok\":false,\"error\":\"%s\"}", not_fw);
         free(a);
         return NULL;
     }
@@ -1190,6 +1206,11 @@ int cb_update_upload(const struct _u_request *req, struct _u_response *res,
     if (cls < 0) {
         unlink(UP_FW);
         return reply_err(res, 400, "not a usable fwup archive");
+    }
+    const char *not_fw = fwproduct_gate(UP_FW, cls);
+    if (not_fw) {
+        unlink(UP_FW);
+        return reply_err(res, 400, not_fw);
     }
     char ver[48];
     fw_meta_version(UP_FW, ver, sizeof(ver));
