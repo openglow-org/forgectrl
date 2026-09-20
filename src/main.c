@@ -1770,6 +1770,11 @@ static int cb_cool_state(const struct _u_request *req,
      * client from spoofing a stand-down that drops the exhaust mid-cut. */
     if (!auth_loopback_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    /* ...and on this host, only the controller the supervisor spawned:
+     * anything that runs here is a loopback peer, and a forged idle
+     * report would drop the exhaust as surely from inside the machine. */
+    if (!super_report_secret_ok(u_map_get_case(req->map_header, "X-ForgeFIRM-Report")))
+        return reply_error(res, 403, "the report channel is the running controller's alone");
     const char *mode = setting_param(req, "mode");
     if (!mode)
         return reply_error(res, 400, "mode is required");

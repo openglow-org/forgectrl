@@ -64,4 +64,9 @@ int super_gated(char *why, size_t len);
  * (a dead controller's files must read as absent, not as truth). */
 int super_grbl_running(void);
 
+/* The controller's report channel: whether presented is the secret the
+ * running controller was handed at its spawn. Never true with no
+ * controller. */
+int super_report_secret_ok(const char *presented);
+
 #endif

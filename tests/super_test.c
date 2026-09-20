@@ -31,6 +31,9 @@
  *   J. a motor release is nobody's to end but the operator's: the probe
  *      is skipped with nothing written, the controller still starts,
  *      and a switch to cloud mode is refused
+ *   L. the report channel is the running controller's alone: each spawn
+ *      is handed a fresh secret in its environment, an inherited one is
+ *      replaced, nothing else passes for it, and a reap ends it
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -677,6 +680,48 @@ int main(void)
               "with the lease given back the switch reaches the idle check again");
         machine_idle = 1;
     }
+
+    printf("L. the report channel is the running controller's alone\n");
+    reset_state();
+    CHECK(!super_report_secret_ok("") && !super_report_secret_ok(NULL) &&
+          !super_report_secret_ok("00000000000000000000000000000000"), "with no controller nothing passes");
+    setenv("GF_REPORT_SECRET", "0123456789abcdef0123456789abcdef", 1);  /* a stale one, inherited */
+    CHECK(run_until_spawned(5.0), "the controller is up");
+    {
+        char first[REPORT_SECRET_HEX + 1], handed[64] = "";
+        snprintf(first, sizeof(first), "%s", report_secret);
+        CHECK(strlen(first) == REPORT_SECRET_HEX && strspn(first, "0123456789abcdef") == REPORT_SECRET_HEX,
+              "the spawn made a secret of 32 hex digits");
+        char **env = build_child_env(Ctl_Grbl, 5);
+        int n = 0;
+        for (size_t i = 0; env && env[i]; i++)
+            if (!strncmp(env[i], "GF_REPORT_SECRET=", 17)) {
+                snprintf(handed, sizeof(handed), "%s", env[i] + 17);
+                n++;
+            }
+        free_child_env(env);
+        CHECK(n == 1 && !strcmp(handed, first), "the child's environment carries it once, the inherited one gone");
+        CHECK(super_report_secret_ok(first), "the secret passes");
+        CHECK(!super_report_secret_ok("0123456789abcdef0123456789abcdef"), "the inherited one does not");
+        char near[REPORT_SECRET_HEX + 2];
+        snprintf(near, sizeof(near), "%s", first);
+        near[7] = near[7] == '0' ? '1' : '0';
+        CHECK(!super_report_secret_ok(near), "one digit off does not");
+        snprintf(near, sizeof(near), "%s0", first);
+        CHECK(!super_report_secret_ok(near), "nor the secret with more behind it");
+        near[REPORT_SECRET_HEX - 1] = '\0';
+        CHECK(!super_report_secret_ok(near) && !super_report_secret_ok(""), "nor a part of it, nor nothing");
+        CHECK(!strstr(logs, first), "the secret is in no log line");
+
+        die(0x0900);
+        tick();
+        CHECK(child_pid == 0 && !super_report_secret_ok(first), "a reap ends it");
+        CHECK(run_until_spawned(30.0), "the respawn comes up");
+        CHECK(strcmp(report_secret, first) && strlen(report_secret) == REPORT_SECRET_HEX &&
+              !super_report_secret_ok(first) && super_report_secret_ok(report_secret),
+              "with a secret of its own, and the old one stays dead");
+    }
+    unsetenv("GF_REPORT_SECRET");
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

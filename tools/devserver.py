@@ -621,6 +621,7 @@ DARK_APPLIED = {
 }
 PRESS_S = 3                     # seconds until the mock button 'presses'
 JOB_S = 8                       # seconds a mock update job runs
+MOCK_REPORT_SECRET = '0123456789abcdef0123456789abcdef'     # the mock controller's report secret
 CURVE_WAIT_S, CURVE_RECORD_S = 3, 12
 # A mock update job walks its kind's phases (the daemon's own strings)
 # evenly over JOB_S seconds.
@@ -2098,8 +2099,12 @@ class Mock:
         form.pop('token', None)
 
         # The controller's job-state report: loopback-only on the
-        # machine, no token.
+        # machine, no token, and the running controller's alone: the
+        # supervisor's per-spawn secret (src/super.c), which the mock's
+        # "controller" is handed as MOCK_REPORT_SECRET.
         if path == '/cool/state':
+            if headers.get('X-ForgeFIRM-Report') != MOCK_REPORT_SECRET:
+                return T(403, "the report channel is the running controller's alone")
             mode = form.get('mode')
             if mode is None:
                 return T(400, 'mode is required')

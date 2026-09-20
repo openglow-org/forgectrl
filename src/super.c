@@ -459,18 +459,66 @@ extern char **environ;
  * is not one, and a lock another thread held at fork time would hang
  * the child forever while it holds the broker fd. Returns a NULL-
  * terminated vector to free with free_child_env(), or NULL. */
+/* The report channel (POST /cool/state) is the running controller's
+ * alone. A loopback peer is not enough to say so: anything on this host
+ * is a loopback peer. Each spawn gets a secret in its environment, the
+ * way it gets the pulse fd, and the route asks for it; a reap ends it.
+ * It has a mutex of its own: the route must never wait behind the
+ * lifecycle thread. */
+#define REPORT_SECRET_HEX 32
+static pthread_mutex_t secret_mu = PTHREAD_MUTEX_INITIALIZER;
+static char report_secret[REPORT_SECRET_HEX + 1];
+
+static int report_secret_new(void)
+{
+    static const char hex[] = "0123456789abcdef";
+    unsigned char raw[REPORT_SECRET_HEX / 2];
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    int ok = fd >= 0 && read(fd, raw, sizeof(raw)) == (ssize_t)sizeof(raw);
+    if (fd >= 0)
+        close(fd);
+    pthread_mutex_lock(&secret_mu);
+    for (size_t i = 0; ok && i < sizeof(raw); i++) {
+        report_secret[2 * i] = hex[raw[i] >> 4];
+        report_secret[2 * i + 1] = hex[raw[i] & 0xf];
+    }
+    report_secret[ok ? REPORT_SECRET_HEX : 0] = '\0';
+    pthread_mutex_unlock(&secret_mu);
+    return ok ? 0 : -1;
+}
+
+static void report_secret_end(void)
+{
+    pthread_mutex_lock(&secret_mu);
+    memset(report_secret, 0, sizeof(report_secret));
+    pthread_mutex_unlock(&secret_mu);
+}
+
+int super_report_secret_ok(const char *presented)
+{
+    unsigned diff = 0;
+    size_t n = presented ? strlen(presented) : 0;
+    pthread_mutex_lock(&secret_mu);
+    int live = report_secret[0] != '\0';
+    for (size_t i = 0; i < REPORT_SECRET_HEX; i++)
+        diff |= (unsigned char)report_secret[i] ^ (unsigned char)(i < n ? presented[i] : 0);
+    pthread_mutex_unlock(&secret_mu);
+    return live && n == REPORT_SECRET_HEX && diff == 0;
+}
+
 static char **build_child_env(ctl_t ctl, int pulse_fd)
 {
     size_t n = 0;
     while (environ && environ[n])
         n++;
-    char **env = calloc(n + 3, sizeof(*env));
+    char **env = calloc(n + 4, sizeof(*env));
     if (!env)
         return NULL;
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
         /* Our own entries replace any inherited value of the same key. */
         if (!strncmp(environ[i], "GF_PULSE_FD=", 12) ||
+            !strncmp(environ[i], "GF_REPORT_SECRET=", 17) ||
             !strncmp(environ[i], "GFSINK=", 7))
             continue;
         env[k] = strdup(environ[i]);
@@ -487,6 +535,15 @@ static char **build_child_env(ctl_t ctl, int pulse_fd)
     }
     if (ctl == Ctl_Grbl) {
         if (!(env[k] = strdup("GFSINK=" PULSE_DEV)))
+            goto fail;
+        k++;
+    }
+    {
+        char sv[24 + REPORT_SECRET_HEX];
+        pthread_mutex_lock(&secret_mu);
+        snprintf(sv, sizeof(sv), "GF_REPORT_SECRET=%s", report_secret);
+        pthread_mutex_unlock(&secret_mu);
+        if (!(env[k] = strdup(sv)))
             goto fail;
         k++;
     }
@@ -581,6 +638,13 @@ static void spawn_locked(ctl_t ctl)
     if (ctl == Ctl_Grbl)
         grbl_nvs_path(nvs, sizeof nvs);
 
+    /* No entropy, no secret, no controller: one whose every report would
+     * be refused is a machine that cannot fire and does not say why. */
+    if (report_secret_new() != 0) {
+        fflog(LOG_ERR, "super: cannot read /dev/urandom for the controller's report secret");
+        respawn_at = wall_s() + backoff_s;
+        return;
+    }
     char **env = build_child_env(ctl, broker_fd);
     if (!env) {
         fflog(LOG_ERR, "super: cannot build the controller "
@@ -671,6 +735,7 @@ static void reap_locked(int status)
 {
     ctl_t died = child_ctl;
     double up = wall_s() - spawned_at;
+    report_secret_end();            /* nobody reports for a controller that is gone */
     child_pid = 0;
     child_ctl = Ctl_None;
     generation++;
