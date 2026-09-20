@@ -330,10 +330,32 @@ static int probe_wait(unsigned s)
  * thresholds sit twice away from what the bench reference reads with
  * its fans at their idle duty. */
 static char probe_detail[96];       /* the last probe's outcome text */
+
+/* The X and Y motors are released ($MD in the GRBL controller): their
+ * step currents are at 0 and an operator's hands may be on the gantry.
+ * The release outlives its controller as a marker in the run directory,
+ * and nothing that starts here may energize the motors under it. The
+ * two things that would are the probe, which is skipped (motion stays
+ * unverified; the controller still starts, and takes the release over),
+ * and a switch to cloud mode, whose homing moves the head, which is
+ * refused. */
+static int motors_released(void)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/motors.released", ff_run_dir());
+    return access(path, F_OK) == 0;
+}
+
 static int probe_sequence(int fd)
 {
     static const int ladder_s[] = { 0, 5, 15, 30 };
     char *detail = probe_detail;
+
+    if (motors_released()) {
+        snprintf(detail, sizeof(probe_detail), "the X and Y motors are released: nothing was moved");
+        fflog(LOG_NOTICE, "super: liveness probe: SKIPPED - %s", detail);
+        return 2;
+    }
 
     for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
         if (ladder_s[i] > 0) {
@@ -1083,6 +1105,10 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
     }
     if (!machine_is_idle()) {
         snprintf(err, elen, "machine is not idle");
+        return -1;
+    }
+    if (target == Ctl_Cloud && motors_released()) {
+        snprintf(err, elen, "the X and Y motors are released: energize them first");
         return -1;
     }
 

@@ -88,6 +88,7 @@ add_executable(forgectrl
   src/curverec.c
   src/font_hershey.c
   src/jobstream.c
+  src/grblport.c
   src/sheet.c
   src/wizlive.c
   src/super.c
@@ -332,6 +333,14 @@ target_link_libraries(lens_test m)
 add_executable(jobstream_test tests/jobstream_test.c src/jobstream.c src/fflog.c)
 target_compile_options(jobstream_test PRIVATE -Wall -Wextra)
 target_link_libraries(jobstream_test pthread)
+
+# The daemon's client of the controller port against a mock port on a
+# Unix socket: the two operation sets, one kept connection, a controller
+# restart, a port that never answers (hence the short wait).
+add_executable(grblport_test tests/grblport_test.c src/grblport.c)
+target_compile_options(grblport_test PRIVATE -Wall -Wextra)
+target_compile_definitions(grblport_test PRIVATE GRBLPORT_REPLY_TIMEOUT_MS=300)
+target_link_libraries(grblport_test pthread m)
 
 add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
 target_compile_options(tls_test PRIVATE -Wall -Wextra)

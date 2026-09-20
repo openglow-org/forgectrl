@@ -24,6 +24,8 @@ var FIELDS_BASE = [
   'homing_mode',
   'gfcloud_home_x',
   'gfcloud_home_y',
+  'manual_home_x',
+  'manual_home_y',
   'gfcloud_home_timeout_s',
   'cloud_pause_backtrack_ticks',
   'cloud_resume_lead_ticks',

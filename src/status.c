@@ -166,7 +166,7 @@ static long fan_rpm(long period_ns)
  * counting started (the UI paints it red). Returns 0 with xyz and
  * homed filled, or -1 when the counters themselves are unreadable. */
 static int read_position(double *x, double *y, double *z, int *homed,
-                         unsigned *axes)
+                         unsigned *axes, char *source, size_t source_len)
 {
     char pos_path[160];
     snprintf(pos_path, sizeof(pos_path), "%scnc/position", gf_sysfs_root());
@@ -174,13 +174,26 @@ static int read_position(double *x, double *y, double *z, int *homed,
     FILE *f = fopen(HOMED_ANCHOR, "r");
     *homed = 0;
     *axes = 0;
+    if (source_len)
+        source[0] = '\0';
     if (f) {
         /* The fourth field names the axes the anchor actually
          * references; an anchor written without it references all
-         * three, which is what a full home always wrote. */
+         * three, which is what a full home always wrote. The fifth names
+         * what set the reference (a homing provider, or "startup" for the
+         * lens reference), so a position a hand declared is shown as one.
+         * It goes into the reply as it is, so it is held to a plain word;
+         * an anchor without one reads as unnamed. */
         unsigned m = 0;
-        int got = fscanf(f, "%lf %lf %lf %u", &hx, &hy, &hz, &m);
+        char src[16] = "";
+        int got = fscanf(f, "%lf %lf %lf %u %15s", &hx, &hy, &hz, &m, src);
         fclose(f);
+        int plain = got == 5;
+        for (const char *p = src; plain && *p; p++)
+            plain = (*p >= 'a' && *p <= 'z') || *p == '-' || *p == '_';
+        snprintf(source, source_len, "%s", plain ? src : "");
+        if (got > 4)
+            got = 4;
         if (got >= 3)
             *axes = got == 4 ? (m & 7u) : 7u;
         if (!*axes)
@@ -575,7 +588,9 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     double x, y, z;
     int homed = 0;
     unsigned homed_axes = 0;
-    int have_pos = read_position(&x, &y, &z, &homed, &homed_axes) == 0;
+    char home_source[16] = "";
+    int have_pos = read_position(&x, &y, &z, &homed, &homed_axes,
+                                 home_source, sizeof(home_source)) == 0;
 
     long t1 = rd_attr_long("pic/water_temp_1", -1);
     long t2 = rd_attr_long("pic/water_temp_2", -1);
@@ -602,9 +617,15 @@ int machine_status_json(char *buf, size_t len, const char *extra)
         "\"reach_min\":%.2f,\"reach_max\":%.2f},",
         edge_z, below, above, stops_found ? "true" : "false", reach_lo, reach_hi);
     append(buf, len, &off,
-        "\"state\":\"%s\",\"homed\":%s,\"homed_axes\":%u,\"diag\":%s,",
+        "\"state\":\"%s\",\"homed\":%s,\"homed_axes\":%u,\"home_source\":\"%s\",\"diag\":%s,",
         state[0] ? state : "unknown", homed ? "true" : "false", homed_axes,
-        diag_running() ? "true" : "false");
+        home_source, diag_running() ? "true" : "false");
+    /* The release outlives its controller as a marker in the run
+     * directory, so it is read from there, controller or none. */
+    char released[192];
+    snprintf(released, sizeof(released), "%s/motors.released", run_dir());
+    append(buf, len, &off, "\"motors_released\":%s,",
+           access(released, F_OK) == 0 ? "true" : "false");
     if (have_pos)
         append(buf, len, &off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);

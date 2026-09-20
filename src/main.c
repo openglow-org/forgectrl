@@ -44,6 +44,7 @@
 #include "diag.h"
 #include "fflog.h"
 #include "gates.h"
+#include "grblport.h"
 #include "hooks.h"
 #include "led.h"
 #include "logs.h"
@@ -471,8 +472,11 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
 
 static int valid_homing_mode(const char *v)
 {
+    /* manual needs no cloud, no camera, and no hardware: it is always
+     * available. It is never a fallback, though: it asserts a position the
+     * machine cannot verify, so only the operator chooses it. */
     return !strcmp(v, "none") || !strcmp(v, "gfcloud") ||
-           !strcmp(v, "switches");
+           !strcmp(v, "manual") || !strcmp(v, "switches");
 }
 
 static int valid_controller_mode(const char *v)
@@ -496,6 +500,16 @@ static int valid_mm(const char *v)
         return 0;
     double f = strtod(v, &end);
     return end != v && *end == '\0' && f >= -1000.0 && f <= 1000.0;
+}
+
+/* A manual home's coordinate: where the stop blocks stand. Never negative. */
+static int valid_mm_nonneg(const char *v)
+{
+    char *end;
+    if (strlen(v) > VALUE_MAX_LEN)
+        return 0;
+    double f = strtod(v, &end);
+    return end != v && *end == '\0' && f >= 0.0 && f <= 1000.0;
 }
 
 static int valid_timeout(const char *v)
@@ -701,6 +715,8 @@ static const struct {
     { "homing_mode",            valid_homing_mode, 0 },
     { "gfcloud_home_x",         valid_mm,          0 },
     { "gfcloud_home_y",         valid_mm,          0 },
+    { "manual_home_x",          valid_mm_nonneg,   0 },
+    { "manual_home_y",          valid_mm_nonneg,   0 },
     { "gfcloud_home_timeout_s", valid_timeout,     0 },
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },
@@ -1454,6 +1470,104 @@ static int cb_mode_post(const struct _u_request *req,
     if (super_mode_switch(mode, err, sizeof(err)) != 0)
         return reply_error(res, strstr(err, "must be") ? 400 : 409, err);
     return cb_mode_get(req, res, NULL);
+}
+
+/* -------------------------------------------------------------- motion */
+
+/* The controller port's operations (grblport.h). Each route names the
+ * operation set it speaks for, here and nowhere later: the jog, the
+ * cancel, and the state are the package set; the release, the energize,
+ * and the manual home are the panel's alone. */
+static int motion_port(struct _u_response *res, grblport_set_t set,
+                       grblport_op_t op, const char *arg)
+{
+    char reply[256], why[160];
+    if (!super_grbl_running())
+        return reply_error(res, 409, "the GRBL controller is not running");
+    int rc = grblport_request(set, op, arg, reply, sizeof(reply));
+    if (rc == GRBLPORT_FORBIDDEN)
+        return reply_error(res, 403, reply);
+    if (rc != GRBLPORT_OK)
+        return reply_error(res, 503, reply);
+    if (op == GRBLPORT_STATE) {
+        if (reply[0] != '{')
+            return reply_error(res, 502, "the controller's answer was not understood");
+        ulfius_set_string_body_response(res, 200, reply);
+    } else {
+        int status = grblport_explain(reply, why, sizeof(why));
+        if (status)
+            return reply_error(res, (unsigned)status, why);
+        ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
+    }
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_motion_state(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_STATE, NULL);
+}
+
+/* A number in a request: absent reads as the default, and anything that
+ * is not wholly a number is an error, never a zero. */
+static int motion_num(const struct _u_request *req, const char *key,
+                      double dflt, double *out)
+{
+    const char *v = setting_param(req, key);
+    *out = dflt;
+    if (!v || !*v)
+        return 0;
+    char *end;
+    *out = strtod(v, &end);
+    return *end ? -1 : 0;
+}
+
+#define MOTION_JOG_FEED_DEFAULT 3000.0  /* mm/min */
+
+/* One bounded, relative jog in millimeters: x, y, z, and feed (mm/min).
+ * It is a jog and nothing else, because a jog is the one motion that
+ * ships dark whatever the laser's modal state is. */
+static int cb_motion_jog(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    double x, y, z, feed;
+    if (motion_num(req, "x", 0, &x) || motion_num(req, "y", 0, &y) ||
+        motion_num(req, "z", 0, &z) || motion_num(req, "feed", MOTION_JOG_FEED_DEFAULT, &feed))
+        return reply_error(res, 400, "x, y, z, and feed must be numbers");
+    char words[96], err[96];
+    if (grblport_jog_words(x, y, z, feed, words, sizeof(words), err, sizeof(err)) != 0)
+        return reply_error(res, 400, err);
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_JOG, words);
+}
+
+static int cb_motion_cancel(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_CANCEL, NULL);
+}
+
+/* The panel's own: release, energize, home (user_data names which). */
+static int cb_motion_panel(const struct _u_request *req,
+                           struct _u_response *res, void *user_data)
+{
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *which = user_data;
+    grblport_op_t op = !strcmp(which, "release")  ? GRBLPORT_RELEASE
+                     : !strcmp(which, "energize") ? GRBLPORT_ENERGIZE
+                                                  : GRBLPORT_HOME;
+    return motion_port(res, GRBLPORT_SET_PANEL, op, NULL);
 }
 
 /* ------------------------------------------------------------- cooling */
@@ -2555,6 +2669,12 @@ int main(int argc, char **argv)
         { "POST", "/mode",                 cb_mode_post,        NULL, 0 },
         { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0 },
         { "POST", "/controller/start",     cb_controller_start, NULL, 0 },
+        { "GET",  "/motion/state",         cb_motion_state,     NULL, 1 },
+        { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0 },
+        { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0 },
+        { "POST", "/motion/release",       cb_motion_panel,     "release", 0 },
+        { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0 },
+        { "POST", "/motion/home",          cb_motion_panel,     "home", 0 },
         { "POST", "/cool/state",           cb_cool_state,       NULL, 0 },
         { "GET",  "/cool/status",          cb_cool_status,      NULL, 1 },
         { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0 },

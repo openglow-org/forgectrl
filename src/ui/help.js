@@ -79,11 +79,35 @@ var HELP = {
     ]
   },
   home_pos: {
-    t: 'Home position',
+    t: 'Camera home position',
     d: 'usage/homing/',
     p: [
-      'Machine coordinates the head is at after a completed homing cycle. For Glowforge web-service homing that is the factory home corner (back left) with the lens at the hall reference; leave blank until a measurement says otherwise.',
-      'To calibrate: home, jog to a known reference, and enter the measured offsets.'
+      'Machine coordinates the head is at after a completed camera homing cycle: the factory home corner (back left), with the lens at the hall reference. Leave blank until a measurement says otherwise. A value may be negative, when the origin you calibrated lies inside the factory home.',
+      'Used by camera homing alone. To calibrate: home, jog to a known reference, and enter the measured offsets.'
+    ]
+  },
+  manual_home_pos: {
+    t: 'Manual home position',
+    d: 'usage/homing/',
+    p: [
+      'Machine coordinates of the head when it rests against the stop blocks, which is where a manual home puts it. Leave blank and the blocks are the origin, X0 Y0. Never negative: nothing is reachable behind the blocks.',
+      'Used by manual homing alone. The soft limits start at this position and end at the bed\'s travel.'
+    ]
+  },
+  motor_release: {
+    t: 'X and Y motors',
+    d: 'usage/homing/',
+    p: [
+      'Release motors takes the holding current off X and Y so the head and the gantry can be pushed by hand, with the machine on. The position is gone the moment they are released: X and Y lose their home, and the controller raises an alarm and refuses every move, from the Grbl client and from this panel alike, so nothing can start the motors under your hands.',
+      'Two things bring the motors back, and both are yours: Energize motors here, or a manual home. After an energize the machine needs a home again. The lens is not released and keeps its reference.'
+    ]
+  },
+  jog: {
+    t: 'Jog',
+    d: 'usage/control-panel/#status',
+    p: [
+      'Each press moves the head one step of the size you picked, at the speed you picked. The arrows are as you stand at the front of the machine: up is toward the back (Y-), down is toward the front (Y+). Z moves the lens, and the long steps are not offered to it. The square stops a jog in progress. A jog never fires the laser, whatever the Grbl client last commanded.',
+      'The jog goes through the controller beside the Grbl client, so LightBurn stays connected, and the client goes first: a line from it stops a jog in progress, and right after one a jog is refused. Its status polling does neither. A jog is also refused during a program, in an alarm, while the motors are released, and past the soft limits once the machine is homed; the reason shows beside the pad for a few seconds.'
     ]
   },
   lens: {

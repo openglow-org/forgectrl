@@ -35,6 +35,8 @@ jobs:
         run: ./build/lens_test
       - name: jobstream_test (the daemon's own sender)
         run: ./build/jobstream_test
+      - name: grblport_test (the controller port's client and its two operation sets)
+        run: ./build/grblport_test
       - name: Machine status JSON sys block
         run: ./build/status_sys_test
       - name: Log-export sanitizer

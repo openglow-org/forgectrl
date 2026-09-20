@@ -28,6 +28,9 @@
  *      open that fails keeps trying instead of a self-opening controller
  *   I. the engine's fail tier stops the controller and starts it again
  *      without a backoff
+ *   J. a motor release is nobody's to end but the operator's: the probe
+ *      is skipped with nothing written, the controller still starts,
+ *      and a switch to cloud mode is refused
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -260,7 +263,8 @@ int setup_gate_open(char *why, size_t len) { if (len) why[0] = '\0'; return 1; }
 int diag_running(void) { return 0; }
 int update_job_running(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
-int settings_get_bool(const char *key, int def) { (void)key; return def; }
+static int cloud_enabled;
+int settings_get_bool(const char *key, int def) { return !strcmp(key, "cloud_enabled") ? cloud_enabled : def; }
 int settings_set(const char *key, const char *val) { (void)key; (void)val; return 0; }
 
 /* --- the fake tree ---------------------------------------------------- */
@@ -288,6 +292,8 @@ static long get_long(const char *attr)
     return v;
 }
 
+#define RELEASE_MARKER "super-test/run/motors.released"
+
 static void make_tree(void)
 {
     mkdir("super-test", 0755);
@@ -304,6 +310,9 @@ static void make_tree(void)
     if (f)
         fclose(f);
     setenv("FORGECTRL_DATA_DIR", "super-test/data", 1);
+    mkdir("super-test/run", 0755);
+    setenv("GF_RUN_DIR", "super-test/run", 1);
+    unlink(RELEASE_MARKER);
 }
 
 static void clear_safing(void)
@@ -614,6 +623,35 @@ int main(void)
     CHECK(engine_stops >= 1, "the engine forgets the reporter");
     CHECK(run_until_spawned(1.0) && child_pid != before, "a new controller follows without a backoff");
     CHECK(probes == 1, "and without a second motion probe");
+
+    printf("J. a motor release is not ended from here\n");
+    reset_state();
+    put("cnc/enable", "0\n");           /* the cases before this one probed */
+    put("cnc/disable", "0\n");
+    {
+        FILE *f = fopen(RELEASE_MARKER, "w");
+        if (f)
+            fclose(f);
+    }
+    CHECK(run_until_spawned(5.0), "the controller still comes up: it is what takes the release over");
+    CHECK(probes == 0, "the motion probe never ran");
+    CHECK(get_long("cnc/enable") == 0 && get_long("cnc/disable") == 0, "and nothing was written to the rail");
+    CHECK(probed && probe_skipped, "motion is unverified, not faulted");
+    {
+        char st[256], err[128] = "";
+        cloud_enabled = 1;
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "\"motion\":\"unverified\"") != NULL && strstr(st, "released") != NULL,
+              "and /mode says why");
+        CHECK(super_mode_switch("cloud", err, sizeof(err)) == -1 && strstr(err, "released") != NULL,
+              "a switch to cloud mode is refused, in words");
+        CHECK(want == Ctl_Grbl, "the mode did not change");
+    }
+    cloud_enabled = 0;
+    unlink(RELEASE_MARKER);
+    reset_state();
+    CHECK(run_until_spawned(5.0) && probes == 1 && !probe_skipped,
+          "with the marker gone the probe runs as always");
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

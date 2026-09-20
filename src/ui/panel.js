@@ -127,6 +127,8 @@ function pTd(v) {
 var FT = {
   gfcloud_home_x: 'len',
   gfcloud_home_y: 'len',
+  manual_home_x: 'len',
+  manual_home_y: 'len',
   lens_park_z_mm: 'len',
   lens_hall_edge_z_mm: 'len',
   cool_flow_rise: 'td',
@@ -585,6 +587,11 @@ function homedAxesText(ax) {
   if (ax & 4) n.push('Z');
   return n.join('') + (ax === 7 ? '' : ' only');
 }
+// A home set by hand is only as true as the placement, and says so
+// wherever the position is shown.
+function homedText(ax, source) {
+  return homedAxesText(ax) + ((ax & 3) && source === 'manual' ? ' (manual)' : '');
+}
 
 function renderMotion() {
   var g = '';
@@ -614,7 +621,8 @@ function renderMotion() {
         axis('Z', M.pos.z, 4, false) +
         "<span class='mono'> " + uL() + '</span>'
     );
-  g += txt('Homed', homedAxesText(ax), ax === 7 ? 'b-ok' : 'b-dim');
+  g += txt('Homed', homedText(ax, M.home_source), ax === 7 ? 'b-ok' : 'b-dim');
+  if (M.motors_released) g += txt('X and Y motors', 'RELEASED', 'b-bad');
   if (M.lens) {
     var reach =
       'Z ' + posN(M.lens.reach_min) + ' to ' + posN(M.lens.reach_max) + ' ' + uL() +
@@ -645,6 +653,142 @@ function renderMotion() {
   if (typeof M.hv_current_raw !== 'undefined')
     g += kv('HV current', "<span class='mono'>" + M.hv_current_raw + ' raw</span>');
   $('motion').innerHTML = g;
+  renderPort();
+}
+/* What goes through the controller port exists while the GRBL controller
+ * runs: the jog card, the motor release, and the manual home. */
+var JOG = {
+  // Round numbers in the unit on display, never a conversion of the other
+  // unit's. The daemon takes millimeters.
+  steps: { mm: [0.1, 1, 10, 50], inch: [0.005, 0.05, 0.5, 2] },
+  speeds: [['Slow', 600], ['Normal', 3000], ['Fast', 6000]],
+  stepIx: 1,
+  speedIx: 1,
+  zMaxMm: 5,
+  active: false, // a jog of this panel's is in flight, or was a moment ago
+  unit: null,
+  msgTimers: {}
+};
+function jogStepMm() {
+  return isImp() ? JOG.steps.inch[JOG.stepIx] * 25.4 : JOG.steps.mm[JOG.stepIx];
+}
+function jogGroup(id, labels, ix, pick) {
+  var h = '';
+  for (var i = 0; i < labels.length; i++)
+    h +=
+      "<button type='button' data-nolock='1' class='btn btn-outline-secondary" +
+      (i === ix ? ' active' : '') + "' onclick='" + pick + '(' + i + ")'>" + labels[i] + '</button>';
+  $(id).innerHTML = h;
+}
+function jogControls() {
+  var list = isImp() ? JOG.steps.inch : JOG.steps.mm,
+    steps = [],
+    speeds = [];
+  for (var i = 0; i < list.length; i++) steps.push(list[i] + ' ' + uL());
+  for (var k = 0; k < JOG.speeds.length; k++) speeds.push(JOG.speeds[k][0]);
+  jogGroup('jog-steps', steps, JOG.stepIx, 'jogPickStep');
+  jogGroup('jog-speeds', speeds, JOG.speedIx, 'jogPickSpeed');
+  // The lens travels a few millimeters in all: the long steps are not its.
+  var big = jogStepMm() > JOG.zMaxMm;
+  $('jog-zp').disabled = big;
+  $('jog-zm').disabled = big;
+}
+function jogPickStep(i) {
+  JOG.stepIx = i;
+  jogControls();
+}
+function jogPickSpeed(i) {
+  JOG.speedIx = i;
+  jogControls();
+}
+function jogShowPos(mpos) {
+  if (!mpos) return;
+  $('jog-pos').textContent =
+    'X ' + posN(mpos[0]) + '  Y ' + posN(mpos[1]) + '  Z ' + posN(mpos[2]) + ' ' + uL();
+}
+function renderPort() {
+  var up = !!M.grbl;
+  $('jogcard').style.display = up ? '' : 'none';
+  $('motors').style.display = up ? '' : 'none';
+  $('mhome').style.display = up ? '' : 'none';
+  $('mrel').textContent = M.motors_released ? 'Energize motors' : 'Release motors';
+  if (JOG.unit !== uL()) {
+    JOG.unit = uL();
+    jogControls();
+  }
+  if (up && !JOG.active && M.pos) jogShowPos([M.pos.x, M.pos.y, M.pos.z]);
+}
+/* What the daemon said, beside the control that asked, for a few seconds:
+ * a refusal that stays on the screen reads as a fault that is still there. */
+function portSay(msgId, text) {
+  var el = $(msgId);
+  el.textContent = text;
+  if (JOG.msgTimers[msgId]) clearTimeout(JOG.msgTimers[msgId]);
+  if (text)
+    JOG.msgTimers[msgId] = setTimeout(function () {
+      el.textContent = '';
+    }, 4000);
+}
+function portPost(url, msgId, done) {
+  fx(url, { method: 'POST' })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        portSay(msgId, r.ok ? '' : t);
+        if (done) done(r.ok);
+        else loadMach();
+      });
+    })
+    .catch(function () {
+      portSay(msgId, 'no response');
+    });
+}
+/* While this panel's own jog runs the machine is busy, and that is no
+ * reason to lock the page or to put the busy banner up: it would move
+ * the pad under the pointer. The port says when the jog is over, and its
+ * position reads out live until then. */
+function jogWatch() {
+  if (JOG.active) return;
+  JOG.active = true;
+  var idleSince = 0,
+    tick = function () {
+      fetch('/motion/state', { cache: 'no-store' })
+        .then(function (r) {
+          return r.ok ? r.json() : null;
+        })
+        .then(function (st) {
+          var now = Date.now();
+          if (st) jogShowPos(st.mpos);
+          if (!st || (st.state === 'Idle' && !st.port_jog)) idleSince = idleSince || now;
+          else idleSince = 0;
+          // The kernel plays the move's tail after the controller reads idle.
+          if (idleSince && now - idleSince > 700) {
+            JOG.active = false;
+            loadMach();
+          } else setTimeout(tick, 200);
+        })
+        .catch(function () {
+          JOG.active = false;
+          loadMach();
+        });
+    };
+  tick();
+}
+/* One bounded step per press. It is a jog through the port, so a Grbl
+ * client stays connected, and goes first whenever it sends a line. */
+function jog(ax, dir) {
+  var mm = Math.round(jogStepMm() * dir * 1000) / 1000;
+  portPost('/motion/jog?' + ax + '=' + mm + '&feed=' + JOG.speeds[JOG.speedIx][1], 'msg-jog', function (ok) {
+    if (ok) jogWatch();
+  });
+}
+function jogCancel() {
+  portPost('/motion/cancel', 'msg-jog', function () {});
+}
+function motorsToggle() {
+  portPost(M.motors_released ? '/motion/energize' : '/motion/release', 'msg-mrel');
+}
+function manualHome() {
+  portPost('/motion/home', 'msg-mhome');
 }
 function rpm(v) {
   return v > 0 ? v + ' rpm' : 'stopped';
@@ -726,6 +870,13 @@ function applyCloudSurface() {
   var opt = $('homing_mode').querySelector('option[value=gfcloud]');
   if (opt) opt.disabled = !on;
   if (!on && tabOf(location.hash) === 'gfcloud') location.hash = '#status';
+}
+/* Each homing method has its own home position, and the other's means
+ * nothing to it: only the selected method's pair is shown. */
+function applyHomingSurface() {
+  var m = $('homing_mode').value;
+  $('home-gfcloud').style.display = m === 'gfcloud' ? '' : 'none';
+  $('home-manual').style.display = m === 'manual' ? '' : 'none';
 }
 function logout() {
   fetch('/logout', { method: 'POST' })
@@ -1076,6 +1227,10 @@ function fill(force) {
   setF('homing_mode', S.homing_mode || 'none');
   setF('gfcloud_home_x', S.gfcloud_home_x);
   setF('gfcloud_home_y', S.gfcloud_home_y);
+  setF('manual_home_x', S.manual_home_x);
+  setF('manual_home_y', S.manual_home_y);
+  applyHomingSurface();
+  $('homing_mode').onchange = applyHomingSurface;
   setF('gfcloud_home_timeout_s', S.gfcloud_home_timeout_s);
   setF('cloud_pause_backtrack_ticks', S.cloud_pause_backtrack_ticks);
   setF('cloud_resume_lead_ticks', S.cloud_resume_lead_ticks);
@@ -2179,7 +2334,7 @@ function loadMach() {
     })
     .then(function (m) {
       M = m;
-      locked = !!(M.state && M.state !== 'idle') || !!M.diag;
+      locked = (!!(M.state && M.state !== 'idle') && !JOG.active) || !!M.diag;
       lockApply();
       renderMotion();
       renderCooling();

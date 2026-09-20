@@ -347,6 +347,7 @@ MOCK_SVG = (
 SETTINGS_KEYS = (
     'controller_mode', 'homing_mode',
     'gfcloud_home_x', 'gfcloud_home_y',
+    'manual_home_x', 'manual_home_y',
     'gfcloud_home_timeout_s', 'gf_serial', 'gf_password', 'ui_units',
     'wifi_country',
     'cool_flow_rise', 'cool_flow_heater_pct', 'cool_flow_check_s',
@@ -386,7 +387,7 @@ SECRET_KEYS = ('gf_password',)
 # outside the gate table are not range-checked here).
 SETTING_CHOICES = {
     'controller_mode': ('grbl', 'cloud'),
-    'homing_mode': ('none', 'gfcloud', 'switches'),
+    'homing_mode': ('none', 'gfcloud', 'manual', 'switches'),
     'ui_units': ('metric', 'imperial'),
     'cool_tec_present': ('0', '1'),
     'lid_policy': ('cancel', 'hold'),
@@ -794,7 +795,8 @@ class Mock:
         self.status = {
             'lens': {'edge_z': 3.48, 'below': 14, 'above': 20, 'stops_found': True,
                      'reach_min': -1.31, 'reach_max': 10.32},
-            'state': 'idle', 'homed': True, 'homed_axes': 7, 'diag': False,
+            'state': 'idle', 'homed': True, 'homed_axes': 7, 'home_source': 'gfcloud', 'diag': False,
+            'motors_released': False,
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
             'laser': {'emission_samples': 0, 'pgood_samples': 255},
@@ -947,6 +949,62 @@ class Mock:
 
     def idle(self):
         return self.status['state'] == 'idle'
+
+    def motion_post(self, op, form, J, T):
+        """The controller port's routes: a jog moves the mock's position
+        inside the bed, a release drops the X and Y home, and only an
+        energize or a manual home ends it."""
+        if self.mode != 'grbl' or self.controller != 'running':
+            return T(409, 'the GRBL controller is not running')
+        st = self.status
+        if op == 'jog':
+            try:
+                d = [float(form.get(a) or 0) for a in ('x', 'y', 'z')]
+                feed = float(form.get('feed') or 3000)
+            except ValueError:
+                return T(400, 'x, y, z, and feed must be numbers')
+            if abs(d[0]) > 100 or abs(d[1]) > 100:
+                return T(400, 'one jog moves X and Y at most 100 mm')
+            if abs(d[2]) > 5:
+                return T(400, 'one jog moves Z at most 5 mm')
+            if not 10 <= feed <= 12000:
+                return T(400, 'feed must be 10 to 12000 mm/min')
+            if not any(abs(v) >= 0.0005 for v in d):
+                return T(400, 'a jog needs an x, y, or z increment')
+            if st['motors_released']:
+                return T(409, 'the X and Y motors are released: energize them first')
+            x, y = st['pos']['x'] + d[0], st['pos']['y'] + d[1]
+            if st['homed_axes'] & 3 and (
+                    (d[0] and not 0 <= x <= 495) or (d[1] and not 0 <= y <= 279)):
+                return T(409, 'the move would leave the work envelope')
+            st['pos'].update(x=round(x, 3), y=round(y, 3),
+                             z=round(st['pos']['z'] + d[2], 3))
+            return J(200, {'ok': True})
+        if op == 'cancel':
+            return J(200, {'ok': True})
+        if op == 'release':
+            st['motors_released'] = True
+            st['homed_axes'] &= ~3
+            st['homed'] = False
+            self._log('grbl: X and Y released')
+            return J(200, {'ok': True})
+        if op == 'energize':
+            st['motors_released'] = False
+            self._log('grbl: X and Y energized')
+            return J(200, {'ok': True})
+        if op == 'home':
+            if self.settings.get('homing_mode') != 'manual':
+                return T(409, 'the homing method is not manual: a home is '
+                              "the Grbl client's to start")
+            st['motors_released'] = False
+            st['homed_axes'] |= 3
+            st['homed'] = st['homed_axes'] == 7
+            st['home_source'] = 'manual'
+            st['pos'].update(x=float(self.settings.get('manual_home_x') or 0),
+                             y=float(self.settings.get('manual_home_y') or 0))
+            self._log('grbl: manual home')
+            return J(200, {'ok': True})
+        return T(404, 'not found')
 
     def _license_bundle(self):
         """A small tar.gz shaped like the image's: the manifest and one
@@ -1613,6 +1671,16 @@ class Mock:
                 return J(200, self.status_reply())
             if path == '/mode':
                 return J(200, self.mode_reply())
+            if path == '/motion/state':
+                if self.mode != 'grbl' or self.controller != 'running':
+                    return T(409, 'the GRBL controller is not running')
+                st = self.status
+                return J(200, {
+                    'state': 'Alarm' if st['motors_released'] else 'Idle',
+                    'sender': False, 'port_jog': False,
+                    'released': st['motors_released'],
+                    'mpos': [st['pos']['x'], st['pos']['y'], st['pos']['z']],
+                    'homed': st['homed_axes']})
             if path == '/cam/status':
                 return J(200, self.cam_reply())
             if path in ('/cam/snapshot', '/cam/stream') or (
@@ -1848,6 +1916,8 @@ class Mock:
             self.motion = 'unverified'
             self._log('super: mode -> %s' % m)
             return J(200, self.mode_reply())
+        if path.startswith('/motion/'):
+            return self.motion_post(path[8:], form, J, T)
         if path == '/controller/stop':
             self.controller = 'standby'
             self.pid = 0
