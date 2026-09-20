@@ -865,6 +865,14 @@ class Mock:
         self.curve = {'state': 'idle', 'reason': '', 'elapsed_s': 0,
                       'samples': 0, 'curve': '', 'points': []}
         self.curve_t0 = 0.0
+        # The job runner's record (src/jobrun.c): a posted program plays
+        # for a fifth of a second a line, dark.
+        self.prog = {'state': 'idle', 'owner': '', 'program': False, 'lines': 0, 'sent': 0,
+                     'acked': 0, 'elapsed_s': 0, 'lit': False,
+                     'emission': {'samples': 0, 'hv_max': 0, 'laser_on_samples': 0,
+                                  'thermopile_delta': 0, 'lit_s': 0.0},
+                     'reason': ''}
+        self.prog_t0 = 0.0
         self.logtext = {lg: '' for lg in LOGGERS}
         self.logtext['forgectrl'] = (
             'Jan  1 00:00:01 forgectrl: auth: generated a new panel token\n'
@@ -955,7 +963,7 @@ class Mock:
     # order of nesting (a diagnostic under its wizard is the innermost), and
     # in the daemon's words.
     LEASE_WORDS = (('diag:', 'a diagnostic'), ('wizard:', 'a setup wizard'),
-                   ('update:', 'an update job'), ('ext:', 'an extension'))
+                   ('update:', 'an update job'), ('job:', 'a job'), ('ext:', 'an extension'))
 
     def lease_holder(self):
         """(owner, kind) of the innermost holder, or None."""
@@ -965,6 +973,8 @@ class Mock:
             return 'wizard:%s' % self.dark['id'], 'hardware'
         if self.curve['state'] in ('waiting', 'recording'):
             return 'recorder', 'sender'
+        if self.prog['state'] == 'running':
+            return self.prog['owner'], 'sender'
         if self.update['running']:
             return 'update:%s' % self.update['kind'], 'system'
         return None
@@ -995,12 +1005,81 @@ class Mock:
                 'observed': {'sender': bool(self.grbl_report['sender']['connected']),
                              'motors_released': self.status['motors_released']}}
 
+    @staticmethod
+    def job_parts(headers, body):
+        """The parts of a multipart form: {name: bytes}."""
+        ctype = headers.get('Content-Type', '')
+        if 'multipart/form-data' not in ctype or 'boundary=' not in ctype:
+            return {}
+        mark = b'--' + ctype.split('boundary=', 1)[1].strip('"').encode()
+        parts = {}
+        for chunk in body.split(mark)[1:]:
+            head, sep, data = chunk.partition(b'\r\n\r\n')
+            if not sep:
+                continue
+            m = re.search(rb'name="([^"]*)"', head)
+            if m:
+                parts[m.group(1).decode()] = data[:-2] if data.endswith(b'\r\n') else data
+        return parts
+
+    @staticmethod
+    def job_check(program):
+        """jobrun_program_check(): (lines, None) or (0, the offense)."""
+        kept = 0
+        for row, raw in enumerate(program.split(b'\n'), 1):
+            raw = raw[:-1] if raw.endswith(b'\r') else raw
+            if any(c != 9 and (c < 0x20 or c >= 0x7f) for c in raw):
+                return 0, ('line %d has a carriage return inside it' % row if b'\r' in raw
+                           else 'line %d has a byte that is not printable ASCII' % row)
+            line = re.sub(rb'\([^)]*\)?', b'', raw).split(b';', 1)[0].replace(b'\t', b' ').strip()
+            if re.search(rb'[?!~]', line):
+                return 0, 'line %d has a realtime character (? ! ~) outside a comment' % row
+            if len(line) > 250:
+                return 0, 'line %d is longer than the sender takes' % row
+            if line.startswith(b'$'):
+                return 0, ("line %d is a $ command: the controller's system commands are not "
+                           "a job's to send" % row)
+            if line and line != b'%':
+                kept += 1
+        return (kept, None) if kept else (0, 'the program has no lines')
+
+    def job_post(self, headers, body, J, T):
+        parts = self.job_parts(headers, body)
+        if 'program' not in parts:
+            return T(400, 'no program was received (the file part is `program`)')
+        if self.lease_refusal():
+            return T(409, self.lease_refusal())
+        if not parts['program']:
+            return T(400, 'the program is empty')
+        for key, top in (('lit_within_s', 3600), ('timeout_s', 86400)):
+            try:
+                if not 0 <= float(parts.get(key, b'0') or b'0') <= top:
+                    raise ValueError
+            except ValueError:
+                return T(400, 'lit_within_s is 0 to 3600 and timeout_s 0 to 86400, in seconds')
+        name = parts.get('name', b'').decode('ascii', 'replace')
+        if not re.fullmatch(r'[A-Za-z0-9._-]{1,32}', name):
+            return T(400, "name says who sends the job: 1 to 32 of letters, digits, "
+                          "'.', '_' and '-'")
+        lines, offense = self.job_check(parts['program'])
+        if offense:
+            return T(400, offense)
+        if self.grbl_report['sender']['connected']:
+            return T(409, 'a sender is connected to the machine - close it first')
+        self.prog.update({'state': 'running', 'owner': 'job:%s' % name, 'program': True,
+                          'lines': lines, 'sent': 0, 'acked': 0, 'elapsed_s': 0, 'reason': ''})
+        self.prog_t0 = time.time()
+        return J(200, self.prog)
+
     def motion_post(self, op, form, J, T):
         """The controller port's routes: a jog moves the mock's position
         inside the bed, a release drops the X and Y home, and only an
         energize or a manual home ends it."""
         if self.mode != 'grbl' or self.controller != 'running':
             return T(409, 'the GRBL controller is not running')
+        # Whoever holds the machine moves it alone; the cancel is always taken.
+        if op != 'cancel' and self.lease_refusal(locks=True):
+            return T(409, self.lease_refusal(locks=True))
         st = self.status
         if op == 'jog':
             try:
@@ -1407,6 +1486,14 @@ class Mock:
                                          {'density': 60, 'light': 44.0},
                                          {'density': 80, 'light': 72.0},
                                          {'density': 100, 'light': 100.0}]})
+        p = self.prog
+        if p['state'] == 'running':
+            el = now - self.prog_t0
+            # The runner's own M2 is the line past the program's.
+            p['sent'] = p['acked'] = min(int(el * 5), p['lines'] + 1)
+            p['elapsed_s'] = int(el)
+            if p['acked'] > p['lines']:
+                p['state'] = 'done'
 
     def _job_end(self):
         u, a = self.update, self.job_args
@@ -1752,6 +1839,8 @@ class Mock:
                 return T(200, '$0=10\n$1=255\n$32=1\n$35=10\n')
             if path == '/curve/status':
                 return J(200, self.curve)
+            if path == '/job':
+                return J(200, self.prog)
             if path == '/curve/ladder.gcode':
                 return 200, {'Content-Type': 'text/plain',
                              'Content-Disposition':
@@ -2006,16 +2095,23 @@ class Mock:
         if path == '/curve/record':
             if self.curve['state'] in ('waiting', 'recording'):
                 return T(409, 'a recording is already running')
-            if self.grbl_report['sender']['connected']:
-                return T(409, 'a sender is connected to the machine - close it first '
-                              '(the recorder streams the ladder itself)')
             if self.lease_refusal():
                 return T(409, self.lease_refusal())
+            if self.grbl_report['sender']['connected']:
+                return T(409, 'a sender is connected to the machine - close it first')
             self.curve.update({'state': 'waiting', 'reason': '',
                                'elapsed_s': 0, 'samples': 0, 'curve': '',
                                'points': []})
             self.curve_t0 = time.time()
             return J(200, self.curve)
+        if path == '/job':
+            return self.job_post(headers, body, J, T)
+        if path == '/job/abort':
+            if self.prog['state'] != 'running':
+                return T(409, 'no job is running')
+            self.prog.update({'state': 'failed', 'reason': 'aborted',
+                              'elapsed_s': int(time.time() - self.prog_t0)})
+            return J(200, self.prog)
         if path == '/curve/stop':
             if self.curve['state'] == 'waiting':
                 self.curve.update({'state': 'failed', 'elapsed_s': 0,

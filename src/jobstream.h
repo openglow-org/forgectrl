@@ -11,9 +11,10 @@
  * as long as the operator takes; a $ command, M102, and the program end
  * go alone as barriers), the lines produced on demand by a generator, an
  * abort on the controller's error or ALARM, and, while the job plays,
- * the emission witnesses sampled at 25 Hz: the tube current, the head
- * thermopile, the kernel's LASER_ON sample count, and the lid IR quartet.
- * The dose-curve recorder and the sheet wizards are its clients.
+ * the emission witnesses sampled at 25 Hz (or a fraction of it, for a
+ * long job that wants the record and not the trace): the tube current,
+ * the head thermopile, the kernel's LASER_ON sample count, and the lid IR
+ * quartet. The job runner is its one caller (jobrun.h).
  *
  * The run is synchronous on the caller's thread and ends when every
  * line is acknowledged and, if asked, the tube has been dark for a
@@ -55,6 +56,7 @@ typedef struct {
     double wait_timeout_s;              /* budget until the first discharge (0: none expected) */
     double run_timeout_s;               /* the whole run */
     double end_dark_s;                  /* keep sampling this long after the last ack, dark */
+    int sample_div;                     /* the witnesses every this many ticks (0 or 1: every tick) */
 } jobstream_cfg_t;
 
 /* Live counters the caller may read from another thread for progress. */

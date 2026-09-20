@@ -5,13 +5,12 @@
  * maps a commanded power through a measured curve (laser_dose_curve).
  * That curve is per tube and supply and drifts with tube age; this
  * module lets an owner measure their own from one Record press: the
- * recorder streams the ladder job itself over the local Grbl socket
- * through jobstream (absolute coordinates from X0 Y0, one 100 mm line
- * per rung, ok-per-line flow control), and the machine treats it as any
- * job: the arm gates stand and the operator's button press starts the
- * fire. Because a new Grbl connection displaces the sender (last
- * connection wins), the recorder refuses to start while the
- * controller's published state file shows a sender connected. While
+ * recorder runs the ladder as a job of the job runner's (absolute
+ * coordinates from X0 Y0, one 100 mm line per rung), and the machine
+ * treats it as any job: the arm gates stand and the operator's button
+ * press starts the fire. The runner takes the machine lease as a sender,
+ * so the recording is refused while a Grbl client is connected and while
+ * anything else holds the machine. While
  * the ladder plays the streamer samples the tube current
  * (pic/hv_current) and the head thermopile (head/beam_detect_analog, a
  * scatter detector in the beam path, so it reads the beam and not the
@@ -39,8 +38,7 @@
 #define _GNU_SOURCE
 #include "curverec.h"
 #include "fflog.h"
-#include "jobstream.h"
-#include "lease.h"
+#include "jobrun.h"
 #include "settings.h"
 
 #include <errno.h>
@@ -76,8 +74,6 @@ static char cr_reason[128];
 static time_t cr_started;
 static int cr_samples;
 static long *buf_hv, *buf_tp;
-static pthread_t thread;
-static int thread_live;
 static volatile int stop_requested;
 
 /* ------------------------------------------------ the laser override */
@@ -301,7 +297,7 @@ static void finish_locked(int state, const char *reason)
     cr_state = state;
     snprintf(cr_reason, sizeof(cr_reason), "%s", reason ? reason : "");
     curverec_override_end();
-    lease_release("recorder");
+    jobrun_lease_back();
     fflog(LOG_INFO, "curverec: %s%s%s",
           state == CR_DONE ? "done" : "failed",
           reason && *reason ? " - " : "", reason ? reason : "");
@@ -339,24 +335,13 @@ static void on_sample(void *ctx, const jobstream_sample_t *s)
     pthread_mutex_unlock(&mu);
 }
 
-static void *record_thread(void *arg)
+/* The ladder has played, or the run failed: on the runner's thread,
+ * the lease still the recorder's until finish_locked() gives it back. */
+static void record_done(void *ctx, int rc, const jobstream_run_t *run, const char *err)
 {
-    (void)arg;
-    char program[LADDER_MAX_LINES * 40], err[160];
-    size_t off = 0;
-    ladder_build();
-    for (int i = 0; i < ladder_n; i++)
-        off += (size_t)snprintf(program + off, sizeof(program) - off, "%s\n", ladder_lines[i]);
-    jobstream_lines_t lines = { program, 0 };
-    jobstream_cfg_t cfg = {
-        .gen = jobstream_lines_gen, .sample = on_sample, .ctx = &lines,
-        .abort_flag = &stop_requested, .wait_timeout_s = WAIT_TIMEOUT_S,
-        .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = DARK_END_S,
-    };
-    jobstream_run_t run;
-    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    (void)ctx;
     pthread_mutex_lock(&mu);
-    if (rc == 0 || (stop_requested && run.lit)) {
+    if (rc == 0 || (stop_requested && run->lit)) {
         if (cr_samples >= MAX_SAMPLES)
             finish_locked(CR_FAILED, "the record ran out of room");
         else
@@ -366,7 +351,34 @@ static void *record_thread(void *arg)
     else
         finish_locked(CR_FAILED, err);
     pthread_mutex_unlock(&mu);
-    return NULL;
+}
+
+static char program[LADDER_MAX_LINES * 40];
+static jobstream_lines_t program_lines;
+
+/* The lease is the recorder's: the keys overridden and the record
+ * cleared, before the ladder's first line goes out. curverec_start()
+ * holds mu around this. */
+static int record_ready(void *ctx, char *err, size_t elen)
+{
+    (void)ctx;
+    if (curverec_override_begin("0", "off", NULL) != 0) {
+        snprintf(err, elen, "the laser keys are held by another job");
+        return -1;
+    }
+    size_t off = 0;
+    ladder_build();
+    for (int i = 0; i < ladder_n; i++)
+        off += (size_t)snprintf(program + off, sizeof(program) - off, "%s\n", ladder_lines[i]);
+    program_lines = (jobstream_lines_t){ program, 0 };
+    cr_state = CR_WAITING;
+    cr_reason[0] = '\0';
+    cr_samples = 0;
+    result_n = 0;
+    result_curve[0] = '\0';
+    stop_requested = 0;
+    cr_started = time(NULL);
+    return 0;
 }
 
 int curverec_start(char *err, size_t elen)
@@ -377,10 +389,6 @@ int curverec_start(char *err, size_t elen)
         snprintf(err, elen, "a recording is already running");
         return -1;
     }
-    if (thread_live) {
-        pthread_join(thread, NULL);
-        thread_live = 0;
-    }
     if (!buf_hv)
         buf_hv = calloc(MAX_SAMPLES, sizeof(long));
     if (!buf_tp)
@@ -390,39 +398,25 @@ int curverec_start(char *err, size_t elen)
         snprintf(err, elen, "out of memory");
         return -1;
     }
-    if (jobstream_sender_blocks()) {
-        pthread_mutex_unlock(&mu);
-        snprintf(err, elen, "a sender is connected to the machine - close it "
-                 "first (the recorder streams the ladder itself)");
-        return -1;
-    }
-    /* The machine lease, as the sender of a job of its own: a wizard, a
+    /* The runner takes the machine lease for the recorder as the sender
+     * of a job of its own: a connected Grbl client, a wizard, a
      * diagnostic, an update job, or a log export refuses the recording,
      * and the refusal names it. */
-    if (lease_take("recorder", LEASE_SENDER, NULL, err, elen) != 0) {
+    jobrun_cfg_t cfg = {
+        .owner = "recorder",
+        .stream = { .gen = jobstream_lines_gen, .sample = on_sample, .ctx = &program_lines,
+                    .abort_flag = &stop_requested, .wait_timeout_s = WAIT_TIMEOUT_S,
+                    .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = DARK_END_S },
+        .ready = record_ready, .done = record_done,
+    };
+    if (jobrun_start(&cfg, err, elen) != 0) {
+        /* Refused with the record as it was, or, when the run's thread
+         * could not be made, with the override to take back. */
+        if (cr_state == CR_WAITING)
+            finish_locked(CR_FAILED, err);
         pthread_mutex_unlock(&mu);
         return -1;
     }
-    if (curverec_override_begin("0", "off", NULL) != 0) {
-        pthread_mutex_unlock(&mu);
-        lease_release("recorder");
-        snprintf(err, elen, "the laser keys are held by another job");
-        return -1;
-    }
-    cr_state = CR_WAITING;
-    cr_reason[0] = '\0';
-    cr_samples = 0;
-    result_n = 0;
-    result_curve[0] = '\0';
-    stop_requested = 0;
-    cr_started = time(NULL);
-    if (pthread_create(&thread, NULL, record_thread, NULL) != 0) {
-        finish_locked(CR_FAILED, "cannot start the sampler");
-        pthread_mutex_unlock(&mu);
-        snprintf(err, elen, "cannot start the sampler");
-        return -1;
-    }
-    thread_live = 1;
     pthread_mutex_unlock(&mu);
     fflog(LOG_INFO, "curverec: streaming the ladder (floor and curve "
           "overridden for the run) - waiting for the button");
@@ -436,10 +430,8 @@ void curverec_stop(void)
     if (live)
         stop_requested = 1;
     pthread_mutex_unlock(&mu);
-    if (live && thread_live) {
-        pthread_join(thread, NULL);
-        thread_live = 0;
-    }
+    if (live)
+        jobrun_stop("recorder");
 }
 
 int curverec_status_json(char *buf, size_t len)

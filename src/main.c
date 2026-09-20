@@ -47,6 +47,8 @@
 #include "gates.h"
 #include "grblport.h"
 #include "hooks.h"
+#include "jobpost.h"
+#include "jobrun.h"
 #include "jobstream.h"
 #include "lease.h"
 #include "led.h"
@@ -1069,6 +1071,18 @@ static int cb_machine_status(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
+/* The one file sink the framework has: every multipart file part of
+ * every request lands here, and each owner knows its own route. */
+static int upload_sink(const struct _u_request *req, const char *key, const char *filename,
+                       const char *content_type, const char *transfer_encoding,
+                       const char *data, uint64_t off, size_t size, void *user_data)
+{
+    if (jobpost_sink(req, key, data, off, size))
+        return U_OK;
+    return update_upload_sink(req, key, filename, content_type, transfer_encoding,
+                              data, off, size, user_data);
+}
+
 static int cb_curve_record(const struct _u_request *req,
                            struct _u_response *res, void *user_data)
 {
@@ -1493,6 +1507,12 @@ static int motion_port(struct _u_response *res, grblport_set_t set,
     char reply[256], why[160];
     if (!super_grbl_running())
         return reply_error(res, 409, "the GRBL controller is not running");
+    /* Whoever holds the machine moves it alone: a job of the daemon's own
+     * is a sender the port would jog beside in any pause of its lines.
+     * The state and the cancel are always answered; a log export only
+     * reads, and a jog does not disturb it. */
+    if (op != GRBLPORT_STATE && op != GRBLPORT_CANCEL && lease_refusal_locks(why, sizeof(why)))
+        return reply_error(res, 409, why);
     int rc = grblport_request(set, op, arg, reply, sizeof(reply));
     if (rc == GRBLPORT_FORBIDDEN)
         return reply_error(res, 403, reply);
@@ -2777,6 +2797,9 @@ int main(int argc, char **argv)
         { "POST", "/curve/stop",           cb_curve_stop,       NULL, 0 },
         { "GET",  "/curve/status",         cb_curve_status,     NULL, 1 },
         { "GET",  "/curve/ladder.gcode",   cb_curve_ladder,     NULL, 1 },
+        { "POST", "/job",                  cb_job_post,         NULL, 0 },
+        { "GET",  "/job",                  cb_job_status,       NULL, 1 },
+        { "POST", "/job/abort",            cb_job_abort,        NULL, 0 },
         { "POST", "/settings",             cb_settings_post,    NULL, 0 },
         { "GET",  "/status",               cb_machine_status,   NULL, 1 },
         { "GET",  "/fuse-identity",        cb_fuse_identity,    NULL, 0 },
@@ -2869,7 +2892,9 @@ int main(int argc, char **argv)
      * Safe for the firmware upload, which is much larger than this: the
      * cap truncates only the framework's own copy, and its post
      * processor still receives every chunk in full, so the multipart
-     * file parts reach update_upload_sink and stream to disk as before.
+     * file parts reach upload_sink and stream to disk as before (a
+     * firmware archive to the updater, a posted program to the job
+     * runner).
      * Nothing here reads that raw copy - the form routes read the
      * parsed body map, which the post processor fills either way.
      * The largest legitimate form body is a settings POST, whose
@@ -2894,9 +2919,9 @@ int main(int argc, char **argv)
     }
     if (have_tls) {
         ulfius_set_default_endpoint(&inst, cb_http_redirect, NULL);
-        ulfius_set_upload_file_callback_function(&tls, &update_upload_sink, NULL);
+        ulfius_set_upload_file_callback_function(&tls, &upload_sink, NULL);
     }
-    ulfius_set_upload_file_callback_function(&inst, &update_upload_sink, NULL);
+    ulfius_set_upload_file_callback_function(&inst, &upload_sink, NULL);
 
     /* The flags ulfius computes for this configuration (a thread per
      * connection, its error log, the internal polling thread, dual
@@ -2969,8 +2994,11 @@ int main(int argc, char **argv)
     }
     /* A recording in progress ends here and puts the floor and curve
      * it overrode back; left running, the raw curve would be in force
-     * for every job after the restart. */
+     * for every job after the restart. A posted program ends with its
+     * soft reset. */
     curverec_stop();
+    char none[8];
+    jobrun_program_abort(none, sizeof(none));
     super_shutdown();
     cool_shutdown();
     cam_engine_shutdown();

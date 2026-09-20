@@ -37,6 +37,9 @@ jobs:
         run: ./build/jobstream_test
       - name: grblport_test (the controller port's client and its two operation sets)
         run: ./build/grblport_test
+      - name: jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort)
+        run: ./build/jobrun_test
+
       - name: lease_test (the machine lease: one holder, nesting, the sender kind)
         run: ./build/lease_test
       - name: events_test (the event stream's cap, edge detector, and ring)

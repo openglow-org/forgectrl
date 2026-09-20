@@ -176,6 +176,7 @@ static void test_error_stops(void)
     int rc = jobstream_run(&cfg, &run, err, sizeof(err));
     mock_settle();
     CHECK(rc == -1, "the error did not stop the run");
+    CHECK(!strchr(err, '\r'), "the controller's carriage return is in the reason: %s", err);
     CHECK(strstr(err, "error:9") && strstr(err, "line 2") && strstr(err, "BAD LINE"),
           "the error names the wrong line: %s", err);
     CHECK(run.sent >= 2 && run.sent <= 3, "sent %d after the error", run.sent);

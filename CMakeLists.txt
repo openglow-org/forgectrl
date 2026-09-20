@@ -87,6 +87,8 @@ add_executable(forgectrl
   src/status.c
   src/curverec.c
   src/font_hershey.c
+  src/jobpost.c
+  src/jobrun.c
   src/jobstream.c
   src/grblport.c
   src/events.c
@@ -138,7 +140,7 @@ target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_idle_test m pthread)
 
 # Host unit test for the dose-curve fitter. CI runs it after the build.
-add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jobstream.c
+add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jobrun.c src/jobstream.c
                src/settings.c src/fflog.c src/lease.c)
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
@@ -347,6 +349,13 @@ target_link_libraries(grblport_test pthread m)
 # The machine lease: one holder and its refusal, one owner under a holder,
 # the sender kind beside a connected client, the /status document, and
 # sixteen threads asking at once.
+# The job runner over the mock controller of jobstream_test: the lease as
+# a sender on every way in and out, a posted program's check, its M2, and
+# its abort.
+add_executable(jobrun_test tests/jobrun_test.c src/jobrun.c src/jobstream.c src/lease.c src/fflog.c)
+target_compile_options(jobrun_test PRIVATE -Wall -Wextra)
+target_link_libraries(jobrun_test pthread)
+
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)
 target_link_libraries(lease_test pthread)

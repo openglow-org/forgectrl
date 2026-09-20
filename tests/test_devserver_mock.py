@@ -424,6 +424,61 @@ class MockTest(unittest.TestCase):
         self.assertEqual(doc_keys(json.loads(body)),
                          keys - {'density', 'light'})
 
+    def test_job_shape(self):
+        keys = c_keys(read('src/jobrun.c'), 'jobrun_status_json')
+        m = self.mock()
+        self.assertEqual(doc_keys(self.get_json(m, '/job')), keys)
+
+        def post(program, name=b'test', extra=b''):
+            mark = b'xXxBoundaryxXx'
+            body = b''.join([
+                b'--', mark, b'\r\nContent-Disposition: form-data; name="name"\r\n\r\n', name,
+                b'\r\n', extra,
+                b'--', mark, b'\r\nContent-Disposition: form-data; name="program"; '
+                b'filename="job.gcode"\r\nContent-Type: text/plain\r\n\r\n', program,
+                b'\r\n--', mark, b'--\r\n'])
+            return m.handle('POST', '/job', {}, {
+                'X-ForgeFIRM-Token': self.token,
+                'Content-Type': 'multipart/form-data; boundary=%s' % mark.decode()}, body)
+
+        # The offenses of jobrun_program_check(), in its words.
+        src = read('src/jobrun.c')
+        for program, words in ((b'G21\n$X\n', 'is a $ command'),
+                               (b'G1 X1!\n', 'has a realtime character'),
+                               (b'G1 X\x9e1\n', 'has a byte that is not printable ASCII'),
+                               (b'(nothing)\n', 'the program has no lines')):
+            code, hdrs, body = post(program)
+            self.assertEqual(code, 400, program)
+            self.assertIn(words, body.decode())
+            self.assertIn(words, src)
+        code, hdrs, body = post(b'G21\n', name=b'not a name')
+        self.assertEqual(code, 400)
+
+        code, hdrs, body = post(b'(header!)\nG21 ; metric\nG1 X5 F600\n')
+        self.assertEqual(code, 200, body)
+        doc = json.loads(body)
+        self.assertEqual(doc_keys(doc), keys)
+        self.assertEqual((doc['state'], doc['owner'], doc['program'], doc['lines']),
+                         ('running', 'job:test', True, 2))
+        lease = self.get_json(m, '/status')['lease']['holder']
+        self.assertEqual((lease['owner'], lease['kind'], lease['words']),
+                         ('job:test', 'sender', 'a job (test)'))
+        code, hdrs, body = post(b'G21\n')
+        self.assertEqual((code, body.decode()), (409, 'a job (test) holds the machine'))
+        # Whoever holds the machine moves it alone; the cancel is always taken.
+        code, hdrs, body = self.call(m, 'POST', '/motion/jog', {'x': '1'})
+        self.assertEqual((code, body.decode()), (409, 'a job (test) holds the machine'))
+        code, hdrs, body = self.call(m, 'POST', '/motion/cancel')
+        self.assertEqual(code, 200)
+        code, hdrs, body = self.call(m, 'POST', '/job/abort')
+        self.assertEqual(code, 200)
+        doc = json.loads(body)
+        self.assertEqual((doc['state'], doc['reason']), ('failed', 'aborted'))
+        self.assertIsNone(self.get_json(m, '/status')['lease']['holder'])
+        code, hdrs, body = self.call(m, 'POST', '/job/abort')
+        self.assertEqual((code, body.decode()), (409, 'no job is running'))
+        self.assertIn('no job is running', src)
+
     # -- every route the daemon registers, and every route the panel calls
     def test_every_daemon_route_is_served(self):
         m = self.mock()

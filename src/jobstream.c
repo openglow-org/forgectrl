@@ -142,6 +142,43 @@ static int line_is_barrier(const char *l)
            (l[0] == 'M' && l[1] == '2' && (l[2] == '\0' || l[2] == ' '));
 }
 
+/* One sample of the witnesses, into the run's record and to the caller. */
+static void witness(const jobstream_cfg_t *cfg, jobstream_run_t *run, double t, int *dark_run)
+{
+    jobstream_sample_t s;
+    s.t = t;
+    s.hv = rd_long("pic/hv_current", 0);
+    s.tp = rd_long("head/beam_detect_analog", 0);
+    s.lon = rd_long("cnc/laser_on_sampled", 0);
+    s.ir[0] = rd_long("pic/lid_ir_1", 0);
+    s.ir[1] = rd_long("pic/lid_ir_2", 0);
+    s.ir[2] = rd_long("pic/lid_ir_3", 0);
+    s.ir[3] = rd_long("pic/lid_ir_4", 0);
+    run->samples++;
+    if (s.hv > run->hv_max)
+        run->hv_max = s.hv;
+    if (s.lon > run->lon_max)
+        run->lon_max = s.lon;
+    if (s.hv > JOBSTREAM_HV_ON) {
+        if (!run->lit) {
+            run->lit = 1;
+            run->t_first_lit = t;
+            fflog(LOG_INFO, "jobstream: the tube is lit");
+        }
+        run->t_last_lit = t;
+        *dark_run = 0;
+        if (s.tp > run->tp_max)
+            run->tp_max = s.tp;
+    } else {
+        if (run->lit)
+            (*dark_run)++;
+        if (run->tp_base < 0 && !run->lit)
+            run->tp_base = s.tp;
+    }
+    if (cfg->sample)
+        cfg->sample(cfg->ctx, &s);
+}
+
 int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, size_t elen)
 {
     struct timespec tick = { 0, (long)(1e9 / JOBSTREAM_HZ) };
@@ -168,42 +205,12 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     double t0 = mono_s(), t_last_ack = t0;
-    for (;;) {
+    int div = cfg->sample_div > 1 ? cfg->sample_div : 1;
+    for (long tickn = 0;; tickn++) {
         double now = mono_s(), t = now - t0;
 
-        /* The witnesses. */
-        jobstream_sample_t s;
-        s.t = t;
-        s.hv = rd_long("pic/hv_current", 0);
-        s.tp = rd_long("head/beam_detect_analog", 0);
-        s.lon = rd_long("cnc/laser_on_sampled", 0);
-        s.ir[0] = rd_long("pic/lid_ir_1", 0);
-        s.ir[1] = rd_long("pic/lid_ir_2", 0);
-        s.ir[2] = rd_long("pic/lid_ir_3", 0);
-        s.ir[3] = rd_long("pic/lid_ir_4", 0);
-        run->samples++;
-        if (s.hv > run->hv_max)
-            run->hv_max = s.hv;
-        if (s.lon > run->lon_max)
-            run->lon_max = s.lon;
-        if (s.hv > JOBSTREAM_HV_ON) {
-            if (!run->lit) {
-                run->lit = 1;
-                run->t_first_lit = t;
-                fflog(LOG_INFO, "jobstream: the tube is lit");
-            }
-            run->t_last_lit = t;
-            dark_run = 0;
-            if (s.tp > run->tp_max)
-                run->tp_max = s.tp;
-        } else {
-            if (run->lit)
-                dark_run++;
-            if (run->tp_base < 0 && !run->lit)
-                run->tp_base = s.tp;
-        }
-        if (cfg->sample)
-            cfg->sample(cfg->ctx, &s);
+        if (tickn % div == 0)
+            witness(cfg, run, t, &dark_run);
 
         /* The controller's answers. */
         if (!done_sending || run->acked < run->sent) {
@@ -224,6 +231,7 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                             barrier = 0;
                         t_last_ack = now;
                     } else if (!strncmp(l, "error", 5) || !strncmp(l, "ALARM", 5)) {
+                        l[strcspn(l, "\r")] = '\0';     /* the reason is read by people, and served as JSON */
                         snprintf(err, elen, "the controller answered %.24s on line %d (%s)",
                                  l, run->acked + 1,
                                  run->acked < run->sent ? sent_text[run->acked % JOBSTREAM_INFLIGHT_LINES] : "");
@@ -303,7 +311,7 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                     snprintf(err, elen, "the program ended without a discharge");
                     goto fail;
                 }
-            } else if (cfg->end_dark_s <= 0 || dark_run >= (int)(cfg->end_dark_s * JOBSTREAM_HZ)) {
+            } else if (cfg->end_dark_s <= 0 || dark_run >= (int)(cfg->end_dark_s * JOBSTREAM_HZ / div)) {
                 rc = 0;
                 break;
             }

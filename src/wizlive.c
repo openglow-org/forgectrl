@@ -29,7 +29,7 @@
 #include "accel.h"
 #include "fflog.h"
 #include "hooks.h"
-#include "jobstream.h"
+#include "jobrun.h"
 #include "led.h"
 #include "lens.h"
 #include "settings.h"
@@ -976,23 +976,26 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
     }
 }
 
-/* Stream the program; the run's outcome in `run`. */
+/* Stream the program as a job of the runner's, inside the wizard's own
+ * hold of the machine (so a connected Grbl client refuses it, in the
+ * lease's words); the run's outcome in `run`. */
 static int stream(gen_t *g, jobstream_run_t *run, double end_dark_s, char *err, size_t elen)
 {
-    if (jobstream_sender_blocks()) {
-        snprintf(err, elen, "a sender is connected to the machine");
-        return -1;
-    }
-    jobstream_cfg_t cfg = {
-        .gen = gen_next, .sample = gen_sample, .ctx = g,
-        .abort_flag = wiz_abort_flag(), .wait_timeout_s = WAIT_TIMEOUT_S,
-        .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = end_dark_s,
+    const char *wizard = wiz_lease_owner();
+    const char *id = strchr(wizard, ':');
+    char owner[48];
+    snprintf(owner, sizeof(owner), "job:%s", id ? id + 1 : wizard);
+    jobrun_cfg_t cfg = {
+        .owner = owner, .under = wizard,
+        .stream = { .gen = gen_next, .sample = gen_sample, .ctx = g,
+                    .abort_flag = wiz_abort_flag(), .wait_timeout_s = WAIT_TIMEOUT_S,
+                    .run_timeout_s = RUN_TIMEOUT_S, .end_dark_s = end_dark_s },
     };
     /* A card that watches the coolant peak may end its own tail early:
      * jobstream reads end_dark_s every tick, and cfg outlives the run. */
     if (g->peak_tail)
-        g->dark_cut = &cfg.end_dark_s;
-    int rc = jobstream_run(&cfg, run, err, elen);
+        g->dark_cut = &cfg.stream.end_dark_s;
+    int rc = jobrun_sync(&cfg, run, err, elen);
     g->dark_cut = NULL;
     return rc;
 }

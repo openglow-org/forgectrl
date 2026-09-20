@@ -1912,6 +1912,11 @@ int wizdark_running(void)
     return r;
 }
 
+const char *wiz_lease_owner(void)
+{
+    return lease_owner;
+}
+
 int wizdark_lease_owner(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);

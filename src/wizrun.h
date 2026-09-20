@@ -31,6 +31,9 @@ void wiz_progress(int pct);
 int wiz_aborted(void);
 /* The abort request as a flag the streamer polls. */
 const volatile int *wiz_abort_flag(void);
+/* The running wizard's machine-lease owner ("wizard:<id>"), for what it
+ * runs inside its own hold. The worker's to read, for as long as it runs. */
+const char *wiz_lease_owner(void);
 void wiz_msleep(int ms);
 /* Poll cond(ctx) at 100 ms: 0 held, -1 aborted, -2 timed out. */
 int wiz_wait_for(int (*cond)(void *), void *ctx, int timeout_s);

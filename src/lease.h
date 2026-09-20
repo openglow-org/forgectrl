@@ -12,10 +12,10 @@
  * somebody else's feet asks it too, and /status shows the holder.
  *
  * An owner is a short name, "<what>:<which>": diag:flow-verify,
- * wizard:motion, update:apply, recorder, logs.export. A holder may let
- * one owner in under itself (the cooling wizards run a diagnostic inside
- * their own hold): the inner owner names the holder it runs under, and
- * releases before it.
+ * wizard:motion, update:apply, job:panel, recorder, logs.export. A holder
+ * may let one owner in under itself (the cooling wizards run a diagnostic
+ * inside their own hold, the sheet wizards a job): the inner owner names
+ * the holder it runs under, and releases before it.
  *
  * What the lease does not hold it still reports, because an operator
  * asking "why won't it start" is asking about these too: a Grbl client on

@@ -46,6 +46,7 @@ void lease_words(const char *owner, char *buf, size_t len)
         { "diag:",   "a diagnostic" },
         { "wizard:", "a setup wizard" },
         { "update:", "an update job" },
+        { "job:",    "a job" },
         { "ext:",    "an extension" },
     };
     for (size_t i = 0; i < sizeof(what) / sizeof(what[0]); i++) {
