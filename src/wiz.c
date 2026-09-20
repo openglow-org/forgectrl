@@ -22,6 +22,7 @@
 #include "wiz.h"
 #include "advisories.h"
 #include "auth.h"
+#include "builtin.h"
 #include "button.h"
 #include "cam.h"
 #include "setup.h"
@@ -610,6 +611,13 @@ int cb_wiz_machine(const struct _u_request *req, struct _u_response *res, void *
 
 /* -------------------------------------------------------------- cloud */
 
+/* The cloud step turning the cloud off, as a settings request. */
+static const char *cloud_off_param(void *ctx, const char *key)
+{
+    (void)ctx;
+    return !strcmp(key, "cloud_enabled") ? "0" : NULL;
+}
+
 int cb_wiz_cloud(const struct _u_request *req, struct _u_response *res, void *ud)
 {
     (void)ud;
@@ -652,15 +660,11 @@ int cb_wiz_cloud(const struct _u_request *req, struct _u_response *res, void *ud
         json_object_set_new(result, "enabled", json_true());
         json_object_set_new(result, "signin", json_string("not tested"));
     } else {
-        /* Off: nothing may point at the cloud. */
-        char cur[16] = "";
-        const char *keys[] = { "cloud_enabled", "homing_mode", "controller_mode" };
-        const char *vals[3] = { "0", NULL, NULL };
-        if (settings_get("homing_mode", cur, sizeof(cur)) == 0 && !strcmp(cur, "gfcloud"))
-            vals[1] = "none";
-        if (settings_get("controller_mode", cur, sizeof(cur)) == 0 && !strcmp(cur, "cloud"))
-            vals[2] = "grbl";
-        if (apply_settings(keys, vals, 3, applied, err, sizeof(err)) != 0) {
+        /* Off: nothing may point at the cloud. The table of built-ins
+         * knows what does, and what each falls back to. */
+        const char *keys[5] = { "cloud_enabled" }, *vals[5] = { "0" };
+        size_t n = 1 + builtin_request_sweep(cloud_off_param, NULL, keys + 1, vals + 1, 4);
+        if (apply_settings(keys, vals, n, applied, err, sizeof(err)) != 0) {
             json_decref(applied);
             json_decref(result);
             return reply_error(res, 400, err);

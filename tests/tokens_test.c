@@ -68,19 +68,19 @@ static void test_shape_and_check(void)
 {
     char hub[TOKENS_TEXT_LEN + 1], pend[TOKENS_TEXT_LEN + 1], id[TOKENS_ID_HEX + 1], id2[TOKENS_ID_HEX + 1];
     char seen[TOKENS_ID_HEX + 1], err[160] = "";
-    CHECK(tokens_create("Home Assistant", "machine.read, events,camera.lid", hub, id, err, sizeof(err)) == 0,
+    CHECK(tokens_create("job notifier", "machine.read, events,camera.lid", hub, id, err, sizeof(err)) == 0,
           "create: %s", err);
     CHECK(strlen(hub) == TOKENS_TEXT_LEN && !strncmp(hub, "fft_", 4) && strlen(id) == TOKENS_ID_HEX,
           "the token's shape: \"%s\" id \"%s\"", hub, id);
-    CHECK(tokens_create("pendant", "motion.jog", pend, id2, err, sizeof(err)) == 0, "create: %s", err);
+    CHECK(tokens_create("jogger", "motion.jog", pend, id2, err, sizeof(err)) == 0, "create: %s", err);
     CHECK(strcmp(hub, pend) && strcmp(id, id2), "two tokens alike");
 
     struct stat st;
     CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "the store's mode is %o", st.st_mode & 0777);
     CHECK(!strstr(file_text(), hub + 4) && !strstr(file_text(), pend + 4), "the store holds a token");
-    CHECK(strstr(file_text(), id) && strstr(file_text(), "Home Assistant"), "the store: %s", file_text());
+    CHECK(strstr(file_text(), id) && strstr(file_text(), "job notifier"), "the store: %s", file_text());
     CHECK(!strstr(json(), hub + 4) && strstr(json(), "\"caps\":[\"machine.read\",\"events\",\"camera.lid\"]") &&
-          strstr(json(), "\"name\":\"pendant\""), "the list: %s", json());
+          strstr(json(), "\"name\":\"jogger\""), "the list: %s", json());
 
     CHECK(tokens_check(hub, "machine.read", seen) == 1 && !strcmp(seen, id), "a held capability");
     CHECK(tokens_check(hub, "motion.jog", seen) == 0 && !strcmp(seen, id), "a capability not held");
@@ -124,7 +124,7 @@ static void test_shape_and_check(void)
     CHECK(tokens_revoke(id, err, sizeof(err)) == 0, "revoke: %s", err);
     CHECK(tokens_check(hub, "machine.read", seen) == -1, "a revoked token passed");
     CHECK(tokens_check(pend, "motion.jog", seen) == 1, "the revoke took the other token too");
-    CHECK(!strstr(file_text(), id) && !strstr(json(), "Home Assistant"), "the revoked token is still listed");
+    CHECK(!strstr(file_text(), id) && !strstr(json(), "job notifier"), "the revoked token is still listed");
     tokens_init();
     CHECK(tokens_check(hub, "machine.read", seen) == -1, "a revoked token came back at the reload");
     CHECK(tokens_revoke(id2, err, sizeof(err)) == 0, "revoke: %s", err);

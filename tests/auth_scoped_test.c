@@ -93,7 +93,7 @@ int main(void)
     setenv("FORGECTRL_DATA_DIR", root, 1);
     tokens_init();
     if (tokens_create("hub", "machine.read,camera.lid", hub, id, err, sizeof(err)) != 0 ||
-        tokens_create("pendant", "motion.jog,motion.job", pend, id, err, sizeof(err)) != 0 ||
+        tokens_create("jogger", "motion.jog,motion.job", pend, id, err, sizeof(err)) != 0 ||
         tokens_create("viewer", "camera.lid", view, id, err, sizeof(err)) != 0) {
         printf("cannot create the tokens: %s\n", err);
         return 1;

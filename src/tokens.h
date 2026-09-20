@@ -6,7 +6,8 @@
  *
  * The panel token authorizes every write, and needs a login session
  * behind it. A scoped token is for a client that has neither a browser
- * nor a session: a home-automation hub, a script, a pendant. The
+ * nor a session: a script, such as one that tells somebody a job has
+ * ended. The
  * operator creates it in the panel with a name and a set of
  * capabilities, sees it once, and can revoke it; the daemon keeps its
  * SHA-256, never the token.

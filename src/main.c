@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 #include "advisories.h"
 #include "auth.h"
+#include "builtin.h"
 #include "button.h"
 #include "cam.h"
 #include "camkey.h"
@@ -1233,6 +1234,28 @@ static void effective_temp(const struct _u_request *req, const char *key,
         *out = dflt;
 }
 
+/* A settings request as the table of built-ins asks about it. */
+static const char *request_param(void *ctx, const char *key)
+{
+    return setting_param((const struct _u_request *)ctx, key);
+}
+
+/* The built-in extensions (builtin.h), with what is on and which of their
+ * providers is selected. */
+static int cb_extensions(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[2048];
+    if (builtin_json(body, sizeof(body)) != 0)
+        return reply_error(res, 500, "the extension list does not fit");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_settings_post(const struct _u_request *req,
                             struct _u_response *res, void *user_data)
 {
@@ -1290,16 +1313,11 @@ static int cb_settings_post(const struct _u_request *req,
                 return reply_error(res, 400,
                     "type I UNDERSTAND to turn cloud mode on");
         }
-        int enabled = ce && ce[0] ? !strcmp(ce, "1")
-                                  : settings_get_bool("cloud_enabled", 0);
-        const char *cm = setting_param(req, "controller_mode");
-        const char *hm = setting_param(req, "homing_mode");
-        if (!enabled && cm && !strcmp(cm, "cloud"))
-            return reply_error(res, 409,
-                "cloud mode is not enabled on this machine");
-        if (!enabled && hm && !strcmp(hm, "gfcloud"))
-            return reply_error(res, 409,
-                "cloud homing needs cloud mode enabled");
+        /* A provider whose extension is off does not exist: the table of
+         * built-ins knows which those are, and the words. */
+        const char *why;
+        if (builtin_request_refused(request_param, (void *)req, &why))
+            return reply_error(res, 409, why);
     }
 
     double tmax, tresume, tcrit;
@@ -1395,25 +1413,12 @@ static int cb_settings_post(const struct _u_request *req,
      * so nothing points at a cloud that is off: the driver's $H reads
      * homing_mode alone. A choice the request sets itself was checked
      * above and stands as sent. */
-    const char *swept[2] = { NULL, NULL };
-    if (ce && !strcmp(ce, "0")) {
-        char cur[16];
-        if (!setting_param(req, "homing_mode") &&
-            settings_get("homing_mode", cur, sizeof(cur)) == 0 &&
-            !strcmp(cur, "gfcloud")) {
-            keys[nset] = "homing_mode";
-            vals[nset] = "none";
-            nset++;
-            swept[0] = "homing_mode none";
-        }
-        if (!setting_param(req, "controller_mode") &&
-            settings_get("controller_mode", cur, sizeof(cur)) == 0 &&
-            !strcmp(cur, "cloud")) {
-            keys[nset] = "controller_mode";
-            vals[nset] = "grbl";
-            nset++;
-            swept[1] = "controller_mode grbl";
-        }
+    const char *swept_keys[4], *swept_vals[4];
+    size_t nswept = builtin_request_sweep(request_param, (void *)req, swept_keys, swept_vals, 4);
+    for (size_t i = 0; i < nswept; i++) {
+        keys[nset] = swept_keys[i];
+        vals[nset] = swept_vals[i];
+        nset++;
     }
     if (settings_set_many(keys, vals, nset) != 0)
         return reply_error(res, 500, "cannot write settings file");
@@ -1425,9 +1430,8 @@ static int cb_settings_post(const struct _u_request *req,
               !v[0] ? "cleared" :
               setting_defs[i].secret ? "set" : v);
     }
-    for (int i = 0; i < 2; i++)
-        if (swept[i])
-            fflog(LOG_NOTICE, "%s (cloud mode off)", swept[i]);
+    for (size_t i = 0; i < nswept; i++)
+        fflog(LOG_NOTICE, "%s %s (its extension was turned off)", swept_keys[i], swept_vals[i]);
     if (setting_param(req, "wifi_country"))
         apply_wifi(1);
     if (setting_param(req, "lid_lamp_idle"))
@@ -2871,6 +2875,7 @@ int main(int argc, char **argv)
         { "GET",  "/curve/ladder.gcode",   cb_curve_ladder,     NULL, 1, NULL },
         { "POST", "/job",                  cb_job_post,         NULL, 0, "motion.job" },
         { "GET",  "/job",                  cb_job_status,       NULL, 1, "machine.read" },
+        { "GET",  "/extensions",           cb_extensions,       NULL, 1, NULL },
         { "GET",  "/tokens",               cb_tokens_list,      NULL, 0, NULL },
         { "POST", "/tokens",               cb_tokens_create,    NULL, 0, NULL },
         { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },

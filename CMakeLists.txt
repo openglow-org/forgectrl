@@ -66,6 +66,7 @@ add_executable(forgectrl
   src/accel.c
   src/airflow.c
   src/auth.c
+  src/builtin.c
   src/cam.c
   src/peer.c
   src/camhealth.c
@@ -370,6 +371,13 @@ add_executable(auth_scoped_test tests/auth_scoped_test.c src/auth.c src/tokens.c
                src/peer.c src/fflog.c)
 target_compile_options(auth_scoped_test PRIVATE -Wall -Wextra)
 target_link_libraries(auth_scoped_test ulfius pthread)
+
+# The table of built-in extensions over a real settings file: the cloud
+# entry, its refusals in the settings route's own words, the sweep when it
+# goes off, and the list.
+add_executable(builtin_test tests/builtin_test.c src/builtin.c src/settings.c src/fflog.c)
+target_compile_options(builtin_test PRIVATE -Wall -Wextra)
+target_link_libraries(builtin_test pthread)
 
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)

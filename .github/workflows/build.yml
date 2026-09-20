@@ -46,6 +46,9 @@ jobs:
       - name: auth_scoped_test (the guards' judgment of a scoped token, route by route)
         run: ./build/auth_scoped_test
 
+      - name: builtin_test (the built-in extensions: the cloud entry, its refusals, its sweep, the list)
+        run: ./build/builtin_test
+
       - name: lease_test (the machine lease: one holder, nesting, the sender kind)
         run: ./build/lease_test
       - name: events_test (the event stream's cap, edge detector, and ring)

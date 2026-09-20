@@ -1427,6 +1427,38 @@ class Mock:
         tok = headers.get('X-ForgeFIRM-Token') or q.get('token')
         return tok == self.token
 
+    # The built-in extensions (src/builtin.c): the table as the daemon has it.
+    BUILTIN_EXT = [{
+        'id': 'cloud', 'name': 'Glowforge cloud mode',
+        'summary': 'Runs the factory experience: jobs from the Glowforge web service, and its '
+                   'camera homing.',
+        'enable_key': 'cloud_enabled',
+        'consent': 'The cloud step of the setup, with its typed acknowledgment.',
+        'setup_step': 'cloud', 'tab': 'gfcloud',
+        'settings': ['cloud_*', 'gfcloud_*', 'gf_serial', 'gf_password', 'log_gfcloud_*'],
+        'roles': [
+            {'role': 'homing', 'provider': 'gfcloud', 'kind': 'runner-fd',
+             'select_key': 'homing_mode', 'fallback': 'none',
+             'refusal': 'cloud homing needs cloud mode enabled'},
+            {'role': 'controller', 'provider': 'cloud', 'kind': 'supervised',
+             'select_key': 'controller_mode', 'fallback': 'grbl',
+             'refusal': 'cloud mode is not enabled on this machine'},
+        ],
+    }]
+
+    def extensions_reply(self):
+        out = []
+        for e in self.BUILTIN_EXT:
+            on = self.settings.get(e['enable_key']) == '1'
+            ext = {k: e[k] for k in ('id', 'name', 'summary', 'enable_key', 'consent', 'setup_step',
+                                     'tab', 'settings')}
+            ext.update({'builtin': True, 'enabled': on,
+                        'roles': [dict({k: v for k, v in r.items() if k != 'refusal'},
+                                       active=on and self.settings.get(r['select_key']) == r['provider'])
+                                  for r in e['roles']]})
+            out.append(ext)
+        return {'extensions': out}
+
     # Scoped tokens (src/tokens.c, src/auth.c): the closed list, and the
     # capability column of the route table in src/main.c. A request that
     # presents one is judged by it alone.
@@ -1890,6 +1922,8 @@ class Mock:
                 return J(403, {'error': refusal})
             self.scoped_pass = True
         if method == 'GET':
+            if path == '/extensions':
+                return J(200, self.extensions_reply())
             if path == '/tokens':
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
@@ -2122,17 +2156,25 @@ class Mock:
             if form.get('cloud_enabled') == '1' and self.settings.get('cloud_enabled') != '1' \
                     and form.get('phrase') != 'I UNDERSTAND':
                 return T(400, 'type I UNDERSTAND to turn cloud mode on')
+            # A provider whose extension is off does not exist, and an
+            # extension that goes off takes down what pointed at it
+            # (src/builtin.c: the request's own enable counts).
+            for e in self.BUILTIN_EXT:
+                now = form.get(e['enable_key']) or self.settings.get(e['enable_key'])
+                for r in e['roles']:
+                    if now != '1' and form.get(r['select_key']) == r['provider']:
+                        return T(409, r['refusal'])
             for k in known:
                 self.settings[k] = form[k]
                 self._log('%s %s' % (k, 'cleared' if not form[k] else
                                      'set' if k in SECRET_KEYS else form[k]))
-            if form.get('cloud_enabled') == '0':
-                if 'homing_mode' not in form and self.settings.get('homing_mode') == 'gfcloud':
-                    self.settings['homing_mode'] = 'none'
-                    self._log('homing_mode none (cloud mode off)')
-                if 'controller_mode' not in form and self.settings.get('controller_mode') == 'cloud':
-                    self.settings['controller_mode'] = 'grbl'
-                    self._log('controller_mode grbl (cloud mode off)')
+            for e in self.BUILTIN_EXT:
+                if form.get(e['enable_key']) != '0':
+                    continue
+                for r in e['roles']:
+                    if r['select_key'] not in form and self.settings.get(r['select_key']) == r['provider']:
+                        self.settings[r['select_key']] = r['fallback']
+                        self._log('%s %s (its extension was turned off)' % (r['select_key'], r['fallback']))
             return J(200, self.settings_reply())
         if path == '/mode':
             m = form.get('controller')

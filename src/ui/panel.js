@@ -401,6 +401,7 @@ function tab() {
   }
   if (h === 'system') {
     loadSsh();
+    loadExtensions();
     loadTokens();
     loadSetup();
   }
@@ -925,6 +926,44 @@ function toggleSsh() {
     .catch(function () {
       $('msg-ssh').textContent = 'no answer';
     });
+}
+/* The built-in extensions: what the image itself contributes and the
+ * operator turns on, with what each provides and which of it is selected. */
+function renderExtensions(j) {
+  var g = '';
+  var list = j.extensions || [];
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i];
+    var roles = [];
+    for (var r = 0; r < (e.roles || []).length; r++) {
+      var ro = e.roles[r];
+      roles.push(esc(ro.role) + ": <span class='mono'>" + esc(ro.provider) + '</span>' + (ro.active ? ' (selected)' : ''));
+    }
+    g += kv(
+      e.name,
+      (e.enabled ? "<span class='b-ok'>on</span>" : 'off') +
+        (e.builtin ? ', part of the image' : '') +
+        '<br>' +
+        esc(e.summary) +
+        (roles.length ? '<br>Provides ' + roles.join(', ') : '') +
+        (e.tab && e.enabled
+          ? "<br>Its tab: <a href='#" + esc(e.tab) + "' data-nolock='1'>" + esc(($('t-' + e.tab) || {}).textContent || e.tab) + '</a>'
+          : '') +
+        "<br><a href='/setup?step=" +
+        esc(e.setup_step) +
+        "' data-nolock='1'>Turn it on or off</a>: " +
+        esc(e.consent)
+    );
+  }
+  $('extlist').innerHTML = g || "<p class='hint'>None.</p>";
+}
+function loadExtensions() {
+  fetch('/extensions')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(renderExtensions)
+    .catch(function () {});
 }
 /* Scoped API tokens: a named credential for one program, holding the
  * capabilities ticked here and nothing else. The daemon keeps a hash, so

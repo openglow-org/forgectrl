@@ -332,11 +332,19 @@ var HELP = {
       'Applied immediately and at every boot. WiFi power save stays off: on a mains-powered machine it only adds latency.'
     ]
   },
+  extensions: {
+    t: 'Extensions',
+    d: 'usage/control-panel/#extensions',
+    p: [
+      'An extension is a part of the machine you turn on: it has settings of its own, a place in this panel, and things it provides, such as a way to home or a controller mode. The ones listed here are part of the image.',
+      'Glowforge cloud mode is one. It is turned on and off in the cloud step of the setup. While it is off, nothing it provides can be selected, and turning it off takes the homing and the controller mode back to the machine\'s own.'
+    ]
+  },
   tokens: {
     t: 'API tokens',
     d: 'usage/control-panel/#api-tokens',
     p: [
-      'A token is a password for one program: a home-automation hub, a script, a pendant. It reaches only what you tick when you make it, and never the settings, the mode, an update, or another token. A job it runs still waits for the button on the machine.',
+      'A token is a password for one program that is not a browser, such as a script that tells you when a job ends. It reaches only what you tick when you make it, and never the settings, the mode, an update, or another token. A job it runs still waits for the button on the machine.',
       'The token is shown once, when it is made; the machine keeps only a fingerprint of it. The program sends it as the header Authorization: Bearer, over HTTPS. Revoke stops a token at once. Give each program its own, so one can be revoked without the others. A token that holds cameras and nothing else may also be put in a camera URL (key=), for a viewer that cannot send a header; a token that holds more is refused there.'
     ]
   },

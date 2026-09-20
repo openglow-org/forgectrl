@@ -12,8 +12,8 @@
  *
  * The port's operations come in two sets, and the caller names the set
  * it speaks for before anything else looks at the request. The package
- * set (state, jog, cancel) is what a jog pad, a pendant, or an extension
- * may reach. The panel set adds the operations that belong to the
+ * set (state, jog, cancel) is what the panel's Jog card, a scoped token,
+ * or an extension may reach. The panel set adds the operations that belong to the
  * operator's own panel alone: the motor release, the energize, and the
  * manual home. An operation outside the caller's set is refused here,
  * with nothing written to the socket.

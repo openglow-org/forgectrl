@@ -479,6 +479,47 @@ class MockTest(unittest.TestCase):
         self.assertEqual((code, body.decode()), (409, 'no job is running'))
         self.assertIn('no job is running', src)
 
+    def test_extensions_match_builtin_c(self):
+        src = read('src/builtin.c')
+        m = self.mock()
+        doc = self.get_json(m, '/extensions')
+        self.assertEqual(doc_keys(doc), c_keys(src, 'builtin_json'))
+        # The table, read out of the C: every string literal of the roles
+        # array and of the entry, in order.
+        roles = re.search(r'cloud_roles\[\] = \{(.*?)\n\};', src, re.S).group(1)
+        rows = [re.findall(r'"([^"]*)"', row) for row in re.findall(r'\{(.*?)\}', roles, re.S)]
+        mock_rows = [[r[k] for k in ('role', 'provider', 'kind', 'select_key', 'fallback')]
+                     for r in self.ds.Mock.BUILTIN_EXT[0]['roles']]
+        self.assertEqual([r[:5] for r in rows], mock_rows)
+        refusals = [r[5] for r in rows]
+        self.assertEqual(refusals, [r['refusal'] for r in self.ds.Mock.BUILTIN_EXT[0]['roles']])
+        keys = re.findall(r'"([^"]*)"', re.search(r'cloud_settings\[\] = \{(.*?)\};', src, re.S).group(1))
+        self.assertEqual(keys, self.ds.Mock.BUILTIN_EXT[0]['settings'])
+        entry = re.search(r'builtin_ext\[\] = \{\s*\{(.*?)cloud_settings', src, re.S).group(1)
+        lits = [''.join(re.findall(r'"([^"]*)"', part)) for part in re.split(r',\s*\n', entry) if '"' in part]
+        e = self.ds.Mock.BUILTIN_EXT[0]
+        self.assertEqual(lits, ['%s%s' % (e['id'], e['name']), e['summary'], e['enable_key'], e['consent'],
+                                '%s%s' % (e['setup_step'], e['tab'])])
+
+        # Off: nothing reads active, and the settings route refuses in the table's words.
+        code, hdrs, body = self.call(m, 'POST', '/settings', {'cloud_enabled': '0'})
+        self.assertEqual(code, 200)
+        ext = self.get_json(m, '/extensions')['extensions'][0]
+        self.assertFalse(ext['enabled'])
+        self.assertEqual([r['active'] for r in ext['roles']], [False, False])
+        for form, words in (({'homing_mode': 'gfcloud'}, refusals[0]), ({'controller_mode': 'cloud'}, refusals[1])):
+            code, hdrs, body = self.call(m, 'POST', '/settings', form)
+            self.assertEqual((code, body.decode()), (409, words))
+        # On, with gfcloud homing: that role reads active, the other does not.
+        self.call(m, 'POST', '/settings', {'cloud_enabled': '1', 'phrase': 'I UNDERSTAND'})
+        self.call(m, 'POST', '/settings', {'homing_mode': 'gfcloud'})
+        ext = self.get_json(m, '/extensions')['extensions'][0]
+        self.assertTrue(ext['enabled'])
+        self.assertEqual([r['active'] for r in ext['roles']], [True, False])
+        # Off again sweeps the selection to the table's fallback.
+        self.call(m, 'POST', '/settings', {'cloud_enabled': '0'})
+        self.assertEqual(self.get_json(m, '/settings')['homing_mode'], rows[0][4])
+
     def test_tokens_shape_and_scope(self):
         m = self.mock()
         ds = self.ds.Mock
