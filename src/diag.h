@@ -15,8 +15,9 @@ void diag_init(void);
 
 /* Launch a tool ("flow-verify" or "flow-calibrate") on the runner
  * thread. Returns 0 on start, -1 if a diagnostic is already running,
- * -2 if the machine is not idle, -3 for an unknown tool. */
-int diag_start(const char *tool);
+ * -2 if the machine is not idle, -3 for an unknown tool, -4 when the
+ * machine lease is somebody else's, with the holder in why. */
+int diag_start(const char *tool, char *why, size_t len);
 
 /* Request an abort; the runner stands down and restarts the controller. */
 void diag_abort(void);

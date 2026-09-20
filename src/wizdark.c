@@ -22,6 +22,7 @@
 #include "fflog.h"
 #include "gates.h"
 #include "hooks.h"
+#include "lease.h"
 #include "led.h"
 #include "liveness.h"
 #include "paths.h"
@@ -105,6 +106,7 @@ static struct {
 static int seq_counter;
 /* The wizard holds the machine with no controller running: the button
  * breathes white until the controller is handed the LED back. */
+static char lease_owner[LEASE_OWNER_MAX];    /* the machine lease the running wizard holds */
 static int machine_held;
 
 static uint8_t *shot_jpeg[2];
@@ -793,10 +795,11 @@ out:
  * progress estimate. */
 static json_t *run_diag(const char *tool, int expect_s, int pct_from, int pct_to)
 {
-    int rc = diag_start(tool);
+    char why[128];
+    int rc = diag_start(tool, why, sizeof(why));
     if (rc != 0) {
-        finish_err(rc == -2 ? "the machine is not idle, or the cooling engine is busy"
-                            : "the diagnostic could not start");
+        finish_err("%s", rc == -2 ? "the machine is not idle, or the cooling engine is busy"
+                       : rc == -4 ? why : "the diagnostic could not start");
         return NULL;
     }
     char buf[2048];
@@ -1631,7 +1634,7 @@ static void run_cloud_header(void)
     posture = 1;
     phase("starting the cloud client");
     led_release();                  /* the cloud client drives the button */
-    if (super_mode_switch("cloud", err, sizeof(err)) != 0) {
+    if (super_mode_switch("cloud", lease_owner, err, sizeof(err)) != 0) {
         finish_err("cannot start cloud mode: %s", err);
         goto out;
     }
@@ -1710,7 +1713,7 @@ static void run_cloud_header(void)
     for (int i = 0; i < 30 && !aborted(); i++)
         msleep(100);
     phase("back to GRBL mode");
-    super_mode_switch("grbl", err, sizeof(err));
+    super_mode_switch("grbl", lease_owner, err, sizeof(err));
     in_cloud = 0;
     super_set_local(0);
     posture = 0;
@@ -1719,7 +1722,7 @@ static void run_cloud_header(void)
 out:
     unlink(CAPTURE_MARKER);
     if (in_cloud)
-        super_mode_switch("grbl", err, sizeof(err));
+        super_mode_switch("grbl", lease_owner, err, sizeof(err));
     if (posture)
         super_set_local(0);
     json_decref(r);
@@ -1790,6 +1793,7 @@ static void *worker(void *arg)
     S.owner[0] = '\0';
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
+    lease_release(lease_owner);
     return NULL;
 }
 
@@ -1806,14 +1810,16 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
         snprintf(err, elen, "a wizard is already running (%s)", S.id);
         return -1;
     }
-    if (diag_running()) {
-        pthread_mutex_unlock(&mu);
-        snprintf(err, elen, "a diagnostic holds the machine");
-        return -1;
-    }
     if (entry(ix)->needs_idle && !machine_is_idle()) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "the machine is not idle");
+        return -1;
+    }
+    /* The machine lease: a diagnostic, an update job, the recorder, or a
+     * log export refuses the wizard, and the refusal names it. */
+    snprintf(lease_owner, sizeof(lease_owner), "wizard:%s", id);
+    if (lease_take(lease_owner, LEASE_HARDWARE, NULL, err, elen) != 0) {
+        pthread_mutex_unlock(&mu);
         return -1;
     }
     snprintf(S.id, sizeof(S.id), "%s", id);
@@ -1845,6 +1851,7 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
         pthread_mutex_lock(&mu);
         S.running = 0;
         pthread_mutex_unlock(&mu);
+        lease_release(lease_owner);
         snprintf(err, elen, "cannot start the wizard thread");
         return -1;
     }
@@ -1901,6 +1908,16 @@ int wizdark_running(void)
 {
     pthread_mutex_lock(&mu);
     int r = S.running;
+    pthread_mutex_unlock(&mu);
+    return r;
+}
+
+int wizdark_lease_owner(char *buf, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    int r = S.running && !strncmp(S.id, "cooling.", 8) && strcmp(S.id, "cooling.tec");
+    if (r)
+        snprintf(buf, len, "%s", lease_owner);
     pthread_mutex_unlock(&mu);
     return r;
 }

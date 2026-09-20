@@ -132,6 +132,14 @@ void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn 
 
     if (a->released != b->released)
         emit(ctx, b->released ? "motors.released" : "motors.energized", "{}");
+
+    if (strcmp(a->lease, b->lease)) {
+        if (b->lease[0])
+            snprintf(d, sizeof(d), "{\"owner\":\"%s\"}", b->lease);
+        else
+            snprintf(d, sizeof(d), "{\"owner\":null}");
+        emit(ctx, "lease.changed", d);
+    }
 }
 
 /* ---- the ring and the streams ---- */

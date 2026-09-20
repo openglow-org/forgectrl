@@ -22,7 +22,9 @@ void super_shutdown(void);
  * stops the active controller, persists the setting, starts the other,
  * and waits for its first job-state report. Returns 0 on success, -1
  * with err filled on refusal/failure. */
-int super_mode_switch(const char *mode, char *err, size_t elen);
+/* as: the machine-lease owner the caller is (a wizard switching the mode
+ * inside its own hold), or NULL for anybody else. */
+int super_mode_switch(const char *mode, const char *as, char *err, size_t elen);
 
 /* Diagnostics takeover: stop the active controller without changing the
  * selected mode (returns 0 once it is down), and start it again. The

@@ -40,8 +40,8 @@
 #include "curverec.h"
 #include "fflog.h"
 #include "jobstream.h"
+#include "lease.h"
 #include "settings.h"
-#include "wizdark.h"
 
 #include <errno.h>
 #include <math.h>
@@ -301,6 +301,7 @@ static void finish_locked(int state, const char *reason)
     cr_state = state;
     snprintf(cr_reason, sizeof(cr_reason), "%s", reason ? reason : "");
     curverec_override_end();
+    lease_release("recorder");
     fflog(LOG_INFO, "curverec: %s%s%s",
           state == CR_DONE ? "done" : "failed",
           reason && *reason ? " - " : "", reason ? reason : "");
@@ -376,11 +377,6 @@ int curverec_start(char *err, size_t elen)
         snprintf(err, elen, "a recording is already running");
         return -1;
     }
-    if (wizdark_running()) {
-        pthread_mutex_unlock(&mu);
-        snprintf(err, elen, "a setup wizard holds the machine");
-        return -1;
-    }
     if (thread_live) {
         pthread_join(thread, NULL);
         thread_live = 0;
@@ -400,8 +396,16 @@ int curverec_start(char *err, size_t elen)
                  "first (the recorder streams the ladder itself)");
         return -1;
     }
+    /* The machine lease, as the sender of a job of its own: a wizard, a
+     * diagnostic, an update job, or a log export refuses the recording,
+     * and the refusal names it. */
+    if (lease_take("recorder", LEASE_SENDER, NULL, err, elen) != 0) {
+        pthread_mutex_unlock(&mu);
+        return -1;
+    }
     if (curverec_override_begin("0", "off", NULL) != 0) {
         pthread_mutex_unlock(&mu);
+        lease_release("recorder");
         snprintf(err, elen, "the laser keys are held by another job");
         return -1;
     }

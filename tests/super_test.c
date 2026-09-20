@@ -643,7 +643,7 @@ int main(void)
         super_status_json(st, sizeof(st));
         CHECK(strstr(st, "\"motion\":\"unverified\"") != NULL && strstr(st, "released") != NULL,
               "and /mode says why");
-        CHECK(super_mode_switch("cloud", err, sizeof(err)) == -1 && strstr(err, "released") != NULL,
+        CHECK(super_mode_switch("cloud", NULL, err, sizeof(err)) == -1 && strstr(err, "released") != NULL,
               "a switch to cloud mode is refused, in words");
         CHECK(want == Ctl_Grbl, "the mode did not change");
     }
@@ -652,6 +652,31 @@ int main(void)
     reset_state();
     CHECK(run_until_spawned(5.0) && probes == 1 && !probe_skipped,
           "with the marker gone the probe runs as always");
+
+    printf("K. the machine lease refuses a mode switch, except its holder's own\n");
+    reset_state();
+    CHECK(run_until_spawned(5.0), "the controller is up");
+    {
+        char err[128] = "";
+        CHECK(lease_take("wizard:cloud.header", LEASE_HARDWARE, NULL, err, sizeof(err)) == 0, "the wizard takes the lease");
+        CHECK(super_mode_switch("grbl", NULL, err, sizeof(err)) == -1 &&
+              !strcmp(err, "a setup wizard (cloud.header) holds the machine"),
+              "anybody else's switch is refused, and the refusal names the holder");
+        CHECK(want == Ctl_Grbl, "the mode did not change");
+        /* The holder's own switch gets past the lease: with the machine
+         * busy it is the idle check that answers, which comes after. */
+        machine_idle = 0;
+        CHECK(super_mode_switch("grbl", "wizard:cloud.header", err, sizeof(err)) == -1 &&
+              !strcmp(err, "machine is not idle"), "the holder's own switch is not refused by its own hold");
+        CHECK(super_mode_switch("grbl", "wizard:motion", err, sizeof(err)) == -1 && strstr(err, "holds the machine"),
+              "a caller that names a hold it does not have is refused");
+        machine_idle = 1;
+        lease_release("wizard:cloud.header");
+        machine_idle = 0;
+        CHECK(super_mode_switch("grbl", NULL, err, sizeof(err)) == -1 && !strcmp(err, "machine is not idle"),
+              "with the lease given back the switch reaches the idle check again");
+        machine_idle = 1;
+    }
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

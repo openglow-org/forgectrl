@@ -797,6 +797,7 @@ class Mock:
                      'reach_min': -1.31, 'reach_max': 10.32},
             'state': 'idle', 'homed': True, 'homed_axes': 7, 'home_source': 'gfcloud', 'diag': False,
             'motors_released': False,
+            'lease': {'holder': None, 'observed': {'sender': False, 'motors_released': False}},
             'pos': {'x': 12.34, 'y': -5.6, 'z': 0.0},
             'laser_locked': True,
             'laser': {'emission_samples': 0, 'pgood_samples': 255},
@@ -949,6 +950,50 @@ class Mock:
 
     def idle(self):
         return self.status['state'] == 'idle'
+
+    # The machine lease (src/lease.c): who has the machine, in the daemon's
+    # order of nesting (a diagnostic under its wizard is the innermost), and
+    # in the daemon's words.
+    LEASE_WORDS = (('diag:', 'a diagnostic'), ('wizard:', 'a setup wizard'),
+                   ('update:', 'an update job'), ('ext:', 'an extension'))
+
+    def lease_holder(self):
+        """(owner, kind) of the innermost holder, or None."""
+        if self.diag['running']:
+            return 'diag:%s' % self.diag.get('tool', ''), 'hardware'
+        if self.dark['running']:
+            return 'wizard:%s' % self.dark['id'], 'hardware'
+        if self.curve['state'] in ('waiting', 'recording'):
+            return 'recorder', 'sender'
+        if self.update['running']:
+            return 'update:%s' % self.update['kind'], 'system'
+        return None
+
+    def lease_words(self, owner):
+        for prefix, words in self.LEASE_WORDS:
+            if owner.startswith(prefix):
+                return '%s (%s)' % (words, owner[len(prefix):])
+        return 'the dose-curve recorder' if owner == 'recorder' else owner
+
+    def lease_refusal(self, locks=False):
+        """The daemon's refusal while somebody holds the machine, or None.
+        locks: for the controls a holder locks, which is every holder but
+        a log export (the export kind)."""
+        h = self.lease_holder()
+        if not h or (locks and h[1] == 'export'):
+            return None
+        return '%s holds the machine' % self.lease_words(h[0])
+
+    def lease_reply(self):
+        h = self.lease_holder()
+        holder = None
+        if h:
+            holder = {'owner': h[0], 'kind': h[1], 'for_s': 0, 'words': self.lease_words(h[0])}
+            if h[0].startswith('diag:') and self.dark['running']:
+                holder['under'] = 'wizard:%s' % self.dark['id']
+        return {'holder': holder,
+                'observed': {'sender': bool(self.grbl_report['sender']['connected']),
+                             'motors_released': self.status['motors_released']}}
 
     def motion_post(self, op, form, J, T):
         """The controller port's routes: a jog moves the mock's position
@@ -1177,6 +1222,7 @@ class Mock:
 
     def status_reply(self):
         self.status['diag'] = self.diag['running']
+        self.status['lease'] = self.lease_reply()
         self.status['switches']['button'] = self.button
         grbl = None
         if self.mode == 'grbl' and self.controller == 'running':
@@ -1393,12 +1439,12 @@ class Mock:
         self._log('update: %s done' % u['kind'])
 
     def _job_start(self, kind, args, J):
-        if self.update['running']:
-            return J(409, {'error': 'an update job is already running'})
         if not self.idle():
             return J(409, {'error': 'machine is not idle'})
-        if self.diag['running']:
-            return J(409, {'error': 'a diagnostic is running'})
+        if self.update['running']:
+            return J(409, {'error': 'an update job is already running'})
+        if self.lease_refusal():
+            return J(409, {'error': self.lease_refusal()})
         self.update.update({'running': True, 'kind': kind,
                             'phase': JOB_PHASES[kind][0], 'elapsed': 0,
                             'progress_bytes': -1, 'result': None})
@@ -1496,6 +1542,8 @@ class Mock:
                 return J(409, {'error': 'accept the advisories first'})
             if d['running']:
                 return J(409, {'error': 'a wizard is already running (%s)' % d['id']})
+            if self.lease_refusal():
+                return J(409, {'error': self.lease_refusal()})
             self.dark = {'id': wid, 'running': True, 'started': time.time(), 'answered': 0.0,
                          'seq': 0, 'answer': None, 'error': '', 'aborted': False}
             self._log('wiz %s: started' % wid)
@@ -1622,8 +1670,8 @@ class Mock:
         if path == '/restore/factory-return':
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
-            if self.update['running']:
-                return J(409, {'error': 'an update job is running'})
+            if self.lease_refusal():
+                return J(409, {'error': self.lease_refusal()})
             return self._job_start('factory-return',
                                    {'slot': 'b', 'archive': {'version': '2.6.0'}}, J)
         return J(404, {'error': 'mock: no such endpoint'})
@@ -1876,9 +1924,8 @@ class Mock:
 
         if path == '/settings':
             print('mock: POST /settings %s' % json.dumps(form), flush=True)
-            if self.diag['running']:
-                return T(409, 'a diagnostic is running - settings are '
-                              'locked')
+            if self.lease_refusal(locks=True):
+                return T(409, self.lease_refusal(locks=True) + ' - settings are locked')
             if not self.idle():
                 return T(409, 'machine is not idle - settings are locked')
             known = [k for k in SETTINGS_KEYS if k in form]
@@ -1910,10 +1957,8 @@ class Mock:
                 return T(400, 'controller is required')
             if m not in ('grbl', 'cloud'):
                 return T(400, 'mode must be grbl or cloud')
-            if self.diag['running']:
-                return T(409, 'a diagnostic is running')
-            if self.update['running']:
-                return T(409, 'an update job is running')
+            if self.lease_refusal():
+                return T(409, self.lease_refusal())
             if not self.idle():
                 return T(409, 'machine is not idle')
             self.mode = m
@@ -1932,20 +1977,20 @@ class Mock:
             self._log('super: controller stopped')
             return J(200, {'stopped': True})
         if path == '/controller/start':
-            if self.diag['running']:
-                return T(409, 'a diagnostic owns the hardware')
+            if self.lease_refusal(locks=True):
+                return T(409, self.lease_refusal(locks=True))
             self.controller_start()
             return J(200, {'started': True})
         if path.startswith('/diag/') and path != '/diag/abort':
             tool = path[6:]
-            if self.update['running']:
-                return T(409, 'an update job is running')
             if tool not in DIAG_TOOLS:
                 return T(400, 'unknown diagnostic')
             if self.diag['running']:
                 return T(409, 'a diagnostic is already running')
             if not self.idle():
                 return T(409, 'machine is not idle')
+            if self.lease_refusal():
+                return T(409, self.lease_refusal())
             self.diag.update({'running': True, 'tool': tool, 'phase': '',
                               'elapsed_s': 0, 'log': [], 'result': None})
             self.diag_t0 = time.time()
@@ -1962,8 +2007,10 @@ class Mock:
             if self.curve['state'] in ('waiting', 'recording'):
                 return T(409, 'a recording is already running')
             if self.grbl_report['sender']['connected']:
-                return T(409, 'a sender is connected to the machine - close '
-                              'it before recording')
+                return T(409, 'a sender is connected to the machine - close it first '
+                              '(the recorder streams the ladder itself)')
+            if self.lease_refusal():
+                return T(409, self.lease_refusal())
             self.curve.update({'state': 'waiting', 'reason': '',
                                'elapsed_s': 0, 'samples': 0, 'curve': '',
                                'points': []})
@@ -1979,12 +2026,10 @@ class Mock:
                 self._tick()
             return J(200, self.curve)
         if path == '/boot':
-            if self.diag['running']:
-                return J(409, {'error': 'a diagnostic is running'})
+            if self.lease_refusal():
+                return J(409, {'error': self.lease_refusal()})
             if not self.idle():
                 return J(409, {'error': 'machine is not idle'})
-            if self.update['running']:
-                return J(409, {'error': 'an update job is running'})
             t = form.get('target', '')
             if t not in SLOT_TARGETS:
                 return J(400, {'error': 'target must be sd, a, b, or legacy'})
@@ -1997,12 +2042,10 @@ class Mock:
             return J(200, {'ok': True, 'target': t,
                            'detail': 'next boot: %s' % SLOT_TARGETS[t]})
         if path == '/system/reboot':
-            if self.diag['running']:
-                return J(409, {'error': 'a diagnostic is running'})
+            if self.lease_refusal():
+                return J(409, {'error': self.lease_refusal()})
             if not self.idle():
                 return J(409, {'error': 'machine is not idle'})
-            if self.update['running']:
-                return J(409, {'error': 'an update job is running'})
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
             self._log('system: reboot requested (mock: down for %d s)'
@@ -2033,8 +2076,8 @@ class Mock:
                 return J(404, {'error': 'staged archive not found'})
             return self._job_start('apply', {'slot': slot, 'file': f}, J)
         if path == '/update/upload':
-            if self.update['running']:
-                return J(409, {'error': 'an update job is running'})
+            if self.lease_refusal():
+                return J(400, {'error': self.lease_refusal()})
             self.slots['staged']['upload'] = {
                 'present': True, 'bytes': len(body), 'version': MOCK_RELEASE}
             return J(200, {'ok': True, 'file': 'upload', 'bytes': len(body),

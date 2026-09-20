@@ -47,6 +47,8 @@
 #include "gates.h"
 #include "grblport.h"
 #include "hooks.h"
+#include "jobstream.h"
+#include "lease.h"
 #include "led.h"
 #include "logs.h"
 #include "paths.h"
@@ -1179,9 +1181,11 @@ static int cb_settings_post(const struct _u_request *req,
     /* Settings are locked whenever the machine is not idle: the
      * controller and the homing runner both read this file mid-run.
      * A running diagnostic owns the hardware and locks them too. */
-    if (diag_running())
-        return reply_error(res, 409,
-            "a diagnostic is running - settings are locked");
+    char held[160];
+    if (lease_refusal_locks(held, sizeof(held))) {
+        strncat(held, " - settings are locked", sizeof(held) - strlen(held) - 1);
+        return reply_error(res, 409, held);
+    }
     if (!machine_is_idle())
         return reply_error(res, 409,
             "machine is not idle - settings are locked");
@@ -1404,8 +1408,12 @@ static int cb_controller_start(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (diag_running())
-        return reply_error(res, 409, "a diagnostic owns the hardware");
+    /* A diagnostic or a wizard stopped the controller on purpose and
+     * starts it again when it is done; an update job is about to change
+     * what would be started. */
+    char held[128];
+    if (lease_refusal_locks(held, sizeof(held)))
+        return reply_error(res, 409, held);
     super_controller_start();
     ulfius_set_string_body_response(res, 200, "{\"started\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -1468,7 +1476,7 @@ static int cb_mode_post(const struct _u_request *req,
     if (!mode)
         return reply_error(res, 400, "controller is required");
     char err[96];
-    if (super_mode_switch(mode, err, sizeof(err)) != 0)
+    if (super_mode_switch(mode, NULL, err, sizeof(err)) != 0)
         return reply_error(res, strstr(err, "must be") ? 400 : 409, err);
     return cb_mode_get(req, res, NULL);
 }
@@ -1573,6 +1581,13 @@ static int cb_motion_panel(const struct _u_request *req,
 
 /* -------------------------------------------------------------- events */
 
+static int motors_released_now(void)
+{
+    char marker[256];
+    snprintf(marker, sizeof(marker), "%s/motors.released", ff_run_dir());
+    return access(marker, F_OK) == 0;
+}
+
 static void snap_str(json_t *o, const char *key, char *dst, size_t len)
 {
     const char *v = json_string_value(json_object_get(o, key));
@@ -1618,9 +1633,10 @@ static void events_gather_state(events_snap_t *s)
 
     machine_home_state(&s->homed_axes, s->home_source, sizeof(s->home_source));
 
-    char marker[256];
-    snprintf(marker, sizeof(marker), "%s/motors.released", ff_run_dir());
-    s->released = access(marker, F_OK) == 0;
+    s->released = motors_released_now();
+
+    if (!lease_holder(s->lease, sizeof(s->lease)))
+        s->lease[0] = '\0';
 }
 
 struct events_ctx {
@@ -1743,8 +1759,9 @@ static int cb_cool_quiet(const struct _u_request *req,
     if (pump && strcmp(pump, "0") && strcmp(pump, "1"))
         return reply_error(res, 400, "pump must be 0 or 1");
     if (!strcmp(on, "1")) {
-        if (diag_running())
-            return reply_error(res, 409, "a diagnostic is running");
+        char held[128];
+        if (lease_refusal_locks(held, sizeof(held)))
+            return reply_error(res, 409, held);
         if (!machine_is_idle())
             return reply_error(res, 409, "machine is not idle");
     }
@@ -1778,12 +1795,8 @@ static int cb_diag_start(const struct _u_request *req,
 {
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    /* A diagnostic seizes the thermal hardware; refuse it while a
-     * firmware job is mid-flight (the update path does not otherwise
-     * share diag's busy check). */
-    if (update_job_running())
-        return reply_error(res, 409, "an update job is running");
-    switch (diag_start((const char *)user_data)) {
+    char why[128];
+    switch (diag_start((const char *)user_data, why, sizeof(why))) {
     case 0:
         ulfius_set_string_body_response(res, 202, "{\"started\":true}");
         ulfius_add_header_to_response(res, "Content-Type",
@@ -1793,6 +1806,8 @@ static int cb_diag_start(const struct _u_request *req,
         return reply_error(res, 409, "a diagnostic is already running");
     case -2:
         return reply_error(res, 409, "machine is not idle");
+    case -4:
+        return reply_error(res, 409, why);      /* the lease's holder, in words */
     default:
         return reply_error(res, 400, "unknown diagnostic");
     }
@@ -2514,7 +2529,7 @@ static int cb_logs_export(const struct _u_request *req,
     logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, record_snapshot,
                                         err, sizeof(err));
     if (!e)
-        return reply_error(res, !strcmp(err, "busy") ? 409 : 500, err);
+        return reply_error(res, !strcmp(err, "busy") || strstr(err, "holds the machine") ? 409 : 500, err);
     char fn[96], ts[24];
     time_t now = time(NULL);
     struct tm tm;
@@ -2734,6 +2749,8 @@ int main(int argc, char **argv)
     wizdark_init();
     setup_fact_hook = setup_fact;
     update_init();
+    lease_sender_connected = jobstream_sender_blocks;
+    lease_motors_released = motors_released_now;
     events_gather = events_gather_state;
     events_init();
     apply_wifi(0);

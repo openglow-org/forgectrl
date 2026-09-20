@@ -272,16 +272,54 @@ class MockTest(unittest.TestCase):
                          re.findall(r'"(\w+)"', fans))
 
     def test_status_shape(self):
-        keys = c_keys(read('src/status.c')) | {'gates_off'}
+        # gates_off is spliced in by the route, and lease by lease.c
+        # (test_lease_shape holds that one to its source).
+        keys = c_keys(read('src/status.c')) | {'gates_off', 'lease'}
         doc = self.get_json(self.mock(), '/status')
+        lease = doc_keys(doc.get('lease'))
         self.assertTrue(keys <= doc_keys(doc), keys - doc_keys(doc))
         self.assertTrue(set(doc) <= keys, set(doc) - keys)
+        self.assertTrue(lease, 'no lease block in /status')
         report = doc['grbl']['report']
         ctl = os.path.join(ROOT, '..', 'grblHAL-glowforge', 'src',
                            'glowforge_status.c')
         if os.path.isfile(ctl):
             with open(ctl, encoding='utf-8') as f:
                 self.assertEqual(doc_keys(report), c_keys(f.read()))
+
+    def test_lease_shape(self):
+        """The machine lease in /status, its words, and its refusals, held
+        to src/lease.c."""
+        src = read('src/lease.c')
+        m = self.mock()
+        rest = self.get_json(m, '/status')['lease']
+        self.assertIsNone(rest['holder'])
+        self.assertEqual(set(rest['observed']), {'sender', 'motors_released'})
+        # the words table, row for row
+        table = re.findall(r'\{ "(\w+:)",\s+"([^"]+)" \}', src)
+        self.assertEqual(tuple(table), tuple(m.LEASE_WORDS))
+        self.assertIn('"the dose-curve recorder"', src)
+        self.assertIn('"%s holds the machine"', src)
+        # a holder: every key lease_json writes, but under, which needs a
+        # nested owner
+        code, hdrs, body = self.call(m, 'POST', '/diag/flow-verify')
+        self.assertEqual(code, 202)
+        held = self.get_json(m, '/status')['lease']
+        self.assertEqual(doc_keys({'lease': held}) | {'under'}, c_keys(src, 'lease_json'))
+        self.assertEqual((held['holder']['owner'], held['holder']['kind'], held['holder']['words']),
+                         ('diag:flow-verify', 'hardware', 'a diagnostic (flow-verify)'))
+        # and it refuses, in the daemon's words, wherever the daemon asks it
+        want = 'a diagnostic (flow-verify) holds the machine'
+        for path, form, shape in (('/mode', {'controller': 'grbl'}, 'text'),
+                                  ('/controller/start', {}, 'text'),
+                                  ('/curve/record', {}, 'text'),
+                                  ('/boot', {'target': 'b'}, 'json'),
+                                  ('/system/reboot', {'confirm': '1'}, 'json')):
+            code, hdrs, body = self.call(m, 'POST', path, form)
+            got = json.loads(body)['error'] if shape == 'json' else body.decode()
+            self.assertEqual((code, got), (409, want), path)
+        code, hdrs, body = self.call(m, 'POST', '/settings', {'ui_units': 'metric'})
+        self.assertEqual((code, body.decode()), (409, want + ' - settings are locked'))
 
     def test_diag_shape_and_tools(self):
         src = read('src/diag.c')
@@ -349,8 +387,14 @@ class MockTest(unittest.TestCase):
         self.assertEqual((code, json.loads(body)),
                          (409, {'error': 'an update job is already running'}))
         code, hdrs, body = self.call(m, 'POST', '/boot', {'target': 'b'})
-        self.assertEqual((code, json.loads(body)),
-                         (409, {'error': 'an update job is running'}))
+        self.assertEqual((code, json.loads(body)['error'].split(' (')[0] +
+                          json.loads(body)['error'].split(')')[-1]),
+                         (409, 'an update job holds the machine'))
+        # an update job locks the settings like any other holder
+        code, hdrs, body = self.call(m, 'POST', '/settings', {'ui_units': 'metric'})
+        self.assertEqual(code, 409)
+        self.assertTrue(body.decode().startswith('an update job ('), body)
+        self.assertTrue(body.decode().endswith('holds the machine - settings are locked'), body)
 
     def test_logs_shapes(self):
         src = read('src/logs.c')

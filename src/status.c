@@ -22,6 +22,7 @@
 #include "super.h"
 #include "cool.h"
 #include "diag.h"
+#include "lease.h"
 #include "lens.h"
 #include "settings.h"
 
@@ -633,6 +634,10 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     snprintf(released, sizeof(released), "%s/motors.released", run_dir());
     append(buf, len, &off, "\"motors_released\":%s,",
            access(released, F_OK) == 0 ? "true" : "false");
+    /* Who has the machine, and what is seen outside the lease. */
+    char lease[256];
+    if (lease_json(lease, sizeof(lease)) > 0)
+        append(buf, len, &off, "%s,", lease);
     if (have_pos)
         append(buf, len, &off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);

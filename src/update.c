@@ -32,6 +32,7 @@
 #include "auth.h"
 #include "diag.h"
 #include "fflog.h"
+#include "lease.h"
 #include "relcheck.h"
 #include "settings.h"
 #include "status.h"
@@ -81,6 +82,7 @@
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int    job_running;
+static char   job_owner[LEASE_OWNER_MAX];     /* the machine lease the running job holds */
 static char   job_kind[24];
 static char   job_phase[96];
 static time_t job_started;
@@ -338,17 +340,17 @@ static void job_finish(const char *fmt, ...)
     progress_file[0] = '\0';
     pthread_mutex_unlock(&mu);
     va_end(ap);
+    lease_release(job_owner);
 }
 
-/* Start a job: 0 ok, -1 busy, -2 not idle, -3 diagnostic running. */
+/* Start a job: 0 ok, -1 busy, -2 not idle, -3 the machine lease is
+ * somebody else's (the holder in why), -4 an upload is streaming. */
 static pthread_mutex_t up_mu;
 static FILE *up_fp;
 static time_t up_last;
 
-static int job_start(const char *kind, void *(*worker)(void *), void *arg)
+static int job_start(const char *kind, void *(*worker)(void *), void *arg, char *why, size_t len)
 {
-    if (diag_running())
-        return -3;
     if (!machine_is_idle())
         return -2;
     pthread_mutex_lock(&up_mu);
@@ -360,6 +362,13 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg)
     if (job_running) {
         pthread_mutex_unlock(&mu);
         return -1;
+    }
+    /* A diagnostic, a wizard, the recorder, or a log export refuses the
+     * job: none of them should find the system changed under it. */
+    snprintf(job_owner, sizeof(job_owner), "update:%s", kind);
+    if (lease_take(job_owner, LEASE_SYSTEM, NULL, why, len) != 0) {
+        pthread_mutex_unlock(&mu);
+        return -3;
     }
     job_running = 1;
     snprintf(job_kind, sizeof(job_kind), "%s", kind);
@@ -379,6 +388,7 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg)
         pthread_mutex_lock(&mu);
         job_running = 0;
         pthread_mutex_unlock(&mu);
+        lease_release(job_owner);
         return -1;
     }
     return 0;
@@ -386,7 +396,7 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg)
 
 /* Reply for a job_start return code. On 0 the worker owns `arg`; on
  * any error the CALLER still owns it and must free. */
-static int job_start_reply(struct _u_response *res, int rc)
+static int job_start_reply(struct _u_response *res, int rc, const char *why)
 {
     switch (rc) {
     case 0:
@@ -398,7 +408,7 @@ static int job_start_reply(struct _u_response *res, int rc)
     case -4:
         return reply_err(res, 409, "an upload is still streaming into the staging file");
     default:
-        return reply_err(res, 409, "a diagnostic is running");
+        return reply_err(res, 409, why);
     }
 }
 
@@ -651,12 +661,11 @@ int cb_boot_select(const struct _u_request *req, struct _u_response *res,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (diag_running())
-        return reply_err(res, 409, "a diagnostic is running");
+    char held[128];
+    if (lease_refusal(held, sizeof(held)))
+        return reply_err(res, 409, held);
     if (!machine_is_idle())
         return reply_err(res, 409, "machine is not idle");
-    if (update_job_running())
-        return reply_err(res, 409, "an update job is running");
 
     const struct slot_target *t = find_target(param(req, "target"));
     if (!t)
@@ -688,12 +697,11 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (diag_running())
-        return reply_err(res, 409, "a diagnostic is running");
+    char held[128];
+    if (lease_refusal(held, sizeof(held)))
+        return reply_err(res, 409, held);
     if (!machine_is_idle())
         return reply_err(res, 409, "machine is not idle");
-    if (update_job_running())
-        return reply_err(res, 409, "an update job is running");
     const char *c = param(req, "confirm");
     if (!c || strcmp(c, "1"))
         return reply_err(res, 400, "confirm=1 required");
@@ -932,7 +940,9 @@ int cb_update_download(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    return job_start_reply(res, job_start("download", dl_worker, NULL));
+    char why[128];
+    int rc = job_start("download", dl_worker, NULL, why, sizeof(why));
+    return job_start_reply(res, rc, why);
 }
 
 /* ------------------------------------------------------ apply worker */
@@ -1067,10 +1077,11 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     snprintf(a->file, sizeof(a->file), "%s", path);
     a->allow_unsigned = allow_unsigned;
 
-    int rc = job_start("apply", apply_worker, a);
+    char why[128];
+    int rc = job_start("apply", apply_worker, a, why, sizeof(why));
     if (rc != 0)
         free(a);
-    return job_start_reply(res, rc);
+    return job_start_reply(res, rc, why);
 }
 
 /* ----------------------------------------------------------- upload */
@@ -1110,12 +1121,10 @@ int update_upload_sink(const struct _u_request *req, const char *key,
         /* Gate the flash-staging write: machine idle, and no diagnostic
          * or update job running (the apply worker reads the same file -
          * an ungated upload could truncate it mid-flash). */
-        if (diag_running())
-            snprintf(up_refusal, sizeof(up_refusal), "a diagnostic owns the hardware");
+        if (lease_refusal(up_refusal, sizeof(up_refusal)))
+            ;                           /* the holder, in words */
         else if (!machine_is_idle())
             snprintf(up_refusal, sizeof(up_refusal), "the machine is not idle");
-        else if (update_job_running())
-            snprintf(up_refusal, sizeof(up_refusal), "an update job is running");
         if (up_refusal[0]) {
             up_error = 1;
             up_bytes = 0;
@@ -1403,8 +1412,9 @@ int cb_restore_factory_return(const struct _u_request *req,
     const char *c = param(req, "confirm");
     if (!c || strcmp(c, "1"))
         return reply_err(res, 400, "confirm=1 required");
-    if (update_job_running())
-        return reply_err(res, 409, "an update job is running");
+    char held[128];
+    if (lease_refusal(held, sizeof(held)))
+        return reply_err(res, 409, held);
 
     char type[16];
     const struct slot_target *t = inactive_slot(type, sizeof(type));
@@ -1426,10 +1436,11 @@ int cb_restore_factory_return(const struct _u_request *req,
                 "factory recovery mode instead");
         }
     }
-    int rc = job_start("factory-return", factory_return_worker, a);
+    char why[128];
+    int rc = job_start("factory-return", factory_return_worker, a, why, sizeof(why));
     if (rc != 0)
         free(a);
-    return job_start_reply(res, rc);
+    return job_start_reply(res, rc, why);
 }
 
 int cb_restore_factory(const struct _u_request *req,
@@ -1483,10 +1494,11 @@ int cb_restore_factory(const struct _u_request *req,
     a->slot = t;
     snprintf(a->file, sizeof(a->file), "%s", file);
 
-    int rc = job_start("restore", restore_worker, a);
+    char why[128];
+    int rc = job_start("restore", restore_worker, a, why, sizeof(why));
     if (rc != 0)
         free(a);
-    return job_start_reply(res, rc);
+    return job_start_reply(res, rc, why);
 }
 
 /* ------------------------------------------------------------ status */

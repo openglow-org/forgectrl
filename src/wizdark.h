@@ -55,6 +55,10 @@ int wizdark_status_json(char *buf, size_t len, const char *requester);
  * to start beside one), and whether the running one is a cooling
  * wizard driving a diagnostic tool, which the tool's own start allows. */
 int wizdark_running(void);
+
+/* The machine-lease owner of a running wizard that runs diagnostics
+ * inside its own hold (the cooling wizards): 1 and the name, else 0. */
+int wizdark_lease_owner(char *buf, size_t len);
 int wizdark_wraps_diag(void);
 
 /* The cameras wizard keeps the last snapshot of each camera for the

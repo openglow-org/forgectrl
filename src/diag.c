@@ -39,6 +39,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "lease.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -86,6 +87,7 @@
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int st_running = 0;
+static char st_owner[LEASE_OWNER_MAX];       /* the machine lease this run holds */
 static int abort_req = 0;
 static char st_tool[24];
 static char st_phase[80];
@@ -411,6 +413,7 @@ out_norestart:
     pthread_mutex_lock(&mu);
     st_running = 0;
     pthread_mutex_unlock(&mu);
+    lease_release(st_owner);
     return NULL;
 }
 
@@ -630,6 +633,7 @@ out_norestart:
     pthread_mutex_lock(&mu);
     st_running = 0;
     pthread_mutex_unlock(&mu);
+    lease_release(st_owner);
     return NULL;
 }
 
@@ -655,7 +659,7 @@ int diag_running(void)
     return r;
 }
 
-int diag_start(const char *tool)
+int diag_start(const char *tool, char *why, size_t len)
 {
     int calibrate;
     void *(*fn)(void *) = runner;
@@ -674,15 +678,19 @@ int diag_start(const char *tool)
         pthread_mutex_unlock(&mu);
         return -1;
     }
-    /* A dark wizard that is not one of these tools holds the machine
-     * the same way; the tools it wraps come through here with it. */
-    if (wizdark_running() && !wizdark_wraps_diag()) {
-        pthread_mutex_unlock(&mu);
-        return -2;
-    }
     if (!machine_is_idle()) {
         pthread_mutex_unlock(&mu);
         return -2;
+    }
+    /* The machine lease: anything else that has the machine refuses this
+     * run, with one exception. A cooling wizard runs these tools inside
+     * its own hold, so the run goes in under it. */
+    char under[LEASE_OWNER_MAX];
+    snprintf(st_owner, sizeof(st_owner), "diag:%s", tool);
+    if (lease_take(st_owner, LEASE_HARDWARE, wizdark_lease_owner(under, sizeof(under)) ? under : NULL,
+                   why, len) != 0) {
+        pthread_mutex_unlock(&mu);
+        return -4;
     }
     st_running = 1;
     abort_req = 0;
@@ -700,6 +708,7 @@ int diag_start(const char *tool)
         pthread_mutex_lock(&mu);
         st_running = 0;
         pthread_mutex_unlock(&mu);
+        lease_release(st_owner);
         return -2;
     }
 
@@ -713,6 +722,7 @@ int diag_start(const char *tool)
         pthread_mutex_lock(&mu);
         st_running = 0;
         pthread_mutex_unlock(&mu);
+        lease_release(st_owner);
         pthread_attr_destroy(&at);
         return -1;
     }

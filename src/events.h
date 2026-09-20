@@ -60,6 +60,7 @@ typedef struct {
     unsigned homed_axes;
     char home_source[16];
     int released;                   /* the X and Y motors */
+    char lease[48];                 /* the machine lease's innermost holder, "" with none */
 } events_snap_t;
 
 typedef void (*events_emit_fn)(void *ctx, const char *name, const char *data_json);

@@ -322,13 +322,22 @@ function lockApply() {
     e.disabled = locked || e.getAttribute('data-off') === '1';
   }
   $('locknote').style.display = locked ? 'block' : 'none';
-  if (locked)
-    $('locknote').textContent = D.running
-      ? 'A diagnostic is running: controls are locked until it completes.'
-      : 'Settings are locked while the machine is busy (state: ' +
-        (M.state || 'unknown') +
-        ').';
+  if (locked) {
+    var h = leaseHolder();
+    $('locknote').textContent = h
+      ? h.words.charAt(0).toUpperCase() + h.words.slice(1) +
+        ' holds the machine: controls are locked until it is done.'
+      : D.running
+        ? 'A diagnostic is running: controls are locked until it completes.'
+        : 'Settings are locked while the machine is busy (state: ' + (M.state || 'unknown') + ').';
+  }
   updateSaveBar();
+}
+/* Who has the machine, when it is somebody who locks the controls: every
+ * holder but a log export, which only reads. */
+function leaseHolder() {
+  var h = M.lease && M.lease.holder;
+  return h && h.kind !== 'export' ? h : null;
 }
 function setMode(m) {
   var el = $('msg-mode');
@@ -2334,7 +2343,7 @@ function loadMach() {
     })
     .then(function (m) {
       M = m;
-      locked = (!!(M.state && M.state !== 'idle') && !JOG.active) || !!M.diag;
+      locked = (!!(M.state && M.state !== 'idle') && !JOG.active) || !!M.diag || !!leaseHolder();
       lockApply();
       renderMotion();
       renderCooling();

@@ -90,6 +90,7 @@ add_executable(forgectrl
   src/jobstream.c
   src/grblport.c
   src/events.c
+  src/lease.c
   src/sheet.c
   src/wizlive.c
   src/super.c
@@ -132,21 +133,21 @@ install(TARGETS forgectrl RUNTIME DESTINATION bin)
 # a read failure - including fd exhaustion under a connection flood -
 # must report not-idle. Built everywhere, installed nowhere; CI runs it
 # after the build.
-add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c)
+add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c src/lease.c)
 target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_idle_test m pthread)
 
 # Host unit test for the dose-curve fitter. CI runs it after the build.
 add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jobstream.c
-               src/settings.c src/fflog.c)
+               src/settings.c src/fflog.c src/lease.c)
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
-add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c)
+add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c src/lease.c)
 target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_grbl_test m pthread)
 
-add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c)
+add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c src/lease.c)
 target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_sys_test m pthread)
 
@@ -159,7 +160,7 @@ target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
 # Host unit test for the camera privacy gate's lid read: every way it
 # can fail must land on "not closed", or the cameras could capture with
 # the enclosure open. CI runs it after the build.
-add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c)
+add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c src/lease.c)
 target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(lid_gate_test m pthread)
 
@@ -177,7 +178,7 @@ target_compile_options(enclosure_wait_test PRIVATE -Wall -Wextra)
 # check before every spawn, the probe's waits and skips, the stop lever
 # reaching a probe, the safing write's retries, the broker failing
 # closed, the engine's fail-tier restart. Includes super.c directly.
-add_executable(super_test tests/super_test.c)
+add_executable(super_test tests/super_test.c src/lease.c)
 target_compile_options(super_test PRIVATE -Wall -Wextra)
 target_link_libraries(super_test pthread)
 
@@ -342,6 +343,13 @@ add_executable(grblport_test tests/grblport_test.c src/grblport.c)
 target_compile_options(grblport_test PRIVATE -Wall -Wextra)
 target_compile_definitions(grblport_test PRIVATE GRBLPORT_REPLY_TIMEOUT_MS=300)
 target_link_libraries(grblport_test pthread m)
+
+# The machine lease: one holder and its refusal, one owner under a holder,
+# the sender kind beside a connected client, the /status document, and
+# sixteen threads asking at once.
+add_executable(lease_test tests/lease_test.c src/lease.c)
+target_compile_options(lease_test PRIVATE -Wall -Wextra)
+target_link_libraries(lease_test pthread)
 
 # The event stream: the cap, the edge detector's table, and the stream
 # end to end over a scripted state (a slow reader, the idle sampler, the

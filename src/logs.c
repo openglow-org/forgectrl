@@ -27,6 +27,7 @@
 #include "auth.h"
 #include "camkey.h"
 #include "fflog.h"
+#include "lease.h"
 #include "sanitize.h"
 #include "settings.h"
 
@@ -751,6 +752,12 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
         snprintf(err, errlen, "busy");
         return NULL;
     }
+    /* The bundle is a picture of the machine at rest: whatever has the
+     * machine refuses it, and an export in progress refuses them. */
+    if (lease_take("logs.export", LEASE_EXPORT, NULL, err, errlen) != 0) {
+        pthread_mutex_unlock(&export_mu);
+        return NULL;
+    }
     export_busy = 1;
     export_staged_bytes = 0;
     pthread_mutex_unlock(&export_mu);
@@ -941,6 +948,7 @@ fail:
     pthread_mutex_lock(&export_mu);
     export_busy = 0;
     pthread_mutex_unlock(&export_mu);
+    lease_release("logs.export");
     return NULL;
 }
 
@@ -965,4 +973,5 @@ void logs_export_end(logs_export_t *e)
     pthread_mutex_lock(&export_mu);
     export_busy = 0;
     pthread_mutex_unlock(&export_mu);
+    lease_release("logs.export");
 }

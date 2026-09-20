@@ -7,7 +7,8 @@
  * Three parts. The cap: three streams in all, an address that already
  * holds one given the same slot again (its older stream is replaced), a
  * released slot reused. The edge detector: a table of state steps and
- * the events each one is, a step that changes nothing being no event.
+ * the events each one is (the machine lease's among them), a step that
+ * changes nothing being no event.
  * The stream end to end over a scripted state: the greeting, an edge
  * arriving as a numbered event, the fourth client refused in words, a
  * second stream from one address ending the first with a "bye" and
@@ -139,6 +140,15 @@ static void test_diff(void)
     b.released = 1;
     step("released", &a, &b, "motors.released {}");
     step("energized", &b, &a, "motors.energized {}");
+
+    /* The machine lease: taken, passed to an owner under the holder, given back. */
+    b = a;
+    snprintf(b.lease, sizeof(b.lease), "wizard:cooling.flow");
+    step("lease taken", &a, &b, "lease.changed {\"owner\":\"wizard:cooling.flow\"}");
+    c = b;
+    snprintf(c.lease, sizeof(c.lease), "diag:flow-calibrate");
+    step("lease nested", &b, &c, "lease.changed {\"owner\":\"diag:flow-calibrate\"}");
+    step("lease given back", &b, &a, "lease.changed {\"owner\":null}");
 }
 
 /* ---- the cap ---- */

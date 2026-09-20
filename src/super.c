@@ -47,6 +47,7 @@
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
+#include "lease.h"
 #include "led.h"
 #include "lenshome.h"
 #include "liveness.h"
@@ -1072,7 +1073,7 @@ void super_shutdown(void)
         pthread_join(th, NULL);
 }
 
-int super_mode_switch(const char *mode, char *err, size_t elen)
+int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
 {
     ctl_t target;
     if (!strcmp(mode, "grbl"))
@@ -1095,14 +1096,10 @@ int super_mode_switch(const char *mode, char *err, size_t elen)
         }
     }
 
-    if (diag_running()) {
-        snprintf(err, elen, "a diagnostic is running");
+    /* Whoever has the machine refuses the switch, unless it is the one
+     * asking (the cloud wizard switches inside its own hold). */
+    if (lease_refusal_for(as, err, elen))
         return -1;
-    }
-    if (update_job_running()) {
-        snprintf(err, elen, "an update job is running");
-        return -1;
-    }
     if (!machine_is_idle()) {
         snprintf(err, elen, "machine is not idle");
         return -1;
