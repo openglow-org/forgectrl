@@ -699,6 +699,29 @@
           </p>
         </div>
         <div class="card">
+          <h2>API tokens<button class="hlp" data-help="tokens" data-nolock="1" type="button">?</button></h2>
+          <div id="tokenlist"></div>
+          <div id="tokennew" style="display: none"></div>
+          <div class="btns">
+            <input
+              class="form-control form-control-sm"
+              id="tokenname"
+              maxlength="40"
+              placeholder="Name: what will use it"
+              style="max-width: 18rem"
+            />
+          </div>
+          <div id="tokencaps" style="margin: 0.4rem 0"></div>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" id="tokenbtn" onclick="createToken()">Create token</button
+            ><span class="msg" id="msg-token"></span>
+          </div>
+          <p class="hint">
+            A token lets one program reach what you tick here, and nothing else, without a login:
+            a home-automation hub, a script, a pendant. It is shown once. It works over HTTPS only.
+          </p>
+        </div>
+        <div class="card">
           <h2>Setup<button class="hlp" data-help="setup" data-nolock="1" type="button">?</button></h2>
           <div id="setupinfo"></div>
           <div class="btns">

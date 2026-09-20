@@ -479,6 +479,87 @@ class MockTest(unittest.TestCase):
         self.assertEqual((code, body.decode()), (409, 'no job is running'))
         self.assertIn('no job is running', src)
 
+    def test_tokens_shape_and_scope(self):
+        m = self.mock()
+        ds = self.ds.Mock
+        # The closed list and the route table's capability column are the C's.
+        caps = re.search(r'static const char \*const CAPS\[\] = \{(.*?)\};', read('src/tokens.c'), re.S)
+        self.assertEqual(tuple(re.findall(r'"([^"]+)"', caps.group(1))), ds.TOKEN_CAPS)
+        self.assertEqual(int(re.search(r'#define TOKENS_MAX\s+(\d+)', read('src/tokens.h')).group(1)),
+                         ds.TOKENS_MAX)
+        table = re.search(r'struct route routes\[\] = \{(.*?)\n    \};', read('src/main.c'), re.S).group(1)
+        column = {(r[0], r[1]): r[2] for r in re.findall(
+            r'\{\s*"(GET|POST)",\s*"([^"]+)",[^{}]*?,\s*[01],\s*"([^"]+)"\s*\}', table)}
+        self.assertEqual(column, ds.ROUTE_CAPS)
+        self.assertEqual(len(re.findall(r'\{\s*"(?:GET|POST)"', table)),
+                         len(re.findall(r'\{\s*"(?:GET|POST)",[^{}]*?,\s*[01],\s*(?:NULL|"[^"]+")\s*\}', table)),
+                         'a route row without its capability column')
+        for c in set(column.values()):
+            self.assertTrue(c in ('camera', 'camera.any') or c in ds.TOKEN_CAPS, c)
+
+        keys = c_keys(read('src/tokens.c'), 'tokens_json')
+        self.assertEqual(doc_keys(self.get_json(m, '/tokens')), keys - {'id', 'name', 'created', 'last_used'})
+        src = read('src/tokens.c')
+        for form, words in (({'name': 'bad;name', 'caps': 'events'}, 'name is 1 to 40'),
+                            ({'name': 'x', 'caps': 'settings.write'}, 'is not a capability a token can hold'),
+                            ({'name': 'x', 'caps': ''}, 'a token holds at least one capability')):
+            code, hdrs, body = self.call(m, 'POST', '/tokens', form)
+            self.assertEqual(code, 400, form)
+            self.assertIn(words, body.decode())
+            self.assertIn(words.replace('40', '%d'), src)
+        code, hdrs, body = self.call(m, 'POST', '/tokens', {'name': 'hub', 'caps': 'machine.read,camera.lid'})
+        self.assertEqual(code, 200, body)
+        made = json.loads(body)
+        self.assertEqual(set(made), {'id', 'token'})
+        self.assertRegex(made['token'], r'^fft_[0-9a-f]{32}$')
+        listed = self.get_json(m, '/tokens')
+        self.assertEqual(doc_keys(listed), keys)
+        self.assertNotIn(made['token'][4:], json.dumps(listed))
+
+        def scoped(method, path, q=None, how='bearer', token=None):
+            token = token or made['token']
+            headers = ({'Authorization': 'Bearer ' + token} if how == 'bearer'
+                       else {'X-ForgeFIRM-Token': token} if how == 'header' else {})
+            q = dict(q or {})
+            if how == 'key':
+                q['key'] = token
+            return m.handle(method, path, q, headers, b'')
+
+        code, hdrs, body = self.call(m, 'POST', '/tokens', {'name': 'viewer', 'caps': 'camera.lid'})
+        viewer = json.loads(body)['token']
+
+        auth_src = read('src/auth.c')
+        self.assertEqual(scoped('GET', '/status')[0], 200)
+        self.assertEqual(scoped('GET', '/status', how='header')[0], 200)
+        # In a URL: a token that holds cameras and nothing else.
+        self.assertEqual(scoped('GET', '/cam/status', how='key', token=viewer)[0], 200)
+        code, hdrs, body = scoped('GET', '/cam/status', how='key')
+        self.assertEqual((code, json.loads(body)['error']),
+                         (403, 'a token in a URL may hold camera capabilities only'))
+        self.assertIn('a token in a URL may hold camera capabilities only', read('src/auth.c'))
+        self.assertEqual(scoped('GET', '/cam/status')[0], 200)
+        for method, path, q, words in (
+                ('POST', '/motion/jog', {'x': '1'}, 'this token does not hold motion.jog'),
+                ('GET', '/cam/snapshot', {'cam': 'head'}, 'this token does not hold camera.head'),
+                ('POST', '/settings', {'ui_units': 'metric'}, 'no scoped token reaches this route'),
+                ('GET', '/tokens', None, 'no scoped token reaches this route'),
+                ('POST', '/tokens', {'name': 'child', 'caps': 'events'}, 'no scoped token reaches this route')):
+            code, hdrs, body = scoped(method, path, q)
+            self.assertEqual((code, json.loads(body)['error']), (403, words), path)
+            self.assertIn(words.split(' motion.jog')[0].split(' camera.head')[0], auth_src)
+        # A key that looks scoped is a camera route's alone.
+        self.assertNotEqual(scoped('POST', '/motion/jog', {'x': '1'}, how='key')[0], 200)
+        code, hdrs, body = m.handle('GET', '/status', {}, {'Authorization': 'Bearer fft_' + '0' * 32}, b'')
+        self.assertEqual((code, json.loads(body)['error']), (403, 'authentication required'))
+
+        self.assertGreater(self.get_json(m, '/tokens')['tokens'][0]['last_used'], 0)
+        self.assertEqual(self.get_json(m, '/tokens')['tokens'][0]['name'], 'hub')
+        code, hdrs, body = self.call(m, 'POST', '/tokens/revoke', {'id': made['id']})
+        self.assertEqual(code, 200)
+        self.assertEqual(scoped('GET', '/status')[0], 403)
+        code, hdrs, body = self.call(m, 'POST', '/tokens/revoke', {'id': made['id']})
+        self.assertEqual((code, body.decode()), (404, 'no such token'))
+
     # -- every route the daemon registers, and every route the panel calls
     def test_every_daemon_route_is_served(self):
         m = self.mock()

@@ -60,6 +60,7 @@
 #include "status.h"
 #include "super.h"
 #include "tls.h"
+#include "tokens.h"
 #include "ui.h"
 #include "update.h"
 #include "users.h"
@@ -1067,6 +1068,55 @@ static int cb_machine_status(const struct _u_request *req,
     snprintf(extra, sizeof(extra), "\"gates_off\":%s", gates);
     machine_status_json(body, sizeof(body), extra);
     ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* Scoped tokens (tokens.h): the panel's token manager. Write class, all
+ * three: the list names what reaches the machine, and no scoped token
+ * reaches any of them. */
+static const char *setting_param(const struct _u_request *req, const char *key);
+
+static int cb_tokens_list(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[6144];
+    if (tokens_json(body, sizeof(body)) != 0)
+        return reply_error(res, 500, "the token list does not fit");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_tokens_create(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char token[TOKENS_TEXT_LEN + 1], id[TOKENS_ID_HEX + 1], err[160], body[256];
+    const char *name = setting_param(req, "name"), *caps = setting_param(req, "caps");
+    if (tokens_create(name, caps, token, id, err, sizeof(err)) != 0)
+        return reply_error(res, strstr(err, "at most") ? 409 : 400, err);
+    /* The one time the token leaves the machine. */
+    snprintf(body, sizeof(body), "{\"id\":\"%s\",\"token\":\"%s\"}", id, token);
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_tokens_revoke(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char err[96];
+    if (tokens_revoke(setting_param(req, "id"), err, sizeof(err)) != 0)
+        return reply_error(res, 404, err);
+    ulfius_set_string_body_response(res, 200, "{\"revoked\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
 }
@@ -2638,15 +2688,36 @@ struct route {
     int (*cb)(const struct _u_request *, struct _u_response *, void *);
     void *ud;
     int read_only;                  /* served to the LAN on HTTP too */
+    const char *cap;                /* what a scoped token needs here; NULL: none reaches it */
 };
+
+/* Every route is called through one of these, so the guards know which
+ * route a request is on (auth_route_begin()): the capability a scoped
+ * token needs, and whether the request came over plain HTTP. */
+static int cb_route(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    const struct route *r = user_data;
+    auth_route_begin(r->cap, 0);
+    int rc = r->cb(req, res, r->ud);
+    auth_route_end();
+    return rc;
+}
+
+static int cb_route_plain(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    const struct route *r = user_data;
+    auth_route_begin(r->cap, 1);
+    int rc = r->cb(req, res, r->ud);
+    auth_route_end();
+    return rc;
+}
 
 static int cb_http_local(const struct _u_request *req, struct _u_response *res,
                          void *user_data)
 {
-    const struct route *r = user_data;
     if (!auth_peer_local(req))
         return cb_http_redirect(req, res, NULL);
-    return r->cb(req, res, r->ud);
+    return cb_route_plain(req, res, user_data);
 }
 
 /* ------------------------------------------------------------------ main */
@@ -2733,6 +2804,7 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     auth_init();
+    tokens_init();
     advisories_init();
     sheetid_init();
     camkey_init();
@@ -2782,92 +2854,95 @@ int main(int argc, char **argv)
      * (the init scripts, the controllers, the acceptance tool on the
      * board), and sends every other request to HTTPS. */
     static const struct route routes[] = {
-        { "GET",  "/",                     cb_root,             NULL, 0 },
-        { "GET",  "/setup",                cb_setup_page,       NULL, 0 },
-        { "GET",  "/login",                cb_login_page,       NULL, 0 },
-        { "POST", "/login",                cb_login,            NULL, 0 },
-        { "POST", "/logout",               cb_logout,           NULL, 0 },
-        { "GET",  "/cam/stream",           cb_stream,           NULL, 1 },
-        { "GET",  "/cam/h264",             cb_h264,             NULL, 1 },
-        { "GET",  "/cam/snapshot",         cb_snapshot,         NULL, 1 },
-        { "GET",  "/cam/status",           cb_status,           NULL, 1 },
-        { "GET",  "/settings",             cb_settings_get,     NULL, 1 },
-        { "GET",  "/grbl/settings",        cb_grbl_settings,    NULL, 1 },
-        { "POST", "/curve/record",         cb_curve_record,     NULL, 0 },
-        { "POST", "/curve/stop",           cb_curve_stop,       NULL, 0 },
-        { "GET",  "/curve/status",         cb_curve_status,     NULL, 1 },
-        { "GET",  "/curve/ladder.gcode",   cb_curve_ladder,     NULL, 1 },
-        { "POST", "/job",                  cb_job_post,         NULL, 0 },
-        { "GET",  "/job",                  cb_job_status,       NULL, 1 },
-        { "POST", "/job/abort",            cb_job_abort,        NULL, 0 },
-        { "POST", "/settings",             cb_settings_post,    NULL, 0 },
-        { "GET",  "/status",               cb_machine_status,   NULL, 1 },
-        { "GET",  "/fuse-identity",        cb_fuse_identity,    NULL, 0 },
-        { "GET",  "/mode",                 cb_mode_get,         NULL, 1 },
-        { "POST", "/mode",                 cb_mode_post,        NULL, 0 },
-        { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0 },
-        { "POST", "/controller/start",     cb_controller_start, NULL, 0 },
-        { "GET",  "/events",               cb_events,           NULL, 1 },
-        { "GET",  "/motion/state",         cb_motion_state,     NULL, 1 },
-        { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0 },
-        { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0 },
-        { "POST", "/motion/release",       cb_motion_panel,     "release", 0 },
-        { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0 },
-        { "POST", "/motion/home",          cb_motion_panel,     "home", 0 },
-        { "POST", "/cool/state",           cb_cool_state,       NULL, 0 },
-        { "GET",  "/cool/status",          cb_cool_status,      NULL, 1 },
-        { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0 },
-        { "POST", "/diag/flow-verify",     cb_diag_start,       "flow-verify", 0 },
-        { "POST", "/diag/flow-calibrate",  cb_diag_start,       "flow-calibrate", 0 },
-        { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0 },
-        { "POST", "/diag/abort",           cb_diag_abort,       NULL, 0 },
-        { "GET",  "/diag/status",          cb_diag_status,      NULL, 1 },
-        { "GET",  "/slots",                cb_slots,            NULL, 1 },
-        { "POST", "/boot",                 cb_boot_select,      NULL, 0 },
-        { "POST", "/system/reboot",        cb_system_reboot,    NULL, 0 },
-        { "GET",  "/system/ssh",           cb_ssh_get,          NULL, 0 },
-        { "POST", "/system/ssh",           cb_ssh_post,         NULL, 0 },
-        { "GET",  "/system/camera-key",    cb_camkey_get,       NULL, 0 },
-        { "GET",  "/cert",                 cb_cert_page,        NULL, 1 },
-        { "GET",  "/cert.pem",             cb_cert_pem,         NULL, 1 },
-        { "GET",  "/licenses",             cb_licenses_page,    NULL, 1 },
-        { "GET",  "/system/licenses",      cb_licenses,         NULL, 1 },
-        { "GET",  "/system/licenses/manifest", cb_licenses_manifest, NULL, 1 },
-        { "POST", "/system/camera-key",    cb_camkey_rotate,    NULL, 0 },
-        { "POST", "/update/check",         cb_update_check,     NULL, 0 },
-        { "GET",  "/update/release",       cb_update_release,   NULL, 0 },
-        { "POST", "/update/dismiss",       cb_update_dismiss,   NULL, 0 },
-        { "POST", "/update/download",      cb_update_download,  NULL, 0 },
-        { "POST", "/update/apply",         cb_update_apply,     NULL, 0 },
-        { "POST", "/update/upload",        cb_update_upload,    NULL, 0 },
-        { "POST", "/restore/factory",      cb_restore_factory,  NULL, 0 },
-        { "POST", "/restore/factory-return", cb_restore_factory_return, NULL, 0 },
-        { "GET",  "/update/status",        cb_update_status,    NULL, 1 },
-        { "GET",  "/logs",                 cb_logs_list,        NULL, 0 },
-        { "GET",  "/logs/tail",            cb_logs_tail,        NULL, 0 },
-        { "POST", "/logs/export",          cb_logs_export,      NULL, 0 },
-        { "GET",  "/wiz",                  cb_wiz_status,       NULL, 1 },
-        { "GET",  "/wiz/record",           cb_wiz_record,       NULL, 0 },
-        { "GET",  "/wiz/record.html",      cb_wiz_record_html,  NULL, 0 },
-        { "POST", "/wiz/changed",          cb_wiz_changed,      NULL, 0 },
-        { "GET",  "/advisories/:id",       cb_advisory_get,    NULL, 1 },
-        { "POST", "/wiz/advisories/accept", cb_wiz_agree,       NULL, 0 },
-        { "POST", "/wiz/advisories/press", cb_wiz_press_start,  NULL, 0 },
-        { "GET",  "/wiz/advisories/press", cb_wiz_press_status, NULL, 1 },
-        { "POST", "/wiz/advisories/press/cancel", cb_wiz_press_cancel, NULL, 0 },
-        { "POST", "/wiz/account",          cb_wiz_account,      NULL, 0 },
-        { "POST", "/wiz/preferences",      cb_wiz_preferences,  NULL, 0 },
-        { "POST", "/wiz/machine",          cb_wiz_machine,      NULL, 0 },
-        { "POST", "/wiz/cloud",            cb_wiz_cloud,        NULL, 0 },
-        { "POST", "/wiz/complete",         cb_wiz_complete,     NULL, 0 },
-        { "GET",  "/wiz/dark",             cb_wiz_dark_status,  NULL, 1 },
-        { "GET",  "/wiz/shot",             cb_wiz_shot,         NULL, 1 },
-        { "GET",  "/wiz/sheet.svg",        cb_wiz_sheet_svg,    NULL, 1 },
-        { "GET",  "/wiz/sheet.gcode",      cb_wiz_sheet_gcode,  NULL, 1 },
-        { "POST", "/wiz/:id/start",        cb_wiz_dark_start,   NULL, 0 },
-        { "POST", "/wiz/:id/answer",       cb_wiz_dark_answer,  NULL, 0 },
-        { "POST", "/wiz/:id/abort",        cb_wiz_dark_abort,   NULL, 0 },
-        { "POST", "/wiz/:id/takeover",     cb_wiz_dark_takeover, NULL, 0 },
+        { "GET",  "/",                     cb_root,             NULL, 0, NULL },
+        { "GET",  "/setup",                cb_setup_page,       NULL, 0, NULL },
+        { "GET",  "/login",                cb_login_page,       NULL, 0, NULL },
+        { "POST", "/login",                cb_login,            NULL, 0, NULL },
+        { "POST", "/logout",               cb_logout,           NULL, 0, NULL },
+        { "GET",  "/cam/stream",           cb_stream,           NULL, 1, "camera" },
+        { "GET",  "/cam/h264",             cb_h264,             NULL, 1, "camera" },
+        { "GET",  "/cam/snapshot",         cb_snapshot,         NULL, 1, "camera" },
+        { "GET",  "/cam/status",           cb_status,           NULL, 1, "camera.any" },
+        { "GET",  "/settings",             cb_settings_get,     NULL, 1, NULL },
+        { "GET",  "/grbl/settings",        cb_grbl_settings,    NULL, 1, "machine.read" },
+        { "POST", "/curve/record",         cb_curve_record,     NULL, 0, NULL },
+        { "POST", "/curve/stop",           cb_curve_stop,       NULL, 0, NULL },
+        { "GET",  "/curve/status",         cb_curve_status,     NULL, 1, NULL },
+        { "GET",  "/curve/ladder.gcode",   cb_curve_ladder,     NULL, 1, NULL },
+        { "POST", "/job",                  cb_job_post,         NULL, 0, "motion.job" },
+        { "GET",  "/job",                  cb_job_status,       NULL, 1, "machine.read" },
+        { "GET",  "/tokens",               cb_tokens_list,      NULL, 0, NULL },
+        { "POST", "/tokens",               cb_tokens_create,    NULL, 0, NULL },
+        { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },
+        { "POST", "/job/abort",            cb_job_abort,        NULL, 0, "motion.job" },
+        { "POST", "/settings",             cb_settings_post,    NULL, 0, NULL },
+        { "GET",  "/status",               cb_machine_status,   NULL, 1, "machine.read" },
+        { "GET",  "/fuse-identity",        cb_fuse_identity,    NULL, 0, NULL },
+        { "GET",  "/mode",                 cb_mode_get,         NULL, 1, "machine.read" },
+        { "POST", "/mode",                 cb_mode_post,        NULL, 0, NULL },
+        { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0, NULL },
+        { "POST", "/controller/start",     cb_controller_start, NULL, 0, NULL },
+        { "GET",  "/events",               cb_events,           NULL, 1, "events" },
+        { "GET",  "/motion/state",         cb_motion_state,     NULL, 1, "machine.read" },
+        { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0, "motion.jog" },
+        { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0, "motion.jog" },
+        { "POST", "/motion/release",       cb_motion_panel,     "release", 0, NULL },
+        { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0, NULL },
+        { "POST", "/motion/home",          cb_motion_panel,     "home", 0, NULL },
+        { "POST", "/cool/state",           cb_cool_state,       NULL, 0, NULL },
+        { "GET",  "/cool/status",          cb_cool_status,      NULL, 1, "machine.read" },
+        { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0, NULL },
+        { "POST", "/diag/flow-verify",     cb_diag_start,       "flow-verify", 0, NULL },
+        { "POST", "/diag/flow-calibrate",  cb_diag_start,       "flow-calibrate", 0, NULL },
+        { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0, NULL },
+        { "POST", "/diag/abort",           cb_diag_abort,       NULL, 0, NULL },
+        { "GET",  "/diag/status",          cb_diag_status,      NULL, 1, NULL },
+        { "GET",  "/slots",                cb_slots,            NULL, 1, NULL },
+        { "POST", "/boot",                 cb_boot_select,      NULL, 0, NULL },
+        { "POST", "/system/reboot",        cb_system_reboot,    NULL, 0, NULL },
+        { "GET",  "/system/ssh",           cb_ssh_get,          NULL, 0, NULL },
+        { "POST", "/system/ssh",           cb_ssh_post,         NULL, 0, NULL },
+        { "GET",  "/system/camera-key",    cb_camkey_get,       NULL, 0, NULL },
+        { "GET",  "/cert",                 cb_cert_page,        NULL, 1, NULL },
+        { "GET",  "/cert.pem",             cb_cert_pem,         NULL, 1, NULL },
+        { "GET",  "/licenses",             cb_licenses_page,    NULL, 1, NULL },
+        { "GET",  "/system/licenses",      cb_licenses,         NULL, 1, NULL },
+        { "GET",  "/system/licenses/manifest", cb_licenses_manifest, NULL, 1, NULL },
+        { "POST", "/system/camera-key",    cb_camkey_rotate,    NULL, 0, NULL },
+        { "POST", "/update/check",         cb_update_check,     NULL, 0, NULL },
+        { "GET",  "/update/release",       cb_update_release,   NULL, 0, NULL },
+        { "POST", "/update/dismiss",       cb_update_dismiss,   NULL, 0, NULL },
+        { "POST", "/update/download",      cb_update_download,  NULL, 0, NULL },
+        { "POST", "/update/apply",         cb_update_apply,     NULL, 0, NULL },
+        { "POST", "/update/upload",        cb_update_upload,    NULL, 0, NULL },
+        { "POST", "/restore/factory",      cb_restore_factory,  NULL, 0, NULL },
+        { "POST", "/restore/factory-return", cb_restore_factory_return, NULL, 0, NULL },
+        { "GET",  "/update/status",        cb_update_status,    NULL, 1, NULL },
+        { "GET",  "/logs",                 cb_logs_list,        NULL, 0, NULL },
+        { "GET",  "/logs/tail",            cb_logs_tail,        NULL, 0, NULL },
+        { "POST", "/logs/export",          cb_logs_export,      NULL, 0, NULL },
+        { "GET",  "/wiz",                  cb_wiz_status,       NULL, 1, NULL },
+        { "GET",  "/wiz/record",           cb_wiz_record,       NULL, 0, NULL },
+        { "GET",  "/wiz/record.html",      cb_wiz_record_html,  NULL, 0, NULL },
+        { "POST", "/wiz/changed",          cb_wiz_changed,      NULL, 0, NULL },
+        { "GET",  "/advisories/:id",       cb_advisory_get,    NULL, 1, NULL },
+        { "POST", "/wiz/advisories/accept", cb_wiz_agree,       NULL, 0, NULL },
+        { "POST", "/wiz/advisories/press", cb_wiz_press_start,  NULL, 0, NULL },
+        { "GET",  "/wiz/advisories/press", cb_wiz_press_status, NULL, 1, NULL },
+        { "POST", "/wiz/advisories/press/cancel", cb_wiz_press_cancel, NULL, 0, NULL },
+        { "POST", "/wiz/account",          cb_wiz_account,      NULL, 0, NULL },
+        { "POST", "/wiz/preferences",      cb_wiz_preferences,  NULL, 0, NULL },
+        { "POST", "/wiz/machine",          cb_wiz_machine,      NULL, 0, NULL },
+        { "POST", "/wiz/cloud",            cb_wiz_cloud,        NULL, 0, NULL },
+        { "POST", "/wiz/complete",         cb_wiz_complete,     NULL, 0, NULL },
+        { "GET",  "/wiz/dark",             cb_wiz_dark_status,  NULL, 1, NULL },
+        { "GET",  "/wiz/shot",             cb_wiz_shot,         NULL, 1, NULL },
+        { "GET",  "/wiz/sheet.svg",        cb_wiz_sheet_svg,    NULL, 1, NULL },
+        { "GET",  "/wiz/sheet.gcode",      cb_wiz_sheet_gcode,  NULL, 1, NULL },
+        { "POST", "/wiz/:id/start",        cb_wiz_dark_start,   NULL, 0, NULL },
+        { "POST", "/wiz/:id/answer",       cb_wiz_dark_answer,  NULL, 0, NULL },
+        { "POST", "/wiz/:id/abort",        cb_wiz_dark_abort,   NULL, 0, NULL },
+        { "POST", "/wiz/:id/takeover",     cb_wiz_dark_takeover, NULL, 0, NULL },
     };
 
     struct _u_instance inst, tls;
@@ -2907,12 +2982,12 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sizeof(routes) / sizeof(*routes); i++) {
         const struct route *r = &routes[i];
         if (have_tls)
-            ulfius_add_endpoint_by_val(&tls, r->method, NULL, r->path, 0, r->cb, r->ud);
+            ulfius_add_endpoint_by_val(&tls, r->method, NULL, r->path, 0, cb_route, (void *)r);
         if (!strcmp(r->path, "/") && !strcmp(r->method, "GET"))
             ulfius_add_endpoint_by_val(&inst, "GET", NULL, "/", 0,
                                        have_tls ? cb_root_http : cb_root, NULL);
         else if (r->read_only || !have_tls)
-            ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0, r->cb, r->ud);
+            ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0, cb_route_plain, (void *)r);
         else
             ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0,
                                        cb_http_local, (void *)r);
@@ -2997,6 +3072,7 @@ int main(int argc, char **argv)
      * for every job after the restart. A posted program ends with its
      * soft reset. */
     curverec_stop();
+    tokens_flush();
     char none[8];
     jobrun_program_abort(none, sizeof(none));
     super_shutdown();

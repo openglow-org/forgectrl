@@ -110,6 +110,7 @@ add_executable(forgectrl
   src/sha256.c
   src/sheetid.c
   src/tls.c
+  src/tokens.c
   src/users.c
   src/wiz.c
   src/wizcalc.c
@@ -355,6 +356,20 @@ target_link_libraries(grblport_test pthread m)
 add_executable(jobrun_test tests/jobrun_test.c src/jobrun.c src/jobstream.c src/lease.c src/fflog.c)
 target_compile_options(jobrun_test PRIVATE -Wall -Wextra)
 target_link_libraries(jobrun_test pthread)
+
+# The scoped-token store: the closed capability list, the judgment, the
+# hash-only file, the deferred last-used write, revoke, and a damaged store.
+add_executable(tokens_test tests/tokens_test.c src/tokens.c src/sha256.c src/fflog.c)
+target_compile_options(tokens_test PRIVATE -Wall -Wextra)
+target_link_libraries(tokens_test pthread)
+
+# The guards' judgment of a scoped token: auth.c with the real token store
+# and real ulfius requests; the account, the sessions, the camera key, and
+# the settings are the test's stubs.
+add_executable(auth_scoped_test tests/auth_scoped_test.c src/auth.c src/tokens.c src/sha256.c
+               src/peer.c src/fflog.c)
+target_compile_options(auth_scoped_test PRIVATE -Wall -Wextra)
+target_link_libraries(auth_scoped_test ulfius pthread)
 
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)

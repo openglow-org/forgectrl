@@ -42,6 +42,11 @@
  * stay open to the LAN by default (panel_open_reads = 1) so LightBurn
  * reads the camera; the setting closes them to sessions and this host.
  * The login itself and the session cookie travel over HTTPS only.
+ *
+ * A scoped token (tokens.c) is the credential of a client with no
+ * browser and no session. A request that presents one is judged by it
+ * alone, against the capability the route table gives the route it is
+ * on; see auth.h.
  */
 #define _GNU_SOURCE
 #include "auth.h"
@@ -51,6 +56,7 @@
 #include "peer.h"
 #include "session.h"
 #include "settings.h"
+#include "tokens.h"
 #include "users.h"
 
 #include <arpa/inet.h>
@@ -62,6 +68,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -280,6 +287,94 @@ int auth_dev_image(void)
     return dev;
 }
 
+/* ------------------------------------------------------ scoped tokens */
+
+static __thread const char *route_cap;
+static __thread int route_plain;
+
+void auth_route_begin(const char *cap, int plain_http)
+{
+    route_cap = cap;
+    route_plain = plain_http;
+}
+
+void auth_route_end(void)
+{
+    route_cap = NULL;
+    route_plain = 0;
+}
+
+/* The scoped token a request presents, or NULL: the Authorization
+ * header's bearer, the panel token's own header, and on a camera route
+ * the `key` parameter, where an <img> or a camera integration has no
+ * header to send (*in_url says it came that way). */
+static const char *scoped_presented(const struct _u_request *req, const char *cap, int *in_url)
+{
+    *in_url = 0;
+    const char *v = u_map_get_case(req->map_header, "Authorization");
+    if (v && !strncasecmp(v, "Bearer ", 7)) {
+        for (v += 7; *v == ' '; v++)
+            ;
+        if (tokens_looks_scoped(v))
+            return v;
+    }
+    v = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
+    if (tokens_looks_scoped(v))
+        return v;
+    if (cap && !strncmp(cap, "camera", 6)) {
+        v = u_map_get(req->map_url, "key");
+        if (tokens_looks_scoped(v)) {
+            *in_url = 1;
+            return v;
+        }
+    }
+    return NULL;
+}
+
+/* -1: no scoped token is presented, and the other rules decide. 1: it
+ * passes. 0: it is refused, with the reason in why. */
+static int scoped_judge(const struct _u_request *req, const char *cap, int plain,
+                        char *why, size_t len)
+{
+    int in_url;
+    const char *tok = scoped_presented(req, cap, &in_url);
+    if (!tok)
+        return -1;
+    char need[32], id[TOKENS_ID_HEX + 1];
+    if (cap && !strcmp(cap, "camera")) {
+        const char *cam = u_map_get(req->map_url, "cam");
+        snprintf(need, sizeof(need), "camera.%s", cam && !strcmp(cam, "head") ? "head" : "lid");
+        cap = need;
+    }
+    int rc = tokens_check(tok, cap, id);
+    if (rc < 0) {
+        snprintf(why, len, "authentication required");
+        return 0;
+    }
+    /* A token that crossed the network in the clear is not honored, and
+     * the log says which one to revoke. */
+    if (plain && !auth_peer_local(req)) {
+        fflog(LOG_WARNING, "auth: the scoped token %s was presented over plain HTTP", id);
+        snprintf(why, len, "a scoped token is accepted over HTTPS only");
+        return 0;
+    }
+    /* A URL ends up in a history, a proxy's log, a referrer. A token that
+     * can do more than see a camera is never taken from one. */
+    if (in_url && !tokens_holds_only(tok, "camera.")) {
+        fflog(LOG_WARNING, "auth: the scoped token %s, which holds more than a camera, was presented in a URL", id);
+        snprintf(why, len, "a token in a URL may hold camera capabilities only");
+        return 0;
+    }
+    if (rc == 0) {
+        if (cap)
+            snprintf(why, len, "this token does not hold %s", cap);
+        else
+            snprintf(why, len, "no scoped token reaches this route");
+        return 0;
+    }
+    return 1;
+}
+
 /* Who may change state, beyond the token: a logged-in session, this
  * host, a dev image, or a machine with no account yet. */
 static int writer_ok(const struct _u_request *req)
@@ -309,6 +404,10 @@ static int camkey_presented(const struct _u_request *req)
 
 int auth_read_ok(const struct _u_request *req, struct _u_response *res)
 {
+    char why[96];
+    int scoped = scoped_judge(req, route_cap, route_plain, why, sizeof(why));
+    if (scoped >= 0)
+        return scoped ? 1 : deny(res, 403, why);
     if (camkey_presented(req))
         return 1;
     if (!origin_ok(req))
@@ -320,8 +419,20 @@ int auth_read_ok(const struct _u_request *req, struct _u_response *res)
     return deny(res, 403, "login required");
 }
 
+int auth_write_permitted_cap(const struct _u_request *req, const char *cap)
+{
+    char why[96];
+    /* Plain HTTP is not the sink's to know: the route, which answers the
+     * request, is reached over it from this host alone. */
+    int scoped = scoped_judge(req, cap, 0, why, sizeof(why));
+    return scoped >= 0 ? scoped : auth_write_permitted(req);
+}
+
 int auth_write_permitted(const struct _u_request *req)
 {
+    int in_url;
+    if (scoped_presented(req, NULL, &in_url))
+        return 0;
     if (!origin_ok(req))
         return 0;
     const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
@@ -332,6 +443,10 @@ int auth_write_permitted(const struct _u_request *req)
 
 int auth_write_ok(const struct _u_request *req, struct _u_response *res)
 {
+    char why[96];
+    int scoped = scoped_judge(req, route_cap, route_plain, why, sizeof(why));
+    if (scoped >= 0)
+        return scoped ? 1 : deny(res, 403, why);
     if (!origin_ok(req))
         return deny(res, 403, "request origin refused");
     const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");

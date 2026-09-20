@@ -40,6 +40,12 @@ jobs:
       - name: jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort)
         run: ./build/jobrun_test
 
+      - name: tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)
+        run: ./build/tokens_test
+
+      - name: auth_scoped_test (the guards' judgment of a scoped token, route by route)
+        run: ./build/auth_scoped_test
+
       - name: lease_test (the machine lease: one holder, nesting, the sender kind)
         run: ./build/lease_test
       - name: events_test (the event stream's cap, edge detector, and ring)

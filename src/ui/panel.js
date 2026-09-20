@@ -401,6 +401,7 @@ function tab() {
   }
   if (h === 'system') {
     loadSsh();
+    loadTokens();
     loadSetup();
   }
   if (h === 'logs') {
@@ -924,6 +925,136 @@ function toggleSsh() {
     .catch(function () {
       $('msg-ssh').textContent = 'no answer';
     });
+}
+/* Scoped API tokens: a named credential for one program, holding the
+ * capabilities ticked here and nothing else. The daemon keeps a hash, so
+ * the token is on this page once, in the answer to its creation. */
+var TOKEN_CAPS = {
+  'machine.read': 'Read the status',
+  events: 'Follow the event stream',
+  'camera.lid': 'See the lid camera',
+  'camera.head': 'See the head camera',
+  'motion.jog': 'Jog the head, laser off',
+  'motion.job': 'Run jobs (each still waits for the button on the machine)'
+};
+function tokenWhen(t) {
+  return t ? new Date(t * 1000).toLocaleString() : 'never';
+}
+function renderTokens(j) {
+  var g = '';
+  var list = j.tokens || [];
+  if (!list.length) g += "<p class='hint'>No tokens.</p>";
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i];
+    var caps = [];
+    for (var c = 0; c < t.caps.length; c++) caps.push(esc(t.caps[c]));
+    g += kv(
+      t.name,
+      "<span class='mono'>" +
+        caps.join(', ') +
+        '</span><br>made ' +
+        esc(tokenWhen(t.created)) +
+        ', last used ' +
+        esc(tokenWhen(t.last_used)) +
+        " <button class='btn btn-sm btn-outline-danger' onclick='revokeToken(\"" +
+        esc(t.id) +
+        '\", \"' +
+        esc(t.name) +
+        "\")'>Revoke</button>"
+    );
+  }
+  $('tokenlist').innerHTML = g;
+  if (!$('tokencaps').innerHTML) {
+    var b = '';
+    for (var k = 0; k < (j.caps || []).length; k++) {
+      var cap = j.caps[k];
+      b +=
+        "<label style='display: block'><input type='checkbox' class='form-check-input tokencap' value='" +
+        esc(cap) +
+        "'> " +
+        esc(TOKEN_CAPS[cap] || cap) +
+        " <span class='mono hint'>" +
+        esc(cap) +
+        '</span></label>';
+    }
+    $('tokencaps').innerHTML = b;
+  }
+  $('tokenbtn').disabled = list.length >= (j.max || 16);
+}
+function loadTokens() {
+  fx('/tokens')
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (j.error) $('msg-token').textContent = j.error;
+      else renderTokens(j);
+    })
+    .catch(function () {});
+}
+function createToken() {
+  var caps = [];
+  var boxes = document.querySelectorAll('.tokencap');
+  for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) caps.push(boxes[i].value);
+  $('msg-token').textContent = '…';
+  fx('/tokens', {
+    method: 'POST',
+    body: new URLSearchParams({ name: $('tokenname').value.trim(), caps: caps.join(',') })
+  })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        return { ok: r.ok, text: t };
+      });
+    })
+    .then(function (a) {
+      var j = null;
+      try {
+        j = JSON.parse(a.text);
+      } catch (e) {
+        j = null;
+      }
+      if (!a.ok || !j || !j.token) {
+        $('msg-token').textContent = (j && j.error) || a.text || 'no answer';
+        return;
+      }
+      $('msg-token').textContent = '';
+      $('tokenname').value = '';
+      for (var i = 0; i < boxes.length; i++) boxes[i].checked = false;
+      $('tokennew').innerHTML =
+        "<div class='alert alert-warning' style='margin: 0.5rem 0'>Copy this token now. It is not shown again." +
+        "<div class='mono brk' style='user-select: all; margin-top: 0.3rem'>" +
+        esc(j.token) +
+        '</div>' +
+        "<div class='hint'>Send it as the header <span class='mono'>Authorization: Bearer …</span> over HTTPS." +
+        (caps.length &&
+        caps.every(function (c) {
+          return c.indexOf('camera.') === 0;
+        })
+          ? " A camera-only token also works in a camera URL, as <span class='mono'>…/cam/stream?cam=lid&amp;key=…</span>"
+          : '') +
+        '</div>' +
+        "<button class='btn btn-sm btn-outline-secondary' onclick='hideNewToken()'>I have it</button></div>";
+      $('tokennew').style.display = '';
+      loadTokens();
+    })
+    .catch(function () {
+      $('msg-token').textContent = 'no answer';
+    });
+}
+function hideNewToken() {
+  $('tokennew').innerHTML = '';
+  $('tokennew').style.display = 'none';
+}
+function revokeToken(id, name) {
+  if (!confirm('Revoke the token "' + name + '"? Whatever uses it stops working at once.')) return;
+  fx('/tokens/revoke', { method: 'POST', body: new URLSearchParams({ id: id }) })
+    .then(function (r) {
+      return r.text();
+    })
+    .then(function () {
+      loadTokens();
+    })
+    .catch(function () {});
 }
 /* The camera key: the URL another program (LightBurn, a viewer) uses to
  * read the camera without a login, shown on request and rotated here. */

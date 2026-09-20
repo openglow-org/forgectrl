@@ -865,6 +865,8 @@ class Mock:
         self.curve = {'state': 'idle', 'reason': '', 'elapsed_s': 0,
                       'samples': 0, 'curve': '', 'points': []}
         self.curve_t0 = 0.0
+        self.tokens = []
+        self.scoped_pass = False
         # The job runner's record (src/jobrun.c): a posted program plays
         # for a fifth of a second a line, dark.
         self.prog = {'state': 'idle', 'owner': '', 'program': False, 'lines': 0, 'sent': 0,
@@ -1420,8 +1422,88 @@ class Mock:
         return buf.getvalue()
 
     def _authorized(self, headers, q):
+        if self.scoped_pass:
+            return True
         tok = headers.get('X-ForgeFIRM-Token') or q.get('token')
         return tok == self.token
+
+    # Scoped tokens (src/tokens.c, src/auth.c): the closed list, and the
+    # capability column of the route table in src/main.c. A request that
+    # presents one is judged by it alone.
+    TOKEN_CAPS = ('machine.read', 'events', 'camera.lid', 'camera.head', 'motion.jog', 'motion.job')
+    TOKENS_MAX = 16
+    ROUTE_CAPS = {
+        ('GET', '/status'): 'machine.read', ('GET', '/cool/status'): 'machine.read',
+        ('GET', '/mode'): 'machine.read', ('GET', '/grbl/settings'): 'machine.read',
+        ('GET', '/motion/state'): 'machine.read', ('GET', '/job'): 'machine.read',
+        ('GET', '/events'): 'events',
+        ('GET', '/cam/stream'): 'camera', ('GET', '/cam/h264'): 'camera',
+        ('GET', '/cam/snapshot'): 'camera', ('GET', '/cam/status'): 'camera.any',
+        ('POST', '/motion/jog'): 'motion.jog', ('POST', '/motion/cancel'): 'motion.jog',
+        ('POST', '/job'): 'motion.job', ('POST', '/job/abort'): 'motion.job',
+    }
+
+    def scoped_presented(self, cap, q, headers):
+        """(the token, whether it came in the URL), or (None, False)."""
+        auth = headers.get('Authorization') or ''
+        for v, in_url in ((auth[7:].strip() if auth.lower().startswith('bearer ') else '', False),
+                          (headers.get('X-ForgeFIRM-Token') or '', False),
+                          ((q.get('key') or '') if (cap or '').startswith('camera') else '', True)):
+            if v.startswith('fft_'):
+                return v, in_url
+        return None, False
+
+    def scoped_refusal(self, tok, cap, q, in_url=False):
+        """The daemon's 403 for a presented scoped token, or None when it passes."""
+        digest = hashlib.sha256(tok.encode()).hexdigest()
+        held = next((t for t in self.tokens if t['sha256'] == digest), None)
+        if not re.fullmatch(r'fft_[0-9a-f]{32}', tok) or held is None:
+            return 'authentication required'
+        if in_url and not all(c.startswith('camera.') for c in held['caps']):
+            return 'a token in a URL may hold camera capabilities only'
+        if cap is None:
+            return 'no scoped token reaches this route'
+        if cap == 'camera':
+            cap = 'camera.head' if q.get('cam') == 'head' else 'camera.lid'
+        ok = (any(c.startswith(cap[:-3]) for c in held['caps']) if cap.endswith('.any')
+              else cap in held['caps'])
+        if not ok:
+            return 'this token does not hold %s' % cap
+        held['last_used'] = int(time.time())
+        return None
+
+    def tokens_reply(self):
+        return {'max': self.TOKENS_MAX, 'caps': list(self.TOKEN_CAPS),
+                'tokens': [{k: t[k] for k in ('id', 'name', 'caps', 'created', 'last_used')}
+                           for t in self.tokens]}
+
+    def tokens_post(self, path, form, J, T):
+        if path == '/tokens/revoke':
+            for t in self.tokens:
+                if t['id'] == form.get('id'):
+                    self.tokens.remove(t)
+                    return J(200, {'revoked': True})
+            return T(404, 'no such token')
+        name = form.get('name') or ''
+        if not re.fullmatch(r'[A-Za-z0-9._-](?:[A-Za-z0-9 ._-]{0,38}[A-Za-z0-9._-])?', name):
+            return T(400, "name is 1 to 40 of letters, digits, spaces, '.', '_' and '-'")
+        caps = [c for c in re.split(r'[ ,]+', form.get('caps') or '') if c]
+        for c in caps:
+            if c not in self.TOKEN_CAPS:
+                return T(400, '%s is not a capability a token can hold' % c[:40])
+        if not caps:
+            return T(400, 'a token holds at least one capability')
+        if len(self.tokens) >= self.TOKENS_MAX:
+            return T(409, 'the machine holds %d tokens at most: revoke one first' % self.TOKENS_MAX)
+        if any(t['name'] == name for t in self.tokens):
+            return T(400, 'a token named %s exists already' % name)
+        tok = 'fft_' + os.urandom(16).hex()
+        ident = os.urandom(4).hex()
+        self.tokens.append({'id': ident, 'name': name,
+                            'caps': [c for c in self.TOKEN_CAPS if c in caps],
+                            'created': int(time.time()), 'last_used': 0,
+                            'sha256': hashlib.sha256(tok.encode()).hexdigest()})
+        return J(200, {'id': ident, 'token': tok})
 
     def _log(self, line):
         self.logtext['forgectrl'] += 'Jan  1 %s forgectrl: %s\n' % (
@@ -1799,7 +1881,19 @@ class Mock:
                                json.dumps(obj).encode())
         T = lambda code, msg: (code, {'Content-Type': 'text/plain'},
                                msg.encode())
+        cap = self.ROUTE_CAPS.get((method, path))
+        tok, in_url = self.scoped_presented(cap, q, headers)
+        self.scoped_pass = False
+        if tok is not None:
+            refusal = self.scoped_refusal(tok, cap, q, in_url)
+            if refusal:
+                return J(403, {'error': refusal})
+            self.scoped_pass = True
         if method == 'GET':
+            if path == '/tokens':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                return J(200, self.tokens_reply())
             if path == '/settings':
                 return J(200, self.settings_reply())
             if path == '/status':
@@ -2104,6 +2198,8 @@ class Mock:
                                'points': []})
             self.curve_t0 = time.time()
             return J(200, self.curve)
+        if path in ('/tokens', '/tokens/revoke'):
+            return self.tokens_post(path, form, J, T)
         if path == '/job':
             return self.job_post(headers, body, J, T)
         if path == '/job/abort':

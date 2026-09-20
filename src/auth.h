@@ -51,8 +51,26 @@ int auth_dev_image(void);
 
 /* Silent form of the write check (origin + token), for the file-upload
  * sink which runs during body parse and has no response object. Returns
- * 1 if the request carries a valid origin and token. */
+ * 1 if the request carries a valid origin and token. No scoped token
+ * passes it. */
 int auth_write_permitted(const struct _u_request *req);
+/* The same for a sink whose route a scoped token may reach: the sink
+ * runs before any route's callback, so it names the capability itself. */
+int auth_write_permitted_cap(const struct _u_request *req, const char *cap);
+
+/* Scoped tokens (tokens.h). The route table's wrapper brackets every
+ * route callback with these, on the request's thread: the capability a
+ * scoped token needs on this route (NULL: none reaches it; "camera":
+ * camera.<the request's cam>), and whether the request came over plain
+ * HTTP. Every guard above reads them. A request that presents a scoped
+ * token is judged by it alone: the capability, and HTTPS unless the peer
+ * is this host; and a token that arrives in a camera route's URL holds
+ * camera capabilities and nothing else. It needs no session and passes
+ * the origin checks, which
+ * exist for browsers; a page cannot put the header on a cross-origin
+ * request. */
+void auth_route_begin(const char *cap, int plain_http);
+void auth_route_end(void);
 
 /* Operator-present factor: true only while the physical button is held.
  * Gates the irrevocable fuse view and unsigned-firmware installs. */

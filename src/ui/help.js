@@ -332,6 +332,14 @@ var HELP = {
       'Applied immediately and at every boot. WiFi power save stays off: on a mains-powered machine it only adds latency.'
     ]
   },
+  tokens: {
+    t: 'API tokens',
+    d: 'usage/control-panel/#api-tokens',
+    p: [
+      'A token is a password for one program: a home-automation hub, a script, a pendant. It reaches only what you tick when you make it, and never the settings, the mode, an update, or another token. A job it runs still waits for the button on the machine.',
+      'The token is shown once, when it is made; the machine keeps only a fingerprint of it. The program sends it as the header Authorization: Bearer, over HTTPS. Revoke stops a token at once. Give each program its own, so one can be revoked without the others. A token that holds cameras and nothing else may also be put in a camera URL (key=), for a viewer that cannot send a header; a token that holds more is refused there.'
+    ]
+  },
   ssh: {
     t: 'Remote access',
     d: 'usage/control-panel/#system',

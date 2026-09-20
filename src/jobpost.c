@@ -89,7 +89,7 @@ int jobpost_sink(const struct _u_request *req, const char *key, const char *data
         return 0;
     /* Unauthorized bytes touch nothing: not the staging file, not an
      * authorized upload in flight. The route answers them. */
-    if (!auth_write_permitted(req) || !key || strcmp(key, "program"))
+    if (!auth_write_permitted_cap(req, "motion.job") || !key || strcmp(key, "program"))
         return 1;
 
     pthread_mutex_lock(&mu);
