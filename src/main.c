@@ -42,6 +42,7 @@
 #include "cool.h"
 #include "curverec.h"
 #include "diag.h"
+#include "events.h"
 #include "fflog.h"
 #include "gates.h"
 #include "grblport.h"
@@ -1570,6 +1571,101 @@ static int cb_motion_panel(const struct _u_request *req,
     return motion_port(res, GRBLPORT_SET_PANEL, op, NULL);
 }
 
+/* -------------------------------------------------------------- events */
+
+static void snap_str(json_t *o, const char *key, char *dst, size_t len)
+{
+    const char *v = json_string_value(json_object_get(o, key));
+    if (v)
+        snprintf(dst, len, "%s", v);
+}
+
+/* The event stream's view of the machine: state the daemon already
+ * holds (the supervisor, the cooling engine's last tick) and the files
+ * in the run directory. No sensor is read for it. */
+static void events_gather_state(events_snap_t *s)
+{
+    char body[COOL_STATUS_JSON_MAX];
+    json_t *o;
+
+    s->switches = machine_switch_bits();
+
+    if (super_status_json(body, sizeof(body)) >= 0 && (o = json_loads(body, 0, NULL))) {
+        snap_str(o, "mode", s->mode, sizeof(s->mode));
+        snap_str(o, "controller", s->controller, sizeof(s->controller));
+        json_decref(o);
+    }
+    if (cool_status_json(body, sizeof(body)) >= 0 && (o = json_loads(body, 0, NULL))) {
+        snap_str(o, "verdict", s->verdict, sizeof(s->verdict));
+        s->fire_ok = json_is_true(json_object_get(o, "fire_ok"));
+        s->armed = json_is_true(json_object_get(o, "armed"));
+        json_decref(o);
+    }
+
+    /* The GRBL controller's own report, while one runs. */
+    s->gstate[0] = '\0';
+    s->alarm = s->arming = 0;
+    if (super_grbl_running()) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/grbl.state", ff_run_dir());
+        if ((o = json_load_file(path, 0, NULL))) {
+            snap_str(o, "state", s->gstate, sizeof(s->gstate));
+            s->alarm = (int)json_integer_value(json_object_get(o, "alarm"));
+            s->arming = json_is_true(json_object_get(json_object_get(o, "laser"), "arming"));
+            json_decref(o);
+        }
+    }
+
+    machine_home_state(&s->homed_axes, s->home_source, sizeof(s->home_source));
+
+    char marker[256];
+    snprintf(marker, sizeof(marker), "%s/motors.released", ff_run_dir());
+    s->released = access(marker, F_OK) == 0;
+}
+
+struct events_ctx {
+    events_client_t *cl;
+};
+
+static ssize_t events_cb(void *cls, uint64_t pos, char *buf, size_t max)
+{
+    (void)pos;
+    struct events_ctx *ec = cls;
+    long n = events_next(ec->cl, buf, max);
+    return n < 0 ? U_STREAM_END : (ssize_t)n;
+}
+
+static void events_free_cb(void *cls)
+{
+    struct events_ctx *ec = cls;
+    events_close(ec->cl);
+    free(ec);
+}
+
+/* Server-sent events. Capped (events.h): the refusal is a 503 in words. */
+static int cb_events(const struct _u_request *req, struct _u_response *res,
+                     void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char peer[64], why[128];
+    auth_peer_text(req, peer, sizeof(peer));
+    struct events_ctx *ec = calloc(1, sizeof(*ec));
+    if (!ec)
+        return reply_error(res, 500, "out of memory");
+    ec->cl = events_open(peer, why, sizeof(why));
+    if (!ec->cl) {
+        free(ec);
+        return reply_error(res, 503, why);
+    }
+    ulfius_add_header_to_response(res, "Content-Type", "text/event-stream");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    ulfius_set_stream_response(res, 200, events_cb, events_free_cb,
+                               U_STREAM_SIZE_UNKNOWN, 1024, ec);
+    return U_CALLBACK_CONTINUE;
+}
+
 /* ------------------------------------------------------------- cooling */
 
 /* Level-triggered job-state report from the active controller (~1 Hz).
@@ -2638,6 +2734,8 @@ int main(int argc, char **argv)
     wizdark_init();
     setup_fact_hook = setup_fact;
     update_init();
+    events_gather = events_gather_state;
+    events_init();
     apply_wifi(0);
     cam_lamp_apply_idle();
 
@@ -2669,6 +2767,7 @@ int main(int argc, char **argv)
         { "POST", "/mode",                 cb_mode_post,        NULL, 0 },
         { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0 },
         { "POST", "/controller/start",     cb_controller_start, NULL, 0 },
+        { "GET",  "/events",               cb_events,           NULL, 1 },
         { "GET",  "/motion/state",         cb_motion_state,     NULL, 1 },
         { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0 },
         { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0 },
@@ -2844,6 +2943,7 @@ int main(int argc, char **argv)
     fflog(LOG_NOTICE, "shutting down");
     wiz_abort_all();
     wizdark_shutdown();
+    events_shutdown();          /* the open streams end, so their threads can */
     ulfius_stop_framework(&inst);
     ulfius_clean_instance(&inst);
     if (have_tls) {

@@ -29,6 +29,10 @@ int grbl_settings_text(char *buf, size_t len);
  * takeovers are only allowed while idle. */
 int machine_is_idle(void);
 
+/* The axes that carry a reference and what set it, without the rest of
+ * the status document (no sensor is read). 0, or -1 when unreadable. */
+int machine_home_state(unsigned *homed_axes, char *source, size_t len);
+
 /* True only when the lid is positively reported closed (the EV_SW
  * `doors` bit, the series combination of both lid switches that the
  * hardware safety chain itself uses). Fails closed: any read failure

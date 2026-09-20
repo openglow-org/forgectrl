@@ -1671,6 +1671,13 @@ class Mock:
                 return J(200, self.status_reply())
             if path == '/mode':
                 return J(200, self.mode_reply())
+            if path == '/events':
+                # The greeting, then the end of the response: the mock has no
+                # edges to report, and a client's EventSource comes back
+                # after the retry interval, as it would after any drop.
+                return 200, {'Content-Type': 'text/event-stream',
+                             'Cache-Control': 'no-store'}, (
+                    b'retry: 5000\nevent: hello\ndata: {"max_streams":3}\n\n')
             if path == '/motion/state':
                 if self.mode != 'grbl' or self.controller != 'running':
                     return T(409, 'the GRBL controller is not running')

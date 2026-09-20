@@ -89,6 +89,7 @@ add_executable(forgectrl
   src/font_hershey.c
   src/jobstream.c
   src/grblport.c
+  src/events.c
   src/sheet.c
   src/wizlive.c
   src/super.c
@@ -341,6 +342,13 @@ add_executable(grblport_test tests/grblport_test.c src/grblport.c)
 target_compile_options(grblport_test PRIVATE -Wall -Wextra)
 target_compile_definitions(grblport_test PRIVATE GRBLPORT_REPLY_TIMEOUT_MS=300)
 target_link_libraries(grblport_test pthread m)
+
+# The event stream: the cap, the edge detector's table, and the stream
+# end to end over a scripted state (a slow reader, the idle sampler, the
+# shutdown).
+add_executable(events_test tests/events_test.c src/events.c src/fflog.c)
+target_compile_options(events_test PRIVATE -Wall -Wextra)
+target_link_libraries(events_test pthread)
 
 add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
 target_compile_options(tls_test PRIVATE -Wall -Wextra)

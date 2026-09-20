@@ -37,6 +37,8 @@ jobs:
         run: ./build/jobstream_test
       - name: grblport_test (the controller port's client and its two operation sets)
         run: ./build/grblport_test
+      - name: events_test (the event stream's cap, edge detector, and ring)
+        run: ./build/events_test
       - name: Machine status JSON sys block
         run: ./build/status_sys_test
       - name: Log-export sanitizer

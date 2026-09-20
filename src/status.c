@@ -580,6 +580,13 @@ static void append_grbl(char *buf, size_t len, size_t *off)
                age < 0 ? 0.0 : age, body);
 }
 
+int machine_home_state(unsigned *homed_axes, char *source, size_t len)
+{
+    double x, y, z;
+    int homed;
+    return read_position(&x, &y, &z, &homed, homed_axes, source, len);
+}
+
 int machine_status_json(char *buf, size_t len, const char *extra)
 {
     char state[24] = "";
