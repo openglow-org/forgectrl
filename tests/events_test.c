@@ -14,7 +14,9 @@
  * second stream from one address ending the first with a "bye" and
  * leaving the count where it was, a reader a whole ring behind told
  * what it lost, no state read while nobody listens, and every open
- * stream ending at shutdown.
+ * stream ending at shutdown. The extension host's stream: its own slot,
+ * taken while the three are full and giving none of them up, and a
+ * second host stream replacing the first.
  */
 #include "../src/events.h"
 
@@ -24,7 +26,7 @@
 #include <unistd.h>
 
 static int fails;
-#define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
+#define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); fflush(stdout); } } while (0)
 
 /* ---- the edge detector ---- */
 
@@ -235,6 +237,28 @@ static void test_stream(void)
     CHECK(c2 && c3, "the second and third streams");
     events_client_t *c4 = events_open("10.0.0.4", why, sizeof(why));
     CHECK(!c4 && strstr(why, "every event stream is taken"), "the fourth stream: '%s'", why);
+
+    /* The extension host's slot is its own: it is there with the three
+     * taken, it takes none of them, and one curl on the machine cannot
+     * have it. */
+    events_client_t *host = events_open_host(why, sizeof(why));
+    CHECK(host != NULL, "the extension host's stream was refused with the three full: %s", why);
+    if (host) {
+        CHECK(events_open("10.0.0.5", why, sizeof(why)) == NULL,
+              "the host's stream made room for a fourth ordinary client");
+        long hn = events_next(host, buf, sizeof(buf));
+        CHECK(hn > 0 && strstr(buf, "event: hello\n"), "the host's greeting: '%s'", buf);
+        events_client_t *host2 = events_open_host(why, sizeof(why));
+        CHECK(host2 != NULL, "a restarted host was refused its slot: %s", why);
+        hn = events_next(host, buf, sizeof(buf));
+        CHECK(hn > 0 && !strcmp(buf, "event: bye\ndata: {\"reason\":\"replaced\"}\n\n"),
+              "the older host stream was not replaced: '%s'", buf);
+        events_close(host);
+        events_close(host2);
+        CHECK(events_open("10.0.0.5", why, sizeof(why)) == NULL,
+              "the host's slot was given away to an ordinary client when it let go");
+    }
+
     events_close(c3);
     c3 = events_open("10.0.0.4", why, sizeof(why));
     CHECK(c3 != NULL, "a closed stream's place was not given to the next client: %s", why);

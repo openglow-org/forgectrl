@@ -1973,10 +1973,14 @@ static int cb_events(const struct _u_request *req, struct _u_response *res,
         return U_CALLBACK_COMPLETE;
     char peer[64], why[128];
     auth_peer_text(req, peer, sizeof(peer));
+    /* The extension host asks for its own slot, outside the cap. Only a
+     * loopback peer may: see events.h for why that is the whole check. */
+    const char *client = u_map_get_case(req->map_header, EVENTS_HOST_HEADER);
+    int host = client && strcmp(client, EVENTS_HOST_CLIENT) == 0 && auth_peer_local(req);
     struct events_ctx *ec = calloc(1, sizeof(*ec));
     if (!ec)
         return reply_error(res, 500, "out of memory");
-    ec->cl = events_open(peer, why, sizeof(why));
+    ec->cl = host ? events_open_host(why, sizeof(why)) : events_open(peer, why, sizeof(why));
     if (!ec->cl) {
         free(ec);
         return reply_error(res, 503, why);

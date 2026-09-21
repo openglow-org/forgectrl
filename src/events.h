@@ -21,6 +21,18 @@
  * end of the response). A client that went away is only noticed at the
  * server's next write, so a refusal would turn every page reload into an
  * error that an EventSource does not retry.
+ *
+ * The extension host's subscription is one more stream, outside that cap
+ * and outside the replacement rule. It is one subscription that fans out
+ * to every extension, so without it each extension that wants events
+ * would want a stream of the three, and one curl on the machine would
+ * blind every extension at once. It is claimed by a loopback peer that
+ * asks for it by name (EVENTS_HOST_HEADER): an extension account cannot
+ * reach a loopback address at all - the sandbox's netfilter rules refuse
+ * everything it sends through lo before any allowlist is looked at - so a
+ * loopback claim is this firmware's own software or somebody who is
+ * already root on the machine. A second host stream replaces the first,
+ * which is what a restarted host is.
  */
 #ifndef FORGECTRL_EVENTS_H
 #define FORGECTRL_EVENTS_H
@@ -29,6 +41,10 @@
 
 #define EVENTS_MAX_STREAMS 3
 #define EVENTS_HZ 5
+/* The extension host's stream: its slot, and how it asks for it. */
+#define EVENTS_HOST_SLOT   EVENTS_MAX_STREAMS
+#define EVENTS_HOST_HEADER "X-ForgeFIRM-Client"
+#define EVENTS_HOST_CLIENT "extension-host"
 
 /* ---- admission: the cap, as a table of peer addresses ---- */
 
@@ -77,6 +93,9 @@ void events_shutdown(void);
  * It ends the older stream of the same address, if there is one. */
 typedef struct events_client events_client_t;
 events_client_t *events_open(const char *peer, char *why, size_t len);
+/* The extension host's: the slot beyond the cap, never refused for want
+ * of room, and replacing whatever held it. */
+events_client_t *events_open_host(char *why, size_t len);
 void events_close(events_client_t *c);
 
 /* The next bytes of the stream into buf: an event, or a keep-alive

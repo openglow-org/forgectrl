@@ -157,8 +157,10 @@ static pthread_cond_t wanted = PTHREAD_COND_INITIALIZER;   /* the first listener
 static char ring[RING][EVENT_TEXT];
 static unsigned long head = 1;                              /* the next sequence number */
 static events_slots_t slots;
-static unsigned slot_gen[EVENTS_MAX_STREAMS];              /* moves when a slot changes hands */
+/* One more than the cap: the last is the extension host's (events.h). */
+static unsigned slot_gen[EVENTS_MAX_STREAMS + 1];          /* moves when a slot changes hands */
 static int listeners, stopping, started;
+static int host_open;                                      /* the extension host holds its slot */
 static pthread_t sampler;
 
 static void publish_locked(const char *name, const char *data)
@@ -240,7 +242,7 @@ void events_shutdown(void)
         pthread_join(sampler, NULL);
 }
 
-events_client_t *events_open(const char *peer, char *why, size_t len)
+static events_client_t *open_slot(const char *peer, int host, char *why, size_t len)
 {
     events_client_t *c = calloc(1, sizeof(*c));
     if (!c) {
@@ -249,7 +251,14 @@ events_client_t *events_open(const char *peer, char *why, size_t len)
     }
     int replaced = 0;
     pthread_mutex_lock(&mu);
-    c->slot = stopping ? EVENTS_ADMIT_FULL : events_admit(&slots, peer, &replaced);
+    if (host) {
+        /* Its slot is its own: never full, and the older host stream ends. */
+        c->slot = stopping ? EVENTS_ADMIT_FULL : EVENTS_HOST_SLOT;
+        replaced = host_open;
+        host_open = c->slot >= 0;
+    } else {
+        c->slot = stopping ? EVENTS_ADMIT_FULL : events_admit(&slots, peer, &replaced);
+    }
     if (c->slot >= 0) {
         c->gen = ++slot_gen[c->slot];   /* the older stream of this address, if any, ends */
         c->next = head;
@@ -259,8 +268,11 @@ events_client_t *events_open(const char *peer, char *why, size_t len)
     }
     pthread_mutex_unlock(&mu);
     if (c->slot < 0) {
-        snprintf(why, len, "every event stream is taken (%d in all): fan out from one client",
-                 EVENTS_MAX_STREAMS);
+        if (stopping)
+            snprintf(why, len, "the daemon is stopping");
+        else
+            snprintf(why, len, "every event stream is taken (%d in all): fan out from one client",
+                     EVENTS_MAX_STREAMS);
         free(c);
         return NULL;
     }
@@ -269,13 +281,29 @@ events_client_t *events_open(const char *peer, char *why, size_t len)
     return c;
 }
 
+events_client_t *events_open(const char *peer, char *why, size_t len)
+{
+    return open_slot(peer, 0, why, len);
+}
+
+events_client_t *events_open_host(char *why, size_t len)
+{
+    return open_slot("the extension host", 1, why, len);
+}
+
 void events_close(events_client_t *c)
 {
     if (!c)
         return;
     pthread_mutex_lock(&mu);
-    if (slot_gen[c->slot] == c->gen)    /* a replaced stream's slot is no longer its own */
-        events_release(&slots, c->slot);
+    /* A replaced stream's slot is no longer its own. The host's slot is
+     * outside the table of addresses and has nothing to give back. */
+    if (slot_gen[c->slot] == c->gen) {
+        if (c->slot == EVENTS_HOST_SLOT)
+            host_open = 0;
+        else
+            events_release(&slots, c->slot);
+    }
     listeners--;
     pthread_mutex_unlock(&mu);
     free(c);
