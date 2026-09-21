@@ -135,8 +135,55 @@ function renderExt(j) {
   }
   if (!list.length) g += "<p class='hint'>No package is installed.</p>";
   $('extpkgs').innerHTML = g;
+  renderExtKeys(j.keys || []);
   $('extswitch').textContent = j.enabled ? 'Turn extensions off' : 'Turn extensions on…';
   $('extswitch').setAttribute('data-on', j.enabled ? '1' : '0');
+}
+/* The owner's keys: what makes a package community rather than unverified.
+ * Adding one takes the machine's button held, as unsigned firmware does. */
+function renderExtKeys(keys) {
+  var g = '',
+    i;
+  for (i = 0; i < keys.length; i++)
+    g += kv(
+      keys[i].name,
+      "<span class='mono brk'>" +
+        esc(keys[i].key || '') +
+        "</span> <button class='btn btn-sm btn-outline-danger extkeyrm' data-name='" +
+        esc(keys[i].name) +
+        "'>Remove</button>"
+    );
+  $('extkeys').innerHTML = g || "<p class='hint'>No key of yours is here: only a package signed by OpenGlow reads as official, and every other one as unverified.</p>";
+}
+function extKeyAdd() {
+  extSay('msg-extkey', '\u2026');
+  fx('/ext/key', {
+    method: 'POST',
+    body: new URLSearchParams({ name: $('extkeyname').value.trim(), key: $('extkeytext').value.trim() })
+  })
+    .then(extAnswer)
+    .then(function (j) {
+      extSay('msg-extkey', '');
+      $('extkeyname').value = '';
+      $('extkeytext').value = '';
+      renderExt(j);
+    })
+    .catch(function (e) {
+      extSay('msg-extkey', String(e));
+    });
+}
+function extKeyRemove(name) {
+  if (!window.confirm('Remove the key ' + name + '? A package signed with it then reads as unverified.')) return;
+  extSay('msg-extkey', '\u2026');
+  fx('/ext/key/remove', { method: 'POST', body: new URLSearchParams({ name: name }) })
+    .then(extAnswer)
+    .then(function (j) {
+      extSay('msg-extkey', '');
+      renderExt(j);
+    })
+    .catch(function (e) {
+      extSay('msg-extkey', String(e));
+    });
 }
 function loadExt() {
   fx('/ext/status')
@@ -306,8 +353,11 @@ function extDiscard() {
   });
 }
 document.addEventListener('click', function (ev) {
-  var b = ev.target.closest ? ev.target.closest('.extact') : null;
+  if (!ev.target.closest) return;
+  var b = ev.target.closest('.extact');
   if (b) extAct(b.getAttribute('data-id'), b.getAttribute('data-action'));
+  var k = ev.target.closest('.extkeyrm');
+  if (k) extKeyRemove(k.getAttribute('data-name'));
 });
 document.addEventListener('change', function (ev) {
   var s = ev.target;

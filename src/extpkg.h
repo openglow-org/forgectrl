@@ -27,6 +27,7 @@
 #define EXTPKG_UPLOAD_MAX       (32UL * 1024 * 1024)    /* the host takes no larger archive */
 #define EXTPKG_PHRASE           "I UNDERSTAND"
 #define EXTPKG_GRANTS_MAX       8
+#define EXTPKG_KEY_MAX          4096            /* a public key as fwup writes it, with room to spare */
 #define EXTPKG_OUT_MAX          (256 * 1024)
 #define EXTPKG_TIMEOUT_S        60
 
@@ -77,5 +78,17 @@ char *extpkg_inspect_json(int *status, char *why, size_t wlen);
  * that is not held, 502) and the words; the staged file stays for another
  * try. */
 int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen);
+
+/* The owner's keys, the trust anchor a community package is judged by.
+ * Adding one is the operator's own act: forgectrl takes it only with the
+ * machine's button held, as for unsigned firmware. The key is written
+ * through the extension host, which parses it before it lands, so a file
+ * that is no Ed25519 public key never becomes a trust anchor.
+ *
+ * 0 when the host did it; otherwise the status (400 for a name or a key
+ * with no such form, 409 for the host's refusal and for a button that is
+ * not held, 502 when the host cannot be asked) and the words. */
+int extpkg_key_add(const char *name, const char *key, size_t klen, int button_held, int *status, char *why, size_t wlen);
+int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen);
 
 #endif

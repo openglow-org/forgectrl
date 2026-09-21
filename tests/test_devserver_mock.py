@@ -297,8 +297,8 @@ class MockTest(unittest.TestCase):
         code, hdrs, body = self.call(m, 'GET', '/ext/status', token=False)
         self.assertEqual(code, 403)
         doc = self.get_json(m, '/ext/status')
-        self.assertEqual(set(doc), {'enabled', 'safe_mode', 'host', 'packages'})
-        for key in ('"enabled"', '"safe_mode"', '"host"', '"packages"', '"running"'):
+        self.assertEqual(set(doc), {'enabled', 'safe_mode', 'host', 'packages', 'keys'})
+        for key in ('"enabled"', '"safe_mode"', '"host"', '"packages"', '"keys"', '"running"'):
             self.assertIn(key, src)
         self.assertEqual([p['id'] for p in doc['packages']], ['org.openglow.notify', 'org.example.badge'])
         for form, want in (({'id': 'org.example.badge', 'action': 'install'}, 400), ({'id': 'badge', 'action': 'enable'}, 400),
@@ -349,6 +349,26 @@ class MockTest(unittest.TestCase):
         code, hdrs, body = self.call(m, 'POST', '/ext/upload/discard')
         self.assertEqual((code, json.loads(body)), (200, {'discarded': True}))
         code, hdrs, body = self.call(m, 'POST', '/ext/upload', body=b'an archive', token=False)
+        self.assertEqual(code, 403)
+
+    def test_ext_keys_match_extpkg_c(self):
+        # as extpkg.c rules it: a name's form, and the button held
+        src = read('src/extpkg.c')
+        m = self.mock()
+        doc = self.get_json(m, '/ext/status')
+        self.assertEqual([k['name'] for k in doc['keys']], ['a-maker'])
+        for form, want in (({'name': 'a maker', 'key': 'AAAA'}, 400), ({'name': '../x', 'key': 'AAAA'}, 400),
+                           ({'name': '.hidden', 'key': 'AAAA'}, 400), ({'name': 'maker'}, 400),
+                           ({'name': 'maker', 'key': 'AAAA'}, 409)):
+            code, hdrs, body = self.call(m, 'POST', '/ext/key', form)
+            self.assertEqual(code, want, form)
+        self.assertIn("hold the machine's button while you add it", src)
+        self.assertIn("a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes", src)
+        code, hdrs, body = self.call(m, 'POST', '/ext/key/remove', {'name': 'nothere'})
+        self.assertEqual(code, 409)
+        code, hdrs, body = self.call(m, 'POST', '/ext/key/remove', {'name': 'a-maker'})
+        self.assertEqual((code, json.loads(body)['keys']), (200, []))
+        code, hdrs, body = self.call(m, 'POST', '/ext/key', {'name': 'maker', 'key': 'AAAA'}, token=False)
         self.assertEqual(code, 403)
 
     # -- the mode vocabulary

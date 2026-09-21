@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -158,6 +159,16 @@ char *extpkg_status_json(int ext_enabled)
         json_object_set_new(top, "error", json_string("the extension host's command line does not answer"));
     }
     json_decref(listed);
+    text = NULL;
+    const char *kargv[] = { "keys", NULL };
+    json_t *klist = extpkg_cli(kargv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    json_t *keys = json_object_get(klist, "keys");
+    if (json_is_array(keys))
+        json_object_set(top, "keys", keys);
+    else
+        json_object_set_new(top, "keys", json_array());
+    json_decref(klist);
     char *doc = json_dumps(top, JSON_COMPACT);
     json_decref(top);
     return doc;
@@ -364,4 +375,95 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     extpkg_stage_discard();
     *status = 200;
     return 0;
+}
+
+/* ---- the owner's keys ------------------------------------------------------------ */
+
+/* The host reads the key from its standard input, so nothing of it is ever
+ * an argument. */
+static int key_cli(const char *const argv_in[], const char *stdin_text, size_t slen, char **out)
+{
+    char tmp[] = "/tmp/forgectrl-key.XXXXXX";
+    int fd = mkstemp(tmp), rc = -1;
+    if (fd < 0)
+        return -1;
+    fchmod(fd, 0600);
+    if (stdin_text && write(fd, stdin_text, slen) == (ssize_t)slen) {
+        const char *argv[8];
+        int n = 0;
+        for (int i = 0; argv_in[i] && n < 7; i++)
+            argv[n++] = argv_in[i];
+        argv[n++] = tmp;
+        argv[n] = NULL;
+        rc = extpkg_cli(argv, out);
+    }
+    close(fd);
+    unlink(tmp);
+    return rc;
+}
+
+static int key_answer(int rc, char *text, int *status, char *why, size_t wlen)
+{
+    json_t *j = text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's command line does not answer");
+        return -1;
+    }
+    if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        *status = 409;
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        return -1;
+    }
+    json_decref(j);
+    *status = 200;
+    return 0;
+}
+
+/* A key's name, as the host takes it, checked before anything runs. */
+static int key_name_ok(const char *name)
+{
+    size_t n = name ? strlen(name) : 0;
+    if (n < 1 || n > 48 || name[0] == '.' || name[0] == '-')
+        return 0;
+    return strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == n;
+}
+
+int extpkg_key_add(const char *name, const char *key, size_t klen, int button_held, int *status, char *why, size_t wlen)
+{
+    *status = 400;
+    if (!key_name_ok(name)) {
+        snprintf(why, wlen, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes");
+        return -1;
+    }
+    if (!key || klen == 0 || klen > EXTPKG_KEY_MAX) {
+        snprintf(why, wlen, "key is the public key fwup wrote, at most %d bytes", EXTPKG_KEY_MAX);
+        return -1;
+    }
+    if (!button_held) {
+        *status = 409;
+        snprintf(why, wlen, "a key you add is what this machine will trust: hold the machine's button while you add it");
+        return -1;
+    }
+    const char *argv[] = { "key-add", name, NULL };
+    char *text = NULL;
+    int rc = key_cli(argv, key, klen, &text);       /* filled before it is read: C orders neither */
+    return key_answer(rc, text, status, why, wlen);
+}
+
+int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen)
+{
+    *status = 400;
+    if (!key_name_ok(name)) {
+        snprintf(why, wlen, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes");
+        return -1;
+    }
+    const char *argv[] = { "key-remove", name, NULL };
+    char *text = NULL;
+    int rc = extpkg_cli(argv, &text);
+    return key_answer(rc, text, status, why, wlen);
 }

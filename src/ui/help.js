@@ -349,6 +349,14 @@ var HELP = {
       'While a job is armed every package is frozen, unless you let one keep running. A package you gave a hold can hold a job; turning that package off, turning extensions off, or entering safe mode ends the hold at once.'
     ]
   },
+  extkeys: {
+    t: 'Keys you trust',
+    d: 'usage/extensions/#keys-you-trust',
+    p: [
+      'A package is signed, and the machine judges it by who signed it. OpenGlow\'s extension key makes a package official. A key you add here makes a package signed with it community: you install it with the typed phrase instead of holding the button. Everything else is unverified.',
+      'Adding a key takes the button on the machine, held, because a key you add is what the machine will trust from then on. Removing a key does not remove a package that was installed with it; the package stays as it is until you remove it.'
+    ]
+  },
   tokens: {
     t: 'API tokens',
     d: 'usage/control-panel/#api-tokens',

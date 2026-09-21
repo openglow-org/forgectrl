@@ -768,6 +768,35 @@
           </p>
         </div>
         <div class="card">
+          <h2>Keys you trust<button class="hlp" data-help="extkeys" data-nolock="1" type="button">?</button></h2>
+          <div id="extkeys"></div>
+          <div class="btns">
+            <input
+              class="form-control form-control-sm"
+              id="extkeyname"
+              maxlength="48"
+              placeholder="Name: whose key it is"
+              style="max-width: 14rem"
+            />
+          </div>
+          <textarea
+            class="form-control form-control-sm mono"
+            id="extkeytext"
+            rows="2"
+            placeholder="The public key, as fwup wrote it"
+            style="margin: 0.4rem 0"
+          ></textarea>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" onclick="extKeyAdd()">Add the key</button
+            ><span class="msg" id="msg-extkey"></span>
+          </div>
+          <p class="hint">
+            A package signed with a key you add here reads as <b>Community</b> instead of Unverified, and
+            installs with the typed phrase instead of the button. <b>Hold the button on the machine</b> while
+            you add a key: what you add is what this machine will trust from then on.
+          </p>
+        </div>
+        <div class="card">
           <h2>API tokens<button class="hlp" data-help="tokens" data-nolock="1" type="button">?</button></h2>
           <div id="tokenlist"></div>
           <div id="tokennew" style="display: none"></div>

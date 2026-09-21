@@ -1285,6 +1285,37 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
     return cb_ext_status(req, res, NULL);
 }
 
+/* The owner's keys. Adding one takes the machine's button held: a key
+ * added here is what the machine will trust from then on. */
+static int cb_ext_key(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *key = setting_param(req, "key");
+    char why[300];
+    int status;
+    if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, operator_present(), &status, why,
+                       sizeof(why)) != 0)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: the owner's key %s was added (by the operator, with the button held)",
+          setting_param(req, "name"));
+    return cb_ext_status(req, res, NULL);
+}
+
+static int cb_ext_key_remove(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char why[300];
+    int status;
+    if (extpkg_key_remove(setting_param(req, "name"), &status, why, sizeof(why)) != 0)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: the owner's key %s was removed (by the operator)", setting_param(req, "name"));
+    return cb_ext_status(req, res, NULL);
+}
+
 static int cb_ext_upload_discard(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -3092,6 +3123,8 @@ int main(int argc, char **argv)
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },
         { "POST", "/ext/install",          cb_ext_install,      NULL, 0, NULL },
+        { "POST", "/ext/key",              cb_ext_key,          NULL, 0, NULL },
+        { "POST", "/ext/key/remove",       cb_ext_key_remove,   NULL, 0, NULL },
         { "POST", "/job/abort",            cb_job_abort,        NULL, 0, "motion.job" },
         { "POST", "/settings",             cb_settings_post,    NULL, 0, NULL },
         { "GET",  "/status",               cb_machine_status,   NULL, 1, "machine.read" },

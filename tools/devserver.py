@@ -875,6 +875,7 @@ class Mock:
         self.tokens = []
         # The extension packages, as the extension host lists them (src/extpkg.c relays its command
         # line): one official package that runs, and one a person installed unsigned, with a hold.
+        self.ext_keys = {'a-maker': 'ab' * 32}
         self.ext_packages = [
             {'id': 'org.openglow.notify', 'version': '1.0.0', 'previous': '', 'tier': 'official', 'key': 'c7' * 32,
              'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
@@ -1534,6 +1535,22 @@ class Mock:
                   'description': 'Holds a job when the filter is spent.', 'author': 'A maker', 'license': 'MIT',
                   'runtime': 'python', 'capabilities': ['hold', 'machine.read', 'storage:4'], 'modes': ['grbl', 'cloud']}
 
+    def ext_key_post(self, path, form, J, T):
+        name = form.get('name', '')
+        if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,47}', name):
+            return T(400, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes")
+        if path.endswith('/remove'):
+            if name not in self.ext_keys:
+                return T(409, 'no key called %s is here' % name)
+            del self.ext_keys[name]
+            self._log("ext: the owner's key %s was removed (by the operator)" % name)
+            return J(200, self.ext_status_reply())
+        key = form.get('key', '')
+        if not key or len(key) > 4096:
+            return T(400, 'key is the public key fwup wrote, at most 4096 bytes')
+        # the mock stands in for the machine's button: it is never held here
+        return T(409, "a key you add is what this machine will trust: hold the machine's button while you add it")
+
     def ext_upload_post(self, body, J, T):
         if self.lease_refusal():
             return T(409, self.lease_refusal())
@@ -1573,6 +1590,7 @@ class Mock:
                      'job_limited': False, 'healthy': True, 'reason': '', **({'hold': p['hold']} if 'hold' in p else {})}
                     for i, p in enumerate(self.ext_packages) if on and p['enabled'] and not p['quarantined']]
         return {'enabled': on, 'safe_mode': False,
+                'keys': [{'name': n, 'key': k} for n, k in sorted(self.ext_keys.items())],
                 'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
                 'packages': self.ext_packages}
@@ -2366,6 +2384,8 @@ class Mock:
             return J(200, {'discarded': True})
         if path == '/ext/install':
             return self.ext_install_post(form, J, T)
+        if path in ('/ext/key', '/ext/key/remove'):
+            return self.ext_key_post(path, form, J, T)
         if path == '/job':
             return self.job_post(headers, body, J, T)
         if path == '/job/abort':

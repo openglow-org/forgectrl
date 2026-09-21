@@ -120,7 +120,8 @@ int main(void)
     char *doc = extpkg_status_json(1);
     json_t *j = doc ? json_loads(doc, 0, NULL) : NULL;
     CHECK(j && json_is_true(json_object_get(j, "enabled")) && json_is_false(json_object_get(j, "safe_mode")) &&
-          json_array_size(json_object_get(j, "packages")) == 1 && !strcmp(ran(), "list\n"), "the status document: %s", doc ? doc : "none");
+          json_array_size(json_object_get(j, "packages")) == 1 && !strcmp(ran(), "keys\n"),
+          "the status document (list first, then the keys): %s", doc ? doc : "none");
     CHECK(j && json_is_false(json_object_get(json_object_get(j, "host"), "running")) &&
           !json_object_get(json_object_get(j, "host"), "services"),
           "a status file whose pid is not a running host is a dead host's: its word is not passed on: %s", doc ? doc : "none");
@@ -220,6 +221,52 @@ int main(void)
           access(stage, F_OK) == 0, "the host's refusal: %d %s", status, why);
     extpkg_stage_discard();
     CHECK(access(stage, F_OK) != 0, "discard left the staged file");
+
+    /* The owner's keys: the button, the name's form, and the key through a
+     * file and never an argument. */
+    host_says("echo '{\"ok\": true, \"keys\": [{\"name\": \"maker\", \"key\": \"ab\"}]}'");
+    CHECK(extpkg_key_add("maker", "AAAA", 4, 0, &status, why, sizeof(why)) != 0 && status == 409 && strstr(why, "button") &&
+          !ran()[0], "a key without the button held: %d %s, ran [%s]", status, why, ran());
+    static const char *const bad_names[] = { "", "a maker", "../../etc/passwd", ".hidden", "-rf", "maker;reboot",
+                                             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX" };
+    for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++)
+        CHECK(extpkg_key_add(bad_names[i], "AAAA", 4, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
+              "the name \"%s\": %d, ran [%s]", bad_names[i], status, ran());
+    CHECK(extpkg_key_add("maker", "", 0, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0], "an empty key");
+    {
+        static char big[EXTPKG_KEY_MAX + 8];
+        memset(big, 'A', sizeof(big) - 1);
+        CHECK(extpkg_key_add("maker", big, sizeof(big) - 1, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
+              "a key over the bound");
+    }
+    CHECK(extpkg_key_add("maker", "AAAA", 4, 1, &status, why, sizeof(why)) == 0 && status == 200, "the key: %d %s", status, why);
+    {
+        /* key-add <name> <file>: the key is in the file, never in an argument. */
+        char args[1024];
+        snprintf(args, sizeof(args), "%s", ran());
+        CHECK(strncmp(args, "key-add\nmaker\n/tmp/forgectrl-key.", 33) == 0 && !strstr(args, "AAAA"),
+              "the host was run with [%s]", args);
+    }
+    host_says("echo '{\"ok\": false, \"error\": \"that is no Ed25519 public key\"}'; exit 1");
+    CHECK(extpkg_key_add("maker", "not a key", 9, 1, &status, why, sizeof(why)) != 0 && status == 409 &&
+          strstr(why, "Ed25519"), "what the host will not take: %d %s", status, why);
+    host_says("echo '{\"ok\": true, \"keys\": []}'");
+    CHECK(extpkg_key_remove("maker", &status, why, sizeof(why)) == 0 && !strcmp(ran(), "key-remove\nmaker\n"),
+          "key-remove: %d, ran [%s]", status, ran());
+    CHECK(extpkg_key_remove("../../etc/passwd", &status, why, sizeof(why)) != 0 && status == 400, "removing a path");
+    /* and no key file is left behind */
+    {
+        int left = system("ls /tmp/forgectrl-key.* >/dev/null 2>&1");
+        CHECK(left != 0, "a staged key file was left in /tmp");
+    }
+    /* the status document carries them */
+    host_says("if [ \"$1\" = keys ]; then echo '{\"ok\": true, \"keys\": [{\"name\": \"maker\", \"key\": \"ab\"}]}'; exit 0; fi\n"
+              "echo '{\"ok\": true, \"packages\": []}'");
+    doc = extpkg_status_json(1);
+    j = doc ? json_loads(doc, 0, NULL) : NULL;
+    CHECK(j && json_array_size(json_object_get(j, "keys")) == 1, "the status document carries the keys: %s", doc ? doc : "none");
+    json_decref(j);
+    free(doc);
 
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
