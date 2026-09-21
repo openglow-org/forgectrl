@@ -88,6 +88,19 @@ int settings_get(const char *key, char *val, size_t len)
     return -1;
 }
 
+/* One hold file, as the extension host writes it. */
+static void ext_hold_file(const char *id, int required, int raised, const char *reason, double ts)
+{
+    char path[160];
+    snprintf(path, sizeof(path), "cool-flow-test/holds/%s.json", id);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return;
+    fprintf(f, "{\"id\": \"%s\", \"required\": %s, \"raised\": %s, \"reason\": \"%s\", \"ts_mono\": %.3f}\n", id,
+            required ? "true" : "false", raised ? "true" : "false", reason, ts);
+    fclose(f);
+}
+
 static char last_log[256];
 
 static char logs[8192];             /* every line since a case cleared it */
@@ -724,6 +737,108 @@ int main(void)
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
         put_long(attr, 100);
     }
+    close_session(&L);
+
+    printf("P. an extension's hold joins the pause tier, under every verdict of the engine's own\n");
+    mkdir("cool-flow-test/holds", 0755);
+    holds_dir = "cool-flow-test/holds";
+    mkdir("cool-flow-test/required-holds", 0755);
+    holds_required_dir = "cool-flow-test/required-holds";
+    ext_safe_file = "cool-flow-test/ext-safe";
+    unlink(ext_safe_file);
+    stops = 0;
+    open_session(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok && !pub_hold, "a settled session before any hold: OK");
+    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off: a raised hold is not looked at");
+    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
+    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+    logs[0] = '\0';
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok && pub_hold && stops == 0 &&
+          !strcmp(pub_reason, "org.example.badge: no badge presented"),
+          "extensions on: EXT, fire withheld, the job held, nothing stopped, the reason the package's");
+    CHECK(strstr(logs, "extension hold: org.example.badge: no badge presented") != NULL, "the rising edge is logged");
+    logs[0] = '\0';
+    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT") && !strstr(logs, "extension hold"), "a standing hold is not logged again");
+    /* the engine's own verdicts outrank it, and it never lifts one */
+    crash_src1 = 0x40 | 0x08;
+    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "BUMP") && !pub_fire_ok && pub_hold, "a bump under a hold reads BUMP");
+    crash_src1 = 0;
+    for (int i = 0; i < 6; i++) {
+        ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+        run_tick(&L);
+    }
+    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok &&
+          !strcmp(pub_reason, "org.example.badge: no badge presented"),
+          "the bump released: EXT again, with the hold's own words back");
+    /* cleared by the host */
+    logs[0] = '\0';
+    ext_hold_file("org.example.badge", 1, 0, "", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok && !pub_hold && !pub_reason[0] &&
+          strstr(logs, "extension hold cleared") != NULL, "cleared: OK, fire back, the words gone, the edge logged");
+    /* the host gone: a required hold stands whatever it last said */
+    run_tick(&L);
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok &&
+          !strcmp(pub_reason, "org.example.badge: the extension host is not answering"),
+          "a required hold gone stale stands whatever it last said");
+    /* the operator's two exits need no host */
+    { FILE *f = fopen(ext_safe_file, "w"); if (f) fclose(f); }
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "safe mode ends the hold at the next tick");
+    unlink(ext_safe_file);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT"), "out of safe mode it stands again");
+    kv[0] = NULL;
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off ends the hold at the next tick");
+    /* an advisory hold gone stale is dropped, and said once */
+    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
+    unlink("cool-flow-test/holds/org.example.badge.json");
+    ext_hold_file("org.example.filter", 0, 1, "filter life under 5 percent", fake_now - 30.0);
+    logs[0] = '\0';
+    run_tick(&L);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "a stale advisory hold does not stand");
+    {
+        int said = 0;
+        for (const char *c = logs; (c = strstr(c, "advisory extension hold(s) dropped")) != NULL; c++)
+            said++;
+        CHECK(said == 1, "the drop is said once");
+    }
+    /* a required hold nobody has spoken for since the boot stands, and ends with the same two exits */
+    unlink("cool-flow-test/holds/org.example.filter.json");
+    { FILE *f = fopen("cool-flow-test/required-holds/org.example.badge", "w"); if (f) fclose(f); }
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok &&
+          !strcmp(pub_reason, "org.example.badge: the extension host is not answering"),
+          "a required hold with no file stands");
+    ext_hold_file("org.example.badge", 1, 0, "", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "the host speaks for it, clear: OK");
+    unlink("cool-flow-test/holds/org.example.badge.json");
+    kv[0] = NULL;
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "with extensions off the required directory is not looked at");
+    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
+    unlink("cool-flow-test/required-holds/org.example.badge");
+    /* a fail tier is a fail tier under a hold too */
+    ext_hold_file("org.example.filter", 0, 1, "filter life under 5 percent", fake_now + 1.0);
+    crash_src2 = 0x40 | 0x02;
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "CRASH") && stops == 1, "CRASH under a hold: CRASH, and the controller is ended");
+    crash_src2 = 0;
+    unlink("cool-flow-test/holds/org.example.filter.json");
+    kv[0] = NULL;
     close_session(&L);
     cool_fail_tier_stop = NULL;
 

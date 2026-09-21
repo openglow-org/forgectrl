@@ -133,6 +133,7 @@
 #include "coolfmt.h"
 #include "fflog.h"
 #include "gates.h"
+#include "holds.h"
 #include "settings.h"
 #include "status.h"
 
@@ -880,6 +881,54 @@ static void overtemp_warn(int log)
 static void info(const char *msg)
 {
     fflog(LOG_INFO, "cool: %s", msg);
+}
+
+/* ------------------------------------------------- an extension's hold */
+
+/* A package's hold withholds fire and never permits it: it joins the pause
+ * tier below every verdict of the engine's own, so it can neither hide one
+ * nor outrank one. The extension host keeps the hold files (holds.h). The
+ * engine looks at them only while extensions are on and the machine is not
+ * in safe mode: turning extensions off, or the safe-mode file, ends every
+ * hold at the next tick, whatever has become of the host. */
+#define EXT_SAFE_FILE   "/run/forgefirm/ext-safe"
+
+static const char *holds_dir = HOLDS_DIR_DEFAULT;
+static const char *holds_required_dir = HOLDS_REQUIRED_DIR;
+static const char *ext_safe_file = EXT_SAFE_FILE;
+static int ext_held;                    /* a hold stood at the last tick */
+static int ext_dropped;                 /* stale advisory holds were dropped at the last tick */
+static char ext_reason[COOL_REASON_MAX];
+
+static void ext_holds_read(double now, holds_t *h)
+{
+    char v[8];
+    memset(h, 0, sizeof(*h));
+    if (access(ext_safe_file, F_OK) == 0 || settings_get("ext_enabled", v, sizeof(v)) != 0 || strcmp(v, "1") != 0)
+        return;
+    holds_read(holds_dir, holds_required_dir, now, h);
+}
+
+/* Named on its edges, and when the hold that stands changes. */
+static void ext_holds_log(const holds_t *h)
+{
+    char msg[COOL_REASON_MAX + 48];
+    if (h->standing && (!ext_held || strcmp(h->reason, ext_reason) != 0)) {
+        snprintf(msg, sizeof(msg), "extension hold: %s", h->reason);
+        fflog(LOG_WARNING, "cool: %s", msg);
+    } else if (!h->standing && ext_held) {
+        info("extension hold cleared");
+        pthread_mutex_lock(&mu);
+        if (!strcmp(pub_reason, ext_reason))
+            pub_reason[0] = '\0';          /* the hold's words go with the hold */
+        pthread_mutex_unlock(&mu);
+    }
+    if (h->stale_advisory && !ext_dropped)
+        fflog(LOG_WARNING, "cool: %d advisory extension hold(s) dropped: the extension host is not answering",
+              h->stale_advisory);
+    ext_held = h->standing;
+    ext_dropped = h->stale_advisory > 0;
+    snprintf(ext_reason, sizeof(ext_reason), "%s", h->standing ? h->reason : "");
 }
 
 /* ---------------------------------------------------------- tunables */
@@ -2596,6 +2645,9 @@ static void engine_tick(void)
      * fire_ok additionally requires a live report: an armed window the
      * engine cannot see must not fire. */
     int warming = cool_state == Cool_Warmup;
+    holds_t ext;
+    ext_holds_read(now, &ext);
+    ext_holds_log(&ext);
     const char *verdict = fire_alarm ? "FIRE"
                         : crash_w.alarm ? "CRASH"
                         : flame_alert ? "FLAME"
@@ -2607,16 +2659,26 @@ static void engine_tick(void)
                         : cold_gate ? "COLD"
                         : warming ? "WARMUP"
                         : flow_verdict == Flow_Fault ? "FAULT"
-                        : flow_verdict == Flow_Suspect ? "SUSPECT" : "OK";
+                        : flow_verdict == Flow_Suspect ? "SUSPECT"
+                        : ext.standing ? "EXT" : "OK";
     int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
              || airflow_alarm || critical_alarm || sensor_alarm
              || over_temp_gate || cold_gate || warming
-             || (armed && flow_verdict != Flow_Normal);
+             || (armed && flow_verdict != Flow_Normal)
+             || ext.standing;
     int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
                 && !crash_w.alert && !airflow_alarm
                 && !critical_alarm && !sensor_alarm
                 && !over_temp_gate && !cold_gate && !warming
-                && flow_verdict != Flow_Fault;
+                && flow_verdict != Flow_Fault
+                && !ext.standing;
+    /* The reason is the hold's while the verdict is: it says which package
+     * and why, and another event's words may have stood there since. */
+    if (!strcmp(verdict, "EXT")) {
+        pthread_mutex_lock(&mu);
+        snprintf(pub_reason, sizeof(pub_reason), "%s", ext.reason);
+        pthread_mutex_unlock(&mu);
+    }
 
     pthread_mutex_lock(&mu);
     pub_phase = cool_state == Cool_Run ? "run"

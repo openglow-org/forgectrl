@@ -90,6 +90,7 @@ add_executable(forgectrl
   src/status.c
   src/curverec.c
   src/font_hershey.c
+  src/holds.c
   src/jobpost.c
   src/jobrun.c
   src/jobstream.c
@@ -214,18 +215,25 @@ target_link_libraries(cool_gate_test m)
 # tube's share subtracted from the rise and bounded, and a stopped pump
 # still read as stopped under a lit tube. Includes the engine source
 # against a fake sysfs tree and a fake clock; CI runs it after the build.
-add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c)
+add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
 target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
-target_link_libraries(cool_flow_test m pthread)
+target_link_libraries(cool_flow_test m pthread jansson)
+
+# An extension package's holds as the engine reads them: what stands, what
+# is dropped, what an unreadable file means, what of a package's words
+# reaches the verdict.
+add_executable(holds_test tests/holds_test.c src/holds.c)
+target_compile_options(holds_test PRIVATE -Wall -Wextra)
+target_link_libraries(holds_test jansson)
 
 # Host unit test for the verified fan writes: every duty read back and
 # retried, a duty a device lost put back by the tick with the spin-up
 # grace, and the airflow fault naming the duty commanded and the duty in
 # force. Includes the engine source against a fake sysfs tree whose writes
 # can be dropped or refused; CI runs it after the build.
-add_executable(cool_fanwrite_test tests/cool_fanwrite_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c)
+add_executable(cool_fanwrite_test tests/cool_fanwrite_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
 target_compile_options(cool_fanwrite_test PRIVATE -Wall -Wextra)
-target_link_libraries(cool_fanwrite_test m pthread)
+target_link_libraries(cool_fanwrite_test m pthread jansson)
 
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs
