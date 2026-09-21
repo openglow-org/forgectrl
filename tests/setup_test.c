@@ -106,6 +106,37 @@ int main(void)
     CHECK(!setup_acceptance_done(), "a re-acceptance needs the press again");
     setup_acceptance_pressed();
 
+    /* 3b. An on-demand document is no part of the first run: it is not
+     * in the list, the first-run acceptance refuses it, and its own
+     * acceptance is recorded beside the others and leaves the press. */
+    {
+        const advisory_t *x = advisories_find("extensions");
+        int listed = 0;
+        for (size_t i = 0; i < n; i++)
+            if (docs[i].on_demand || !strcmp(docs[i].id, "extensions"))
+                listed = 1;
+        CHECK(x && x->on_demand && x->hash[0] && x->len > 0, "the Extensions advisory is on demand");
+        CHECK(n == 4 && !listed, "the first-run list carries no on-demand document");
+        CHECK(x && setup_advisory_accept("extensions", x->hash, "typed") == -1,
+              "the first-run acceptance refuses an on-demand document");
+        CHECK(setup_acceptance_done(), "the refusal left the press");
+        CHECK(setup_on_demand_accept("extensions", "0000", "typed") == -1,
+              "an on-demand acceptance with a stale hash is refused");
+        CHECK(setup_on_demand_accept(docs[0].id, docs[0].hash, "typed") == -1,
+              "an on-demand acceptance of a first-run document is refused");
+        CHECK(x && setup_on_demand_accept("extensions", x->hash, "typed") == 0,
+              "the on-demand acceptance is recorded");
+        CHECK(setup_acceptance_done() && setup_advisories_complete(),
+              "it leaves the first-run documents and their press as they are");
+        json_t *r = setup_record_copy();
+        json_t *e = json_object_get(json_object_get(r, "on_demand"), "extensions");
+        CHECK(x && e && !strcmp(sget(e, "hash"), x->hash) && !strcmp(sget(e, "method"), "typed") &&
+              sget(e, "accepted")[0], "the record holds the hash, the method, and the time");
+        CHECK(!json_object_get(json_object_get(r, "advisories"), "extensions"),
+              "and not among the first-run ones");
+        json_decref(r);
+    }
+
     /* 4. The account, then the required wizards. */
     CHECK(setup_set_account("owner", 1000) == 0, "account recorded");
     CHECK(!setup_gate_open(why, sizeof(why)), "required wizards still close the gate");

@@ -15,6 +15,7 @@ screen.
 
 Run: python3 -B -m unittest -v tests/test_devserver_mock.py
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -231,6 +232,59 @@ class MockTest(unittest.TestCase):
         reply = json.loads(body)
         self.assertEqual((reply['cloud_enabled'], reply['homing_mode'],
                           reply['controller_mode']), ('0', 'none', 'grbl'))
+
+    def test_settings_ext_enabled_is_turned_on_over_its_advisory(self):
+        # as main.c rules it: on from off takes the hash of the Extensions
+        # advisory as it stands and the typed phrase, and records both;
+        # the first-run acceptance refuses the document
+        main = read('src/main.c')
+        adv = read('src/advisories.c')
+        self.assertIn('{ "extensions", "Extensions", "typed", "I UNDERSTAND", NULL, 0, "", 1 }', adv)
+        self.assertEqual(self.ds.ON_DEMAND_DOCS, ('extensions',))
+        m = self.mock()
+        self.assertNotIn('extensions', [d['id'] for d in m.wiz_reply()['documents']])
+        code, hdrs, text = self.call(m, 'GET', '/advisories/extensions')
+        self.assertEqual(code, 200)
+        digest = hashlib.sha256(text).hexdigest()
+        self.assertEqual(hdrs['ETag'], digest)
+        for form, want in (
+                ({'ext_enabled': '1'},
+                 (409, b'read the Extensions advisory first: turning extensions on agrees to it')),
+                ({'ext_enabled': '1', 'advisory': '0' * 64, 'phrase': 'I UNDERSTAND'},
+                 (409, b'read the Extensions advisory first: turning extensions on agrees to it')),
+                ({'ext_enabled': '1', 'advisory': digest},
+                 (400, b'type I UNDERSTAND to turn extensions on')),
+                ({'ext_enabled': '1', 'advisory': digest, 'phrase': 'i understand'},
+                 (400, b'type I UNDERSTAND to turn extensions on'))):
+            code, hdrs, body = self.call(m, 'POST', '/settings', form)
+            self.assertEqual((code, body), want, form)
+            self.assertIn(want[1].decode(), main)
+            self.assertNotEqual(m.settings.get('ext_enabled'), '1')
+            self.assertNotIn('on_demand', m.wiz_record())
+        # a good consent beside a write the daemon refuses records nothing
+        code, hdrs, body = self.call(m, 'POST', '/settings',
+                                     {'ext_enabled': '1', 'advisory': digest,
+                                      'phrase': 'I UNDERSTAND', 'cloud_enabled': '0',
+                                      'controller_mode': 'cloud'})
+        self.assertEqual(code, 409)
+        self.assertNotEqual(m.settings.get('ext_enabled'), '1')
+        self.assertNotIn('on_demand', m.wiz_record())
+        code, hdrs, body = self.call(m, 'POST', '/settings',
+                                     {'ext_enabled': '1', 'advisory': digest,
+                                      'phrase': 'I UNDERSTAND'})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)['ext_enabled'], '1')
+        self.assertEqual(m.wiz_record()['on_demand']['extensions']['hash'], digest)
+        # re-sending 1 while it stands, and turning it off, ask nothing
+        for form in ({'ext_enabled': '1'}, {'ext_enabled': '0'}):
+            code, hdrs, body = self.call(m, 'POST', '/settings', form)
+            self.assertEqual(code, 200, form)
+        code, hdrs, body = self.call(m, 'POST', '/wiz/advisories/accept',
+                                     {'doc': 'extensions', 'hash': digest,
+                                      'phrase': 'I UNDERSTAND'})
+        self.assertEqual((code, json.loads(body)),
+                         (400, {'error': 'this document is accepted where its feature is turned on'}))
+        self.assertIn('this document is accepted where its feature is turned on', read('src/wiz.c'))
 
     # -- the mode vocabulary
     def test_mode_matches_super_c(self):

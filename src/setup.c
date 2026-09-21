@@ -408,7 +408,7 @@ int setup_advisory_accept(const char *doc_id, const char *hash,
                                 const char *method)
 {
     const advisory_t *d = advisories_find(doc_id);
-    if (!d || !hash || strcmp(hash, d->hash) || !method)
+    if (!d || d->on_demand || !hash || strcmp(hash, d->hash) || !method)
         return -1;
     char ts[32];
     now_iso(ts, sizeof(ts));
@@ -421,6 +421,25 @@ int setup_advisory_accept(const char *doc_id, const char *hash,
     json_object_set_new(acc, doc_id, e);
     /* A new acceptance of any document needs the press again. */
     json_object_del(rec, "acceptance");
+    int rc = commit_locked();
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
+int setup_on_demand_accept(const char *doc_id, const char *hash, const char *method)
+{
+    const advisory_t *d = advisories_find(doc_id);
+    if (!d || !d->on_demand || !hash || strcmp(hash, d->hash) || !method)
+        return -1;
+    char ts[32];
+    now_iso(ts, sizeof(ts));
+    pthread_mutex_lock(&mu);
+    json_t *acc = obj_get_or_make(rec, "on_demand");
+    json_t *e = json_object();
+    json_object_set_new(e, "hash", json_string(hash));
+    json_object_set_new(e, "accepted", json_string(ts));
+    json_object_set_new(e, "method", json_string(method));
+    json_object_set_new(acc, doc_id, e);
     int rc = commit_locked();
     pthread_mutex_unlock(&mu);
     return rc;

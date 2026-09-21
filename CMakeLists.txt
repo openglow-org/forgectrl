@@ -57,6 +57,7 @@ add_custom_command(
           -DOUT_C=${UI_OUT}/advisories_blob.c -P ${UI_DIR}/embed_docs.cmake
   DEPENDS ${DOCS_DIR}/safety-and-risk.md ${DOCS_DIR}/licenses.md
           ${DOCS_DIR}/privacy.md ${DOCS_DIR}/cloud-service.md
+          ${DOCS_DIR}/extensions.md
           ${UI_DIR}/embed_docs.cmake
   COMMENT "Embedding the advisory documents (docs/advisories -> advisories_blob.c)"
   VERBATIM)
@@ -379,6 +380,12 @@ target_link_libraries(auth_scoped_test ulfius pthread)
 add_executable(builtin_test tests/builtin_test.c src/builtin.c src/settings.c src/fflog.c)
 target_compile_options(builtin_test PRIVATE -Wall -Wextra)
 target_link_libraries(builtin_test pthread)
+
+# The data directory opened for search when extensions are turned on: the
+# search bit added, nothing taken away, nothing made.
+add_executable(settings_dir_test tests/settings_dir_test.c src/settings.c src/fflog.c)
+target_compile_options(settings_dir_test PRIVATE -Wall -Wextra)
+target_link_libraries(settings_dir_test pthread)
 
 # The product gate on the firmware paths: firmware only, by signature class.
 add_executable(fwproduct_test tests/fwproduct_test.c src/fwproduct.c)

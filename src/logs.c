@@ -48,7 +48,7 @@
 #include <zlib.h>
 
 const char *const logs_names[] = {
-    "forgectrl", "grblhal", "gfcloud", "gfhome", "kernel", "system",
+    "forgectrl", "grblhal", "gfcloud", "gfhome", "forgeext", "kernel", "system",
 };
 const size_t logs_count = sizeof(logs_names) / sizeof(*logs_names);
 
@@ -302,6 +302,7 @@ int logs_render(char *err, size_t errlen)
     render_logger(f, "grblhal",   "$programname == \"grblhal\"",   remote_on);
     render_logger(f, "gfcloud",   "$programname == \"gfcloud\"",   remote_on);
     render_logger(f, "gfhome",    "$programname == \"gfhome\"",    remote_on);
+    render_logger(f, "forgeext",  "$programname == \"forgeext\"",  remote_on);
     render_logger(f, "kernel",    "$syslogfacility-text == \"kern\"", remote_on);
     render_logger(f, "system",    NULL, remote_on);
     if (fclose(f) != 0 || rename(tmp, LOGS_RSYSLOG) != 0) {
@@ -879,7 +880,7 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                    "Layout:\n"
                    "  logs/<logger>/   one directory per logger (forgectrl,"
                    " grblhal, gfcloud, gfhome,\n"
-                   "                   kernel, system): the live .log and"
+                   "                   forgeext, kernel, system): the live .log and"
                    " rotated .N.gz files\n"
                    "  logs/install/    the installer's own log, one block per"
                    " run, written on\n"

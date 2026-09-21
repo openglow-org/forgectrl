@@ -48,6 +48,8 @@ jobs:
 
       - name: builtin_test (the built-in extensions: the cloud entry, its refusals, its sweep, the list)
         run: ./build/builtin_test
+      - name: settings_dir_test (the data directory opened for search: the bit added, nothing taken away)
+        run: ./build/settings_dir_test
       - name: fwproduct_test (the product gate: the firmware paths take firmware only, an extension package never)
         run: ./build/fwproduct_test
 

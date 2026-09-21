@@ -26,4 +26,12 @@ int settings_set(const char *key, const char *val);
 int settings_set_many(const char *const *keys, const char *const *vals,
                       size_t count);
 
+/* Let other accounts walk through the data directory (the search bit, for
+ * group and others; nothing is taken away and nothing becomes listable).
+ * An extension package's account reaches its own files under ext/ that
+ * way, and the directory is found closed on a machine whose installer made
+ * it under a strict umask. What is private in it is closed file by file.
+ * 0 when the bit is set, -1 when it could not be. */
+int settings_dir_searchable(void);
+
 #endif

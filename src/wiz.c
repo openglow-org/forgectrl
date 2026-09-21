@@ -436,6 +436,8 @@ int cb_wiz_agree(const struct _u_request *req, struct _u_response *res, void *ud
     const advisory_t *d = advisories_find(id);
     if (!d)
         return reply_error(res, 400, "unknown document");
+    if (d->on_demand)
+        return reply_error(res, 400, "this document is accepted where its feature is turned on");
     if (!hash || strcmp(hash, d->hash))
         return reply_error(res, 409, "the document changed; read it again");
     if (!strcmp(d->consent, "typed")) {

@@ -781,6 +781,7 @@ static const struct {
     { "lid_policy",             valid_lid_policy,  0 },
     { "xy_microsteps",          valid_xy_microsteps, 0 },
     { "cloud_enabled",          valid_bool,        0 },
+    { "ext_enabled",            valid_bool,        0 },
     { "panel_open_reads",       valid_bool,        0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
@@ -790,6 +791,8 @@ static const struct {
     { "log_gfcloud_remote",     logs_valid_level,  0 },
     { "log_gfhome_disk",        logs_valid_level,  0 },
     { "log_gfhome_remote",      logs_valid_level,  0 },
+    { "log_forgeext_disk",      logs_valid_level,  0 },
+    { "log_forgeext_remote",    logs_valid_level,  0 },
     { "log_kernel_disk",        logs_valid_level,  0 },
     { "log_kernel_remote",      logs_valid_level,  0 },
     { "log_system_disk",        logs_valid_level,  0 },
@@ -1301,6 +1304,24 @@ static int cb_settings_post(const struct _u_request *req,
     /* Nothing may point at the cloud while cloud mode is off: the
      * effective cloud_enabled (this request's value, else the stored
      * one) must be 1 for controller_mode=cloud or homing_mode=gfcloud. */
+    /* Extensions are the owner's decision, made over their own advisory:
+     * turning them on takes the hash of the text as it stands (so what was
+     * read is what is agreed to) and the typed phrase, and records both.
+     * Re-sending 1 while it stands asks nothing; 0 asks nothing. The
+     * acceptance is recorded below, once the whole request has been found
+     * good, and before the settings are written. */
+    const char *xe = setting_param(req, "ext_enabled"), *ext_accept = NULL;
+    if (xe && !strcmp(xe, "1") && !settings_get_bool("ext_enabled", 0)) {
+        const advisory_t *d = advisories_find("extensions");
+        const char *hash = setting_param(req, "advisory");
+        const char *phrase = setting_param(req, "phrase");
+        if (!d || !hash || strcmp(hash, d->hash))
+            return reply_error(res, 409,
+                "read the Extensions advisory first: turning extensions on agrees to it");
+        if (!phrase || strcmp(phrase, d->phrase))
+            return reply_error(res, 400, "type I UNDERSTAND to turn extensions on");
+        ext_accept = hash;
+    }
     const char *ce = setting_param(req, "cloud_enabled");
     {
         /* The key is the owner's decision from the cloud step, never a
@@ -1420,8 +1441,15 @@ static int cb_settings_post(const struct _u_request *req,
         vals[nset] = swept_vals[i];
         nset++;
     }
+    if (ext_accept) {
+        if (setup_on_demand_accept("extensions", ext_accept, "typed") != 0)
+            return reply_error(res, 500, "cannot record the acceptance");
+        fflog(LOG_NOTICE, "settings: the Extensions advisory was accepted (typed)");
+    }
     if (settings_set_many(keys, vals, nset) != 0)
         return reply_error(res, 500, "cannot write settings file");
+    if (ext_accept && settings_dir_searchable() != 0)
+        fflog(LOG_WARNING, "settings: the data directory cannot be opened for search: no package's account reaches its files");
     for (size_t i = 0; i < N_SETTINGS; i++) {
         const char *v = setting_param(req, setting_defs[i].key);
         if (!v)
@@ -2815,6 +2843,8 @@ int main(int argc, char **argv)
     auth_init();
     tokens_init();
     advisories_init();
+    if (settings_get_bool("ext_enabled", 0) && settings_dir_searchable() != 0)
+        fflog(LOG_WARNING, "the data directory cannot be opened for search: no package's account reaches its files");
     sheetid_init();
     camkey_init();
     users_init();

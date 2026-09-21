@@ -373,11 +373,12 @@ SETTINGS_KEYS = (
     'cloud_hold_max_s', 'pulse_warn_threshold_bytes',
     'pulse_reject_threshold_bytes', 'lid_policy',
     'xy_microsteps',
-    'cloud_enabled', 'panel_open_reads',
+    'cloud_enabled', 'ext_enabled', 'panel_open_reads',
     'log_forgectrl_disk', 'log_forgectrl_remote',
     'log_grblhal_disk', 'log_grblhal_remote',
     'log_gfcloud_disk', 'log_gfcloud_remote',
     'log_gfhome_disk', 'log_gfhome_remote',
+    'log_forgeext_disk', 'log_forgeext_remote',
     'log_kernel_disk', 'log_kernel_remote',
     'log_system_disk', 'log_system_remote',
     'syslog_server', 'syslog_port', 'syslog_proto',
@@ -393,10 +394,11 @@ SETTING_CHOICES = {
     'lid_policy': ('cancel', 'hold'),
     'xy_microsteps': ('8', '16', '32'),
     'cloud_enabled': ('0', '1'),
+    'ext_enabled': ('0', '1'),
     'panel_open_reads': ('0', '1'),
     'syslog_proto': ('udp', 'tcp'),
 }
-LOGGERS = ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'kernel', 'system')
+LOGGERS = ('forgectrl', 'grblhal', 'gfcloud', 'gfhome', 'forgeext', 'kernel', 'system')
 LOG_LEVELS = ('off', 'error', 'warning', 'notice', 'info', 'debug')
 LOGS_ROOT = '/data/log/forgefirm'
 FAN_NAMES = ('exhaust', 'intake_1', 'intake_2', 'air_assist', 'purge')
@@ -436,6 +438,9 @@ MOCK_MANIFEST = ('PACKAGE NAME: forgectrl\nPACKAGE VERSION: 0.0.1\n'
                  'RECIPE NAME: grblhal-glowforge\nLICENSE: GPL-3.0-or-later\n\n')
 MOCK_CAMKEY = 'c0ffee00' * 4
 ADVISORY_DOCS = ('safety-and-risk', 'licenses', 'privacy', 'cloud-service')
+# Served like the others, and no part of first-run setup: accepted where
+# its feature is turned on (src/advisories.c, on_demand).
+ON_DEMAND_DOCS = ('extensions',)
 ADVISORY_META = {
     'safety-and-risk': ('Safety and risk', 'typed', 'I UNDERSTAND'),
     'licenses': ('Licenses and notices', 'check', None),
@@ -768,7 +773,7 @@ class Mock:
         # shows by default and the wizard on request.
         first = os.environ.get('GF_MOCK_FIRST_RUN') == '1'
         self.docs = {}
-        for d in ADVISORY_DOCS:
+        for d in ADVISORY_DOCS + ON_DEMAND_DOCS:
             try:
                 with open(os.path.join(ROOT, 'docs', 'advisories', d + '.md'),
                           'rb') as f:
@@ -780,6 +785,7 @@ class Mock:
                      'seq': 0, 'answer': None, 'error': '', 'aborted': False}
         self.wiz = {
             'accepted': set() if first else set(ADVISORY_DOCS),
+            'on_demand': {},        # document id -> the hash accepted where its feature went on
             'pressed': not first,
             'account': None if first else 'owner',
             'reset': False,
@@ -1191,7 +1197,9 @@ class Mock:
                                 'result': DARK_RESULTS.get(k, {}),
                                 'applied': DARK_APPLIED.get(k, {})}
                             for k, v in w['versions'].items()},
-                'flags': {k: {'level': lv, 'reason': rs} for k, (lv, rs) in w['flags'].items()}}
+                'flags': {k: {'level': lv, 'reason': rs} for k, (lv, rs) in w['flags'].items()},
+                **({'on_demand': {d: {'hash': h, 'accepted': '2026-09-06T19:10:00Z', 'method': 'typed'}
+                                  for d, h in w['on_demand'].items()}} if w['on_demand'] else {})}
 
     def wiz_record_html(self):
         """A stand-in for recordhtml.c: the same sections, plain."""
@@ -1776,6 +1784,8 @@ class Mock:
             d = form.get('doc')
             if d not in self.docs:
                 return J(400, {'error': 'unknown document'})
+            if d in ON_DEMAND_DOCS:
+                return J(400, {'error': 'this document is accepted where its feature is turned on'})
             if form.get('hash') != self.docs[d][1]:
                 return J(409, {'error': 'the document changed; read it again'})
             title, consent, phrase = ADVISORY_META[d]
@@ -2161,6 +2171,13 @@ class Mock:
             if form.get('cloud_enabled') == '1' and self.settings.get('cloud_enabled') != '1' \
                     and form.get('phrase') != 'I UNDERSTAND':
                 return T(400, 'type I UNDERSTAND to turn cloud mode on')
+            # ext_enabled is turned on over its own advisory: the hash of
+            # the text as it stands, and the typed phrase
+            if form.get('ext_enabled') == '1' and self.settings.get('ext_enabled') != '1':
+                if form.get('advisory') != self.docs['extensions'][1]:
+                    return T(409, 'read the Extensions advisory first: turning extensions on agrees to it')
+                if form.get('phrase') != 'I UNDERSTAND':
+                    return T(400, 'type I UNDERSTAND to turn extensions on')
             # A provider whose extension is off does not exist, and an
             # extension that goes off takes down what pointed at it
             # (src/builtin.c: the request's own enable counts).
@@ -2169,6 +2186,9 @@ class Mock:
                 for r in e['roles']:
                     if now != '1' and form.get(r['select_key']) == r['provider']:
                         return T(409, r['refusal'])
+            if form.get('ext_enabled') == '1' and self.settings.get('ext_enabled') != '1':
+                self.wiz['on_demand']['extensions'] = self.docs['extensions'][1]
+                self._log('settings: the Extensions advisory was accepted (typed)')
             for k in known:
                 self.settings[k] = form[k]
                 self._log('%s %s' % (k, 'cleared' if not form[k] else

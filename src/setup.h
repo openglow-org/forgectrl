@@ -67,6 +67,10 @@ int setup_override_active(void);
 int setup_advisory_accept(const char *doc_id, const char *hash,
                                 const char *method);
 int setup_acceptance_pressed(void);
+/* An on-demand document, accepted where its feature is turned on. It is
+ * recorded beside the first-run ones and leaves them, and the press that
+ * sealed them, as they are. */
+int setup_on_demand_accept(const char *doc_id, const char *hash, const char *method);
 int setup_set_account(const char *name, long uid);
 int setup_clear_account(void);
 int setup_set_machine(json_t *machine);   /* takes a reference */

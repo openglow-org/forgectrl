@@ -54,6 +54,22 @@ static void settings_dir_ready(const char *path)
     (void)mkdir(dir, 0755);
 }
 
+int settings_dir_searchable(void)
+{
+    char dir[300];
+    struct stat st;
+    snprintf(dir, sizeof(dir), "%s", settings_path());
+    char *slash = strrchr(dir, '/');
+    if (!slash || slash == dir)
+        return -1;
+    *slash = '\0';
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode))
+        return -1;
+    if ((st.st_mode & (S_IXGRP | S_IXOTH)) == (S_IXGRP | S_IXOTH))
+        return 0;
+    return chmod(dir, (st.st_mode & 07777) | S_IXGRP | S_IXOTH);
+}
+
 /* Parse "key = value" into trimmed pointers inside line (modified in
  * place). Returns 0 on a key/value line, -1 for comments/blank/other. */
 static int parse_line(char *line, char **key, char **val)
