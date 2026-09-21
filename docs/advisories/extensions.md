@@ -26,17 +26,19 @@ While a job is armed, every package is frozen. It does not run at all until the 
 
 The safeguards of the machine do not depend on any package. The lid, the interlock, the armed window and its button, the cooling gates, and the limits on motion work the same with extensions on. No capability reaches past them. The most a package can do to a job is hold it.
 
-A package that keeps ending is set aside until you look at it. Safe mode stops every package. To enter safe mode, turn extensions off, or make the file `/run/forgefirm/ext-safe` at the console.
+A package that keeps ending is set aside until you look at it. There are two ways to stop every package at once: turn extensions off in the settings, or make the file `/run/forgefirm/ext-safe` at the console, which is safe mode. Safe mode is the one to use when you want the setting left as it is.
 
 ## The risk
 
 A sandbox lowers the risk. It does not remove it. A flaw in the sandbox, in the kernel, or in this firmware could let a package do more than its capabilities say.
 
-Within its capabilities, a package can still do harm. A package that can read the machine's status can send it to the destination you allowed. A package that can use a camera can take pictures when the lid is closed and send them there. A package that can jog the head can move it while you are near it. A package that can run a program can start a job, and the job then waits for the button like any other job. Read the capabilities as a list of what you are trusting the author with.
+Within its capabilities, a package can still do harm. A package that can read the machine's status, or follow its events, can send what it learns to the destination you allowed: what you cut, when you cut it, and when you are at the machine. A package that can hold a job can stop you cutting, at any time and for its own reasons. A package that runs at all can use the machine's one processor and its storage.
+
+This firmware serves a small part of the capability list: reading the machine, following its events, and holding a job. The other names a package may ask for - the cameras, jogging the head, running a program, a tab of its own - are reserved and reach nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 
-Packages keep their own data on the machine, and that data can hold credentials for the services they talk to. Removing a package removes its data. The forgotten-password reset offers to remove every package and its data.
+Packages keep their own data on the machine, and that data can hold credentials for the services they talk to. Removing a package removes its data, unless you ask to keep it. Resetting your password does not touch packages, and neither does a factory return: to be rid of a package and its data, remove the package.
 
 If you report a problem with the machine, first see whether it happens in safe mode. The project cannot debug a machine that runs software it did not write.
 
