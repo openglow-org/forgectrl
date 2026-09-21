@@ -426,6 +426,21 @@ static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
         if (lamp < 0 || lamp > 1023)
             return reply_error(res, 400, "lamp must be 0..1023");
     }
+    /* background=1 marks a capture nobody is waiting for - a program's,
+     * not an operator's. It yields to a viewer rather than freezing one:
+     * a snapshot borrows the mux for a frame, and a stream stutters for
+     * a few seconds while it does. An operator's own snapshot is
+     * unmarked and still wins, as it always did. */
+    if ((v = u_map_get(req->map_url, "background")) != NULL) {
+        if (strcmp(v, "1") && strcmp(v, "0"))
+            return reply_error(res, 400, "background must be '0' or '1'");
+        if (!strcmp(v, "1")) {
+            struct cam_status st;
+            cam_get_status(&st);
+            if (st.clients > 0)
+                return reply_error(res, 409, CAM_ERR_WATCHED);
+        }
+    }
     return do_snapshot(cam, full, quality, lamp, res);
 }
 

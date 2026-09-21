@@ -37,6 +37,13 @@ typedef enum {
  * it, so it lives here rather than being spelled twice. */
 #define CAM_ERR_LID "lid is open: the cameras only capture with the lid closed"
 
+/* A snapshot nobody is waiting for is refused while somebody is watching.
+ * A snapshot borrows the mux for a frame and freezes a running stream for
+ * a few seconds, which is a fair price when an operator asked for the
+ * picture and no price at all worth paying when a program did. The
+ * refusal's words, matched by the callers that map them to a status. */
+#define CAM_ERR_WATCHED "somebody is watching a camera: a background capture waits until they stop"
+
 /* Read once at startup (env overrides): stream JPEG quality, lamp level,
  * stream FPS cap, and the encoder/buffer fallback switches. */
 void cam_engine_init(void);
