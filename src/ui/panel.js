@@ -402,6 +402,7 @@ function tab() {
   if (h === 'system') {
     loadSsh();
     loadExtensions();
+    loadExt();
     loadTokens();
     loadSetup();
   }

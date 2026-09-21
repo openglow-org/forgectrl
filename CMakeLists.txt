@@ -4,7 +4,7 @@ project(forgectrl C)
 set(CMAKE_C_STANDARD 11)
 
 # The pages are normal static files under src/ui/: the control panel
-# (index.html with theme.css, md.js, help.js, forms.js, panel.js), the
+# (index.html with theme.css, md.js, help.js, forms.js, ext.js, panel.js), the
 # setup wizard (wizard.html with wizard.css, md.js, wizard.js),
 # and the login page (login.html with login.js), all on Bootstrap in
 # vendor/. embed.cmake bundles each into one self-contained page, gzips
@@ -21,7 +21,7 @@ add_custom_command(
           -DOUT_HTML=${UI_OUT}/index.html
           -DOUT_C=${UI_OUT}/ui_blob.c -P ${UI_DIR}/embed.cmake
   DEPENDS ${UI_DIR}/index.html ${UI_DIR}/md.js ${UI_DIR}/help.js
-          ${UI_DIR}/forms.js ${UI_DIR}/panel.js ${UI_DIR}/regions.js
+          ${UI_DIR}/forms.js ${UI_DIR}/ext.js ${UI_DIR}/panel.js ${UI_DIR}/regions.js
           ${UI_COMMON}
   COMMENT "Bundling the control panel (src/ui -> index_html_gz[])"
   VERBATIM)

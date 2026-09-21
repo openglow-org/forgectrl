@@ -703,6 +703,71 @@
           <div id="extlist"></div>
         </div>
         <div class="card">
+          <h2>Extension packages<button class="hlp" data-help="extpkg" data-nolock="1" type="button">?</button></h2>
+          <div id="extpkgs"></div>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" id="extswitch" onclick="extSwitch()">Turn extensions on…</button
+            ><span class="msg" id="msg-ext"></span>
+          </div>
+          <div id="extadv" style="display: none">
+            <div class="alert alert-warning" style="margin: 0.5rem 0">
+              <div id="extadvtext" class="extadvdoc"></div>
+              <div class="btns">
+                <input
+                  class="form-control form-control-sm"
+                  id="extphrase"
+                  maxlength="40"
+                  placeholder="Type I UNDERSTAND"
+                  style="max-width: 14rem"
+                /><button class="btn btn-sm btn-primary" onclick="extTurnOn()">Turn extensions on</button
+                ><button class="btn btn-sm btn-outline-secondary" onclick="extCancelOn()">Cancel</button
+                ><span class="msg" id="msg-extadv"></span>
+              </div>
+            </div>
+          </div>
+          <div class="btns">
+            <input class="form-control form-control-sm" id="extfile" type="file" accept=".ffx" style="max-width: 18rem" /><button
+              class="btn btn-sm btn-outline-secondary"
+              onclick="extUpload()"
+            >
+              Upload a package</button
+            ><span class="msg" id="msg-extup"></span>
+          </div>
+          <div id="extstaged" style="display: none">
+            <div class="alert alert-secondary" style="margin: 0.5rem 0">
+              <div id="extstagedkv"></div>
+              <div id="extconsent-typed" style="display: none">
+                <p class="hint">
+                  A key you added to this machine signed this package, not OpenGlow. Nobody reviewed it.
+                </p>
+                <input
+                  class="form-control form-control-sm"
+                  id="extinstallphrase"
+                  maxlength="40"
+                  placeholder="Type I UNDERSTAND"
+                  style="max-width: 14rem"
+                />
+              </div>
+              <div id="extconsent-button" style="display: none">
+                <p class="hint">
+                  Nobody this machine trusts signed this package. <b>Hold the button on the machine</b> while
+                  you press Install, as you would for unsigned firmware.
+                </p>
+              </div>
+              <div class="btns">
+                <button class="btn btn-sm btn-primary" onclick="extInstall()">Install</button
+                ><button class="btn btn-sm btn-outline-secondary" onclick="extDiscard()">Discard</button
+                ><span class="msg" id="msg-extinstall"></span>
+              </div>
+            </div>
+          </div>
+          <p class="hint">
+            An extension package is software that is not part of ForgeFIRM. It runs in a sandbox, with only
+            what you grant it, and it is frozen while a job is armed. Turning extensions off, or safe mode,
+            stops every package at once.
+          </p>
+        </div>
+        <div class="card">
           <h2>API tokens<button class="hlp" data-help="tokens" data-nolock="1" type="button">?</button></h2>
           <div id="tokenlist"></div>
           <div id="tokennew" style="display: none"></div>
@@ -830,6 +895,7 @@
     <script src="md.js"></script>
     <script src="help.js"></script>
     <script src="forms.js"></script>
+    <script src="ext.js"></script>
     <script src="panel.js"></script>
   </body>
 </html>
