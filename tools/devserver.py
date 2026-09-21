@@ -700,6 +700,39 @@ def num(x):
     return int(x) if float(x) == int(x) else x
 
 
+MOCK_UI_ID = 'org.example.panel'
+MOCK_UI_HTML = """<!doctype html><title>Example</title>
+<style>body{font:14px system-ui;margin:12px}b{color:#036}</style>
+<h3>An example package's interface</h3>
+<p id="who">This page is a package's own, in a sandboxed frame.</p>
+<ul id="tries"></ul>
+<script>
+// What a hostile page would try. Each line reports what the frame is
+// actually allowed to do, so the isolation can be looked at and not
+// only argued about.
+var out = document.getElementById('tries');
+function say(what, how) {
+  var li = document.createElement('li');
+  li.textContent = what + ': ' + how;
+  out.appendChild(li);
+}
+try { say('same-origin', document.domain === null ? 'null' : String(document.domain)); }
+catch (e) { say('same-origin', 'refused (' + e.name + ')'); }
+try { say('cookies', document.cookie === '' ? 'none readable' : 'READ ' + document.cookie); }
+catch (e) { say('cookies', 'refused (' + e.name + ')'); }
+try { say('parent', String(window.parent.location.href)); }
+catch (e) { say('parent', 'refused (' + e.name + ')'); }
+try {
+  fetch('/settings').then(function (r) { say('fetch /settings', 'REACHED ' + r.status); })
+    .catch(function (e) { say('fetch /settings', 'refused (' + e.message + ')'); });
+} catch (e) { say('fetch /settings', 'refused (' + e.name + ')'); }
+try { top.location = 'https://example.test/'; say('top navigation', 'ALLOWED'); }
+catch (e) { say('top navigation', 'refused (' + e.name + ')'); }
+try { say('eval', String(eval('1+1'))); } catch (e) { say('eval', 'refused (' + e.name + ')'); }
+</script>
+"""
+
+
 class Mock:
     """In-memory stand-in for the daemon: every endpoint it registers,
     in the JSON shape it serves, so the JavaScript runs end to end.
@@ -888,6 +921,12 @@ class Mock:
              'package': {'id': 'org.example.badge', 'name': 'Badge reader', 'version': '0.3.1',
                          'description': 'Holds a job until a badge is read.', 'author': 'A maker', 'license': 'MIT',
                          'runtime': 'python', 'capabilities': ['hold', 'machine.read'], 'modes': ['grbl']}},
+            {'id': MOCK_UI_ID, 'version': '2.1.0', 'previous': '', 'tier': 'community',
+             'key': 'ab' * 32, 'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx2',
+             'package': {'id': MOCK_UI_ID, 'name': 'Example panel', 'version': '2.1.0',
+                         'description': 'A package with an interface of its own.', 'author': 'A maker',
+                         'license': 'MIT', 'runtime': 'ui', 'capabilities': ['ui', 'machine.read'],
+                         'modes': ['grbl', 'cloud']}},
         ]
         self.scoped_pass = False
         # The job runner's record (src/jobrun.c): a posted program plays
@@ -2047,6 +2086,14 @@ class Mock:
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
                 return J(200, self.ext_status_reply())
+            if path == '/ext/ui':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                pid = q.get('id') or ''
+                if pid != MOCK_UI_ID:
+                    return J(404, {'error': 'this package has no interface'})
+                return J(200, {'ok': True, 'id': pid, 'bytes': len(MOCK_UI_HTML),
+                               'html': MOCK_UI_HTML})
             if path == '/settings':
                 return J(200, self.settings_reply())
             if path == '/status':

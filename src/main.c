@@ -1163,6 +1163,29 @@ static int cb_ext_status(const struct _u_request *req, struct _u_response *res, 
     return U_CALLBACK_CONTINUE;
 }
 
+/* A package's interface, for the panel to put in a sandboxed frame.
+ * What comes back is JSON with the page as a string: this daemon never
+ * composes markup out of a package's file, and the panel is what builds
+ * the frame, with the policy as the document's first element. */
+static int cb_ext_ui(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!settings_get_bool("ext_enabled", 0))
+        return reply_error(res, 409, "extensions are off");
+    char why[300];
+    int status = 500;
+    char *doc = extpkg_ui_json(setting_param(req, "id"), &status, why, sizeof(why));
+    if (!doc)
+        return reply_error(res, (unsigned)status, why[0] ? why : "no interface");
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_ext_package(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -3145,6 +3168,7 @@ int main(int argc, char **argv)
         { "POST", "/tokens",               cb_tokens_create,    NULL, 0, NULL },
         { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },
         { "GET",  "/ext/status",           cb_ext_status,       NULL, 0, NULL },
+        { "GET",  "/ext/ui",               cb_ext_ui,           NULL, 0, NULL },
         { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },

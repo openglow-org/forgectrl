@@ -300,7 +300,16 @@ class MockTest(unittest.TestCase):
         self.assertEqual(set(doc), {'enabled', 'safe_mode', 'host', 'packages', 'keys'})
         for key in ('"enabled"', '"safe_mode"', '"host"', '"packages"', '"keys"', '"running"'):
             self.assertIn(key, src)
-        self.assertEqual([p['id'] for p in doc['packages']], ['org.openglow.notify', 'org.example.badge'])
+        self.assertEqual([p['id'] for p in doc['packages']],
+                         ['org.openglow.notify', 'org.example.badge', 'org.example.panel'])
+        # The one with an interface: the route serves it, and a package
+        # without one is a 404 rather than an empty page.
+        code, _h, body = self.call(m, 'GET', '/ext/ui', q={'id': 'org.example.panel'})
+        self.assertEqual(code, 200)
+        doc2 = json.loads(body)
+        self.assertTrue(doc2['ok'] and doc2['bytes'] > 0 and doc2['html'].startswith('<!doctype html>'))
+        code, _h, _b = self.call(m, 'GET', '/ext/ui', q={'id': 'org.example.badge'})
+        self.assertEqual(code, 404)
         for form, want in (({'id': 'org.example.badge', 'action': 'install'}, 400), ({'id': 'badge', 'action': 'enable'}, 400),
                            ({'id': 'org.example;x', 'action': 'enable'}, 400), ({'id': 'org.example.none', 'action': 'enable'}, 409),
                            ({'id': 'org.openglow.notify', 'action': 'hold-required'}, 409)):
@@ -310,11 +319,12 @@ class MockTest(unittest.TestCase):
             self.assertIn(words.decode(), src)
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'hold-required'})
         self.assertEqual(code, 200)
-        self.assertEqual([p.get('hold') for p in json.loads(body)['packages']], [None, 'required'])
+        self.assertEqual([p.get('hold') for p in json.loads(body)['packages']], [None, 'required', None])
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'disable'})
-        self.assertEqual([p['enabled'] for p in json.loads(body)['packages']], [True, False])
+        self.assertEqual([p['enabled'] for p in json.loads(body)['packages']], [True, False, True])
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'remove'})
-        self.assertEqual([p['id'] for p in json.loads(body)['packages']], ['org.openglow.notify'])
+        self.assertEqual([p['id'] for p in json.loads(body)['packages']],
+                         ['org.openglow.notify', 'org.example.panel'])
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.openglow.notify', 'action': 'disable'}, token=False)
         self.assertEqual(code, 403)
 

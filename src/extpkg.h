@@ -71,6 +71,12 @@ void extpkg_stage_discard(void);
  * cannot be asked (502). */
 char *extpkg_inspect_json(int *status, char *why, size_t wlen);
 
+/* A package's interface, as the host reads it out of the installed
+ * package: the JSON the panel is given, or NULL with the status and the
+ * words. The page is never markup this daemon composes - it goes to the
+ * panel as a JSON string, and the panel is what puts it in a frame. */
+char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen);
+
 /* Install the staged archive. grants is a comma-separated list of
  * capabilities the operator grants (or NULL). 0 when installed (the staged
  * file is removed). Otherwise the status (400 for a request with no such

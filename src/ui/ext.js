@@ -100,6 +100,7 @@ function renderExt(j) {
       caps.push(
         extCap(m.capabilities[c]) + ((p.grants || []).indexOf(m.capabilities[c]) >= 0 ? " <span class='hint'>(granted by you)</span>" : '')
       );
+    var hasUi = (m.capabilities || []).indexOf('ui') >= 0;
     g += kv(
       m.name || p.id,
       extTier(p.tier) +
@@ -108,6 +109,9 @@ function renderExt(j) {
         ' ' +
         esc(p.version) +
         '</span>' +
+        (hasUi && p.enabled
+          ? " <button type='button' class='extui' data-id='" + esc(p.id) + "'>Open</button>"
+          : '') +
         (m.author ? ', by ' + esc(m.author) : '') +
         '<br>' +
         extStateOf(j, p) +
@@ -185,9 +189,75 @@ function extKeyRemove(name) {
       extSay('msg-extkey', String(e));
     });
 }
+/* A package's interface renders in a frame that can reach nothing: no
+ * same-origin, so it holds no session and no token; and a policy carried
+ * as the document's own first element, because the sandbox attribute
+ * alone does not stop a page fetching the network. The panel draws the
+ * label above it - the frame cannot, and a package must not be able to
+ * claim a name or a tier that is not its own. */
+var EXT_FRAME_POLICY =
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+  "img-src blob: data:; connect-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'";
+
+function extFrameDoc(html) {
+  /* The policy goes first, before anything the package wrote, so that it
+   * governs the whole document. A package may add its own policy after
+   * it and only make it stricter. */
+  return '<meta http-equiv="Content-Security-Policy" content="' + EXT_FRAME_POLICY + '">' + html;
+}
+
+function extOpenUi(id) {
+  var host = $('extframe');
+  if (!host) return;
+  host.innerHTML = "<p class='hint'>Loading the interface...</p>";
+  fx('/ext/ui?id=' + encodeURIComponent(id))
+    .then(extAnswer)
+    .then(function (j) {
+      var pkg = extFrameOwner(id),
+        f = document.createElement('iframe');
+      host.innerHTML = '';
+      /* The label is the panel's, above the frame and outside it. */
+      var label = document.createElement('div');
+      label.className = 'extframe-label';
+      /* The name and the tier are the panel's own knowledge of the
+       * package. When it has none - the list has not loaded - the label
+       * says the id and nothing it cannot stand behind. */
+      label.innerHTML =
+        '<b>' + esc(pkg.name || id) + '</b> ' +
+        (pkg.tier ? extTier(pkg.tier) + ' ' : '') +
+        "<span class='mono'>" + esc(id) + "</span>" +
+        " <button type='button' class='extframeclose'>Close</button>";
+      host.appendChild(label);
+      /* No allow-same-origin: with it the frame would hold the panel's
+       * session and the rest of this would be decoration. */
+      f.setAttribute('sandbox', 'allow-scripts');
+      f.setAttribute('referrerpolicy', 'no-referrer');
+      f.className = 'extframe';
+      f.srcdoc = extFrameDoc(j.html || '');
+      host.appendChild(f);
+    })
+    .catch(function (e) {
+      host.innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
+    });
+}
+
+/* What the panel knows of the package, for the label it draws. */
+var EXT_LAST = { packages: [] };
+function extFrameOwner(id) {
+  var list = EXT_LAST.packages || [],
+    i;
+  for (i = 0; i < list.length; i++)
+    if (list[i].id === id) return { name: (list[i].package || {}).name, tier: list[i].tier };
+  return {};
+}
+
 function loadExt() {
   fx('/ext/status')
     .then(extAnswer)
+    .then(function (j) {
+      EXT_LAST = j;
+      return j;
+    })
     .then(renderExt)
     .catch(function (e) {
       $('extpkgs').innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
@@ -358,6 +428,12 @@ document.addEventListener('click', function (ev) {
   if (b) extAct(b.getAttribute('data-id'), b.getAttribute('data-action'));
   var k = ev.target.closest('.extkeyrm');
   if (k) extKeyRemove(k.getAttribute('data-name'));
+  var u = ev.target.closest('.extui');
+  if (u) extOpenUi(u.getAttribute('data-id'));
+  if (ev.target.closest('.extframeclose')) {
+    var h = $('extframe');
+    if (h) h.innerHTML = '';
+  }
 });
 document.addEventListener('change', function (ev) {
   var s = ev.target;
