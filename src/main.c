@@ -1162,6 +1162,140 @@ static int cb_ext_package(const struct _u_request *req, struct _u_response *res,
     return cb_ext_status(req, res, NULL);
 }
 
+/* Installing a package: the archive is staged by the file sink, the host
+ * says what it is, and the install carries the grants and the consent its
+ * tier takes (extpkg.h). One upload at a time; one whose sender went away
+ * is abandoned after a minute. The staging write is gated as the firmware
+ * upload's is: the machine idle and no lease in the way. */
+static pthread_mutex_t extup_mu = PTHREAD_MUTEX_INITIALIZER;
+static FILE *extup_fp;
+static const struct _u_request *extup_owner;
+static uint64_t extup_bytes;
+static int extup_error;
+static time_t extup_last;
+static char extup_refusal[96];
+
+static int ext_upload_sink(const struct _u_request *req, const char *data, uint64_t off, size_t size)
+{
+    if (!req->http_url || strncmp(req->http_url, "/ext/upload", 11) != 0 ||
+        (req->http_url[11] != '\0' && req->http_url[11] != '?'))
+        return 0;                       /* not ours */
+    if (!auth_write_permitted(req))
+        return 1;                       /* unauthorized bytes touch nothing; the handler answers them */
+    pthread_mutex_lock(&extup_mu);
+    if (off == 0) {
+        if (extup_fp && extup_owner != req && time(NULL) - extup_last < 60) {
+            pthread_mutex_unlock(&extup_mu);
+            return 1;                   /* the handler reports the refusal */
+        }
+        if (extup_fp) {
+            fclose(extup_fp);
+            extup_fp = NULL;
+        }
+        extup_owner = req;
+        extup_refusal[0] = '\0';
+        extup_bytes = 0;
+        if (lease_refusal(extup_refusal, sizeof(extup_refusal)))
+            ;                           /* the holder, in words */
+        else if (!machine_is_idle())
+            snprintf(extup_refusal, sizeof(extup_refusal), "the machine is not idle");
+        if (!extup_refusal[0]) {
+            char dir[300];
+            snprintf(dir, sizeof(dir), "%s", extpkg_stage_path());
+            char *slash = strrchr(dir, '/');
+            if (slash && slash != dir) {
+                *slash = '\0';
+                (void)mkdir(dir, 0700);
+            }
+            extup_fp = fopen(extpkg_stage_path(), "wb");
+            if (!extup_fp)
+                snprintf(extup_refusal, sizeof(extup_refusal), "cannot open the staging file");
+        }
+        extup_error = extup_refusal[0] != '\0';
+    }
+    if (extup_fp && extup_owner == req && !extup_error) {
+        extup_last = time(NULL);
+        if (extup_bytes + size > EXTPKG_UPLOAD_MAX) {
+            extup_error = 1;
+            snprintf(extup_refusal, sizeof(extup_refusal), "the archive exceeds the size limit");
+        } else if (size && fwrite(data, 1, size, extup_fp) != size) {
+            extup_error = 1;
+            snprintf(extup_refusal, sizeof(extup_refusal), "writing the staging file failed");
+        } else {
+            extup_bytes += size;
+        }
+    }
+    pthread_mutex_unlock(&extup_mu);
+    return 1;
+}
+
+static int cb_ext_upload(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    pthread_mutex_lock(&extup_mu);
+    if (extup_fp && extup_owner != req) {
+        pthread_mutex_unlock(&extup_mu);
+        return reply_error(res, 409, "another upload is in progress");
+    }
+    if (extup_fp) {
+        fclose(extup_fp);
+        extup_fp = NULL;
+    }
+    int mine = extup_owner == req, err = extup_error;
+    uint64_t bytes = mine ? extup_bytes : 0;
+    char why[300];
+    snprintf(why, sizeof(why), "%s", mine && extup_refusal[0] ? extup_refusal : "no file data received");
+    extup_owner = NULL;
+    pthread_mutex_unlock(&extup_mu);
+    if (!mine || err || bytes == 0) {
+        if (mine)
+            extpkg_stage_discard();
+        return reply_error(res, err && strstr(why, "idle") ? 409 : 400, why);
+    }
+    int status;
+    char *doc = extpkg_inspect_json(&status, why, sizeof(why));
+    if (!doc)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: a package archive of %llu bytes is staged", (unsigned long long)bytes);
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_ext_install(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char why[300];
+    int status;
+    if (lease_refusal(why, sizeof(why)))
+        return reply_error(res, 409, why);
+    if (!machine_is_idle())
+        return reply_error(res, 409, "the machine is not idle");
+    if (extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), operator_present(), &status, why,
+                       sizeof(why)) != 0)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: a package was installed (by the operator, through the panel; grants: %s)",
+          setting_param(req, "grants") ? setting_param(req, "grants") : "none");
+    return cb_ext_status(req, res, NULL);
+}
+
+static int cb_ext_upload_discard(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    extpkg_stage_discard();
+    ulfius_set_string_body_response(res, 200, "{\"discarded\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 /* The one file sink the framework has: every multipart file part of
  * every request lands here, and each owner knows its own route. */
 static int upload_sink(const struct _u_request *req, const char *key, const char *filename,
@@ -1169,6 +1303,8 @@ static int upload_sink(const struct _u_request *req, const char *key, const char
                        const char *data, uint64_t off, size_t size, void *user_data)
 {
     if (jobpost_sink(req, key, data, off, size))
+        return U_OK;
+    if (ext_upload_sink(req, data, off, size))
         return U_OK;
     return update_upload_sink(req, key, filename, content_type, transfer_encoding,
                               data, off, size, user_data);
@@ -2953,6 +3089,9 @@ int main(int argc, char **argv)
         { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },
         { "GET",  "/ext/status",           cb_ext_status,       NULL, 0, NULL },
         { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
+        { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
+        { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },
+        { "POST", "/ext/install",          cb_ext_install,      NULL, 0, NULL },
         { "POST", "/job/abort",            cb_job_abort,        NULL, 0, "motion.job" },
         { "POST", "/settings",             cb_settings_post,    NULL, 0, NULL },
         { "GET",  "/status",               cb_machine_status,   NULL, 1, "machine.read" },

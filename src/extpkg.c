@@ -48,11 +48,11 @@ static double mono(void)
 
 int extpkg_cli(const char *const argv_in[], char **out)
 {
-    const char *argv[16];
+    const char *argv[32];
     int n = 0, pfd[2];
     *out = NULL;
     argv[n++] = bin();
-    for (int i = 0; argv_in[i] && n < 15; i++)
+    for (int i = 0; argv_in[i] && n < 31; i++)
         argv[n++] = argv_in[i];
     argv[n] = NULL;
     if (pipe2(pfd, O_CLOEXEC) != 0)
@@ -206,4 +206,162 @@ int extpkg_action(const char *id, const char *action, int *status, char *why, si
     }
     snprintf(why, wlen, "action is enable, disable, remove, remove-keep-data, hold-required, or hold-advisory");
     return -1;
+}
+
+/* ---- installing ------------------------------------------------------------------ */
+
+const char *extpkg_stage_path(void)
+{
+    const char *v = getenv("FORGECTRL_EXT_STAGE");      /* a test's staging file */
+    return v && v[0] ? v : EXTPKG_STAGE_DEFAULT;
+}
+
+void extpkg_stage_discard(void)
+{
+    unlink(extpkg_stage_path());
+}
+
+/* The host's inspect of the staged file: the JSON object, or NULL with the
+ * status and the words. */
+static json_t *inspect(int *status, char *why, size_t wlen)
+{
+    const char *argv[] = { "inspect", extpkg_stage_path(), NULL };
+    char *text = NULL;
+    if (access(extpkg_stage_path(), R_OK) != 0) {
+        *status = 409;
+        snprintf(why, wlen, "no package is staged: upload one first");
+        return NULL;
+    }
+    int rc = extpkg_cli(argv, &text);
+    json_t *j = text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's command line does not answer");
+        return NULL;
+    }
+    if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        *status = 400;
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused the archive");
+        json_decref(j);
+        extpkg_stage_discard();                         /* what the host will not take is not kept */
+        return NULL;
+    }
+    return j;
+}
+
+/* What installing a package of this tier takes beyond the login. A tier the
+ * relay does not know takes the most. */
+static const char *consent_of(const json_t *inspected)
+{
+    const char *tier = json_string_value(json_object_get(inspected, "tier"));
+    if (tier && !strcmp(tier, "official"))
+        return "login";
+    if (tier && !strcmp(tier, "community"))
+        return "typed";
+    return "button";
+}
+
+char *extpkg_inspect_json(int *status, char *why, size_t wlen)
+{
+    json_t *j = inspect(status, why, wlen);
+    if (!j)
+        return NULL;
+    json_object_set_new(j, "consent", json_string(consent_of(j)));
+    char *doc = json_dumps(j, JSON_COMPACT);
+    json_decref(j);
+    if (!doc) {
+        *status = 500;
+        snprintf(why, wlen, "out of memory");
+    } else {
+        *status = 200;
+    }
+    return doc;
+}
+
+static int grant_ok(const char *g, size_t n)
+{
+    if (n < 1 || n > 40)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((g[i] >= 'a' && g[i] <= 'z') || g[i] == '_' || g[i] == '.'))
+            return 0;
+    return 1;
+}
+
+int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen)
+{
+    static char held[EXTPKG_GRANTS_MAX][44];
+    const char *argv[8 + 2 * EXTPKG_GRANTS_MAX];
+    int n = 0, ng = 0;
+
+    /* The grants, in the form of capability names, before anything runs. */
+    *status = 400;
+    for (const char *p = grants; p && *p;) {
+        size_t len = strcspn(p, ",");
+        if (ng >= EXTPKG_GRANTS_MAX || !grant_ok(p, len)) {
+            snprintf(why, wlen, "grants is a comma-separated list of at most %d capability names", EXTPKG_GRANTS_MAX);
+            return -1;
+        }
+        snprintf(held[ng++], sizeof(held[0]), "%.*s", (int)len, p);
+        p += len + (p[len] == ',');
+    }
+
+    /* What the staged file is, from the host and not from the request. */
+    json_t *j = inspect(status, why, wlen);
+    if (!j)
+        return -1;
+    const char *consent = consent_of(j);
+    const char *flag = NULL;
+    if (!strcmp(consent, "typed")) {
+        if (!phrase || strcmp(phrase, EXTPKG_PHRASE) != 0) {
+            json_decref(j);
+            *status = 400;
+            snprintf(why, wlen, "this package is signed by a key you added, not by OpenGlow: type " EXTPKG_PHRASE " to install it");
+            return -1;
+        }
+        flag = "--consent-community";
+    } else if (!strcmp(consent, "button")) {
+        if (!button_held) {
+            json_decref(j);
+            *status = 409;
+            snprintf(why, wlen, "nobody the machine trusts signed this package: hold the machine's button while you install it");
+            return -1;
+        }
+        flag = "--consent-unverified";
+    }
+    json_decref(j);
+
+    argv[n++] = "install";
+    argv[n++] = extpkg_stage_path();
+    for (int i = 0; i < ng; i++) {
+        argv[n++] = "--grant";
+        argv[n++] = held[i];
+    }
+    if (flag)
+        argv[n++] = flag;
+    argv[n] = NULL;
+    char *text = NULL;
+    int rc = extpkg_cli(argv, &text);
+    j = text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's command line does not answer");
+        return -1;
+    }
+    if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        *status = 409;
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        return -1;
+    }
+    json_decref(j);
+    extpkg_stage_discard();
+    *status = 200;
+    return 0;
 }

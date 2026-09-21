@@ -318,6 +318,39 @@ class MockTest(unittest.TestCase):
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.openglow.notify', 'action': 'disable'}, token=False)
         self.assertEqual(code, 403)
 
+    def test_ext_install_matches_extpkg_c(self):
+        # as extpkg.c and main.c rule it: upload, the host's inspect with the
+        # consent its tier takes, then the install with the grants and the
+        # consent; the tier is never the request's to say
+        src = read('src/extpkg.c')
+        m = self.mock()
+        code, hdrs, body = self.call(m, 'POST', '/ext/install', {'phrase': 'I UNDERSTAND', 'grants': 'hold'})
+        self.assertEqual((code, body), (409, b'no package is staged: upload one first'))
+        self.assertIn(body.decode(), src)
+        code, hdrs, body = self.call(m, 'POST', '/ext/upload', body=b'')
+        self.assertEqual(code, 400)
+        code, hdrs, body = self.call(m, 'POST', '/ext/upload', body=b'an archive')
+        doc = json.loads(body)
+        self.assertEqual((code, doc['tier'], doc['consent'], doc['needs_grant']), (200, 'community', 'typed', ['hold']))
+        for word in ('"consent"', '"login"', '"typed"', '"button"'):
+            self.assertIn(word, src)
+        for form, want in (({'grants': 'hold'}, 400), ({'grants': 'hold', 'phrase': 'i understand'}, 400),
+                           ({'phrase': 'I UNDERSTAND'}, 409), ({'phrase': 'I UNDERSTAND', 'grants': 'hold;reboot'}, 400),
+                           ({'phrase': 'I UNDERSTAND', 'grants': 'a,b,c,d,e,f,g,h,i'}, 400)):
+            code, hdrs, body = self.call(m, 'POST', '/ext/install', form)
+            self.assertEqual(code, want, form)
+        self.assertIn('type " EXTPKG_PHRASE " to install it', src)
+        self.assertIn('grants is a comma-separated list of at most %d capability names', src)
+        code, hdrs, body = self.call(m, 'POST', '/ext/install', {'phrase': 'I UNDERSTAND', 'grants': 'hold'})
+        self.assertEqual(code, 200)
+        self.assertIn('org.example.filter', [p['id'] for p in json.loads(body)['packages']])
+        code, hdrs, body = self.call(m, 'POST', '/ext/install', {'phrase': 'I UNDERSTAND', 'grants': 'hold'})
+        self.assertEqual(code, 409)                 # the staged file went with the install
+        code, hdrs, body = self.call(m, 'POST', '/ext/upload/discard')
+        self.assertEqual((code, json.loads(body)), (200, {'discarded': True}))
+        code, hdrs, body = self.call(m, 'POST', '/ext/upload', body=b'an archive', token=False)
+        self.assertEqual(code, 403)
+
     # -- the mode vocabulary
     def test_mode_matches_super_c(self):
         src = read('src/super.c')

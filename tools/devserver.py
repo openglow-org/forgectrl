@@ -1529,6 +1529,43 @@ class Mock:
         return None
 
     EXT_ACTIONS = ('enable', 'disable', 'remove', 'remove-keep-data', 'hold-required', 'hold-advisory')
+    # What an upload to the mock is: a package a person signed with a key the owner added, which wants a hold.
+    EXT_UPLOAD = {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0',
+                  'description': 'Holds a job when the filter is spent.', 'author': 'A maker', 'license': 'MIT',
+                  'runtime': 'python', 'capabilities': ['hold', 'machine.read', 'storage:4'], 'modes': ['grbl', 'cloud']}
+
+    def ext_upload_post(self, body, J, T):
+        if self.lease_refusal():
+            return T(409, self.lease_refusal())
+        if not self.idle():
+            return T(409, 'the machine is not idle')
+        if not body:
+            return T(400, 'no file data received')
+        self.ext_staged = True
+        return J(200, {'ok': True, 'package': self.EXT_UPLOAD, 'tier': 'community', 'key': 'ab' * 32, 'files': 6,
+                       'bytes': len(body), 'update': False, 'downgrade': False, 'from_version': '',
+                       'needs_grant': ['hold'], 'new_capabilities': self.EXT_UPLOAD['capabilities'], 'consent': 'typed'})
+
+    def ext_install_post(self, form, J, T):
+        if self.lease_refusal():
+            return T(409, self.lease_refusal())
+        if not self.idle():
+            return T(409, 'the machine is not idle')
+        grants = [g for g in form.get('grants', '').split(',')] if form.get('grants') else []
+        if len(grants) > 8 or not all(re.fullmatch(r'[a-z_.]{1,40}', g) for g in grants):
+            return T(400, 'grants is a comma-separated list of at most 8 capability names')
+        if not getattr(self, 'ext_staged', False):
+            return T(409, 'no package is staged: upload one first')
+        if form.get('phrase') != 'I UNDERSTAND':
+            return T(400, 'this package is signed by a key you added, not by OpenGlow: type I UNDERSTAND to install it')
+        if grants != ['hold']:
+            return T(409, 'only the operator grants: hold' if not grants else 'a grant it does not ask for: %s' % grants[0])
+        self.ext_staged = False
+        self.ext_packages.append({'id': self.EXT_UPLOAD['id'], 'version': self.EXT_UPLOAD['version'], 'previous': '',
+                                  'tier': 'community', 'key': 'ab' * 32, 'enabled': True, 'quarantined': False,
+                                  'grants': ['hold'], 'hold': 'advisory', 'account': 'ffx2', 'package': self.EXT_UPLOAD})
+        self._log('ext: a package was installed (by the operator, through the panel; grants: hold)')
+        return J(200, self.ext_status_reply())
 
     def ext_status_reply(self):
         on = self.settings.get('ext_enabled') == '1'
@@ -2322,6 +2359,13 @@ class Mock:
             return self.tokens_post(path, form, J, T)
         if path == '/ext/package':
             return self.ext_package_post(form, J, T)
+        if path == '/ext/upload':
+            return self.ext_upload_post(body, J, T)
+        if path == '/ext/upload/discard':
+            self.ext_staged = False
+            return J(200, {'discarded': True})
+        if path == '/ext/install':
+            return self.ext_install_post(form, J, T)
         if path == '/job':
             return self.job_post(headers, body, J, T)
         if path == '/job/abort':

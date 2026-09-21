@@ -134,6 +134,93 @@ int main(void)
     json_decref(j);
     free(doc);
 
+    /* Installing: the tier is the host's to say, and the consent is forgectrl's to take. */
+    char stage[300];
+    snprintf(stage, sizeof(stage), "%s/upload.ffx", dir);
+    setenv("FORGECTRL_EXT_STAGE", stage, 1);
+    host_says("echo '{\"ok\": true}'");
+    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 409 && strstr(why, "staged") && !ran()[0],
+          "nothing staged: %d %s, ran [%s]", status, why, ran());
+    CHECK(extpkg_inspect_json(&status, why, sizeof(why)) == NULL && status == 409, "inspect with nothing staged: %d", status);
+
+    static const struct { const char *tier, *consent; } tiers[] = {
+        { "official", "login" }, { "community", "typed" }, { "unverified", "button" }, { "something-new", "button" },
+    };
+    for (size_t i = 0; i < sizeof(tiers) / sizeof(tiers[0]); i++) {
+        char says[300];
+        write_file(stage, "an archive", 0600);
+        snprintf(says, sizeof(says), "echo '{\"ok\": true, \"tier\": \"%s\", \"needs_grant\": [\"hold\"]}'", tiers[i].tier);
+        host_says(says);
+        doc = extpkg_inspect_json(&status, why, sizeof(why));
+        j = doc ? json_loads(doc, 0, NULL) : NULL;
+        char want[340];
+        snprintf(want, sizeof(want), "inspect\n%s\n", stage);
+        CHECK(j && status == 200 && !strcmp(json_string_value(json_object_get(j, "consent")), tiers[i].consent) &&
+              !strcmp(ran(), want), "tier %s asks for %s: %s, ran [%s]", tiers[i].tier, tiers[i].consent, doc ? doc : why, ran());
+        json_decref(j);
+        free(doc);
+    }
+
+    /* An archive the host will not take is not kept. */
+    write_file(stage, "an archive", 0600);
+    host_says("echo '{\"ok\": false, \"error\": \"this archive is firmware, not an extension package\"}'; exit 1");
+    CHECK(extpkg_inspect_json(&status, why, sizeof(why)) == NULL && status == 400 && strstr(why, "firmware") &&
+          access(stage, F_OK) != 0, "a refused archive: %d %s, staged file %s", status, why, access(stage, F_OK) ? "gone" : "kept");
+
+    /* The stand-in answers inspect with a tier and records what install was run with. */
+    char script[1200];
+#define HOST_TIER(tier) do { \
+    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"" tier "\"}'; exit 0; fi\n" \
+             "for a in \"$@\"; do echo \"$a\"; done > %s.install\necho '{\"ok\": true}'", args_file); \
+    host_says(script); \
+    write_file(stage, "an archive", 0600); \
+    snprintf(script, sizeof(script), "%s.install", args_file); \
+    unlink(script); } while (0)
+#define INSTALL_RAN() ({ static char t[1024]; char pth[340]; snprintf(pth, sizeof(pth), "%s.install", args_file); \
+    FILE *f = fopen(pth, "r"); size_t n = f ? fread(t, 1, sizeof(t) - 1, f) : 0; if (f) fclose(f); t[n] = 0; t; })
+    char expect[400];
+
+    HOST_TIER("official");
+    CHECK(extpkg_install("hold,job_time.run", NULL, 0, &status, why, sizeof(why)) == 0 && status == 200, "official: %d %s", status, why);
+    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--grant\njob_time.run\n", stage);
+    CHECK(!strcmp(INSTALL_RAN(), expect) && access(stage, F_OK) != 0, "official: the login is enough, the grants go on, no consent "
+          "flag, the staged file gone: [%s]", INSTALL_RAN());
+
+    HOST_TIER("community");
+    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, EXTPKG_PHRASE) &&
+          !INSTALL_RAN()[0] && access(stage, F_OK) == 0, "community without the phrase: %d, ran [%s]", status, INSTALL_RAN());
+    CHECK(extpkg_install(NULL, "i understand", 1, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
+          "community with the phrase in another case: %d", status);
+    CHECK(extpkg_install("", EXTPKG_PHRASE, 0, &status, why, sizeof(why)) == 0, "community with the phrase: %d %s", status, why);
+    snprintf(expect, sizeof(expect), "install\n%s\n--consent-community\n", stage);
+    CHECK(!strcmp(INSTALL_RAN(), expect), "community: the host is told of the consent forgectrl took: [%s]", INSTALL_RAN());
+
+    HOST_TIER("unverified");
+    CHECK(extpkg_install(NULL, EXTPKG_PHRASE, 0, &status, why, sizeof(why)) != 0 && status == 409 && strstr(why, "button") &&
+          !INSTALL_RAN()[0] && access(stage, F_OK) == 0, "unverified without the button (the phrase is no substitute): %d, ran [%s]",
+          status, INSTALL_RAN());
+    CHECK(extpkg_install("hold", NULL, 1, &status, why, sizeof(why)) == 0, "unverified with the button held: %d %s", status, why);
+    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--consent-unverified\n", stage);
+    CHECK(!strcmp(INSTALL_RAN(), expect), "unverified: [%s]", INSTALL_RAN());
+
+    /* Grants that have not the form of capability names run nothing. */
+    HOST_TIER("official");
+    static const char *const bad_grants[] = { "hold;reboot", "--consent-unverified", "hold,,job_time.run", "HOLD", "hold job",
+                                              "a,b,c,d,e,f,g,h,i", "net.outbound:evil.example:443" };
+    for (size_t i = 0; i < sizeof(bad_grants) / sizeof(bad_grants[0]); i++)
+        CHECK(extpkg_install(bad_grants[i], NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
+              "grants \"%s\": %d, ran [%s]", bad_grants[i], status, INSTALL_RAN());
+
+    /* The host's refusal of the install, in its words; the staged file stays for another try. */
+    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"official\"}'; exit 0; fi\n"
+             "echo '{\"ok\": false, \"error\": \"only the operator grants: hold\"}'; exit 1");
+    host_says(script);
+    write_file(stage, "an archive", 0600);
+    CHECK(extpkg_install(NULL, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 && strstr(why, "only the operator grants") &&
+          access(stage, F_OK) == 0, "the host's refusal: %d %s", status, why);
+    extpkg_stage_discard();
+    CHECK(access(stage, F_OK) != 0, "discard left the staged file");
+
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0)

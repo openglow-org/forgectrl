@@ -23,6 +23,10 @@
 #define EXTPKG_BIN_DEFAULT      "/usr/bin/forgeext"
 #define EXTPKG_STATUS_FILE      "/run/forgefirm/ext/status.json"
 #define EXTPKG_SAFE_FILE        "/run/forgefirm/ext-safe"
+#define EXTPKG_STAGE_DEFAULT    "/data/forgefirm/tmp/ext-upload.ffx"
+#define EXTPKG_UPLOAD_MAX       (32UL * 1024 * 1024)    /* the host takes no larger archive */
+#define EXTPKG_PHRASE           "I UNDERSTAND"
+#define EXTPKG_GRANTS_MAX       8
 #define EXTPKG_OUT_MAX          (256 * 1024)
 #define EXTPKG_TIMEOUT_S        60
 
@@ -45,5 +49,33 @@ char *extpkg_status_json(int ext_enabled);
  * status to refuse with (400 for a request that has no such form, 409 for
  * the host's refusal, 502 when the host cannot be asked) and the words. */
 int extpkg_action(const char *id, const char *action, int *status, char *why, size_t wlen);
+
+/* Installing, in two requests. The archive is uploaded to one staging
+ * file and the host is asked what it is (inspect changes nothing): the
+ * answer goes to the operator with the consent its tier takes. Then the
+ * install names the grants and carries the consent, and forgectrl asks the
+ * host again what the staged file is, because the tier is never the
+ * client's to say:
+ *
+ *   official      the login
+ *   community     the login and the typed phrase
+ *   unverified    the login and the machine's button held, as for unsigned firmware
+ */
+const char *extpkg_stage_path(void);
+void extpkg_stage_discard(void);
+
+/* The host's inspect of the staged archive with "consent" added ("login",
+ * "typed", "button"), malloc'd; NULL with the status and the words when
+ * the host refuses the archive (400, and the staged file is removed) or
+ * cannot be asked (502). */
+char *extpkg_inspect_json(int *status, char *why, size_t wlen);
+
+/* Install the staged archive. grants is a comma-separated list of
+ * capabilities the operator grants (or NULL). 0 when installed (the staged
+ * file is removed). Otherwise the status (400 for a request with no such
+ * form or a missing consent, 409 for the host's refusal and for a button
+ * that is not held, 502) and the words; the staged file stays for another
+ * try. */
+int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen);
 
 #endif
