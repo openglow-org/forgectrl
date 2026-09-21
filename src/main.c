@@ -3065,6 +3065,13 @@ int main(int argc, char **argv)
 
     auth_init();
     tokens_init();
+    {
+        /* The extension host's credential, minted fresh for this run of
+         * the daemon: the host reads it from a file only root can. */
+        char terr[200];
+        if (tokens_host_mint(terr, sizeof(terr)) != 0)
+            fflog(LOG_WARNING, "the extension host's credential was not made: %s", terr);
+    }
     advisories_init();
     if (settings_get_bool("ext_enabled", 0) && settings_dir_searchable() != 0)
         fflog(LOG_WARNING, "the data directory cannot be opened for search: no package's account reaches its files");

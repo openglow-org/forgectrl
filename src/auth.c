@@ -346,6 +346,19 @@ static int scoped_judge(const struct _u_request *req, const char *cap, int plain
         snprintf(need, sizeof(need), "camera.%s", cam && !strcmp(cam, "head") ? "head" : "lid");
         cap = need;
     }
+    /* The extension host's own credential is judged first and on the
+     * same terms: it is a scoped credential that holds only what the
+     * host may relay, and it is accepted from a loopback peer alone -
+     * it never leaves this machine, so a presentation from anywhere
+     * else is not the host. */
+    if (tokens_host_check(tok, cap)) {
+        if (!peer_is_loopback(req->client_address)) {
+            fflog(LOG_WARNING, "auth: the extension host's credential was presented from off the machine");
+            snprintf(why, len, "that credential is not accepted from here");
+            return 0;
+        }
+        return 1;
+    }
     int rc = tokens_check(tok, cap, id);
     if (rc < 0) {
         snprintf(why, len, "authentication required");

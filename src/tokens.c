@@ -19,6 +19,7 @@
 #include "sha256.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -300,6 +301,77 @@ static int random_hex(char *out, size_t bytes)
     }
     out[2 * bytes] = '\0';
     return 0;
+}
+
+/* ---- the extension host's own credential (tokens.h) ---- */
+
+static char host_tok[TOKENS_TEXT_LEN + 1];
+static unsigned host_caps;
+
+int tokens_host_mint(char *err, size_t elen)
+{
+    char bad[64], fresh[TOKENS_TEXT_LEN + 1];
+    unsigned caps = 0;
+    FILE *f;
+    int fd;
+
+    if (caps_parse(TOKENS_HOST_CAPS, &caps, bad, sizeof(bad)) != 0) {
+        snprintf(err, elen, "the host credential's capabilities are not ones a token may hold");
+        return -1;
+    }
+    snprintf(fresh, sizeof(fresh), "%s", TOKENS_PREFIX);
+    if (random_hex(fresh + strlen(TOKENS_PREFIX), 16) != 0) {
+        snprintf(err, elen, "no randomness for the host credential");
+        return -1;
+    }
+    pthread_mutex_lock(&mu);
+    snprintf(host_tok, sizeof(host_tok), "%s", fresh);
+    host_caps = caps;
+    char text[TOKENS_TEXT_LEN + 2];
+    snprintf(text, sizeof(text), "%s\n", host_tok);
+    pthread_mutex_unlock(&mu);
+
+    /* Made unreadable before it has contents: the file is opened with
+     * the mode it keeps, not chmod'd after the secret is in it. */
+    unlink(TOKENS_HOST_FILE);
+    fd = open(TOKENS_HOST_FILE, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        snprintf(err, elen, "cannot make %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        return -1;
+    }
+    f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        snprintf(err, elen, "cannot write %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        return -1;
+    }
+    fputs(text, f);
+    if (fclose(f) != 0) {
+        snprintf(err, elen, "cannot write %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int tokens_host_check(const char *presented, const char *cap)
+{
+    int ok = 0;
+    if (!presented || !cap)
+        return 0;
+    size_t n = strlen(cap);
+    int any = n > 4 && !strcmp(cap + n - 4, ".any");
+    pthread_mutex_lock(&mu);
+    if (host_tok[0] && strlen(presented) == TOKENS_TEXT_LEN
+        && ct_equal((const unsigned char *)presented, (const unsigned char *)host_tok, TOKENS_TEXT_LEN)) {
+        for (size_t c = 0; c < NCAPS; c++) {
+            if (!(host_caps & (1u << c)))
+                continue;
+            if (any ? !strncmp(CAPS[c], cap, n - 3) : !strcmp(CAPS[c], cap))
+                ok = 1;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+    return ok;
 }
 
 int tokens_create(const char *name, const char *caps, char *token, char *id,

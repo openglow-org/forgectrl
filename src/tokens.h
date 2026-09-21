@@ -55,6 +55,32 @@ int tokens_holds_only(const char *presented, const char *prefix);
 /* Whether cap is one a token can be granted. */
 int tokens_cap_known(const char *cap);
 
+/* ---- the extension host's own credential ----
+ *
+ * The host relays a package's request to routes that are writes, and a
+ * write takes a credential. The panel token is not it: it reaches every
+ * route, so a flaw in the host or its broker would reach every route
+ * too. This is a scoped credential of the same shape as the operator's
+ * tokens and none of their substance: it holds only what the host may
+ * relay, it is minted fresh every time the daemon starts, it is never in
+ * the store and never in the operator's list (it is not theirs to
+ * manage or to revoke by accident), and it dies with the daemon.
+ *
+ * It is written to a file only root can read. An extension account
+ * cannot read it, and cannot reach a loopback listener to use it even if
+ * it could.
+ *
+ * What it holds is deliberately small: widening it widens what a flaw in
+ * the host reaches, so a capability belongs here only once the host
+ * actually relays it. */
+#define TOKENS_HOST_FILE "/run/forgefirm/ext-host.token"
+#define TOKENS_HOST_CAPS "motion.jog"
+
+/* Mint it and write the file. 0, or -1 with the reason in err. */
+int tokens_host_mint(char *err, size_t elen);
+/* 1 when presented is this daemon's host credential and it holds cap. */
+int tokens_host_check(const char *presented, const char *cap);
+
 /* Create a token: caps is a comma-separated list, each from the closed
  * list, at least one. 0 with the token in token (TOKENS_TEXT_LEN + 1
  * bytes; this is the one time it exists outside the client) and its id,

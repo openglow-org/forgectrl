@@ -34,7 +34,9 @@ A sandbox lowers the risk. It does not remove it. A flaw in the sandbox, in the 
 
 Within its capabilities, a package can still do harm. A package that can read the machine's status, or follow its events, can send what it learns to the destination you allowed: what you cut, when you cut it, and when you are at the machine. A package that can hold a job can stop you cutting, at any time and for its own reasons. A package that runs at all can use the machine's one processor and its storage.
 
-This firmware serves a small part of the capability list: reading the machine, following its events, and holding a job. The other names a package may ask for - the cameras, jogging the head, running a program, a tab of its own - are reserved and reach nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
+A package that can use a camera can take a picture of the inside of the machine and send it to the destination you allowed. A package that can jog can move the head, and it can do that while you have your hands inside the machine: the lid being open does not stop a jog, and nothing but you watching the machine will tell you it is about to move. A jog is bounded and it never fires the laser, and it is still motion you did not ask for.
+
+This firmware serves a part of the capability list: reading the machine, following its events, holding a job, its own settings, a camera, and a jog. The rest - running a program, a tab of its own - are reserved and reach nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 
