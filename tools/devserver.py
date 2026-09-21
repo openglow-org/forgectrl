@@ -873,6 +873,21 @@ class Mock:
                       'samples': 0, 'curve': '', 'points': []}
         self.curve_t0 = 0.0
         self.tokens = []
+        # The extension packages, as the extension host lists them (src/extpkg.c relays its command
+        # line): one official package that runs, and one a person installed unsigned, with a hold.
+        self.ext_packages = [
+            {'id': 'org.openglow.notify', 'version': '1.0.0', 'previous': '', 'tier': 'official', 'key': 'c7' * 32,
+             'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
+             'package': {'id': 'org.openglow.notify', 'name': 'Notifications', 'version': '1.0.0',
+                         'description': 'Tells you when a job ends.', 'author': 'OpenGlow', 'license': 'MIT',
+                         'runtime': 'native', 'capabilities': ['events', 'net.outbound:ntfy.sh:443'],
+                         'modes': ['grbl', 'cloud']}},
+            {'id': 'org.example.badge', 'version': '0.3.1', 'previous': '', 'tier': 'unverified', 'key': '',
+             'enabled': True, 'quarantined': False, 'grants': ['hold'], 'hold': 'advisory', 'account': 'ffx1',
+             'package': {'id': 'org.example.badge', 'name': 'Badge reader', 'version': '0.3.1',
+                         'description': 'Holds a job until a badge is read.', 'author': 'A maker', 'license': 'MIT',
+                         'runtime': 'python', 'capabilities': ['hold', 'machine.read'], 'modes': ['grbl']}},
+        ]
         self.scoped_pass = False
         # The job runner's record (src/jobrun.c): a posted program plays
         # for a fifth of a second a line, dark.
@@ -1513,6 +1528,40 @@ class Mock:
         held['last_used'] = int(time.time())
         return None
 
+    EXT_ACTIONS = ('enable', 'disable', 'remove', 'remove-keep-data', 'hold-required', 'hold-advisory')
+
+    def ext_status_reply(self):
+        on = self.settings.get('ext_enabled') == '1'
+        services = [{'id': p['id'], 'state': 'running', 'account': p['account'], 'pid': 2000 + i, 'frozen': False,
+                     'job_limited': False, 'healthy': True, 'reason': '', **({'hold': p['hold']} if 'hold' in p else {})}
+                    for i, p in enumerate(self.ext_packages) if on and p['enabled'] and not p['quarantined']]
+        return {'enabled': on, 'safe_mode': False,
+                'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
+                         'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
+                'packages': self.ext_packages}
+
+    def ext_package_post(self, form, J, T):
+        pid, action = form.get('id', ''), form.get('action', '')
+        if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid):
+            return T(400, 'id is a package id')
+        if action not in self.EXT_ACTIONS:
+            return T(400, 'action is enable, disable, remove, remove-keep-data, hold-required, or hold-advisory')
+        p = next((x for x in self.ext_packages if x['id'] == pid), None)
+        if p is None:
+            return T(409, '%s is not installed' % pid)
+        if action.startswith('hold-'):
+            if 'hold' not in p['grants']:
+                return T(409, '%s has no hold: the operator did not grant it one' % pid)
+            p['hold'] = action[5:]
+        elif action.startswith('remove'):
+            self.ext_packages.remove(p)
+        else:
+            p['enabled'] = action == 'enable'
+            if p['enabled']:
+                p['quarantined'] = False
+        self._log('ext: %s %s (by the operator, through the panel)' % (action, pid))
+        return J(200, self.ext_status_reply())
+
     def tokens_reply(self):
         return {'max': self.TOKENS_MAX, 'caps': list(self.TOKEN_CAPS),
                 'tokens': [{k: t[k] for k in ('id', 'name', 'caps', 'created', 'last_used')}
@@ -1939,6 +1988,10 @@ class Mock:
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
                 return J(200, self.tokens_reply())
+            if path == '/ext/status':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                return J(200, self.ext_status_reply())
             if path == '/settings':
                 return J(200, self.settings_reply())
             if path == '/status':
@@ -2267,6 +2320,8 @@ class Mock:
             return J(200, self.curve)
         if path in ('/tokens', '/tokens/revoke'):
             return self.tokens_post(path, form, J, T)
+        if path == '/ext/package':
+            return self.ext_package_post(form, J, T)
         if path == '/job':
             return self.job_post(headers, body, J, T)
         if path == '/job/abort':

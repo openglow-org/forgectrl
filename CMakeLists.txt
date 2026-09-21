@@ -77,6 +77,7 @@ add_executable(forgectrl
   src/diag.c
   src/fflog.c
   src/fwproduct.c
+  src/extpkg.c
   src/gates.c
   src/gpu_debayer.c
   src/ipu_copy.c
@@ -398,6 +399,13 @@ target_link_libraries(settings_dir_test pthread)
 # The product gate on the firmware paths: firmware only, by signature class.
 add_executable(fwproduct_test tests/fwproduct_test.c src/fwproduct.c)
 target_compile_options(fwproduct_test PRIVATE -Wall -Wextra)
+
+# The operator's door to extension packages: the extension host's command
+# line run as an argument vector, a closed list of actions, a package id in
+# the form of one, the host's refusal passed on in its words.
+add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c)
+target_compile_options(extpkg_test PRIVATE -Wall -Wextra)
+target_link_libraries(extpkg_test jansson)
 
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)

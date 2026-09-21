@@ -286,6 +286,38 @@ class MockTest(unittest.TestCase):
                          (400, {'error': 'this document is accepted where its feature is turned on'}))
         self.assertIn('this document is accepted where its feature is turned on', read('src/wiz.c'))
 
+    def test_ext_routes_match_extpkg_c(self):
+        # as extpkg.c rules it: a closed list of actions, a package id in
+        # the form of one, the host's refusal in its words (409), and the
+        # status document's four keys
+        src = read('src/extpkg.c')
+        actions = re.findall(r'\{ "([a-z-]+)",\s+\{ "', src)
+        self.assertEqual(tuple(actions), self.ds.Mock.EXT_ACTIONS)
+        m = self.mock()
+        code, hdrs, body = self.call(m, 'GET', '/ext/status', token=False)
+        self.assertEqual(code, 403)
+        doc = self.get_json(m, '/ext/status')
+        self.assertEqual(set(doc), {'enabled', 'safe_mode', 'host', 'packages'})
+        for key in ('"enabled"', '"safe_mode"', '"host"', '"packages"', '"running"'):
+            self.assertIn(key, src)
+        self.assertEqual([p['id'] for p in doc['packages']], ['org.openglow.notify', 'org.example.badge'])
+        for form, want in (({'id': 'org.example.badge', 'action': 'install'}, 400), ({'id': 'badge', 'action': 'enable'}, 400),
+                           ({'id': 'org.example;x', 'action': 'enable'}, 400), ({'id': 'org.example.none', 'action': 'enable'}, 409),
+                           ({'id': 'org.openglow.notify', 'action': 'hold-required'}, 409)):
+            code, hdrs, body = self.call(m, 'POST', '/ext/package', form)
+            self.assertEqual(code, want, form)
+        for words in (b'id is a package id', b'action is enable, disable, remove, remove-keep-data, hold-required, or hold-advisory'):
+            self.assertIn(words.decode(), src)
+        code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'hold-required'})
+        self.assertEqual(code, 200)
+        self.assertEqual([p.get('hold') for p in json.loads(body)['packages']], [None, 'required'])
+        code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'disable'})
+        self.assertEqual([p['enabled'] for p in json.loads(body)['packages']], [True, False])
+        code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.example.badge', 'action': 'remove'})
+        self.assertEqual([p['id'] for p in json.loads(body)['packages']], ['org.openglow.notify'])
+        code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.openglow.notify', 'action': 'disable'}, token=False)
+        self.assertEqual(code, 403)
+
     # -- the mode vocabulary
     def test_mode_matches_super_c(self):
         src = read('src/super.c')

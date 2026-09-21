@@ -44,6 +44,7 @@
 #include "curverec.h"
 #include "diag.h"
 #include "events.h"
+#include "extpkg.h"
 #include "fflog.h"
 #include "gates.h"
 #include "grblport.h"
@@ -1123,6 +1124,42 @@ static int cb_tokens_revoke(const struct _u_request *req, struct _u_response *re
     ulfius_set_string_body_response(res, 200, "{\"revoked\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
+}
+
+/* ------------------------------------------------- extension packages */
+
+/* The operator's door to the packages (extpkg.h): what is installed and
+ * how the host is doing, and one action on one package. Both are the
+ * logged-in operator's and no scoped token's. The actions are taken at any
+ * time, a job included: disabling a package or removing it is the way out
+ * of a hold it has on that job. */
+static int cb_ext_status(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char *doc = extpkg_status_json(settings_get_bool("ext_enabled", 0));
+    if (!doc)
+        return reply_error(res, 500, "out of memory");
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static int cb_ext_package(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *id = setting_param(req, "id"), *action = setting_param(req, "action");
+    char why[300];
+    int status;
+    if (extpkg_action(id, action, &status, why, sizeof(why)) != 0)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: %s %s (by the operator, through the panel)", action, id);
+    return cb_ext_status(req, res, NULL);
 }
 
 /* The one file sink the framework has: every multipart file part of
@@ -2914,6 +2951,8 @@ int main(int argc, char **argv)
         { "GET",  "/tokens",               cb_tokens_list,      NULL, 0, NULL },
         { "POST", "/tokens",               cb_tokens_create,    NULL, 0, NULL },
         { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },
+        { "GET",  "/ext/status",           cb_ext_status,       NULL, 0, NULL },
+        { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
         { "POST", "/job/abort",            cb_job_abort,        NULL, 0, "motion.job" },
         { "POST", "/settings",             cb_settings_post,    NULL, 0, NULL },
         { "GET",  "/status",               cb_machine_status,   NULL, 1, "machine.read" },

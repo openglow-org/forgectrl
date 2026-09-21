@@ -1,0 +1,209 @@
+/*
+ * extpkg.c - the operator's door to extension packages: forgectrl asks the extension host
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
+ * SPDX-License-Identifier: MIT
+ *
+ * See extpkg.h.
+ */
+#define _GNU_SOURCE
+#include "extpkg.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <jansson.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static const char *bin(void)
+{
+    const char *v = getenv("FORGECTRL_FORGEEXT");       /* a test's stand-in */
+    return v && v[0] ? v : EXTPKG_BIN_DEFAULT;
+}
+
+int extpkg_id_ok(const char *id)
+{
+    if (!id)
+        return 0;
+    size_t n = strlen(id);
+    if (n < 3 || n > 63 || id[0] == '.' || id[0] == '-' || id[n - 1] == '.' || !strchr(id, '.'))
+        return 0;
+    if (strspn(id, "abcdefghijklmnopqrstuvwxyz0123456789.-") != n || strstr(id, ".."))
+        return 0;
+    return 1;
+}
+
+static double mono(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+int extpkg_cli(const char *const argv_in[], char **out)
+{
+    const char *argv[16];
+    int n = 0, pfd[2];
+    *out = NULL;
+    argv[n++] = bin();
+    for (int i = 0; argv_in[i] && n < 15; i++)
+        argv[n++] = argv_in[i];
+    argv[n] = NULL;
+    if (pipe2(pfd, O_CLOEXEC) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pfd[0]);
+        close(pfd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, 0);
+            dup2(null, 2);
+        }
+        dup2(pfd[1], 1);
+        /* Nothing of forgectrl's goes along: it holds the pulse device, and
+         * that descriptor is inheritable on purpose, for the controllers. */
+        if (close_range(3, ~0U, 0) != 0)
+            for (int fd = 3; fd < 1024; fd++)
+                close(fd);
+        execv(argv[0], (char *const *)argv);
+        _exit(127);
+    }
+    close(pfd[1]);
+    char *buf = malloc(EXTPKG_OUT_MAX + 1);
+    size_t len = 0;
+    int bad = buf == NULL;
+    double end = mono() + EXTPKG_TIMEOUT_S;
+    while (!bad) {
+        struct pollfd p = { pfd[0], POLLIN, 0 };
+        double left = end - mono();
+        if (left <= 0 || poll(&p, 1, (int)(left * 1000) + 1) <= 0) {
+            bad = 1;
+            break;
+        }
+        ssize_t got = read(pfd[0], buf + len, EXTPKG_OUT_MAX - len);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        len += (size_t)got;
+        if (len >= EXTPKG_OUT_MAX)
+            bad = 1;
+    }
+    close(pfd[0]);
+    if (bad)
+        kill(pid, SIGKILL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+    if (bad || !WIFEXITED(status) || WEXITSTATUS(status) == 127) {
+        free(buf);
+        return -1;
+    }
+    buf[len] = '\0';
+    *out = buf;
+    return WEXITSTATUS(status);
+}
+
+static int host_running(json_int_t pid)
+{
+    char link[64], exe[256];
+    if (pid <= 1)
+        return 0;
+    snprintf(link, sizeof(link), "/proc/%lld/exe", (long long)pid);
+    ssize_t n = readlink(link, exe, sizeof(exe) - 1);
+    if (n <= 0)
+        return 0;
+    exe[n] = '\0';
+    return strcmp(exe, bin()) == 0;
+}
+
+char *extpkg_status_json(int ext_enabled)
+{
+    json_t *top = json_object();
+    if (!top)
+        return NULL;
+    json_object_set_new(top, "enabled", json_boolean(ext_enabled));
+    json_object_set_new(top, "safe_mode", json_boolean(access(EXTPKG_SAFE_FILE, F_OK) == 0));
+
+    /* The host's own word, when the host that wrote it is still there. */
+    const char *sf = getenv("FORGECTRL_EXT_STATUS");
+    json_t *host = json_load_file(sf && sf[0] ? sf : EXTPKG_STATUS_FILE, 0, NULL);
+    int running = json_is_object(host) && host_running(json_integer_value(json_object_get(host, "pid")));
+    if (!running) {
+        json_decref(host);
+        host = json_object();
+    }
+    json_object_set_new(host, "running", json_boolean(running));
+    json_object_set_new(top, "host", host);
+
+    char *text = NULL;
+    const char *argv[] = { "list", NULL };
+    json_t *listed = extpkg_cli(argv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    json_t *pkgs = json_object_get(listed, "packages");
+    if (json_is_array(pkgs)) {
+        json_object_set(top, "packages", pkgs);
+    } else {
+        json_object_set_new(top, "packages", json_array());
+        json_object_set_new(top, "error", json_string("the extension host's command line does not answer"));
+    }
+    json_decref(listed);
+    char *doc = json_dumps(top, JSON_COMPACT);
+    json_decref(top);
+    return doc;
+}
+
+int extpkg_action(const char *id, const char *action, int *status, char *why, size_t wlen)
+{
+    static const struct { const char *action; const char *argv[4]; int id_at; } acts[] = {
+        { "enable",           { "enable",  NULL, NULL, NULL },           1 },
+        { "disable",          { "disable", NULL, NULL, NULL },           1 },
+        { "remove",           { "remove",  NULL, NULL, NULL },           1 },
+        { "remove-keep-data", { "remove",  NULL, "--keep-data", NULL },  1 },
+        { "hold-required",    { "hold",    NULL, "required", NULL },     1 },
+        { "hold-advisory",    { "hold",    NULL, "advisory", NULL },     1 },
+    };
+    *status = 400;
+    if (!extpkg_id_ok(id)) {
+        snprintf(why, wlen, "id is a package id");
+        return -1;
+    }
+    for (size_t i = 0; action && i < sizeof(acts) / sizeof(acts[0]); i++) {
+        if (strcmp(action, acts[i].action) != 0)
+            continue;
+        const char *argv[5] = { acts[i].argv[0], acts[i].argv[1], acts[i].argv[2], acts[i].argv[3], NULL };
+        argv[acts[i].id_at] = id;
+        char *text = NULL;
+        int rc = extpkg_cli(argv, &text);
+        json_t *j = text ? json_loads(text, 0, NULL) : NULL;
+        free(text);
+        if (rc < 0 || !json_is_object(j)) {
+            json_decref(j);
+            *status = 502;
+            snprintf(why, wlen, "the extension host's command line does not answer");
+            return -1;
+        }
+        if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+            const char *e = json_string_value(json_object_get(j, "error"));
+            *status = 409;
+            snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+            json_decref(j);
+            return -1;
+        }
+        json_decref(j);
+        *status = 200;
+        return 0;
+    }
+    snprintf(why, wlen, "action is enable, disable, remove, remove-keep-data, hold-required, or hold-advisory");
+    return -1;
+}
