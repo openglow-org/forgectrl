@@ -37,23 +37,23 @@ jobs:
         run: ./build/jobstream_test
       - name: grblport_test (the controller port's client and its two operation sets)
         run: ./build/grblport_test
-      - name: jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort)
+      - name: "jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort)"
         run: ./build/jobrun_test
 
-      - name: tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)
+      - name: "tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)"
         run: ./build/tokens_test
 
       - name: auth_scoped_test (the guards' judgment of a scoped token, route by route)
         run: ./build/auth_scoped_test
 
-      - name: builtin_test (the built-in extensions: the cloud entry, its refusals, its sweep, the list)
+      - name: "builtin_test (the built-in extensions: the cloud entry, its refusals, its sweep, the list)"
         run: ./build/builtin_test
-      - name: settings_dir_test (the data directory opened for search: the bit added, nothing taken away)
+      - name: "settings_dir_test (the data directory opened for search: the bit added, nothing taken away)"
         run: ./build/settings_dir_test
-      - name: fwproduct_test (the product gate: the firmware paths take firmware only, an extension package never)
+      - name: "fwproduct_test (the product gate: the firmware paths take firmware only, an extension package never)"
         run: ./build/fwproduct_test
 
-      - name: lease_test (the machine lease: one holder, nesting, the sender kind)
+      - name: "lease_test (the machine lease: one holder, nesting, the sender kind)"
         run: ./build/lease_test
       - name: events_test (the event stream's cap, edge detector, and ring)
         run: ./build/events_test
@@ -75,9 +75,9 @@ jobs:
         run: ./build/cool_gate_test
       - name: Flow check reading (means, the tube's share, the bound)
         run: ./build/cool_flow_test
-      - name: holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)
+      - name: "holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)"
         run: ./build/holds_test
-      - name: extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words)
+      - name: "extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words)"
         run: ./build/extpkg_test
       - name: Verified fan writes (readback, retry, the duty a device lost put back)
         run: ./build/cool_fanwrite_test
