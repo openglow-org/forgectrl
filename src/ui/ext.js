@@ -79,11 +79,28 @@ function extStateOf(j, p) {
     );
   return esc(svc.state) + (svc.reason ? ': ' + esc(svc.reason) : '');
 }
+/* An open frame goes when its package does. Disabling a package, or
+ * removing it, is the operator's way out of everything it does, and a
+ * frame left open would go on asking the bridge for as long as the panel
+ * stayed on the page. */
+function extFramesFollow(list) {
+  if (!EXT_FRAMES.length) return;
+  var id = EXT_FRAMES[0].id,
+    i,
+    still = false;
+  for (i = 0; i < list.length; i++) if (list[i].id === id && list[i].enabled) still = true;
+  if (still) return;
+  var h = $('extframe');
+  if (h) h.innerHTML = '';
+  EXT_FRAMES = [];
+}
+
 function renderExt(j) {
   var g = '',
     list = j.packages || [],
     i,
     c;
+  extFramesFollow(list);
   g += kv(
     'Extensions',
     (j.enabled ? "<span class='b-ok'>on</span>" : 'off') +
@@ -230,13 +247,22 @@ function extBridgeOwner(win) {
   return null;
 }
 
+/* What the host would honor for this package, which is the question the
+ * bridge has to ask. `package.capabilities` is the manifest's list: what
+ * the package asked for, granted or not. `effective` is what the host
+ * built its identity from - the capabilities that need no grant, and
+ * those the operator granted - and it is the same list the package's own
+ * API socket answers with. A package the operator disabled holds
+ * nothing: disabling is the way out of everything it does. A host too old
+ * to send `effective` leaves the bridge holding nothing, which is the
+ * side to be wrong on. */
 function extHolds(id, cap) {
   var list = EXT_LAST.packages || [],
     i;
   for (i = 0; i < list.length; i++)
     if (list[i].id === id) {
-      var caps = (list[i].package || {}).capabilities || [];
-      return caps.indexOf(cap) >= 0;
+      if (!list[i].enabled) return false;
+      return (list[i].effective || []).indexOf(cap) >= 0;
     }
   return false;
 }
@@ -273,7 +299,9 @@ function extBridgeCall(id, call, args) {
           id: id,
           version: list[i].version,
           tier: list[i].tier,
-          capabilities: (list[i].package || {}).capabilities || []
+          /* What it may use, not what it asked for: the same list its own
+           * API socket gives a service at GET /v0/self. */
+          capabilities: list[i].effective || []
         });
     return Promise.reject('this package is not installed');
   }
@@ -294,12 +322,16 @@ function extBridgeCall(id, call, args) {
       body: new URLSearchParams({ id: id, set: JSON.stringify(args || {}) })
     }).then(extAnswer);
   if (call === 'motion.jog') {
-    var q = ['x', 'y', 'z', 'feed']
-      .filter(function (k) { return typeof (args || {})[k] === 'number'; })
-      .map(function (k) { return k + '=' + encodeURIComponent(args[k]); })
-      .join('&');
-    if (!q) return Promise.reject('a jog moves at least one axis');
-    return fx('/motion/jog', { method: 'POST', body: new URLSearchParams(args || {}) }).then(extAnswer);
+    /* The four the machine's route takes, each a number, and nothing else
+     * the frame put in the message. The machine judges the values - its
+     * bounds, its mode, its lease, the sender who always wins - and this
+     * is only about what is carried to it. */
+    var jog = new URLSearchParams();
+    ['x', 'y', 'z', 'feed'].forEach(function (k) {
+      if (typeof (args || {})[k] === 'number' && isFinite(args[k])) jog.set(k, String(args[k]));
+    });
+    if (!jog.has('x') && !jog.has('y') && !jog.has('z')) return Promise.reject('a jog moves at least one axis');
+    return fx('/motion/jog', { method: 'POST', body: jog }).then(extAnswer);
   }
   return fx(spec.path).then(extAnswer);
 }
