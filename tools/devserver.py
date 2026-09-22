@@ -2163,6 +2163,13 @@ class Mock:
             if path in ('/cam/snapshot', '/cam/stream') or (
                     path == '/' and q.get('action') in ('snapshot',
                                                         'stream')):
+                # background=1 is a capture nobody is waiting for. The
+                # machine refuses one while a job is armed: a capture
+                # costs kernel-side work beside the step stream.
+                if path == '/cam/snapshot' and q.get('background') == '1' \
+                        and self.rep_armed:
+                    return T(409, 'a job is armed: a background capture '
+                                  'waits until the window closes')
                 svg = MOCK_SVG % time.strftime('%H:%M:%S')
                 return 200, {'Content-Type': 'image/svg+xml'}, svg.encode()
             if path == '/cam/h264':

@@ -113,6 +113,12 @@ void cool_state_model(int density);
 #define COOL_STATUS_JSON_MAX 1536
 int cool_status_json(char *buf, size_t len);
 
+/* The armed window as `GET /cool/status` publishes it: the running
+ * controller's last report while that report is fresh, and false when
+ * there is none or it has gone stale. Callers that must not add work
+ * beside the step stream ask this. */
+int cool_armed(void);
+
 /* Seconds since the last job-state report, or -1 if none has ever
  * arrived (the supervisor uses this to see a controller come alive). */
 double cool_report_age(void);

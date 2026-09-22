@@ -44,6 +44,12 @@ typedef enum {
  * refusal's words, matched by the callers that map them to a status. */
 #define CAM_ERR_WATCHED "somebody is watching a camera: a background capture waits until they stop"
 
+/* And refused outright while a job is armed. A capture costs kernel-side
+ * work beside the step stream, which the thread priorities do not cover,
+ * so no program takes a picture during a cut. An operator's own snapshot
+ * is unmarked and is not refused: they are standing at the machine. */
+#define CAM_ERR_ARMED "a job is armed: a background capture waits until the window closes"
+
 /* Read once at startup (env overrides): stream JPEG quality, lamp level,
  * stream FPS cap, and the encoder/buffer fallback switches. */
 void cam_engine_init(void);

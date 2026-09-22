@@ -2882,6 +2882,15 @@ int cool_status_json(char *buf, size_t len)
     return rc;
 }
 
+int cool_armed(void)
+{
+    pthread_mutex_lock(&mu);
+    double age = rep_at < 0 ? -1 : wall_s() - rep_at;
+    int armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S);
+    pthread_mutex_unlock(&mu);
+    return armed;
+}
+
 int cool_gates_off_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
