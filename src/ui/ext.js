@@ -206,6 +206,119 @@ function extFrameDoc(html) {
   return '<meta http-equiv="Content-Security-Policy" content="' + EXT_FRAME_POLICY + '">' + html;
 }
 
+/* ---- the bridge ----
+ *
+ * A frame holds no session and can reach nothing itself, so everything
+ * it wants goes through here. Three rules run this:
+ *
+ *   1. A frame is known by `event.source` and never by `event.origin`.
+ *      Every sandboxed frame reports the origin `null`, so two open
+ *      packages are indistinguishable by origin - identifying by origin
+ *      would let either speak for the other.
+ *   2. The capability checked is the one the panel holds for that
+ *      package, read from the machine's own list. A frame's claim about
+ *      what it may do is never an input.
+ *   3. The panel makes the call under its own session. The token and the
+ *      camera key never go into a message: a camera frame is fetched
+ *      here and handed over as bytes.
+ */
+var EXT_FRAMES = [];            /* {win, id} for each open frame */
+
+function extBridgeOwner(win) {
+  var i;
+  for (i = 0; i < EXT_FRAMES.length; i++) if (EXT_FRAMES[i].win === win) return EXT_FRAMES[i].id;
+  return null;
+}
+
+function extHolds(id, cap) {
+  var list = EXT_LAST.packages || [],
+    i;
+  for (i = 0; i < list.length; i++)
+    if (list[i].id === id) {
+      var caps = (list[i].package || {}).capabilities || [];
+      return caps.indexOf(cap) >= 0;
+    }
+  return false;
+}
+
+var EXT_BRIDGE_CALLS = {
+  'self': { cap: null },
+  'machine.status': { cap: 'machine.read', path: '/status' },
+  'machine.cool': { cap: 'machine.read', path: '/cool/status' },
+  'machine.mode': { cap: 'machine.read', path: '/mode' },
+  'settings.get': { cap: 'settings.own' },
+  'settings.set': { cap: 'settings.own' },
+  'camera.frame': { cap: null },
+  'motion.jog': { cap: 'motion.jog' }
+};
+
+function extBridgeReply(win, rid, ok, value) {
+  /* The frame's origin is opaque, so the reply is addressed to the
+   * window itself with '*'; nothing secret goes in it. */
+  try {
+    win.postMessage({ forgefirm: 1, id: rid, ok: ok, value: ok ? value : undefined, error: ok ? undefined : value }, '*');
+  } catch (e) {
+    /* the frame went away */
+  }
+}
+
+function extBridgeCall(id, call, args) {
+  var spec = EXT_BRIDGE_CALLS[call];
+  if (call === 'self') {
+    var list = EXT_LAST.packages || [],
+      i;
+    for (i = 0; i < list.length; i++)
+      if (list[i].id === id)
+        return Promise.resolve({
+          id: id,
+          version: list[i].version,
+          tier: list[i].tier,
+          capabilities: (list[i].package || {}).capabilities || []
+        });
+    return Promise.reject('this package is not installed');
+  }
+  if (call === 'camera.frame') {
+    var which = args && args.camera === 'head' ? 'head' : 'lid';
+    if (!extHolds(id, 'camera.' + which)) return Promise.reject('this package does not hold that camera');
+    /* Fetched by the panel, under the panel's own session, and handed
+     * over as bytes. The camera key is never in a message. */
+    return fx('/cam/snapshot?cam=' + which + '&res=half&background=1').then(function (r) {
+      if (!r.ok) return Promise.reject('the machine did not give a frame');
+      return r.blob();
+    });
+  }
+  if (call === 'settings.get') return fx('/ext/settings?id=' + encodeURIComponent(id)).then(extAnswer);
+  if (call === 'settings.set')
+    return fx('/ext/settings', {
+      method: 'POST',
+      body: new URLSearchParams({ id: id, set: JSON.stringify(args || {}) })
+    }).then(extAnswer);
+  if (call === 'motion.jog') {
+    var q = ['x', 'y', 'z', 'feed']
+      .filter(function (k) { return typeof (args || {})[k] === 'number'; })
+      .map(function (k) { return k + '=' + encodeURIComponent(args[k]); })
+      .join('&');
+    if (!q) return Promise.reject('a jog moves at least one axis');
+    return fx('/motion/jog', { method: 'POST', body: new URLSearchParams(args || {}) }).then(extAnswer);
+  }
+  return fx(spec.path).then(extAnswer);
+}
+
+window.addEventListener('message', function (ev) {
+  var msg = ev.data;
+  if (!msg || msg.forgefirm !== 1 || typeof msg.call !== 'string') return;
+  var id = extBridgeOwner(ev.source);
+  if (!id) return;                        /* not a frame this panel opened */
+  var spec = EXT_BRIDGE_CALLS[msg.call];
+  if (!spec) return extBridgeReply(ev.source, msg.id, false, 'no such call');
+  if (spec.cap && !extHolds(id, spec.cap))
+    return extBridgeReply(ev.source, msg.id, false, 'this package does not hold ' + spec.cap);
+  extBridgeCall(id, msg.call, msg.args).then(
+    function (v) { extBridgeReply(ev.source, msg.id, true, v); },
+    function (e) { extBridgeReply(ev.source, msg.id, false, String(e && e.message ? e.message : e)); }
+  );
+});
+
 function extOpenUi(id) {
   var host = $('extframe');
   if (!host) return;
@@ -235,6 +348,9 @@ function extOpenUi(id) {
       f.className = 'extframe';
       f.srcdoc = extFrameDoc(j.html || '');
       host.appendChild(f);
+      /* Remembered by its window, which is how the bridge will know it:
+       * the frame's origin is null and tells the panel nothing. */
+      EXT_FRAMES = [{ win: f.contentWindow, id: id }];
     })
     .catch(function (e) {
       host.innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
@@ -433,6 +549,7 @@ document.addEventListener('click', function (ev) {
   if (ev.target.closest('.extframeclose')) {
     var h = $('extframe');
     if (h) h.innerHTML = '';
+    EXT_FRAMES = [];
   }
 });
 document.addEventListener('change', function (ev) {

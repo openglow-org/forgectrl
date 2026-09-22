@@ -275,6 +275,52 @@ static const char *consent_of(const json_t *inspected)
     return "button";
 }
 
+char *extpkg_settings_json(const char *id, const char *patch, int *status, char *why, size_t wlen)
+{
+    char *out = NULL;
+    const char *argv[] = { "settings", id, patch, NULL };
+
+    *status = 500;
+    why[0] = '\0';
+    if (!extpkg_id_ok(id)) {
+        *status = 400;
+        snprintf(why, wlen, "id is a package id");
+        return NULL;
+    }
+    /* The patch is one argument and is JSON; anything else the host
+     * refuses, and it is the host that owns the schema. */
+    if (patch && strlen(patch) > 4096) {
+        *status = 400;
+        snprintf(why, wlen, "that is more settings than a package has");
+        return NULL;
+    }
+    if (extpkg_cli(argv, &out) != 0 || !out) {
+        free(out);
+        *status = 502;
+        snprintf(why, wlen, "the extension host did not answer");
+        return NULL;
+    }
+    json_t *j = json_loads(out, 0, NULL);
+    if (!json_is_object(j)) {
+        json_decref(j);
+        free(out);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's answer is not a JSON object");
+        return NULL;
+    }
+    if (!json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        snprintf(why, wlen, "%s", e ? e : "the host refused");
+        *status = 400;
+        json_decref(j);
+        free(out);
+        return NULL;
+    }
+    json_decref(j);
+    *status = 200;
+    return out;
+}
+
 char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen)
 {
     char *out = NULL;

@@ -702,33 +702,63 @@ def num(x):
 
 MOCK_UI_ID = 'org.example.panel'
 MOCK_UI_HTML = """<!doctype html><title>Example</title>
-<style>body{font:14px system-ui;margin:12px}b{color:#036}</style>
+<style>body{font:14px system-ui;margin:12px}li{margin:2px 0}</style>
 <h3>An example package's interface</h3>
-<p id="who">This page is a package's own, in a sandboxed frame.</p>
 <ul id="tries"></ul>
+<h4>Through the bridge</h4>
+<ul id="bridge"></ul>
+<img id="shot" alt="" style="max-width:220px">
 <script>
-// What a hostile page would try. Each line reports what the frame is
-// actually allowed to do, so the isolation can be looked at and not
-// only argued about.
-var out = document.getElementById('tries');
-function say(what, how) {
-  var li = document.createElement('li');
-  li.textContent = what + ': ' + how;
-  out.appendChild(li);
+function li(where, what) {
+  var e = document.createElement('li');
+  e.textContent = what;
+  document.getElementById(where).appendChild(e);
 }
-try { say('same-origin', document.domain === null ? 'null' : String(document.domain)); }
-catch (e) { say('same-origin', 'refused (' + e.name + ')'); }
-try { say('cookies', document.cookie === '' ? 'none readable' : 'READ ' + document.cookie); }
-catch (e) { say('cookies', 'refused (' + e.name + ')'); }
-try { say('parent', String(window.parent.location.href)); }
-catch (e) { say('parent', 'refused (' + e.name + ')'); }
+// What a hostile page would try on its own. Each line is what the frame
+// is actually allowed to do.
+try { li('tries', 'cookies: ' + (document.cookie === '' ? 'none readable' : 'READ ' + document.cookie)); }
+catch (e) { li('tries', 'cookies: refused (' + e.name + ')'); }
+try { li('tries', 'parent: ' + String(window.parent.location.href)); }
+catch (e) { li('tries', 'parent: refused (' + e.name + ')'); }
 try {
-  fetch('/settings').then(function (r) { say('fetch /settings', 'REACHED ' + r.status); })
-    .catch(function (e) { say('fetch /settings', 'refused (' + e.message + ')'); });
-} catch (e) { say('fetch /settings', 'refused (' + e.name + ')'); }
-try { top.location = 'https://example.test/'; say('top navigation', 'ALLOWED'); }
-catch (e) { say('top navigation', 'refused (' + e.name + ')'); }
-try { say('eval', String(eval('1+1'))); } catch (e) { say('eval', 'refused (' + e.name + ')'); }
+  fetch('/settings').then(function (r) { li('tries', 'fetch /settings: REACHED ' + r.status); })
+    .catch(function (e) { li('tries', 'fetch /settings: refused'); });
+} catch (e) { li('tries', 'fetch /settings: refused (' + e.name + ')'); }
+try { top.location = 'https://example.test/'; li('tries', 'top navigation: ALLOWED'); }
+catch (e) { li('tries', 'top navigation: refused (' + e.name + ')'); }
+
+// The bridge: what the package is allowed to ask the panel for.
+var n = 0, waiting = {};
+function ask(call, args) {
+  return new Promise(function (ok) {
+    var id = ++n;
+    waiting[id] = ok;
+    parent.postMessage({ forgefirm: 1, id: id, call: call, args: args }, '*');
+  });
+}
+window.addEventListener('message', function (ev) {
+  var m = ev.data;
+  if (m && m.forgefirm === 1 && waiting[m.id]) { waiting[m.id](m); delete waiting[m.id]; }
+});
+ask('self').then(function (r) {
+  li('bridge', 'self: ' + (r.ok ? r.value.id + ' ' + r.value.tier + ' [' + r.value.capabilities + ']' : r.error));
+});
+ask('machine.mode').then(function (r) {
+  li('bridge', 'machine.mode: ' + (r.ok ? JSON.stringify(r.value).slice(0, 60) : 'refused - ' + r.error));
+});
+ask('motion.jog', { x: 5 }).then(function (r) {
+  li('bridge', 'motion.jog: ' + (r.ok ? 'ALLOWED' : 'refused - ' + r.error));
+});
+ask('camera.frame', { camera: 'lid' }).then(function (r) {
+  li('bridge', 'camera.frame: ' + (r.ok ? 'got ' + r.value.size + ' bytes' : 'refused - ' + r.error));
+  if (r.ok) document.getElementById('shot').src = URL.createObjectURL(r.value);
+});
+ask('settings.get').then(function (r) {
+  li('bridge', 'settings.get: ' + (r.ok ? JSON.stringify(r.value.settings) : 'refused - ' + r.error));
+});
+ask('nonsense.call').then(function (r) {
+  li('bridge', 'nonsense.call: ' + (r.ok ? 'ALLOWED' : 'refused - ' + r.error));
+});
 </script>
 """
 
@@ -909,6 +939,7 @@ class Mock:
         # The extension packages, as the extension host lists them (src/extpkg.c relays its command
         # line): one official package that runs, and one a person installed unsigned, with a hold.
         self.ext_keys = {'a-maker': 'ab' * 32}
+        self.ext_settings = {'greeting': 'hello'}
         self.ext_packages = [
             {'id': 'org.openglow.notify', 'version': '1.0.0', 'previous': '', 'tier': 'official', 'key': 'c7' * 32,
              'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
@@ -925,7 +956,8 @@ class Mock:
              'key': 'ab' * 32, 'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx2',
              'package': {'id': MOCK_UI_ID, 'name': 'Example panel', 'version': '2.1.0',
                          'description': 'A package with an interface of its own.', 'author': 'A maker',
-                         'license': 'MIT', 'runtime': 'ui', 'capabilities': ['ui', 'machine.read'],
+                         'license': 'MIT', 'runtime': 'ui',
+                         'capabilities': ['ui', 'machine.read', 'settings.own', 'camera.lid'],
                          'modes': ['grbl', 'cloud']}},
         ]
         self.scoped_pass = False
@@ -2086,6 +2118,15 @@ class Mock:
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
                 return J(200, self.ext_status_reply())
+            if path == '/ext/settings':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                if (q.get('id') or '') != MOCK_UI_ID:
+                    return J(400, {'error': 'this package declares no settings'})
+                return J(200, {'ok': True, 'id': MOCK_UI_ID,
+                               'settings': dict(self.ext_settings),
+                               'schema': [{'name': 'greeting', 'label': 'Greeting', 'type': 'string',
+                                           'default': 'hello', 'max': 32}]})
             if path == '/ext/ui':
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
@@ -2422,6 +2463,24 @@ class Mock:
             return J(200, self.curve)
         if path in ('/tokens', '/tokens/revoke'):
             return self.tokens_post(path, form, J, T)
+        if path == '/ext/settings':
+            if (form.get('id') or '') != MOCK_UI_ID:
+                return J(400, {'error': 'this package declares no settings'})
+            try:
+                patch = json.loads(form.get('set') or '{}')
+            except ValueError:
+                return J(400, {'error': 'the patch is a JSON object of settings'})
+            if not isinstance(patch, dict):
+                return J(400, {'error': 'the patch is a JSON object of settings'})
+            for k, v in patch.items():
+                if k != 'greeting':
+                    return J(400, {'error': 'this package declares no setting "%s"' % k})
+                if not isinstance(v, str) or len(v) > 32:
+                    return J(400, {'error': '"greeting" is at most 32 bytes'})
+            self.ext_settings.update(patch)
+            return J(200, {'ok': True, 'id': MOCK_UI_ID, 'settings': dict(self.ext_settings),
+                           'schema': [{'name': 'greeting', 'label': 'Greeting', 'type': 'string',
+                                       'default': 'hello', 'max': 32}]})
         if path == '/ext/package':
             return self.ext_package_post(form, J, T)
         if path == '/ext/upload':

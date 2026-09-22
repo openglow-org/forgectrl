@@ -1186,6 +1186,32 @@ static int cb_ext_ui(const struct _u_request *req, struct _u_response *res, void
     return U_CALLBACK_CONTINUE;
 }
 
+/* A package's own settings, for the operator and for the package's own
+ * page through the bridge. The host owns the schema and judges every
+ * value; this route carries the request and nothing more. */
+static int cb_ext_settings(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!settings_get_bool("ext_enabled", 0))
+        return reply_error(res, 409, "extensions are off");
+    char why[300];
+    int status = 500;
+    const char *patch = setting_param(req, "set");
+    char *doc = extpkg_settings_json(setting_param(req, "id"), patch, &status, why, sizeof(why));
+    if (!doc)
+        return reply_error(res, (unsigned)status, why[0] ? why : "no settings");
+    if (patch)
+        fflog(LOG_NOTICE, "ext: the settings of %s were changed through the panel",
+              setting_param(req, "id"));
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_ext_package(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -3169,6 +3195,8 @@ int main(int argc, char **argv)
         { "POST", "/tokens/revoke",        cb_tokens_revoke,    NULL, 0, NULL },
         { "GET",  "/ext/status",           cb_ext_status,       NULL, 0, NULL },
         { "GET",  "/ext/ui",               cb_ext_ui,           NULL, 0, NULL },
+        { "GET",  "/ext/settings",         cb_ext_settings,     NULL, 0, NULL },
+        { "POST", "/ext/settings",         cb_ext_settings,     NULL, 0, NULL },
         { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },

@@ -36,7 +36,9 @@ Within its capabilities, a package can still do harm. A package that can read th
 
 A package that can use a camera can take a picture of the inside of the machine and send it to the destination you allowed. A package that can jog can move the head, and it can do that while you have your hands inside the machine: the lid being open does not stop a jog, and nothing but you watching the machine will tell you it is about to move. A jog is bounded and it never fires the laser, and it is still motion you did not ask for.
 
-This firmware serves a part of the capability list: reading the machine, following its events, holding a job, its own settings, a camera, and a jog. The rest - running a program, a tab of its own - are reserved and reach nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
+A package with a page of its own can send a little data out of your browser while you have that page open. The page cannot reach the machine or the network by itself, and it cannot read your session; what it can do is a browser gap this project cannot close, and a package without a page cannot do it at all.
+
+This firmware serves most of the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, and a page of its own. The rest - running a program - is reserved and reaches nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 

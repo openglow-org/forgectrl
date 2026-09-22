@@ -77,6 +77,11 @@ char *extpkg_inspect_json(int *status, char *why, size_t wlen);
  * panel as a JSON string, and the panel is what puts it in a frame. */
 char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen);
 
+/* A package's own settings, read or patched on the operator's behalf.
+ * patch is NULL to read. The host holds the schema and judges every
+ * value; this only carries the request and the answer. */
+char *extpkg_settings_json(const char *id, const char *patch, int *status, char *why, size_t wlen);
+
 /* Install the staged archive. grants is a comma-separated list of
  * capabilities the operator grants (or NULL). 0 when installed (the staged
  * file is removed). Otherwise the status (400 for a request with no such
