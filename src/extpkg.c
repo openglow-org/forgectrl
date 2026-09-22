@@ -335,7 +335,9 @@ char *extpkg_settings_json(const char *id, const char *patch, int *status, char 
         snprintf(why, wlen, "that is more settings than a package has");
         return NULL;
     }
-    if (extpkg_cli(argv, &out) != 0 || !out) {
+    /* A refusal exits 1 with the host's words on stdout: an exit status
+     * that is not 0 is an answer, and only no answer at all is 502. */
+    if (extpkg_cli(argv, &out) < 0 || !out) {
         free(out);
         *status = 502;
         snprintf(why, wlen, "the extension host did not answer");
@@ -374,7 +376,8 @@ char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen)
         snprintf(why, wlen, "id is a package id");
         return NULL;
     }
-    if (extpkg_cli(argv, &out) != 0 || !out) {
+    /* A refusal exits 1 with its words, as for the settings. */
+    if (extpkg_cli(argv, &out) < 0 || !out) {
         free(out);
         *status = 502;
         snprintf(why, wlen, "the extension host did not answer");

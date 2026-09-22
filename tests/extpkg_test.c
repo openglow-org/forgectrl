@@ -268,6 +268,42 @@ int main(void)
     json_decref(j);
     free(doc);
 
+    /* A package's page and its settings. The host exits 1 when it refuses,
+     * and the refusal still reaches the panel in its words, with the
+     * route's own status; only a host that gives no answer is 502. */
+    host_says("echo '{\"ok\": true, \"id\": \"org.example.notify\", \"bytes\": 2, \"html\": \"hi\"}'");
+    doc = extpkg_ui_json("org.example.notify", &status, why, sizeof(why));
+    CHECK(doc && status == 200 && !strcmp(ran(), "ui\norg.example.notify\n"), "the page: %d %s, ran [%s]", status,
+          doc ? doc : why, ran());
+    free(doc);
+    host_says("echo '{\"ok\": false, \"error\": \"this package is disabled: its interface is not served\"}'; exit 1");
+    doc = extpkg_ui_json("org.example.notify", &status, why, sizeof(why));
+    CHECK(!doc && status == 404 && strstr(why, "disabled"), "a disabled package's page: %d %s", status, why);
+    free(doc);
+    host_says("echo 'Segmentation fault'; exit 139");
+    doc = extpkg_ui_json("org.example.notify", &status, why, sizeof(why));
+    CHECK(!doc && status == 502, "a page from a host that gives no JSON: %d %s", status, why);
+    free(doc);
+    host_says("echo '{\"ok\": true}'");
+    doc = extpkg_ui_json("org.example;reboot", &status, why, sizeof(why));
+    CHECK(!doc && status == 400 && !ran()[0], "the page of an id that is none: %d, ran [%s]", status, ran());
+    free(doc);
+
+    host_says("echo '{\"ok\": true, \"id\": \"org.example.notify\", \"settings\": {\"threshold\": 40}}'");
+    doc = extpkg_settings_json("org.example.notify", NULL, &status, why, sizeof(why));
+    CHECK(doc && status == 200 && !strcmp(ran(), "settings\norg.example.notify\n"), "the settings: %d %s, ran [%s]", status,
+          doc ? doc : why, ran());
+    free(doc);
+    host_says("echo '{\"ok\": false, \"error\": \"threshold is at most 100\"}'; exit 1");
+    doc = extpkg_settings_json("org.example.notify", "{\"threshold\": 101}", &status, why, sizeof(why));
+    CHECK(!doc && status == 400 && strstr(why, "at most 100") && !strcmp(ran(), "settings\norg.example.notify\n{\"threshold\": 101}\n"),
+          "a patch the host refuses: %d %s, ran [%s]", status, why, ran());
+    free(doc);
+    host_says("exit 1");
+    doc = extpkg_settings_json("org.example.notify", NULL, &status, why, sizeof(why));
+    CHECK(!doc && status == 502, "settings from a host that says nothing: %d %s", status, why);
+    free(doc);
+
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0)
