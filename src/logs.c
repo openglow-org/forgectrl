@@ -26,6 +26,7 @@
 #include "logs.h"
 #include "auth.h"
 #include "camkey.h"
+#include "extpkg.h"
 #include "fflog.h"
 #include "lease.h"
 #include "sanitize.h"
@@ -670,6 +671,20 @@ static int stage_cmd(sanitizer_t *san, const char *cmd, const char *dst)
     return rc;
 }
 
+/* A document this daemon already holds as text, staged like any other
+ * file. */
+static int stage_text(sanitizer_t *san, const char *text, const char *dst)
+{
+    if (!text)
+        return -1;
+    FILE *in = fmemopen((void *)text, strlen(text), "r");
+    if (!in)
+        return -1;
+    int rc = stage_stream(san, in, dst);
+    fclose(in);
+    return rc;
+}
+
 /* A rotated (gzip) log: decompress, sanitize, recompress. */
 static int stage_gz(sanitizer_t *san, const char *src, const char *dst)
 {
@@ -811,6 +826,18 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
     (void)stage_cmd(san, "df -h 2>&1", dst);
     snprintf(dst, sizeof(dst), "%s/system/ps.txt", top);
     (void)stage_cmd(san, "ps 2>&1", dst);
+    /* What is installed that is not the firmware. A report that begins
+     * "it stopped working" is a different report when three extension
+     * packages are running, and the bundle is where that is read: the
+     * ids, versions, tiers, the key each was signed by, whether each is
+     * enabled or quarantined, what the operator granted, and what the
+     * host says each one is doing. Whatever is in it is written by
+     * whoever wrote the package, so it goes through the sanitizer like
+     * everything else. */
+    snprintf(dst, sizeof(dst), "%s/system/extensions.json", top);
+    char *ext = extpkg_status_json(settings_get_bool("ext_enabled", 0));
+    (void)stage_text(san, ext, dst);
+    free(ext);
     snprintf(dst, sizeof(dst), "%s/system/rsyslog-forgefirm.conf", top);
     (void)stage_file(san, LOGS_RSYSLOG, dst);
     snprintf(dst, sizeof(dst), "%s/system/loglevels.txt", top);
@@ -916,7 +943,11 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                        " long hex/base64 blobs). It\n"
                        "cannot know everything a log line may carry - skim"
                        " the bundle before posting it\n"
-                       "publicly.\n");
+                       "publicly. It knows this machine's own secrets and"
+                       " not an extension package's: what a\n"
+                       "package logs and what it keeps in its settings are"
+                       " its author's to keep clean.\n"
+                       "system/extensions.json lists what is installed.\n");
         }
         fclose(r);
     }
