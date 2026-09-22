@@ -51,6 +51,17 @@ char *extpkg_status_json(int ext_enabled);
  * the host's refusal, 502 when the host cannot be asked) and the words. */
 int extpkg_action(const char *id, const char *action, int *status, char *why, size_t wlen);
 
+/* Every package, its data, and the owner's keys, for a change of owner:
+ * a package can hold the last owner's credentials, and a key they added
+ * would go on making their packages read as trusted. The counts into
+ * *packages and *keys. 0, or -1 with the words. This is the account
+ * reset's alone; nothing an operator does reaches it. */
+int extpkg_wipe(int *packages, int *keys, char *why, size_t wlen);
+
+/* How many packages are installed, for the offer to wipe them: -1 when
+ * the host cannot be asked. */
+int extpkg_count(void);
+
 /* Installing, in two requests. The archive is uploaded to one staging
  * file and the host is asked what it is (inspect changes nothing): the
  * answer goes to the operator with the consent its tier takes. Then the

@@ -23,6 +23,7 @@
 #include "advisories.h"
 #include "auth.h"
 #include "builtin.h"
+#include "extpkg.h"
 #include "button.h"
 #include "cam.h"
 #include "setup.h"
@@ -319,6 +320,13 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
     json_object_set_new(u, "exists", json_boolean(users_exist()));
     json_object_set_new(u, "reset_pending", json_boolean(users_reset_pending()));
     json_object_set_new(u, "name", json_string(users_exist() ? name : ""));
+    /* What a change of owner would have to be asked about. A package can
+     * hold the last owner's credentials, so the account step offers to
+     * take them; it is only asked when there is something to take. */
+    if (users_reset_pending()) {
+        int n = extpkg_count();
+        json_object_set_new(u, "extension_packages", n < 0 ? json_null() : json_integer(n));
+    }
     json_object_set_new(st, "users", u);
 
     json_object_set_new(st, "button", json_string(button_state()));
@@ -518,11 +526,32 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
         return reply_error(res, 403, "log in to change the account");
     const char *name = param(req, "name");
     const char *pw = param(req, "password");
+    const char *wipe = param(req, "wipe_extensions");
     char reason[128];
+    /* Whether this is a change of owner has to be read before the account
+     * is made: making it is what ends the reset. */
+    int changing_owner = users_reset_pending();
     if (users_create(name, pw, reason, sizeof(reason)) != 0)
         return reply_error(res, 400, reason);
     setup_set_account(name, USERS_UID);
     setup_wizard_done("account", 1, NULL, NULL);
+
+    /* The extension tree, when the new owner asked for it: every package,
+     * its data, and every key the last owner added. They can hold that
+     * owner's tokens and credentials, and a key of theirs would go on
+     * making their packages read as trusted. The account is already the
+     * new owner's, so a failure here is said and is not a refusal of it. */
+    int wiped_pkgs = 0, wiped_keys = 0, wipe_failed = 0;
+    char wipe_why[160] = "";
+    if (changing_owner && wipe && !strcmp(wipe, "1")) {
+        if (extpkg_wipe(&wiped_pkgs, &wiped_keys, wipe_why, sizeof(wipe_why)) != 0) {
+            wipe_failed = 1;
+            fflog(LOG_ERR, "wiz: the extension tree could not be wiped for the new owner: %s", wipe_why);
+        } else {
+            fflog(LOG_WARNING, "wiz: a new owner took the machine: %d extension package(s) and %d owner key(s) removed",
+                  wiped_pkgs, wiped_keys);
+        }
+    }
 
     /* Log this browser in. */
     char sid[SESSION_ID_HEX + 1], cookie[256];
@@ -533,6 +562,15 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
     json_t *o = json_object();
     json_object_set_new(o, "ok", json_true());
     json_object_set_new(o, "name", json_string(name));
+    if (changing_owner && wipe && !strcmp(wipe, "1")) {
+        json_t *w = json_object();
+        json_object_set_new(w, "ok", json_boolean(!wipe_failed));
+        json_object_set_new(w, "packages", json_integer(wiped_pkgs));
+        json_object_set_new(w, "keys", json_integer(wiped_keys));
+        if (wipe_failed)
+            json_object_set_new(w, "error", json_string(wipe_why));
+        json_object_set_new(o, "wiped", w);
+    }
     return reply_obj(res, 200, o);
 }
 

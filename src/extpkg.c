@@ -174,6 +174,47 @@ char *extpkg_status_json(int ext_enabled)
     return doc;
 }
 
+int extpkg_count(void)
+{
+    char *text = NULL;
+    const char *argv[] = { "list", NULL };
+    if (extpkg_cli(argv, &text) != 0 || !text) {
+        free(text);
+        return -1;
+    }
+    json_t *j = json_loads(text, 0, NULL);
+    free(text);
+    json_t *pkgs = json_object_get(j, "packages");
+    int n = json_is_array(pkgs) ? (int)json_array_size(pkgs) : -1;
+    json_decref(j);
+    return n;
+}
+
+int extpkg_wipe(int *packages, int *keys, char *why, size_t wlen)
+{
+    char *text = NULL;
+    const char *argv[] = { "wipe", NULL };
+    *packages = *keys = 0;
+    int rc = extpkg_cli(argv, &text);
+    json_t *j = text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        snprintf(why, wlen, "the extension host's command line does not answer");
+        return -1;
+    }
+    if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        return -1;
+    }
+    *packages = (int)json_integer_value(json_object_get(j, "packages"));
+    *keys = (int)json_integer_value(json_object_get(j, "keys"));
+    json_decref(j);
+    return 0;
+}
+
 int extpkg_action(const char *id, const char *action, int *status, char *why, size_t wlen)
 {
     static const struct { const char *action; const char *argv[4]; int id_at; } acts[] = {

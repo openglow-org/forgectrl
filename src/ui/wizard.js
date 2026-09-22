@@ -325,6 +325,7 @@ function show(id) {
   renderRail(id);
   window.scrollTo(0, 0);
   if (dark) initDark(id);
+  if (id === 'account') initAccount();
   if (id === 'advisories') initDocs();
   if (id === 'press') startPress();
   if (id === 'preferences') initPreferences();
@@ -561,20 +562,46 @@ function cancelPress() {
 }
 
 /* ---- Account ---------------------------------------------------------- */
+
+/* A change of owner is offered the extension packages the last one left:
+ * a package can hold their tokens and credentials, and a key they added
+ * would go on making their packages read as trusted. The offer is only
+ * made when there is something to take, and it is ticked by default. */
+function initAccount() {
+  var n = W && W.users ? W.users.extension_packages : undefined,
+    field = $('a-wipe-field');
+  if (!field) return;
+  if (!(W && W.users && W.users.reset_pending) || !n) {
+    field.style.display = 'none';
+    return;
+  }
+  field.style.display = '';
+  $('a-wipe').checked = true;
+  $('a-wipe-help').textContent =
+    n === 1
+      ? 'One package is installed. It and its data go, with any signing key the last owner added: a package can hold their credentials.'
+      : n + ' packages are installed. They and their data go, with any signing key the last owner added: a package can hold their credentials.';
+}
+
 $('acct').addEventListener('submit', function (e) {
   e.preventDefault();
   var name = $('a-name').value.trim(),
     pw = $('a-pw').value,
-    pw2 = $('a-pw2').value;
+    pw2 = $('a-pw2').value,
+    body = { name: name, password: pw };
   if (pw !== pw2) {
     setMsg('a-msg', 'the two passwords differ', 'bad');
     return;
   }
+  if ($('a-wipe-field').style.display !== 'none' && $('a-wipe').checked) body.wipe_extensions = '1';
   $('a-go').disabled = true;
   setMsg('a-msg', 'creating…');
-  post('/wiz/account', { name: name, password: pw })
-    .then(function () {
-      setMsg('a-msg', 'done', 'ok');
+  post('/wiz/account', body)
+    .then(function (j) {
+      var w = j && j.wiped;
+      if (w && w.ok === false) setMsg('a-msg', 'account made; the packages were not removed: ' + w.error, 'bad');
+      else if (w) setMsg('a-msg', 'done; ' + w.packages + ' package(s) and ' + w.keys + ' key(s) removed', 'ok');
+      else setMsg('a-msg', 'done', 'ok');
       load(function () {
         show(firstOpen());
       });

@@ -1354,9 +1354,13 @@ class Mock:
                          'class': 'dark' if k in DARK else 'live' if k in LIVE else 'form',
                          'done': w['versions'].get(k, 0)} for k, t in WIZARDS],
             'dark': self.dark_reply(),
-            'users': {'exists': bool(w['account']) and not w['reset'],
-                      'reset_pending': w['reset'],
-                      'name': w['account'] or ''},
+            'users': dict({'exists': bool(w['account']) and not w['reset'],
+                           'reset_pending': w['reset'],
+                           'name': w['account'] or ''},
+                          # What a change of owner is offered: the packages
+                          # the last one left. Only asked when there are any.
+                          **({'extension_packages': len(self.ext_packages)}
+                             if w['reset'] else {})),
             'button': w['button'], 'tls_fingerprint': MOCK_FINGERPRINT,
             'session': True,
             'clock': {'utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
@@ -1987,12 +1991,24 @@ class Mock:
                                         "digits, '-' and '_'"})
             if len(pw) < 8 or pw == name:
                 return J(400, {'error': 'the password must be at least 8 characters'})
+            # A change of owner may take the extension tree with it: every
+            # package, its data, and every key the last owner added. They
+            # can hold that owner's credentials.
+            wiped = None
+            if w['reset'] and form.get('wipe_extensions') == '1':
+                wiped = {'ok': True, 'packages': len(self.ext_packages),
+                         'keys': len(self.ext_keys)}
+                self.ext_packages = []
+                self.ext_keys = {}
             w['account'] = name
             w['reset'] = False
             w['versions']['account'] = 1
+            body = {'ok': True, 'name': name}
+            if wiped:
+                body['wiped'] = wiped
             return 200, {'Content-Type': 'application/json',
                          'Set-Cookie': 'ffsid=' + '0' * 64 + '; Path=/; HttpOnly'
-                         }, json.dumps({'ok': True, 'name': name}).encode()
+                         }, json.dumps(body).encode()
         if path == '/wiz/preferences':
             for k in ('ui_units', 'wifi_country'):
                 if k in form and form[k]:
