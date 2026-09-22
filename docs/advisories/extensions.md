@@ -38,7 +38,9 @@ A package that can use a camera can take a picture of the inside of the machine 
 
 A package with a page of its own can send a little data out of your browser while you have that page open. The page cannot reach the machine or the network by itself, and it cannot read your session; what it can do is a browser gap this project cannot close, and a package without a page cannot do it at all.
 
-This firmware serves most of the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, and a page of its own. The rest - running a program - is reserved and reaches nothing yet. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
+A package that can run a program starts a job the way you would, and the job then waits for the button and stands under every gate and limit your own jobs do.
+
+This firmware serves the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, a page of its own, and running a program. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 

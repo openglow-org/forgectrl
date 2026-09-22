@@ -74,7 +74,7 @@ int tokens_cap_known(const char *cap);
  * the host reaches, so a capability belongs here only once the host
  * actually relays it. */
 #define TOKENS_HOST_FILE "/run/forgefirm/ext-host.token"
-#define TOKENS_HOST_CAPS "motion.jog"
+#define TOKENS_HOST_CAPS "motion.jog,motion.job"
 
 /* Mint it and write the file. 0, or -1 with the reason in err. */
 int tokens_host_mint(char *err, size_t elen);
