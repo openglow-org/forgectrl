@@ -139,6 +139,13 @@ function battery() {
   ask("bridge-frame", "camera.frame", { camera: "lid", resolution: "full", quality: 80, lamp: 60, key: "x" });
   ask("bridge-frame-lamp", "camera.frame", { camera: "lid", lamp: 5000 });
   ask("bridge-frame-res", "camera.frame", { camera: "lid", resolution: "huge" });
+  // The calls that move the machine or run a program, which this package does not hold.
+  ask("bridge-cancel", "motion.cancel");
+  ask("bridge-job", "motion.job", { program: "M3 S1000\nG1 X10 F600\nM5\n" });
+  ask("bridge-job-abort", "motion.job.abort");
+  // Its own frame's height: taken, inside the panel's bounds.
+  ask("bridge-height", "frame.height", { px: 99999 });
+  ask("bridge-height-bad", "frame.height", { px: "tall" });
 
   done(2500);
 }

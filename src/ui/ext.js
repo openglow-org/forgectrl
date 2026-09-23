@@ -275,8 +275,19 @@ var EXT_BRIDGE_CALLS = {
   'settings.get': { cap: 'settings.own' },
   'settings.set': { cap: 'settings.own' },
   'camera.frame': { cap: null },
-  'motion.jog': { cap: 'motion.jog' }
+  'motion.jog': { cap: 'motion.jog' },
+  'motion.cancel': { cap: 'motion.jog' },
+  'motion.job': { cap: 'motion.job' },
+  'motion.job.abort': { cap: 'motion.job' },
+  'motion.job.state': { cap: 'motion.job' },
+  'frame.height': { cap: null }
 };
+/* How tall a page may ask its frame to be. The frame is the panel's and
+ * sits in the panel's layout: a page picks its height inside these, and
+ * nothing a page does moves the label above it or the page around it. */
+var EXT_FRAME_MIN = 200,
+  EXT_FRAME_MAX = 1400;
+var EXT_JOB_MAX = 2 * 1024 * 1024;      /* a program a page may hand the panel, in characters */
 
 function extBridgeReply(win, rid, ok, value) {
   /* The frame's origin is opaque, so the reply is addressed to the
@@ -353,6 +364,40 @@ function extBridgeCall(id, call, args) {
     if (!jog.has('x') && !jog.has('y') && !jog.has('z')) return Promise.reject('a jog moves at least one axis');
     return fx('/motion/jog', { method: 'POST', body: jog }).then(extAnswer);
   }
+  if (call === 'motion.cancel') return fx('/motion/cancel', { method: 'POST' }).then(extAnswer);
+  if (call === 'motion.job') {
+    /* A program the page wrote, run as the machine's one sender under
+     * every gate a sender is under, the arm press included. Who it is
+     * from is the panel's word - the package's id - and never a name the
+     * page chose, which is also what the arm prompt shows. */
+    var p = args || {},
+      form = new FormData();
+    if (typeof p.program !== 'string' || !p.program.length) return Promise.reject('program is the text of a G-code program');
+    if (p.program.length > EXT_JOB_MAX) return Promise.reject('a program from a page is at most 2 MiB');
+    form.append('name', id);
+    var k, key;
+    for (k = 0; k < 2; k++) {
+      key = ['lit_within_s', 'timeout_s'][k];
+      if (p[key] === undefined) continue;
+      if (typeof p[key] !== 'number' || !isFinite(p[key]) || p[key] < 0)
+        return Promise.reject(key + ' is a number of seconds');
+      form.append(key, String(p[key]));
+    }
+    form.append('program', new Blob([p.program], { type: 'text/plain' }), 'program.gcode');
+    return fx('/job', { method: 'POST', body: form }).then(extAnswer);
+  }
+  if (call === 'frame.height') {
+    var px = (args || {}).px,
+      fr = null;
+    if (typeof px !== 'number' || !isFinite(px)) return Promise.reject('px is a number of pixels');
+    for (var f = 0; f < EXT_FRAMES.length; f++) if (EXT_FRAMES[f].id === id) fr = EXT_FRAMES[f].el;
+    if (!fr) return Promise.reject('this page has no frame open');
+    px = Math.max(EXT_FRAME_MIN, Math.min(EXT_FRAME_MAX, Math.round(px)));
+    fr.style.height = px + 'px';
+    return Promise.resolve({ px: px });
+  }
+  if (call === 'motion.job.abort') return fx('/job/abort', { method: 'POST' }).then(extAnswer);
+  if (call === 'motion.job.state') return fx('/job').then(extAnswer);
   return fx(spec.path).then(extAnswer);
 }
 
@@ -402,7 +447,7 @@ function extOpenUi(id) {
       host.appendChild(f);
       /* Remembered by its window, which is how the bridge will know it:
        * the frame's origin is null and tells the panel nothing. */
-      EXT_FRAMES = [{ win: f.contentWindow, id: id }];
+      EXT_FRAMES = [{ win: f.contentWindow, id: id, el: f }];
     })
     .catch(function (e) {
       host.innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';

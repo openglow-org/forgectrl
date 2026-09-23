@@ -333,6 +333,63 @@ class Panel:
 
 
 # ------------------------------------------------------------- mock
+# The mock's head camera: a picture of the bed under the camera, drawn from the mock head's position, so a
+# jog moves the scene and a package's page (the alignment one, above all) can be worked without a machine.
+# The camera sits MOCK_CAM_MM from where the beam lands (not quite the 24.6 mm a package assumes before it is
+# calibrated, so a calibration has something to find), the scale is the head camera's pinhole fit on the
+# bench reference at 3 mm of material, and every burn the mock's job runner played left a mark where the
+# head stood.
+MOCK_CAM_MM = (24.9, -0.35)
+MOCK_CAM_PX_MM = 3590.0 / (49.6 - 3.0)      # full resolution
+
+
+def mock_head_png(pos, full, lamp, marks):
+    """A grayscale PNG: a millimeter grid, darker every ten, and a plus sign 3 mm across for each burn."""
+    import struct
+    import zlib
+    w, h = (2592, 1944) if full else (1296, 972)
+    k = MOCK_CAM_PX_MM * (1.0 if full else 0.5)
+    cx, cy = pos['x'] - MOCK_CAM_MM[0], pos['y'] - MOCK_CAM_MM[1]
+    gain = 0.6 + (lamp if lamp >= 0 else 120) / 600.0
+    bg, fine, bold, burnt = (min(255, int(v * gain)) for v in (205, 150, 70, 25))
+    lw = 0.04
+
+    def bed(u, c, half):
+        return c + (u - half) / k
+
+    def near(v):
+        d = abs(v - round(v))
+        return d < lw, abs(v / 10.0 - round(v / 10.0)) * 10.0 < lw * 1.6
+
+    base = bytearray([bg]) * w
+    for u in range(w):
+        on, ten = near(bed(u, cx, w / 2))
+        if ten:
+            base[u] = bold
+        elif on:
+            base[u] = fine
+    rows = []
+    for v in range(h):
+        by = bed(v, cy, h / 2)
+        on, ten = near(by)
+        row = bytearray([bold if ten else fine]) * w if (on or ten) else bytearray(base)
+        for mx, my in marks:
+            if abs(by - my) <= 1.5:
+                lo, hi = int((mx - cx - 0.12) * k + w / 2), int((mx - cx + 0.12) * k + w / 2)
+                for u in range(max(0, lo), min(w, hi + 1)):
+                    row[u] = burnt
+            if abs(by - my) <= 0.12:
+                lo, hi = int((mx - cx - 1.5) * k + w / 2), int((mx - cx + 1.5) * k + w / 2)
+                for u in range(max(0, lo), min(w, hi + 1)):
+                    row[u] = burnt
+        rows.append(b'\x00' + bytes(row))
+
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 0, 0, 0, 0)) +
+            chunk(b'IDAT', zlib.compress(b''.join(rows), 1)) + chunk(b'IEND', b''))
+
+
 MOCK_SVG = (
     "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='360' "
     "viewBox='0 0 640 360'><rect width='640' height='360' fill='#3a3d46'/>"
@@ -943,7 +1000,8 @@ class Mock:
         # The extension packages, as the extension host lists them (src/extpkg.c relays its command
         # line): one official package that runs, and one a person installed unsigned, with a hold.
         self.ext_keys = {'a-maker': 'ab' * 32}
-        self.ext_settings = {'greeting': 'hello'}
+        self.ext_values = {}        # package id -> the settings the operator or the page set
+        self.burn_marks = []        # where the head stood for each lit job the mock's runner played
         self.ext_packages = [
             {'id': 'org.openglow.notify', 'version': '1.0.0', 'previous': '', 'tier': 'official', 'key': 'c7' * 32,
              'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
@@ -962,7 +1020,9 @@ class Mock:
                          'description': 'A package with an interface of its own.', 'author': 'A maker',
                          'license': 'MIT', 'runtime': 'ui',
                          'capabilities': ['ui', 'machine.read', 'settings.own', 'camera.lid'],
-                         'modes': ['grbl', 'cloud']}},
+                         'modes': ['grbl', 'cloud']},
+             '_settings': {'greeting': {'type': 'string', 'default': 'hello', 'max': 32, 'label': 'Greeting'}},
+             '_ui': MOCK_UI_HTML},
         ]
         self.scoped_pass = False
         # The job runner's record (src/jobrun.c): a posted program plays
@@ -1168,6 +1228,8 @@ class Mock:
             return T(409, 'a sender is connected to the machine - close it first')
         self.prog.update({'state': 'running', 'owner': 'job:%s' % name, 'program': True,
                           'lines': lines, 'sent': 0, 'acked': 0, 'elapsed_s': 0, 'reason': ''})
+        if re.search(rb'(?m)^\s*M0*[34]\b', parts['program']):
+            self.burn_marks.append((self.status['pos']['x'], self.status['pos']['y']))
         self.prog_t0 = time.time()
         return J(200, self.prog)
 
@@ -1675,7 +1737,8 @@ class Mock:
                 'keys': [{'name': n, 'key': k} for n, k in sorted(self.ext_keys.items())],
                 'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
-                'packages': [dict(p, effective=self.ext_effective(p)) for p in self.ext_packages]}
+                'packages': [dict({k: v for k, v in p.items() if not k.startswith('_')},
+                                  effective=self.ext_effective(p)) for p in self.ext_packages]}
 
     @staticmethod
     def snapshot_bad(q):
@@ -1693,6 +1756,113 @@ class Mock:
         if 'background' in q and q['background'] not in ('0', '1'):
             return "background must be '0' or '1'"
         return None
+
+    @staticmethod
+    def ext_schema(p):
+        """The schema forgeext reads out of a manifest's settings (settings_schema_json()): the label is the
+        key when it says none, numbers are reals, and a string's max is 128 unless it says less."""
+        out = []
+        for name, d in (p.get('_settings') or {}).items():
+            t = {'name': name, 'label': d.get('label', name), 'type': d['type']}
+            if d['type'] == 'number':
+                t['default'] = float(d['default'])
+                for k in ('min', 'max'):
+                    if k in d:
+                        t[k] = float(d[k])
+            elif d['type'] == 'string':
+                t['default'] = d['default']
+                t['max'] = int(d.get('max', 128))
+            elif d['type'] == 'choice':
+                t['default'] = d['default']
+                t['choices'] = list(d['choices'])
+            else:
+                t['default'] = bool(d['default'])
+            out.append(t)
+        return out
+
+    @staticmethod
+    def ext_value_bad(t, v):
+        """setting_value_ok(): None when the value fits, else its words."""
+        name = t['name']
+        if t['type'] == 'number':
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return '"%s" takes a number' % name
+            if 'min' in t and v < t['min']:
+                return '"%s" is at least %g' % (name, t['min'])
+            if 'max' in t and v > t['max']:
+                return '"%s" is at most %g' % (name, t['max'])
+            return None
+        if t['type'] == 'bool':
+            return None if isinstance(v, bool) else '"%s" takes true or false' % name
+        if not isinstance(v, str) or '\0' in v:
+            return '"%s" takes a string' % name
+        if t['type'] == 'choice':
+            return None if v in t['choices'] else '"%s" takes one of its choices' % name
+        if len(v.encode('utf-8')) > t['max']:
+            return '"%s" is at most %d bytes' % (name, t['max'])
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in v):
+            return '"%s" takes printable text: no control characters' % name
+        return None
+
+    def ext_settings_reply(self, p):
+        schema = self.ext_schema(p)
+        have = self.ext_values.get(p['id'], {})
+        vals = {t['name']: (have[t['name']] if t['name'] in have and self.ext_value_bad(t, have[t['name']]) is None
+                            else t['default']) for t in schema}
+        return {'ok': True, 'id': p['id'], 'settings': vals, 'schema': schema}
+
+    def ext_settings_patch(self, p, text):
+        """settings_write(): the whole patch or none of it."""
+        try:
+            patch = json.loads(text or '')
+        except ValueError:
+            return 'the patch is a JSON object of settings'
+        if not isinstance(patch, dict):
+            return 'the body is a JSON object of settings'
+        if not patch:
+            return 'the body names no setting'
+        by = {t['name']: t for t in self.ext_schema(p)}
+        for k, v in patch.items():
+            if k not in by:
+                return 'this package declares no setting "%s"' % k[:32]
+            bad = self.ext_value_bad(by[k], v)
+            if bad:
+                return bad
+        self.ext_values.setdefault(p['id'], {}).update(patch)
+        return None
+
+    def ext_install_dir(self, d, tier):
+        """A package an author is working on, installed from its directory. The mock judges nothing a real
+        host would: forgeext inspect (or ffx lint) is what says whether the manifest would install."""
+        with open(os.path.join(d, 'manifest.json'), encoding='utf-8') as f:
+            m = json.load(f)
+        caps = list(m.get('capabilities') or [])
+        pkg = {k: m[k] for k in ('id', 'name', 'version', 'description', 'author', 'license', 'runtime')
+               if k in m}
+        pkg.update({'capabilities': caps, 'modes': list(m.get('modes') or ['grbl', 'cloud'])})
+        entry = {'id': m['id'], 'version': m['version'], 'previous': '', 'tier': tier, 'key': '',
+                 'enabled': True, 'quarantined': False, 'grants': [c for c in caps if c in self.EXT_NEEDS_GRANT],
+                 'account': 'ffx%d' % (10 + len(self.ext_packages)), 'package': pkg,
+                 '_settings': m.get('settings') or {}, '_dir': os.path.abspath(d)}
+        if 'hold' in entry['grants']:
+            entry['hold'] = 'advisory'
+        self.ext_packages = [x for x in self.ext_packages if x['id'] != m['id']] + [entry]
+        self.settings['ext_enabled'] = '1'
+        return entry
+
+    def ext_find(self, pid):
+        return next((x for x in self.ext_packages if x['id'] == pid), None)
+
+    def ext_page(self, p):
+        """A package's page: the one the mock was given, or the author's file read fresh at every open, so an
+        edit shows at the next Open."""
+        if p.get('_dir'):
+            try:
+                with open(os.path.join(p['_dir'], 'ui', 'index.html'), encoding='utf-8') as f:
+                    return f.read()
+            except OSError:
+                return None
+        return p.get('_ui')
 
     def ext_effective(self, p):
         """What the host would honor, as its list reports it: every capability the manifest asked for that needs
@@ -2167,20 +2337,23 @@ class Mock:
             if path == '/ext/settings':
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
-                if (q.get('id') or '') != MOCK_UI_ID:
+                p = self.ext_find(q.get('id') or '')
+                if p is None or not p.get('_settings'):
                     return J(400, {'error': 'this package declares no settings'})
-                return J(200, {'ok': True, 'id': MOCK_UI_ID,
-                               'settings': dict(self.ext_settings),
-                               'schema': [{'name': 'greeting', 'label': 'Greeting', 'type': 'string',
-                                           'default': 'hello', 'max': 32}]})
+                return J(200, self.ext_settings_reply(p))
             if path == '/ext/ui':
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
                 pid = q.get('id') or ''
-                if pid != MOCK_UI_ID:
+                p = self.ext_find(pid)
+                if p is None:
+                    return J(404, {'error': 'that package is not installed'})
+                if not p['enabled']:
+                    return J(404, {'error': 'this package is disabled: its interface is not served'})
+                page = self.ext_page(p)
+                if page is None:
                     return J(404, {'error': 'this package has no interface'})
-                return J(200, {'ok': True, 'id': pid, 'bytes': len(MOCK_UI_HTML),
-                               'html': MOCK_UI_HTML})
+                return J(200, {'ok': True, 'id': pid, 'bytes': len(page.encode('utf-8')), 'html': page})
             if path == '/settings':
                 return J(200, self.settings_reply())
             if path == '/status':
@@ -2220,6 +2393,10 @@ class Mock:
                         and self.rep_armed:
                     return T(409, 'a job is armed: a background capture '
                                   'waits until the window closes')
+                if path == '/cam/snapshot' and q.get('cam') == 'head':
+                    return 200, {'Content-Type': 'image/png'}, mock_head_png(
+                        self.status['pos'], q.get('res', 'full') == 'full',
+                        int(q['lamp']) if (q.get('lamp') or '').isdigit() else -1, self.burn_marks)
                 svg = MOCK_SVG % time.strftime('%H:%M:%S')
                 return 200, {'Content-Type': 'image/svg+xml'}, svg.encode()
             if path == '/cam/h264':
@@ -2521,23 +2698,14 @@ class Mock:
         if path in ('/tokens', '/tokens/revoke'):
             return self.tokens_post(path, form, J, T)
         if path == '/ext/settings':
-            if (form.get('id') or '') != MOCK_UI_ID:
+            p = self.ext_find(form.get('id') or '')
+            if p is None or not p.get('_settings'):
                 return J(400, {'error': 'this package declares no settings'})
-            try:
-                patch = json.loads(form.get('set') or '{}')
-            except ValueError:
-                return J(400, {'error': 'the patch is a JSON object of settings'})
-            if not isinstance(patch, dict):
-                return J(400, {'error': 'the patch is a JSON object of settings'})
-            for k, v in patch.items():
-                if k != 'greeting':
-                    return J(400, {'error': 'this package declares no setting "%s"' % k})
-                if not isinstance(v, str) or len(v) > 32:
-                    return J(400, {'error': '"greeting" is at most 32 bytes'})
-            self.ext_settings.update(patch)
-            return J(200, {'ok': True, 'id': MOCK_UI_ID, 'settings': dict(self.ext_settings),
-                           'schema': [{'name': 'greeting', 'label': 'Greeting', 'type': 'string',
-                                       'default': 'hello', 'max': 32}]})
+            if 'set' in form:
+                bad = self.ext_settings_patch(p, form.get('set'))
+                if bad:
+                    return J(400, {'error': bad})
+            return J(200, self.ext_settings_reply(p))
         if path == '/ext/package':
             return self.ext_package_post(form, J, T)
         if path == '/ext/upload':
@@ -2907,6 +3075,12 @@ def main():
                     help='print the bundled page and exit')
     ap.add_argument('-v', '--verbose', action='store_true',
                     help='log every request, including the polls')
+    ap.add_argument('--package', action='append', default=[], metavar='DIR',
+                    help='install the package in DIR (manifest.json at its top) in the mock: its page is read '
+                         'from DIR/ui/index.html at every Open, its settings follow its manifest, and every '
+                         'capability that takes the operator\'s grant is granted (implies --mock)')
+    ap.add_argument('--tier', default='unverified', choices=('official', 'community', 'unverified'),
+                    help='the tier --package installs at (default unverified)')
     args = ap.parse_args()
 
     panel = Panel(UI_DIR)
@@ -2917,10 +3091,17 @@ def main():
             sys.exit('devserver: %s' % e)
         return
 
+    if args.package:
+        args.mock = True
     cfg = Config(args)
     Handler.cfg = cfg
     Handler.panel = panel
     Handler.mock = Mock(MOCK_TOKEN)
+    for d in args.package:
+        try:
+            Handler.mock.ext_install_dir(d, args.tier)
+        except (OSError, ValueError, KeyError) as e:
+            sys.exit('devserver: --package %s: %s' % (d, e))
     Handler.verbose = args.verbose
     Handler.bundled = args.bundle
 

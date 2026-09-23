@@ -83,6 +83,11 @@ BRIDGE = {
     'bridge-frame': ('ok: ', ''),
     'bridge-frame-lamp': ('refused: ', 'lamp is a whole number from 0 to 1023'),
     'bridge-frame-res': ('refused: ', 'resolution is full or half'),
+    'bridge-cancel': ('refused: ', 'does not hold motion.jog'),
+    'bridge-job': ('refused: ', 'does not hold motion.job'),
+    'bridge-job-abort': ('refused: ', 'does not hold motion.job'),
+    'bridge-height': ('ok: ', '"px":1400'),
+    'bridge-height-bad': ('refused: ', 'px is a number of pixels'),
 }
 # What the bridge must send the machine for bridge-frame: every value the page asked for that the route takes,
 # the capture marked as a background one, and nothing else the message carried.
@@ -155,6 +160,7 @@ DRIVER = r"""<script>
       var fr = f.getBoundingClientRect(), lr = label ? label.getBoundingClientRect() : null;
       out.label_outside = !!lr && lr.bottom <= fr.top + 0.5 && !label.contains(f) && !f.contains(label);
       out.frame_in_host = host.contains(f);
+      out.height = fr.height;
     }
     return fetch('/', { cache: 'no-store' }).then(function (r) {
       out.page_policy = r.headers.get('Content-Security-Policy');
@@ -276,6 +282,7 @@ def verdict(ua):
         'the policy is the first element': pc.get('policy_first') is True,
         "the panel's label sits outside the frame": pc.get('label_outside') is True,
         "the panel page sends frame-src 'none'": "frame-src 'none'" in (pc.get('page_policy') or ''),
+        'the frame is no taller than the panel allows': 0 < (pc.get('height') or 0) <= 1400.5,
     }
     for k, ok in checks.items():
         if not ok:

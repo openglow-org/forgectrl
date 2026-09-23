@@ -360,6 +360,70 @@ class MockTest(unittest.TestCase):
                 self.assertEqual((code, out.decode()), (400, want), q)
                 self.assertIn('"%s"' % want.replace("'", "'"), body)
 
+    def test_ext_settings_follow_the_manifest(self):
+        # forgeext's settings as the mock keeps them (forgeext src/settings.c): the schema is the manifest's,
+        # a value that does not fit reads as its default, and a patch is applied whole or not at all
+        m = self.mock()
+        m.ext_packages[2]['_settings'] = {
+            'threshold': {'type': 'number', 'default': 40, 'min': 0, 'max': 100},
+            'note': {'type': 'string', 'default': '', 'max': 8, 'label': 'A note'},
+            'loud': {'type': 'bool', 'default': False},
+            'when': {'type': 'choice', 'default': 'end', 'choices': ['start', 'end']}}
+        doc = self.get_json(m, '/ext/settings', q={'id': 'org.example.panel'})
+        self.assertEqual(doc['settings'], {'threshold': 40.0, 'note': '', 'loud': False, 'when': 'end'})
+        self.assertEqual([t['label'] for t in doc['schema']], ['threshold', 'A note', 'loud', 'when'])
+        self.assertEqual(doc['schema'][1]['max'], 8)
+        for patch, words in (({'threshold': 101}, '"threshold" is at most 100'),
+                             ({'threshold': True}, '"threshold" takes a number'),
+                             ({'note': 'far too long'}, '"note" is at most 8 bytes'),
+                             ({'note': 'a\tb'}, '"note" takes printable text: no control characters'),
+                             ({'loud': 1}, '"loud" takes true or false'),
+                             ({'when': 'never'}, '"when" takes one of its choices'),
+                             ({'nothere': 1}, 'this package declares no setting "nothere"'),
+                             ({}, 'the body names no setting'),
+                             ({'threshold': 50, 'note': 'far too long'}, '"note" is at most 8 bytes')):
+            code, _h, out = self.call(m, 'POST', '/ext/settings',
+                                      body=('id=org.example.panel&set=' + json.dumps(patch)).encode())
+            self.assertEqual((code, json.loads(out)['error']), (400, words), patch)
+        # nothing of a refused patch was kept, the half that fitted included
+        self.assertEqual(self.get_json(m, '/ext/settings', q={'id': 'org.example.panel'})['settings']['threshold'], 40.0)
+        code, _h, out = self.call(m, 'POST', '/ext/settings',
+                                  body=b'id=org.example.panel&set=' + json.dumps({'threshold': 70, 'loud': True}).encode())
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(out)['settings'], {'threshold': 70, 'note': '', 'loud': True, 'when': 'end'})
+        code, _h, _o = self.call(m, 'GET', '/ext/settings', q={'id': 'org.example.badge'})
+        self.assertEqual(code, 400)
+        # the mock's own keys are not in the listing forgeext would give
+        self.assertFalse(any(k.startswith('_') for p in self.get_json(m, '/ext/status')['packages'] for k in p))
+
+    def test_package_from_a_directory(self):
+        # --package DIR: an author's package in the mock, its page read fresh at every open
+        import tempfile
+        m = self.mock()
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'ui'))
+            with open(os.path.join(d, 'manifest.json'), 'w', encoding='utf-8') as f:
+                json.dump({'manifest': 1, 'id': 'org.example.mine', 'name': 'Mine', 'version': '0.1.0',
+                           'author': 'me', 'license': 'MIT', 'api': '0.1', 'runtime': 'ui',
+                           'capabilities': ['ui', 'motion.job', 'settings.own'],
+                           'settings': {'depth': {'type': 'number', 'default': 3}}}, f)
+            with open(os.path.join(d, 'ui', 'index.html'), 'w', encoding='utf-8') as f:
+                f.write('<p>one</p>')
+            m.ext_install_dir(d, 'unverified')
+            doc = self.get_json(m, '/ext/status')
+            mine = [p for p in doc['packages'] if p['id'] == 'org.example.mine'][0]
+            self.assertEqual((mine['tier'], mine['grants'], mine['effective']),
+                             ('unverified', ['motion.job'], ['ui', 'motion.job', 'settings.own']))
+            self.assertTrue(doc['enabled'])
+            self.assertEqual(json.loads(self.call(m, 'GET', '/ext/ui', q={'id': 'org.example.mine'})[2])['html'],
+                             '<p>one</p>')
+            with open(os.path.join(d, 'ui', 'index.html'), 'w', encoding='utf-8') as f:
+                f.write('<p>two</p>')
+            self.assertEqual(json.loads(self.call(m, 'GET', '/ext/ui', q={'id': 'org.example.mine'})[2])['html'],
+                             '<p>two</p>')
+            self.assertEqual(self.get_json(m, '/ext/settings', q={'id': 'org.example.mine'})['settings'],
+                             {'depth': 3.0})
+
     def test_page_policy_matches_main_c(self):
         # every page the daemon serves lets no frame navigate anywhere; the
         # mock's pages, and the frame-isolation harness built on them, carry
