@@ -2030,8 +2030,13 @@ static void events_gather_state(events_snap_t *s)
     }
     if (cool_status_json(body, sizeof(body)) >= 0 && (o = json_loads(body, 0, NULL))) {
         snap_str(o, "verdict", s->verdict, sizeof(s->verdict));
+        snap_str(o, "phase", s->phase, sizeof(s->phase));
         s->fire_ok = json_is_true(json_object_get(o, "fire_ok"));
         s->armed = json_is_true(json_object_get(o, "armed"));
+        if (json_is_number(json_object_get(o, "down_c")))
+            s->down_c = json_number_value(json_object_get(o, "down_c"));
+        if (json_is_number(json_object_get(o, "up_c")))
+            s->up_c = json_number_value(json_object_get(o, "up_c"));
         json_decref(o);
     }
 
@@ -2055,6 +2060,10 @@ static void events_gather_state(events_snap_t *s)
 
     if (!lease_holder(s->lease, sizeof(s->lease)))
         s->lease[0] = '\0';
+
+    s->button_wait = !strcmp(button_state(), "waiting");
+    update_newer_release(s->update, sizeof(s->update));
+    s->gate_open = setup_gate_open(s->gate_why, sizeof(s->gate_why));
 }
 
 struct events_ctx {
@@ -3219,6 +3228,7 @@ int main(int argc, char **argv)
     lease_sender_connected = jobstream_sender_blocks;
     lease_motors_released = motors_released_now;
     events_gather = events_gather_state;
+    events_switches = machine_switch_bits;
     events_init();
     apply_wifi(0);
     cam_lamp_apply_idle();

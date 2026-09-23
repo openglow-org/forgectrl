@@ -47,4 +47,8 @@ int update_upload_sink(const struct _u_request *req, const char *key,
                        const char *transfer_encoding, const char *data,
                        uint64_t off, size_t size, void *user_data);
 
+/* A release newer than the installed version, as the last check found it:
+ * its version into out (1), or "" (0). */
+int update_newer_release(char *out, size_t len);
+
 #endif

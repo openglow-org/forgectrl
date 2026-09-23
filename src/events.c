@@ -26,6 +26,7 @@
 #define KEEPALIVE_S 5
 
 void (*events_gather)(events_snap_t *snap);
+unsigned long (*events_switches)(void);
 
 /* ---- admission ---- */
 
@@ -65,6 +66,39 @@ void events_release(events_slots_t *s, int slot)
 static int is_running(const events_snap_t *s)
 {
     return !strcmp(s->controller, "running");
+}
+
+/* s as the inside of a JSON string: the daemon's own words, still held to
+ * the form. */
+static void quote(const char *s, char *out, size_t len)
+{
+    size_t n = 0;
+    for (; *s && n + 7 < len; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\')
+            out[n++] = '\\', out[n++] = (char)c;
+        else if (c < 0x20)
+            n += (size_t)snprintf(out + n, len - n, "\\u%04x", c);
+        else
+            out[n++] = (char)c;
+    }
+    out[n] = '\0';
+}
+
+void events_button(unsigned long was, unsigned long now, const events_snap_t *st, events_emit_fn emit, void *ctx)
+{
+    if (!((was ^ now) & SW_BUTTON))
+        return;
+    if (st->arming || st->armed || st->lease[0] || st->button_wait)
+        return;                                     /* somebody else's press */
+    emit(ctx, "button", (now & SW_BUTTON) ? "{\"pressed\":true}" : "{\"pressed\":false}");
+}
+
+void events_telemetry(const events_snap_t *s, char *out, size_t len)
+{
+    snprintf(out, len, "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,\"down_c\":%.1f,\"up_c\":%.1f,"
+             "\"state\":\"%s\",\"lid\":%s}", s->phase, s->verdict, s->fire_ok ? "true" : "false", s->down_c, s->up_c,
+             s->gstate[0] ? s->gstate : s->controller, (s->switches & SW_LID) ? "\"closed\"" : "\"open\"");
 }
 
 void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn emit, void *ctx)
@@ -140,6 +174,22 @@ void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn 
             snprintf(d, sizeof(d), "{\"owner\":null}");
         emit(ctx, "lease.changed", d);
     }
+
+    /* A release newer than the installed one: found, or a newer one yet. */
+    if (b->update[0] && strcmp(a->update, b->update)) {
+        char v[64];
+        quote(b->update, v, sizeof(v));
+        snprintf(d, sizeof(d), "{\"version\":\"%s\"}", v);
+        emit(ctx, "update.available", d);
+    }
+
+    /* The setup's gate on the controllers opening or closing. */
+    if (a->gate_open != b->gate_open) {
+        char why[112];
+        quote(b->gate_open ? "" : b->gate_why, why, sizeof(why));
+        snprintf(d, sizeof(d), "{\"gate_open\":%s,\"reason\":\"%s\"}", b->gate_open ? "true" : "false", why);
+        emit(ctx, "setup.flag", d);
+    }
 }
 
 /* ---- the ring and the streams ---- */
@@ -184,12 +234,21 @@ static void emit_locked(void *ctx, const char *name, const char *data)
     publish_locked(name, data);
 }
 
+static double mono_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
 static void *sampler_thread(void *arg)
 {
     (void)arg;
     events_snap_t prev, cur;
-    const struct timespec tick = { 0, 1000000000L / EVENTS_HZ };
+    const struct timespec tick = { 0, 1000000000L / EVENTS_BUTTON_HZ };
     int have_prev = 0;
+    unsigned long bits = 0;
+    double full_at = 0, tick_at = 0;
 
     pthread_mutex_lock(&mu);
     while (!stopping) {
@@ -201,16 +260,39 @@ static void *sampler_thread(void *arg)
             continue;
         }
         pthread_mutex_unlock(&mu);
-        if (have_prev)
-            cur = prev;
-        else
-            memset(&cur, 0, sizeof(cur));
-        if (events_gather)
-            events_gather(&cur);
+        /* Every tick the switch word, for the button; the whole state
+         * EVENTS_HZ times a second; the telemetry every EVENTS_TELEMETRY_S
+         * seconds. By the clock, not by the ticks: a tick is its sleep and
+         * whatever the reads cost on this board. */
+        unsigned long now_bits = events_switches ? events_switches() : bits;
+        double t = mono_s();
+        int full = !have_prev || t - full_at >= 1.0 / EVENTS_HZ;
+        if (!have_prev)
+            tick_at = t;
+        if (full) {
+            if (have_prev)
+                cur = prev;
+            else
+                memset(&cur, 0, sizeof(cur));
+            if (events_gather)
+                events_gather(&cur);
+        }
         pthread_mutex_lock(&mu);
         if (have_prev)
-            events_diff(&prev, &cur, emit_locked, NULL);
-        prev = cur;
+            events_button(bits, now_bits, &prev, emit_locked, NULL);
+        if (full) {
+            if (have_prev)
+                events_diff(&prev, &cur, emit_locked, NULL);
+            prev = cur;
+            full_at = t;
+            if (have_prev && t - tick_at >= EVENTS_TELEMETRY_S) {
+                char d[200];
+                events_telemetry(&prev, d, sizeof(d));
+                publish_locked("telemetry.tick", d);
+                tick_at = t;
+            }
+        }
+        bits = now_bits;
         have_prev = 1;
         pthread_mutex_unlock(&mu);
         nanosleep(&tick, NULL);

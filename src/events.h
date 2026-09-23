@@ -41,6 +41,10 @@
 
 #define EVENTS_MAX_STREAMS 3
 #define EVENTS_HZ 5
+/* The button is looked at more often than the rest: a press is shorter
+ * than a 5 Hz look. Only the switch word is read at this rate. */
+#define EVENTS_BUTTON_HZ 25
+#define EVENTS_TELEMETRY_S 10           /* telemetry.tick, while somebody listens */
 /* The extension host's stream: its slot, and how it asks for it. */
 #define EVENTS_HOST_SLOT   EVENTS_MAX_STREAMS
 #define EVENTS_HOST_HEADER "X-ForgeFIRM-Client"
@@ -77,12 +81,28 @@ typedef struct {
     char home_source[16];
     int released;                   /* the X and Y motors */
     char lease[48];                 /* the machine lease's innermost holder, "" with none */
+    int button_wait;                /* this daemon waits for a press (the setup's, an install's) */
+    char update[48];                /* a release newer than the installed one, "" with none */
+    int gate_open;                  /* the setup's controller gate */
+    char gate_why[96];
+    char phase[16];                 /* the cooling engine's, for the telemetry */
+    double down_c, up_c;
 } events_snap_t;
 
 typedef void (*events_emit_fn)(void *ctx, const char *name, const char *data_json);
 
 /* Every event the step from a to b is, in a fixed order. */
 void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn emit, void *ctx);
+
+/* The button, from one switch word to the next: a "button" event for each
+ * edge, but only when nothing else is waiting for the press - not while a
+ * job arms or runs, not under the machine lease (a wizard, a diagnostic),
+ * and not while this daemon waits for it itself. The state is the last
+ * full snapshot's. */
+void events_button(unsigned long was, unsigned long now, const events_snap_t *state, events_emit_fn emit, void *ctx);
+
+/* telemetry.tick's data: what the daemon already holds, no sensor read. */
+void events_telemetry(const events_snap_t *s, char *out, size_t len);
 
 /* ---- the stream ---- */
 
@@ -106,6 +126,8 @@ long events_next(events_client_t *c, char *buf, size_t max);
 /* Fills the snapshot from the daemon's state; set before events_init().
  * A field it cannot read is left as it came in. */
 extern void (*events_gather)(events_snap_t *snap);
+/* The switch word alone, for the button's faster look. */
+extern unsigned long (*events_switches)(void);
 
 /* For a caller that has an edge of its own to report. */
 void events_publish(const char *name, const char *data_json);

@@ -798,6 +798,15 @@ static void *rel_thread(void *arg)
     return NULL;
 }
 
+int update_newer_release(char *out, size_t len)
+{
+    pthread_mutex_lock(&rel_mu);
+    int newer = rel_checked && rel.available && relcheck_is_newer(rel.version, rel_current);
+    snprintf(out, len, "%s", newer ? rel.version : "");
+    pthread_mutex_unlock(&rel_mu);
+    return newer;
+}
+
 /* The release the alert is dismissed for, "" when none. */
 static void dismissed_release(char *out, size_t len)
 {

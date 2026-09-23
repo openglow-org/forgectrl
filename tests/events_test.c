@@ -151,6 +151,66 @@ static void test_diff(void)
     snprintf(c.lease, sizeof(c.lease), "diag:flow-calibrate");
     step("lease nested", &b, &c, "lease.changed {\"owner\":\"diag:flow-calibrate\"}");
     step("lease given back", &b, &a, "lease.changed {\"owner\":null}");
+
+    /* A newer release found, the same one again, a newer one yet, and none. */
+    b = a;
+    snprintf(b.update, sizeof(b.update), "v0.0.8");
+    step("an update found", &a, &b, "update.available {\"version\":\"v0.0.8\"}");
+    step("the same update again", &b, &b, "");
+    c = b;
+    snprintf(c.update, sizeof(c.update), "v0.0.9");
+    step("a newer one yet", &b, &c, "update.available {\"version\":\"v0.0.9\"}");
+    step("installed: none newer", &c, &a, "");
+
+    /* The setup's gate, closed with the reason (its words held to JSON's form), and open again. */
+    b = a;
+    b.gate_open = 1;
+    c = b;
+    c.gate_open = 0;
+    snprintf(c.gate_why, sizeof(c.gate_why), "the wizard \"cooling.flow\" is required");
+    step("the gate closes", &b, &c, "setup.flag {\"gate_open\":false,\"reason\":\"the wizard \\\"cooling.flow\\\" is required\"}");
+    step("the gate opens", &c, &b, "setup.flag {\"gate_open\":true,\"reason\":\"\"}");
+}
+
+/* ---- the button, and the telemetry ---- */
+
+static void press(const char *what, unsigned long was, unsigned long now, const events_snap_t *st, const char *want)
+{
+    got[0] = '\0';
+    events_button(was, now, st, collect, NULL);
+    CHECK(!strcmp(got, want), "%s: got '%s', want '%s'", what, got, want);
+}
+
+static void test_button(void)
+{
+    events_snap_t s = base_snap();
+    unsigned long up = 1ul << 3, down = up | 1ul << 2;
+    press("a press at idle", up, down, &s, "button {\"pressed\":true}");
+    press("and its release", down, up, &s, "button {\"pressed\":false}");
+    press("no edge", down, down, &s, "");
+    press("the lid is no press", up, 0, &s, "");
+    s.arming = 1;
+    press("the arm press is the job's", up, down, &s, "");
+    s = base_snap();
+    s.armed = 1;
+    press("a press inside the window is the job's", up, down, &s, "");
+    s = base_snap();
+    snprintf(s.lease, sizeof(s.lease), "wizard:cooling.flow");
+    press("a press under the lease is the wizard's", up, down, &s, "");
+    s = base_snap();
+    s.button_wait = 1;
+    press("a press this daemon waits for is its own", up, down, &s, "");
+
+    char t[256];
+    s = base_snap();
+    snprintf(s.phase, sizeof(s.phase), "idle");
+    s.down_c = 18.25;
+    s.up_c = 18.5;
+    events_telemetry(&s, t, sizeof(t));
+    CHECK(!strcmp(t, "{\"phase\":\"idle\",\"verdict\":\"OK\",\"fire_ok\":true,\"down_c\":18.2,\"up_c\":18.5,\"state\":\"Idle\","
+                     "\"lid\":\"closed\"}") || !strcmp(t, "{\"phase\":\"idle\",\"verdict\":\"OK\",\"fire_ok\":true,\"down_c\":18.3,"
+                     "\"up_c\":18.5,\"state\":\"Idle\",\"lid\":\"closed\"}"), "the telemetry: %s", t);
+    CHECK(strlen(t) < 200, "the telemetry fits an event: %zu bytes", strlen(t));
 }
 
 /* ---- the cap ---- */
@@ -292,6 +352,7 @@ int main(void)
 {
     test_admit();
     test_diff();
+    test_button();
     test_stream();
     printf(fails ? "events_test: %d FAILED\n" : "events_test: all passed\n", fails);
     return fails ? 1 : 0;
