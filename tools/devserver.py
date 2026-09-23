@@ -1007,8 +1007,10 @@ class Mock:
              'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
              'package': {'id': 'org.openglow.notify', 'name': 'Notifications', 'version': '1.0.0',
                          'description': 'Tells you when a job ends.', 'author': 'OpenGlow', 'license': 'MIT',
-                         'runtime': 'native', 'capabilities': ['events', 'net.outbound:ntfy.sh:443'],
-                         'modes': ['grbl', 'cloud']}},
+                         'runtime': 'native',
+                         'capabilities': ['events', 'net.outbound:ntfy.sh:443', 'net.outbound.operator'],
+                         'modes': ['grbl', 'cloud']},
+             'destinations': ['192.168.1.40:80']},
             {'id': 'org.example.badge', 'version': '0.3.1', 'previous': '', 'tier': 'unverified', 'key': '',
              'enabled': True, 'quarantined': False, 'grants': ['hold'], 'hold': 'advisory', 'account': 'ffx1',
              'package': {'id': 'org.example.badge', 'name': 'Badge reader', 'version': '0.3.1',
@@ -1738,7 +1740,8 @@ class Mock:
                 'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
                 'packages': [dict({k: v for k, v in p.items() if not k.startswith('_')},
-                                  effective=self.ext_effective(p)) for p in self.ext_packages]}
+                                  effective=self.ext_effective(p), destinations=list(p.get('destinations', [])))
+                             for p in self.ext_packages]}
 
     @staticmethod
     def snapshot_bad(q):
@@ -1871,6 +1874,50 @@ class Mock:
                 if c not in self.EXT_NEEDS_GRANT or c in p.get('grants', [])]
 
     call_port = 0               # --call-port: where an author's own service answers its page
+    EXT_DESTS_MAX = 15          # forgeext's: the manifest's and the operator's together
+    EXT_OPERATOR_DESTS_MAX = 8
+
+    def ext_dest_post(self, form, J):
+        """POST /ext/dest: a destination the operator names for a package that asks for them, or takes away, in
+        the host's words."""
+        pid, action, dest = form.get('id', ''), form.get('action', ''), form.get('dest', '')
+        if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid):
+            return J(400, {'error': 'id is a package id'})
+        if action not in ('add', 'remove'):
+            return J(400, {'error': 'action is add or remove'})
+        if not dest or dest[0] == '-' or len(dest) > 95 or not re.fullmatch(r'[a-z0-9.:\[\]-]+', dest):
+            return J(400, {'error': 'a destination is host:port'})
+        m = re.fullmatch(r'(\[[0-9a-f:.]+\]|[a-z0-9.-]+):([1-9][0-9]{0,4})', dest)
+        if not m or int(m.group(2)) > 65535:
+            return J(409, {'error': 'a destination is host:port, the host a lowercase DNS name, an IPv4 address, or an '
+                                    'IPv6 address in brackets'})
+        host = m.group(1).strip('[]')
+        if host in ('::1', '::', 'localhost') or host.startswith('127.') or host == '0.0.0.0':
+            return J(409, {'error': '%s is this machine: no package reaches the machine' % host})
+        p = self.ext_find(pid)
+        if p is None:
+            return J(409, {'error': '%s is not installed' % pid})
+        caps = p['package'].get('capabilities', [])
+        if 'net.outbound.operator' not in caps:
+            return J(409, {'error': '%s does not ask for destinations of the operator\'s (net.outbound.operator)' % pid})
+        have = p.setdefault('destinations', [])
+        declared = sum(1 for c in caps if c.startswith('net.outbound:'))
+        if action == 'add':
+            if dest in have:
+                return J(409, {'error': '%s is already one of its destinations' % dest})
+            if len(have) >= self.EXT_OPERATOR_DESTS_MAX:
+                return J(409, {'error': 'the operator has named %d destinations for it, and that is the limit'
+                                        % self.EXT_OPERATOR_DESTS_MAX})
+            if len(have) + declared >= self.EXT_DESTS_MAX:
+                return J(409, {'error': 'it has %d destinations, its manifest\'s and the operator\'s, and a service '
+                                        'has at most %d' % (len(have) + declared, self.EXT_DESTS_MAX)})
+            have.append(dest)
+        else:
+            if dest not in have:
+                return J(409, {'error': '%s is not one of the destinations the operator named for it' % dest})
+            have.remove(dest)
+        self._log('ext: %s %s: %s (by the operator, through the panel)' % (pid, action, dest))
+        return J(200, self.ext_status_reply())
 
     def ext_call_post(self, form, J):
         """POST /ext/call: a page's call to its own service, held to the form the host holds it to and answered
@@ -2767,6 +2814,8 @@ class Mock:
             return self.ext_package_post(form, J, T)
         if path == '/ext/call':
             return self.ext_call_post(form, J)
+        if path == '/ext/dest':
+            return self.ext_dest_post(form, J)
         if path == '/ext/upload':
             return self.ext_upload_post(body, J, T)
         if path == '/ext/upload/discard':

@@ -23,6 +23,7 @@ var EXT_CAPS = {
   'job_time.run': 'Keep running while a job is armed',
   ui: 'Show a tab or cards of its own in this panel',
   'net.outbound': 'Connect to',
+  'net.outbound.operator': 'Connect to the places you name for it, below',
   'net.listen': 'Listen on port',
   storage: 'Keep data on the machine, in MiB up to'
 };
@@ -117,7 +118,24 @@ function renderExt(j) {
       caps.push(
         extCap(m.capabilities[c]) + ((p.grants || []).indexOf(m.capabilities[c]) >= 0 ? " <span class='hint'>(granted by you)</span>" : '')
       );
-    var hasUi = (m.capabilities || []).indexOf('ui') >= 0;
+    var hasUi = (m.capabilities || []).indexOf('ui') >= 0,
+      named = '';
+    /* The places the operator named for a package that asks to be given
+     * some: the operator's own list, on the panel's card, never the
+     * package's page. */
+    if ((m.capabilities || []).indexOf('net.outbound.operator') >= 0) {
+      var dl = p.destinations || [];
+      for (c = 0; c < dl.length; c++)
+        named +=
+          "<li><span class='mono'>" + esc(dl[c]) + "</span> <button type='button' class='btn btn-sm btn-outline-danger extdestrm' " +
+          "data-id='" + esc(p.id) + "' data-dest='" + esc(dl[c]) + "'>Remove</button></li>";
+      named =
+        'Places you named for it' + (dl.length ? ":<ul class='extcaps'>" + named + '</ul>' : ': none yet.<br>') +
+        "<input class='form-control form-control-sm extdestin' data-id='" + esc(p.id) +
+        "' placeholder='host:port, as 192.168.1.40:80 or broker.lan:1883' style='display: inline-block; width: auto' " +
+        "maxlength='95'> <button type='button' class='btn btn-sm btn-outline-secondary extdestadd' data-id='" + esc(p.id) +
+        "'>Add</button><br>";
+    }
     g += kv(
       m.name || p.id,
       extTier(p.tier) +
@@ -134,6 +152,7 @@ function renderExt(j) {
         extStateOf(j, p) +
         (m.description ? '<br>' + esc(m.description) : '') +
         (caps.length ? "<br>It may:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '<br>') +
+        named +
         (p.hold
           ? "Its hold, when it cannot speak for itself: <select class='form-select form-select-sm exthold' data-id='" +
             esc(p.id) +
@@ -301,6 +320,15 @@ function extBridgeReply(win, rid, ok, value) {
   }
 }
 
+function extDestinations(p) {
+  var caps = (p.package || {}).capabilities || [],
+    out = [],
+    i;
+  for (i = 0; i < caps.length; i++) if (caps[i].indexOf('net.outbound:') === 0) out.push(caps[i].slice(13));
+  if (caps.indexOf('net.outbound.operator') >= 0) out = out.concat(p.destinations || []);
+  return out;
+}
+
 function extBridgeCall(id, call, args) {
   var spec = EXT_BRIDGE_CALLS[call];
   if (call === 'self') {
@@ -314,7 +342,10 @@ function extBridgeCall(id, call, args) {
           tier: list[i].tier,
           /* What it may use, not what it asked for: the same list its own
            * API socket gives a service at GET /v0/self. */
-          capabilities: list[i].effective || []
+          capabilities: list[i].effective || [],
+          /* Where its service may connect, its manifest's and then the
+           * places the operator named: GET /v0/self's list too. */
+          destinations: extDestinations(list[i])
         });
     return Promise.reject('this package is not installed');
   }
@@ -500,6 +531,19 @@ function loadExt() {
       $('extpkgs').innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
     });
 }
+function extDest(id, action, dest) {
+  extSay('msg-ext', '\u2026');
+  fx('/ext/dest', { method: 'POST', body: new URLSearchParams({ id: id, action: action, dest: dest }) })
+    .then(extAnswer)
+    .then(function (j) {
+      extSay('msg-ext', '');
+      EXT_LAST = j;
+      renderExt(j);
+    })
+    .catch(function (e) {
+      extSay('msg-ext', String(e));
+    });
+}
 function extAct(id, action) {
   if (action === 'remove' && !window.confirm('Remove ' + id + ' and its data?')) return;
   extSay('msg-ext', '…');
@@ -667,6 +711,13 @@ document.addEventListener('click', function (ev) {
   if (k) extKeyRemove(k.getAttribute('data-name'));
   var u = ev.target.closest('.extui');
   if (u) extOpenUi(u.getAttribute('data-id'));
+  var da = ev.target.closest('.extdestadd');
+  if (da) {
+    var inp = document.querySelector(".extdestin[data-id='" + da.getAttribute('data-id') + "']");
+    if (inp && inp.value.trim()) extDest(da.getAttribute('data-id'), 'add', inp.value.trim());
+  }
+  var dr = ev.target.closest('.extdestrm');
+  if (dr) extDest(dr.getAttribute('data-id'), 'remove', dr.getAttribute('data-dest'));
   if (ev.target.closest('.extframeclose')) {
     var h = $('extframe');
     if (h) h.innerHTML = '';

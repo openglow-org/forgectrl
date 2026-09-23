@@ -64,6 +64,14 @@ int extpkg_action(const char *id, const char *action, int *status, char *why, si
 char *extpkg_call_json(const char *id, const char *method, const char *path, const char *body, int *status, char *why,
                        size_t wlen);
 
+/* A destination the operator names for a package that asks for them
+ * (net.outbound.operator), or takes away: action is add or remove, dest
+ * is host:port. The host judges the form, the package, and the limit. 0
+ * when it did it; otherwise the status to refuse with (400 for a request
+ * with no such form, 409 for the host's refusal, 502 when the host cannot
+ * be asked) and the words. */
+int extpkg_dest(const char *id, const char *action, const char *dest, int *status, char *why, size_t wlen);
+
 /* Every package, its data, and the owner's keys, for a change of owner:
  * a package can hold the last owner's credentials, and a key they added
  * would go on making their packages read as trusted. The counts into

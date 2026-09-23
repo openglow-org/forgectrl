@@ -1220,6 +1220,22 @@ static int cb_ext_settings(const struct _u_request *req, struct _u_response *res
     return U_CALLBACK_CONTINUE;
 }
 
+/* A destination the operator names for a package, or takes away: the
+ * operator's own act, on the package's card, and never a frame's. */
+static int cb_ext_dest(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *id = setting_param(req, "id"), *action = setting_param(req, "action"), *dest = setting_param(req, "dest");
+    char why[300];
+    int status;
+    if (extpkg_dest(id, action, dest, &status, why, sizeof(why)) != 0)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: %s %s: %s (by the operator, through the panel)", id, action, dest);
+    return cb_ext_status(req, res, NULL);
+}
+
 /* A package's page asking its own service, through the bridge. The page
  * names the call and the panel names the package: the bridge knows which
  * frame asked, and a page reaches no service but its own. The host holds
@@ -3240,6 +3256,7 @@ int main(int argc, char **argv)
         { "POST", "/ext/settings",         cb_ext_settings,     NULL, 0, NULL },
         { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
         { "POST", "/ext/call",             cb_ext_call,         NULL, 0, NULL },
+        { "POST", "/ext/dest",             cb_ext_dest,         NULL, 0, NULL },
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },
         { "POST", "/ext/install",          cb_ext_install,      NULL, 0, NULL },

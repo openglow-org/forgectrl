@@ -503,6 +503,44 @@ class MockTest(unittest.TestCase):
         m.ext_find(rid)['enabled'] = True
         self.assertEqual(post(m, id=rid, method='GET', path='/rules'), (409, {'error': 'its service is not running'}))
 
+    def test_operator_destinations(self):
+        # POST /ext/dest: the operator's own list for a package that asks for one, in the host's words
+        from urllib.parse import urlencode
+
+        def post(m, **form):
+            code, _h, out = self.call(m, 'POST', '/ext/dest', body=urlencode(form).encode())
+            return code, json.loads(out)
+
+        def listed(m):
+            return {p['id']: p['destinations'] for p in self.get_json(m, '/ext/status')['packages']}
+
+        m = self.mock()
+        nid = 'org.openglow.notify'
+        self.assertEqual(listed(m)[nid], ['192.168.1.40:80'])
+        self.assertEqual(listed(m)['org.example.badge'], [])
+        code, doc = post(m, id=nid, action='add', dest='broker.lan:1883')
+        self.assertEqual(code, 200)
+        self.assertEqual([p['destinations'] for p in doc['packages'] if p['id'] == nid][0],
+                         ['192.168.1.40:80', 'broker.lan:1883'])
+        for form, want, words in (({'id': nid, 'action': 'add', 'dest': 'broker.lan:1883'}, 409, 'already'),
+                                  ({'id': nid, 'action': 'add', 'dest': '127.0.0.1:80'}, 409, 'is this machine'),
+                                  ({'id': nid, 'action': 'add', 'dest': '[::1]:80'}, 409, 'is this machine'),
+                                  ({'id': nid, 'action': 'add', 'dest': 'broker.lan'}, 409, 'host:port'),
+                                  ({'id': nid, 'action': 'add', 'dest': '--root'}, 400, 'host:port'),
+                                  ({'id': nid, 'action': 'move', 'dest': 'a.lan:1'}, 400, 'add or remove'),
+                                  ({'id': nid, 'action': 'remove', 'dest': 'other.lan:80'}, 409, 'is not one of'),
+                                  ({'id': 'org.example.badge', 'action': 'add', 'dest': 'a.lan:1'}, 409,
+                                   'does not ask for destinations')):
+            code, doc = post(m, **form)
+            self.assertEqual(code, want, form)
+            self.assertIn(words, doc['error'], form)
+        code, doc = post(m, id=nid, action='remove', dest='192.168.1.40:80')
+        self.assertEqual((code, listed(m)[nid]), (200, ['broker.lan:1883']))
+        # the bridge's self names where the service may connect: the manifest's, then the operator's
+        src = read('src/ui/ext.js')
+        self.assertIn("destinations: extDestinations(list[i])", src)
+        self.assertIn("'net.outbound.operator'", src)
+
     def test_page_policy_matches_main_c(self):
         # every page the daemon serves lets no frame navigate anywhere; the
         # mock's pages, and the frame-isolation harness built on them, carry

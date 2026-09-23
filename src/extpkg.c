@@ -405,6 +405,48 @@ char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen)
     return out;
 }
 
+int extpkg_dest(const char *id, const char *action, const char *dest, int *status, char *why, size_t wlen)
+{
+    char *out = NULL;
+    *status = 400;
+    why[0] = '\0';
+    if (!extpkg_id_ok(id))
+        return snprintf(why, wlen, "id is a package id"), -1;
+    if (!action || (strcmp(action, "add") != 0 && strcmp(action, "remove") != 0))
+        return snprintf(why, wlen, "action is add or remove"), -1;
+    /* host:port in the form net.outbound takes; the host judges it
+     * whole, and this keeps it from reading as one of its options. */
+    if (!dest || !dest[0] || dest[0] == '-' || strlen(dest) > 95
+        || strspn(dest, "abcdefghijklmnopqrstuvwxyz0123456789.-:[]") != strlen(dest))
+        return snprintf(why, wlen, "a destination is host:port"), -1;
+    const char *argv[] = { "dest", id, action, dest, NULL };
+    if (extpkg_cli(argv, &out) < 0 || !out) {
+        free(out);
+        *status = 502;
+        snprintf(why, wlen, "the extension host did not answer");
+        return -1;
+    }
+    json_t *j = json_loads(out, 0, NULL);
+    free(out);
+    if (!json_is_object(j)) {
+        json_decref(j);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's answer is not a JSON object");
+        return -1;
+    }
+    int ok = json_is_true(json_object_get(j, "ok"));
+    if (!ok) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        snprintf(why, wlen, "%s", e ? e : "the host refused");
+        *status = 409;
+    }
+    json_decref(j);
+    if (!ok)
+        return -1;
+    *status = 200;
+    return 0;
+}
+
 char *extpkg_call_json(const char *id, const char *method, const char *path, const char *body, int *status, char *why,
                        size_t wlen)
 {

@@ -343,6 +343,32 @@ int main(void)
     CHECK(!doc && status == 502, "a call through a host that gives no JSON: %d %s", status, why);
     free(doc);
 
+    /* A destination the operator names: exactly the host's command, the
+     * form held before it runs, the host's refusal in its words. */
+    host_says("echo '{\"ok\": true, \"id\": \"org.example.notify\", \"destinations\": [\"plug.lan:80\"]}'");
+    CHECK(extpkg_dest("org.example.notify", "add", "plug.lan:80", &status, why, sizeof(why)) == 0 && status == 200
+          && !strcmp(ran(), "dest\norg.example.notify\nadd\nplug.lan:80\n"), "a destination added: %d %s, ran [%s]", status,
+          why, ran());
+    CHECK(extpkg_dest("org.example.notify", "remove", "[2001:db8::7]:1883", &status, why, sizeof(why)) == 0
+          && !strcmp(ran(), "dest\norg.example.notify\nremove\n[2001:db8::7]:1883\n"), "a destination removed, ran [%s]", ran());
+    static const struct { const char *id, *action, *dest; } bad_dests[] = {
+        { "org.example;x", "add", "plug.lan:80" }, { "org.example.notify", "move", "plug.lan:80" },
+        { "org.example.notify", NULL, "plug.lan:80" }, { "org.example.notify", "add", NULL },
+        { "org.example.notify", "add", "" }, { "org.example.notify", "add", "--root" },
+        { "org.example.notify", "add", "plug.lan:80 --root" }, { "org.example.notify", "add", "Plug.lan:80" },
+    };
+    for (size_t i = 0; i < sizeof(bad_dests) / sizeof(bad_dests[0]); i++) {
+        host_says("echo '{\"ok\": true}'");
+        CHECK(extpkg_dest(bad_dests[i].id, bad_dests[i].action, bad_dests[i].dest, &status, why, sizeof(why)) != 0
+              && status == 400 && why[0] && !ran()[0], "destination %zu out of form: %d %s, ran [%s]", i, status, why, ran());
+    }
+    host_says("echo '{\"ok\": false, \"error\": \"127.0.0.1 is this machine: no package reaches the machine\"}'; exit 1");
+    CHECK(extpkg_dest("org.example.notify", "add", "127.0.0.1:80", &status, why, sizeof(why)) != 0 && status == 409
+          && strstr(why, "is this machine"), "the host's refusal: %d %s", status, why);
+    host_says("echo 'Segmentation fault'; exit 139");
+    CHECK(extpkg_dest("org.example.notify", "add", "plug.lan:80", &status, why, sizeof(why)) != 0 && status == 502,
+          "a host that gives no JSON: %d", status);
+
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0)
