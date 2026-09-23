@@ -306,11 +306,31 @@ function extBridgeCall(id, call, args) {
     return Promise.reject('this package is not installed');
   }
   if (call === 'camera.frame') {
-    var which = args && args.camera === 'head' ? 'head' : 'lid';
+    var a = args || {},
+      which = a.camera === 'head' ? 'head' : 'lid',
+      shot = new URLSearchParams({ cam: which });
     if (!extHolds(id, 'camera.' + which)) return Promise.reject('this package does not hold that camera');
+    /* The frame the page asked for, each value checked here and carried as
+     * the machine's route takes it: the whole frame or half of it, a JPEG
+     * quality, and the camera's own lamp for this one frame (the machine
+     * puts its level back after it). Nothing else in the message goes. */
+    if (a.resolution !== undefined && a.resolution !== 'full' && a.resolution !== 'half')
+      return Promise.reject('resolution is full or half');
+    shot.set('res', a.resolution === 'full' ? 'full' : 'half');
+    if (a.quality !== undefined) {
+      if (typeof a.quality !== 'number' || a.quality % 1 !== 0 || a.quality < 1 || a.quality > 100)
+        return Promise.reject('quality is a whole number from 1 to 100');
+      shot.set('q', String(a.quality));
+    }
+    if (a.lamp !== undefined) {
+      if (typeof a.lamp !== 'number' || a.lamp % 1 !== 0 || a.lamp < 0 || a.lamp > 1023)
+        return Promise.reject('lamp is a whole number from 0 to 1023');
+      shot.set('lamp', String(a.lamp));
+    }
+    shot.set('background', '1');
     /* Fetched by the panel, under the panel's own session, and handed
      * over as bytes. The camera key is never in a message. */
-    return fx('/cam/snapshot?cam=' + which + '&res=half&background=1').then(function (r) {
+    return fx('/cam/snapshot?' + shot.toString()).then(function (r) {
       if (!r.ok) return Promise.reject('the machine did not give a frame');
       return r.blob();
     });

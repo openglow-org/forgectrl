@@ -80,12 +80,19 @@ BRIDGE = {
     'bridge-other-camera': ('refused: ', 'does not hold that camera'),
     'bridge-nosuch': ('refused: ', 'no such call'),
     'bridge-claim': ('refused: ', 'does not hold motion.jog'),
+    'bridge-frame': ('ok: ', ''),
+    'bridge-frame-lamp': ('refused: ', 'lamp is a whole number from 0 to 1023'),
+    'bridge-frame-res': ('refused: ', 'resolution is full or half'),
 }
+# What the bridge must send the machine for bridge-frame: every value the page asked for that the route takes,
+# the capture marked as a background one, and nothing else the message carried.
+FRAME_QUERY = {'cam': 'lid', 'res': 'full', 'q': '80', 'lamp': '60', 'background': '1'}
 CONTROL_MIN = 10          # of the network vectors, how many the control frame must get out
 
 HITS = []                  # {'side', 'tag', 'path', 't'}
 REPORTS = {}               # variant -> what the frame (or the driver) reported
 STATE = {'variant': 'main', 'phase': 'none', 'verdict': None, 'prelim_t': 0.0}
+SNAPSHOTS = []             # every /cam/snapshot query the panel's bridge made
 LOCK = threading.Lock()
 DONE = threading.Event()
 
@@ -253,6 +260,14 @@ def verdict(ua):
         notes[v] = n
         if not n.startswith(lead) or has not in n:
             failed.append('%s answered "%s", wanted %s...%s' % (v, n[:100], lead, has))
+    with LOCK:
+        shots = list(SNAPSHOTS)
+    if FRAME_QUERY not in shots:
+        failed.append('the bridge did not ask the machine for %s: it asked for %s' % (FRAME_QUERY, shots))
+    for q in shots:
+        if q.get('background') != '1':
+            failed.append('the bridge asked for a frame that is not a background capture: %s' % q)
+    notes['snapshots'] = shots
     pc = reports.get('panel') or {}
     checks = {
         'the frame opened': pc.get('frame') is True,
@@ -297,6 +312,11 @@ def make_handler(port):
             q = dict(parse_qsl(u.query, keep_blank_values=True))
             if 't' in q and q['t'].startswith(('frame-', 'control-')):
                 record('the machine', q['t'], u.path)
+            elif u.path == '/cam/snapshot' and 't' not in q:
+                # The panel's own preview carries a cache-busting t=; the
+                # bridge never does, so what is left is the bridge's.
+                with LOCK:
+                    SNAPSHOTS.append(q)
             try:
                 if u.path == '/harness' and self.command == 'GET':
                     return self._harness_page()
@@ -335,6 +355,7 @@ def make_handler(port):
             with LOCK:
                 HITS.clear()
                 REPORTS.clear()
+                SNAPSHOTS.clear()
             STATE['verdict'] = None
             STATE['variant'] = 'main'
             STATE['phase'] = 'none'

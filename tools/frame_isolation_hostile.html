@@ -135,6 +135,10 @@ function battery() {
   ask("bridge-nosuch", "cnc.latch", { unlock: 1 });
   // A claim about who is asking, and about what it may do, is no input.
   ask("bridge-claim", "motion.jog", { x: 1 }, { from: "org.example.panel", capabilities: ["motion.jog"] });
+  // A frame, whole, at a quality and a lamp level; and values the bridge must not carry.
+  ask("bridge-frame", "camera.frame", { camera: "lid", resolution: "full", quality: 80, lamp: 60, key: "x" });
+  ask("bridge-frame-lamp", "camera.frame", { camera: "lid", lamp: 5000 });
+  ask("bridge-frame-res", "camera.frame", { camera: "lid", resolution: "huge" });
 
   done(2500);
 }

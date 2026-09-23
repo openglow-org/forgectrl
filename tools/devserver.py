@@ -1677,6 +1677,23 @@ class Mock:
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
                 'packages': [dict(p, effective=self.ext_effective(p)) for p in self.ext_packages]}
 
+    @staticmethod
+    def snapshot_bad(q):
+        """cb_snapshot()'s parameter checks, in its words; None when the request is one it takes. A number is
+        read the way atoi() reads it, leading digits and nothing else."""
+        def num(v):
+            m = re.match(r'\s*[-+]?\d+', v)
+            return int(m.group()) if m else 0
+        if 'res' in q and q['res'] not in ('full', 'half'):
+            return "res must be 'full' or 'half'"
+        if 'q' in q and not 1 <= num(q['q']) <= 100:
+            return 'q must be 1..100'
+        if 'lamp' in q and not 0 <= num(q['lamp']) <= 1023:
+            return 'lamp must be 0..1023'
+        if 'background' in q and q['background'] not in ('0', '1'):
+            return "background must be '0' or '1'"
+        return None
+
     def ext_effective(self, p):
         """What the host would honor, as its list reports it: every capability the manifest asked for that needs
         no grant, and those the operator granted, in the manifest's order. The panel's bridge decides on this."""
@@ -2195,6 +2212,10 @@ class Mock:
                 # background=1 is a capture nobody is waiting for. The
                 # machine refuses one while a job is armed: a capture
                 # costs kernel-side work beside the step stream.
+                if path == '/cam/snapshot':
+                    bad = self.snapshot_bad(q)
+                    if bad:
+                        return T(400, bad)
                 if path == '/cam/snapshot' and q.get('background') == '1' \
                         and self.rep_armed:
                     return T(409, 'a job is armed: a background capture '

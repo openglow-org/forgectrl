@@ -339,6 +339,27 @@ class MockTest(unittest.TestCase):
         m.ext_packages[1]['grants'] = []
         self.assertEqual([p['effective'] for p in self.get_json(m, '/ext/status')['packages']][1], ['machine.read'])
 
+    def test_snapshot_parameters_match_main_c(self):
+        # a package's page asks for a frame through the bridge, which carries
+        # res, q, lamp and background to /cam/snapshot; the mock takes and
+        # refuses them as cb_snapshot() does, in its words
+        src = read('src/main.c')
+        body = re.search(r'static int cb_snapshot\(.*?\n\}', src, re.S).group(0)
+        m = self.mock()
+        for q, want in (({'cam': 'head', 'res': 'full', 'q': '80', 'lamp': '60', 'background': '1'}, None),
+                        ({'cam': 'lid', 'lamp': '0'}, None), ({'cam': 'lid', 'lamp': '1023'}, None),
+                        ({'cam': 'lid', 'lamp': '1024'}, 'lamp must be 0..1023'),
+                        ({'cam': 'lid', 'lamp': '-1'}, 'lamp must be 0..1023'),
+                        ({'cam': 'lid', 'q': '0'}, 'q must be 1..100'),
+                        ({'cam': 'lid', 'res': 'huge'}, "res must be 'full' or 'half'"),
+                        ({'cam': 'lid', 'background': '2'}, "background must be '0' or '1'")):
+            code, _h, out = self.call(m, 'GET', '/cam/snapshot', q=q)
+            if want is None:
+                self.assertEqual(code, 200, q)
+            else:
+                self.assertEqual((code, out.decode()), (400, want), q)
+                self.assertIn('"%s"' % want.replace("'", "'"), body)
+
     def test_page_policy_matches_main_c(self):
         # every page the daemon serves lets no frame navigate anywhere; the
         # mock's pages, and the frame-isolation harness built on them, carry
