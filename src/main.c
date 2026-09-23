@@ -2311,11 +2311,20 @@ static const char *page_html(int which)
     return page;
 }
 
+/* A package's page renders in a frame of the panel's (src/ui/ext.js), and
+ * the frame's own policy governs what it loads, not where it goes: a page
+ * can still navigate its frame to another address and carry what it was
+ * shown in the URL. Navigating a frame is the embedding page's to allow,
+ * so the pages allow no frame to go anywhere. A srcdoc frame still renders
+ * under it; no page of the panel frames anything else. */
+#define PAGE_POLICY "frame-src 'none'"
+
 static int serve_page(struct _u_response *res, int which)
 {
     ulfius_set_string_body_response(res, 200, page_html(which));
     ulfius_add_header_to_response(res, "Content-Type", "text/html; charset=utf-8");
     ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    ulfius_add_header_to_response(res, "Content-Security-Policy", PAGE_POLICY);
     return U_CALLBACK_CONTINUE;
 }
 

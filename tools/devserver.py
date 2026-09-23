@@ -59,7 +59,7 @@ TOKEN_MARK = '__FFTOKEN__'          # in panel.js; the daemon substitutes it
 # one marker tag per file.
 CSS_FILES = ('vendor/bootstrap.min.css', 'theme.css')
 JS_FILES = ('vendor/bootstrap.bundle.min.js', 'regions.js', 'md.js', 'help.js',
-            'forms.js', 'panel.js')
+            'forms.js', 'ext.js', 'panel.js')
 
 DEFAULT_PORT = 8081
 DEVICE_PORT = 443                # the machine's HTTPS listener; the dev server proxies over TLS
@@ -207,6 +207,10 @@ BADGE_HTML = (
     "system-ui,sans-serif;padding:6px 9px;border-radius:5px;opacity:.85;"
     "letter-spacing:.3px;pointer-events:none'>DEV &middot; %(label)s</div>"
 )
+# The headers the daemon's serve_page() gives every page it serves (src/main.c): no page lets a frame
+# navigate anywhere, which is what keeps a package's page from carrying data out in a URL.
+PAGE_POLICY = "frame-src 'none'"
+PAGE_HEADERS = {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_POLICY}
 CONTENT_TYPES = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -1605,6 +1609,9 @@ class Mock:
         return None
 
     EXT_ACTIONS = ('enable', 'disable', 'remove', 'remove-keep-data', 'hold-required', 'hold-advisory')
+    # The capabilities the operator grants by hand (forgeext's caps.c): a package may use one only once it is
+    # granted, and every other capability it asked for it may use as installed.
+    EXT_NEEDS_GRANT = ('motion.job', 'hold', 'job_time.run')
     # What an upload to the mock is: a package a person signed with a key the owner added, which wants a hold.
     EXT_UPLOAD = {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0',
                   'description': 'Holds a job when the filter is spent.', 'author': 'A maker', 'license': 'MIT',
@@ -1668,7 +1675,13 @@ class Mock:
                 'keys': [{'name': n, 'key': k} for n, k in sorted(self.ext_keys.items())],
                 'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
-                'packages': self.ext_packages}
+                'packages': [dict(p, effective=self.ext_effective(p)) for p in self.ext_packages]}
+
+    def ext_effective(self, p):
+        """What the host would honor, as its list reports it: every capability the manifest asked for that needs
+        no grant, and those the operator granted, in the manifest's order. The panel's bridge decides on this."""
+        return [c for c in p['package'].get('capabilities', [])
+                if c not in self.EXT_NEEDS_GRANT or c in p.get('grants', [])]
 
     def ext_package_post(self, form, J, T):
         pid, action = form.get('id', ''), form.get('action', '')
@@ -2732,8 +2745,7 @@ class Handler(BaseHTTPRequestHandler):
                               'label': html_escape(label)}
         k = page.rfind('</body>')
         page = page + badge if k < 0 else page[:k] + badge + page[k:]
-        self._send(200, {'Content-Type': 'text/html; charset=utf-8'},
-                   page.encode('utf-8'))
+        self._send(200, dict(PAGE_HEADERS), page.encode('utf-8'))
 
     def _panel(self):
         token, label = self._token_label()
@@ -2747,8 +2759,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.verbose:
             self._say('panel: served %d bytes%s'
                       % (len(page), ' (bundled)' if self.bundled else ''))
-        self._send(200, {'Content-Type': 'text/html; charset=utf-8'},
-                   page.encode('utf-8'))
+        self._send(200, dict(PAGE_HEADERS), page.encode('utf-8'))
 
     def _file(self, name):
         """A file from src/ui/, with the token substituted in text."""

@@ -328,6 +328,38 @@ class MockTest(unittest.TestCase):
         code, hdrs, body = self.call(m, 'POST', '/ext/package', {'id': 'org.openglow.notify', 'action': 'disable'}, token=False)
         self.assertEqual(code, 403)
 
+    def test_ext_effective_is_what_may_be_used(self):
+        # what the bridge decides on: the manifest's capabilities that need no
+        # grant, and those the operator granted, in the manifest's order
+        doc = self.get_json(self.mock(), '/ext/status')
+        eff = {p['id']: p['effective'] for p in doc['packages']}
+        self.assertEqual(eff['org.example.badge'], ['hold', 'machine.read'])
+        self.assertEqual(eff['org.example.panel'], ['ui', 'machine.read', 'settings.own', 'camera.lid'])
+        m = self.mock()
+        m.ext_packages[1]['grants'] = []
+        self.assertEqual([p['effective'] for p in self.get_json(m, '/ext/status')['packages']][1], ['machine.read'])
+
+    def test_page_policy_matches_main_c(self):
+        # every page the daemon serves lets no frame navigate anywhere; the
+        # mock's pages, and the frame-isolation harness built on them, carry
+        # the same header
+        src = read('src/main.c')
+        m = re.search(r'#define PAGE_POLICY "([^"]*)"', src)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), self.ds.PAGE_POLICY)
+        self.assertEqual(self.ds.PAGE_HEADERS['Content-Security-Policy'], self.ds.PAGE_POLICY)
+        body = re.search(r'static int serve_page\(.*?\n\}', src, re.S).group(0)
+        self.assertIn('"Content-Security-Policy", PAGE_POLICY', body)
+
+    def test_bundle_lists_match_embed_cmake(self):
+        # --bundle and --dump are the page the daemon serves only if they
+        # inline the files embed.cmake inlines, in its order
+        src = read('src/ui/embed.cmake')
+        css = re.search(r'set\(CSS_FILES ([^)]*)\)', src).group(1).split()
+        js = re.search(r'set\(JS_FILES ([^)]*)\)', src).group(1).split()
+        self.assertEqual(tuple(css), self.ds.CSS_FILES)
+        self.assertEqual(tuple(js), self.ds.JS_FILES)
+
     def test_ext_install_matches_extpkg_c(self):
         # as extpkg.c and main.c rule it: upload, the host's inspect with the
         # consent its tier takes, then the install with the grants and the

