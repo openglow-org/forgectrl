@@ -791,7 +791,10 @@ function initCloud() {
       var on = s.cloud_enabled === '1';
       for (var i = 0; i < radios.length; i++) radios[i].checked = radios[i].value === (on ? '1' : '0');
       showCloudChoice(on);
-      if (on && (s.homing_mode === 'gfcloud' || s.homing_mode === 'none')) $('c-homing').value = s.homing_mode;
+      /* A home by hand stands whether cloud mode is on or off; turning
+       * cloud mode off sweeps the camera home to none. */
+      if (s.homing_mode === 'manual' || (on && (s.homing_mode === 'gfcloud' || s.homing_mode === 'none')))
+        $('c-homing').value = s.homing_mode;
     })
     .catch(function () {});
 }

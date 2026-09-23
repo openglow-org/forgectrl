@@ -128,4 +128,7 @@ int setup_wizard_version(const char *id);
 json_t *setup_wizard_result(const char *id);
 /* The record's completion time ("" when the first run is not complete). */
 void setup_completed_at(char *buf, size_t len);
+/* Whether `mode` is a homing method the cloud step offers while it turns
+ * cloud mode on: the service's camera home, a home by hand, or none. */
+int setup_cloud_homing_ok(const char *mode);
 #endif

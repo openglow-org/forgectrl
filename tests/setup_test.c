@@ -11,7 +11,7 @@
  * engine flag; the override file lifts the wizard part only; a damaged
  * record reads as nothing done; the status document parses and says
  * what the gate says; a record under the file's earlier name is adopted
- * once and never over a current one.
+ * once and never over a current one; the cloud step's homing choices.
  */
 #include "../src/advisories.h"
 #include "../src/setup.h"
@@ -359,6 +359,15 @@ int main(void)
     CHECK(access(old, F_OK) == 0 && setup_acceptance_done(),
           "an earlier record never replaces a current one");
     unlink(old);
+
+    /* 11. The cloud step's homing choices: the camera home, a home by
+     * hand, none; nothing else. */
+    CHECK(setup_cloud_homing_ok("gfcloud") && setup_cloud_homing_ok("none"),
+          "the cloud step takes the camera home and none");
+    CHECK(setup_cloud_homing_ok("manual"), "the cloud step keeps a home by hand");
+    CHECK(!setup_cloud_homing_ok("switches") && !setup_cloud_homing_ok("") &&
+          !setup_cloud_homing_ok("Manual") && !setup_cloud_homing_ok(NULL),
+          "the cloud step refuses anything else");
 
     /* Clean up. */
     unlink(path);

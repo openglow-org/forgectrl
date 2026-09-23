@@ -233,6 +233,31 @@ class MockTest(unittest.TestCase):
         self.assertEqual((reply['cloud_enabled'], reply['homing_mode'],
                           reply['controller_mode']), ('0', 'none', 'grbl'))
 
+    def test_wiz_cloud_takes_the_homing_choices_it_offers(self):
+        # as wiz.c rules it: turning cloud mode on takes the camera home, a
+        # home by hand, or none, and refuses anything else with the setting
+        # unmoved
+        words = 'homing_mode must be gfcloud, manual, or none'
+        self.assertIn('"%s"' % words, read('src/wiz.c'))
+        m = self.mock()
+        for mode in ('manual', 'gfcloud', 'none'):
+            code, hdrs, body = self.call(m, 'POST', '/wiz/cloud',
+                                         {'enabled': '1', 'phrase': 'I UNDERSTAND',
+                                          'homing_mode': mode})
+            self.assertEqual(code, 200, mode)
+            self.assertEqual(m.settings['homing_mode'], mode)
+        code, hdrs, body = self.call(m, 'POST', '/wiz/cloud',
+                                     {'enabled': '1', 'phrase': 'I UNDERSTAND',
+                                      'homing_mode': 'switches'})
+        self.assertEqual((code, json.loads(body)), (400, {'error': words}))
+        self.assertEqual(m.settings['homing_mode'], 'none')
+        # the page offers the same three
+        page = read('src/ui/wizard.html')
+        select = page[page.index('id="c-homing"'):]
+        select = select[:select.index('</select>')]
+        self.assertEqual(sorted(re.findall(r'<option value="([a-z]+)"', select)),
+                         ['gfcloud', 'manual', 'none'])
+
     def test_settings_ext_enabled_is_turned_on_over_its_advisory(self):
         # as main.c rules it: on from off takes the hash of the Extensions
         # advisory as it stands and the typed phrase, and records both;

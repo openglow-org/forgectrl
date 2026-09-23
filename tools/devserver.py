@@ -2412,8 +2412,11 @@ class Mock:
             if form.get('enabled') == '1':
                 if form.get('phrase') != 'I UNDERSTAND':
                     return J(400, {'error': 'type I UNDERSTAND to turn cloud mode on'})
+                homing = form.get('homing_mode') or 'gfcloud'
+                if homing not in ('gfcloud', 'manual', 'none'):
+                    return J(400, {'error': 'homing_mode must be gfcloud, manual, or none'})
                 self.settings['cloud_enabled'] = '1'
-                self.settings['homing_mode'] = form.get('homing_mode', 'gfcloud')
+                self.settings['homing_mode'] = homing
             else:
                 self.settings['cloud_enabled'] = '0'
                 if self.settings['homing_mode'] == 'gfcloud':

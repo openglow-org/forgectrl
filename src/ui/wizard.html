@@ -278,11 +278,14 @@
                 <label for="c-homing">Homing in GRBL mode</label>
                 <select class="form-select" id="c-homing">
                   <option value="gfcloud">Use the Glowforge service (cameras)</option>
+                  <option value="manual">By hand (push the head to the home corner)</option>
                   <option value="none">None</option>
                 </select>
                 <div class="help">
-                  The one thing in GRBL mode that reaches the service: a homing cycle that finds the
-                  head with the cameras. Without it the machine cuts from wherever the head is.
+                  The Glowforge service: a homing cycle that finds the head with the cameras, the one
+                  thing in GRBL mode that reaches the service. By hand: you push the head to the home
+                  corner and home there, and nothing reaches the service. None: the machine cuts from
+                  wherever the head is.
                 </div>
               </div>
               <details>

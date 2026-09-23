@@ -685,10 +685,10 @@ int cb_wiz_cloud(const struct _u_request *req, struct _u_response *res, void *ud
             json_decref(result);
             return reply_error(res, 400, "type I UNDERSTAND to turn cloud mode on");
         }
-        if (homing && strcmp(homing, "gfcloud") && strcmp(homing, "none")) {
+        if (homing && !setup_cloud_homing_ok(homing)) {
             json_decref(applied);
             json_decref(result);
-            return reply_error(res, 400, "homing_mode must be gfcloud or none");
+            return reply_error(res, 400, "homing_mode must be gfcloud, manual, or none");
         }
         const char *keys[] = { "cloud_enabled", "homing_mode", "gfcloud_home_timeout_s",
                                "gf_serial", "gf_password" };

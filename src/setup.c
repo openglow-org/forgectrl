@@ -706,6 +706,14 @@ void setup_completed_at(char *buf, size_t len)
     pthread_mutex_unlock(&mu);
 }
 
+int setup_cloud_homing_ok(const char *mode)
+{
+    /* Limit switches are a valid setting with nothing behind them yet;
+     * the step does not offer them. */
+    return mode && (!strcmp(mode, "gfcloud") || !strcmp(mode, "manual") ||
+                    !strcmp(mode, "none"));
+}
+
 int setup_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
