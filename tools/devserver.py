@@ -1870,6 +1870,63 @@ class Mock:
         return [c for c in p['package'].get('capabilities', [])
                 if c not in self.EXT_NEEDS_GRANT or c in p.get('grants', [])]
 
+    call_port = 0               # --call-port: where an author's own service answers its page
+
+    def ext_call_post(self, form, J):
+        """POST /ext/call: a page's call to its own service, held to the form the host holds it to and answered
+        in its words. The mock runs no service; with --call-port it carries the call, as the host would, to a
+        service the author runs on 127.0.0.1 at that port."""
+        pid, method, cpath, cbody = (form.get(k) for k in ('id', 'method', 'path', 'body'))
+        if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid or ''):
+            return J(400, {'error': 'id is a package id'})
+        if method not in ('GET', 'POST'):
+            return J(400, {'error': 'a call is GET or POST'})
+        if not cpath or not re.fullmatch(r'/[A-Za-z0-9/._-]{0,199}', cpath) or '..' in cpath:
+            return J(400 if not cpath or cpath[0] != '/' or len(cpath) > 200 else 409,
+                     {'error': "a call's path starts with '/' and has only letters, digits, '/', '.', '-', and '_', "
+                               "at most 200 of them"})
+        if cbody is not None and method == 'GET':
+            return J(400, {'error': 'a GET call has no body'})
+        if cbody is not None and (not cbody.startswith('{') or len(cbody.encode()) > 4096):
+            return J(400, {'error': "a call's body is a JSON object of at most 4096 bytes"})
+        p = self.ext_find(pid)
+        if p is None:
+            return J(409, {'error': 'that package is not installed'})
+        if not p['enabled']:
+            return J(409, {'error': 'this package is disabled: its service is not running'})
+        if 'ui' not in p['package'].get('capabilities', []) or p['package'].get('runtime') in ('ui', 'data'):
+            return J(409, {'error': 'this package has no page that calls a service'})
+        try:
+            doc = json.loads(cbody) if cbody is not None else ({} if method == 'POST' else None)
+        except ValueError:
+            doc = None
+        if method == 'POST' and not isinstance(doc, dict):
+            return J(409, {'error': "a call's body is a JSON object"})
+        if not self.call_port:
+            return J(409, {'error': 'its service is not running (the mock runs no service: see --call-port)'})
+        data = None if doc is None else json.dumps(doc, separators=(',', ':')).encode()
+        conn = http.client.HTTPConnection('127.0.0.1', self.call_port, timeout=10)
+        try:
+            conn.request(method, cpath, body=data,
+                         headers={'Host': 'forgeext', 'Content-Type': 'application/json'} if data is not None
+                         else {'Host': 'forgeext'})
+            r = conn.getresponse()
+            raw = r.read(64 * 1024 + 1)
+            status = r.status
+        except ConnectionRefusedError:
+            return J(409, {'error': 'its service is not running'})
+        except (OSError, http.client.HTTPException):
+            return J(409, {'error': 'its service did not answer in time'})
+        finally:
+            conn.close()
+        if len(raw) > 64 * 1024:
+            return J(409, {'error': 'its service answered more than 65536 bytes'})
+        try:
+            ans = json.loads(raw) if raw else None
+        except ValueError:
+            return J(409, {'error': "its service's answer is not JSON"})
+        return J(200, {'ok': True, 'id': pid, 'status': status, 'body': ans})
+
     def ext_package_post(self, form, J, T):
         pid, action = form.get('id', ''), form.get('action', '')
         if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid):
@@ -2708,6 +2765,8 @@ class Mock:
             return J(200, self.ext_settings_reply(p))
         if path == '/ext/package':
             return self.ext_package_post(form, J, T)
+        if path == '/ext/call':
+            return self.ext_call_post(form, J)
         if path == '/ext/upload':
             return self.ext_upload_post(body, J, T)
         if path == '/ext/upload/discard':
@@ -3081,6 +3140,9 @@ def main():
                          'capability that takes the operator\'s grant is granted (implies --mock)')
     ap.add_argument('--tier', default='unverified', choices=('official', 'community', 'unverified'),
                     help='the tier --package installs at (default unverified)')
+    ap.add_argument('--call-port', type=int, default=0, metavar='PORT',
+                    help='carry a --package page\'s calls to its own service to 127.0.0.1:PORT, where the author '
+                         'runs that service (without it, a call answers that the mock runs no service)')
     args = ap.parse_args()
 
     panel = Panel(UI_DIR)
@@ -3097,6 +3159,7 @@ def main():
     Handler.cfg = cfg
     Handler.panel = panel
     Handler.mock = Mock(MOCK_TOKEN)
+    Handler.mock.call_port = args.call_port
     for d in args.package:
         try:
             Handler.mock.ext_install_dir(d, args.tier)

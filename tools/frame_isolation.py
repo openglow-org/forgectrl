@@ -88,16 +88,22 @@ BRIDGE = {
     'bridge-job-abort': ('refused: ', 'does not hold motion.job'),
     'bridge-height': ('ok: ', '"px":1400'),
     'bridge-height-bad': ('refused: ', 'px is a number of pixels'),
+    'bridge-service': ('refused: ', 'this package has no page that calls a service'),
+    'bridge-service-bad': ('refused: ', 'a call is GET or POST'),
 }
 # What the bridge must send the machine for bridge-frame: every value the page asked for that the route takes,
 # the capture marked as a background one, and nothing else the message carried.
 FRAME_QUERY = {'cam': 'lid', 'res': 'full', 'q': '80', 'lamp': '60', 'background': '1'}
+# What the bridge must send the machine for bridge-service: the call for this package's own service, whatever
+# package the message named, with the body the page gave and nothing else the message carried.
+SERVICE_CALL = {'id': HOSTILE_ID, 'method': 'POST', 'path': '/rules', 'body': '{"on":true}'}
 CONTROL_MIN = 10          # of the network vectors, how many the control frame must get out
 
 HITS = []                  # {'side', 'tag', 'path', 't'}
 REPORTS = {}               # variant -> what the frame (or the driver) reported
 STATE = {'variant': 'main', 'phase': 'none', 'verdict': None, 'prelim_t': 0.0}
 SNAPSHOTS = []             # every /cam/snapshot query the panel's bridge made
+CALLS = []                 # every /ext/call the panel's bridge made, as its form
 LOCK = threading.Lock()
 DONE = threading.Event()
 
@@ -274,6 +280,11 @@ def verdict(ua):
         if q.get('background') != '1':
             failed.append('the bridge asked for a frame that is not a background capture: %s' % q)
     notes['snapshots'] = shots
+    with LOCK:
+        calls = list(CALLS)
+    if calls != [SERVICE_CALL]:
+        failed.append('the bridge carried a page\'s service call as %s, wanted exactly %s' % (calls, SERVICE_CALL))
+    notes['calls'] = calls
     pc = reports.get('panel') or {}
     checks = {
         'the frame opened': pc.get('frame') is True,
@@ -363,6 +374,7 @@ def make_handler(port):
                 HITS.clear()
                 REPORTS.clear()
                 SNAPSHOTS.clear()
+                CALLS.clear()
             STATE['verdict'] = None
             STATE['variant'] = 'main'
             STATE['phase'] = 'none'
@@ -457,6 +469,13 @@ def main():
         'package': {'id': HOSTILE_ID, 'name': 'Hostile page', 'version': '1.0.0', 'author': 'forgetest',
                     'license': 'MIT', 'description': 'Tries every way out of its frame.', 'runtime': 'ui',
                     'capabilities': ['ui', 'machine.read', 'settings.own', 'camera.lid'], 'modes': ['grbl', 'cloud']}})
+    relay = mock.ext_call_post
+
+    def record_call(form, J):
+        with LOCK:
+            CALLS.append(dict(form))
+        return relay(form, J)
+    mock.ext_call_post = record_call
     handler = make_handler(args.port)
     handler.cfg = ds.Config(cfg_args)
     handler.panel = ds.Panel(ds.UI_DIR)

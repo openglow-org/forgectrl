@@ -9,8 +9,9 @@
  * form of one before it is an argument, the actions are a closed list and
  * become exactly the host's commands, nothing of a request is ever a shell
  * word, the host's refusal is passed on in its words, a host that cannot
- * be run or says something that is no JSON is 502, and the status document
- * carries the host's own status only while that host is alive.
+ * be run or says something that is no JSON is 502, the status document
+ * carries the host's own status only while that host is alive, and a
+ * page's call to its service is held to its form before the host runs.
  */
 #include "../src/extpkg.h"
 
@@ -302,6 +303,44 @@ int main(void)
     host_says("exit 1");
     doc = extpkg_settings_json("org.example.notify", NULL, &status, why, sizeof(why));
     CHECK(!doc && status == 502, "settings from a host that says nothing: %d %s", status, why);
+    free(doc);
+
+    /* A page's call to its own service: exactly the host's command, the
+     * form held before the host runs, the host's refusal in its words. */
+    host_says("echo '{\"ok\": true, \"id\": \"org.example.notify\", \"status\": 200, \"body\": {\"a\": 1}}'");
+    doc = extpkg_call_json("org.example.notify", "POST", "/rules", "{\"a\": 1}", &status, why, sizeof(why));
+    CHECK(doc && status == 200 && !strcmp(ran(), "call\norg.example.notify\nPOST\n/rules\n{\"a\": 1}\n"),
+          "a call: %d %s, ran [%s]", status, doc ? doc : why, ran());
+    free(doc);
+    doc = extpkg_call_json("org.example.notify", "GET", "/rules", NULL, &status, why, sizeof(why));
+    CHECK(doc && status == 200 && !strcmp(ran(), "call\norg.example.notify\nGET\n/rules\n"), "a GET: %d, ran [%s]", status, ran());
+    free(doc);
+    static const struct { const char *id, *method, *path, *body; } bad_calls[] = {
+        { "org.example;reboot", "GET", "/rules", NULL }, { "org.example.notify", "PUT", "/rules", NULL },
+        { "org.example.notify", NULL, "/rules", NULL }, { "org.example.notify", "GET", "--call-dir", NULL },
+        { "org.example.notify", "GET", NULL, NULL }, { "org.example.notify", "POST", "/rules", "--call-dir" },
+        { "org.example.notify", "POST", "/rules", "[1]" }, { "org.example.notify", "GET", "/rules", "{}" },
+    };
+    for (size_t i = 0; i < sizeof(bad_calls) / sizeof(bad_calls[0]); i++) {
+        host_says("echo '{\"ok\": true}'");
+        doc = extpkg_call_json(bad_calls[i].id, bad_calls[i].method, bad_calls[i].path, bad_calls[i].body, &status, why,
+                               sizeof(why));
+        CHECK(!doc && status == 400 && why[0] && !ran()[0], "call %zu out of form: %d %s, ran [%s]", i, status, why, ran());
+        free(doc);
+    }
+    static char big[EXTPKG_CALL_BODY_MAX + 8];
+    memset(big, 'x', sizeof(big) - 1);
+    big[0] = '{';
+    doc = extpkg_call_json("org.example.notify", "POST", "/rules", big, &status, why, sizeof(why));
+    CHECK(!doc && status == 400 && !ran()[0], "a body past the limit: %d, ran [%s]", status, ran());
+    free(doc);
+    host_says("echo '{\"ok\": false, \"error\": \"its service is frozen while a job is armed\"}'; exit 1");
+    doc = extpkg_call_json("org.example.notify", "GET", "/rules", NULL, &status, why, sizeof(why));
+    CHECK(!doc && status == 409 && !strcmp(why, "its service is frozen while a job is armed"), "the host's refusal: %d %s", status, why);
+    free(doc);
+    host_says("echo 'Segmentation fault'; exit 139");
+    doc = extpkg_call_json("org.example.notify", "GET", "/rules", NULL, &status, why, sizeof(why));
+    CHECK(!doc && status == 502, "a call through a host that gives no JSON: %d %s", status, why);
     free(doc);
 
     char cmd[340];

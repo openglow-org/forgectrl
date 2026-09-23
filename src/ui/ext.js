@@ -280,7 +280,8 @@ var EXT_BRIDGE_CALLS = {
   'motion.job': { cap: 'motion.job' },
   'motion.job.abort': { cap: 'motion.job' },
   'motion.job.state': { cap: 'motion.job' },
-  'frame.height': { cap: null }
+  'frame.height': { cap: null },
+  'service.call': { cap: 'ui' }
 };
 /* How tall a page may ask its frame to be. The frame is the panel's and
  * sits in the panel's layout: a page picks its height inside these, and
@@ -288,6 +289,7 @@ var EXT_BRIDGE_CALLS = {
 var EXT_FRAME_MIN = 200,
   EXT_FRAME_MAX = 1400;
 var EXT_JOB_MAX = 2 * 1024 * 1024;      /* a program a page may hand the panel, in characters */
+var EXT_CALL_BODY_MAX = 4096;           /* what a page may send its own service, as JSON */
 
 function extBridgeReply(win, rid, ok, value) {
   /* The frame's origin is opaque, so the reply is addressed to the
@@ -395,6 +397,28 @@ function extBridgeCall(id, call, args) {
     px = Math.max(EXT_FRAME_MIN, Math.min(EXT_FRAME_MAX, Math.round(px)));
     fr.style.height = px + 'px';
     return Promise.resolve({ px: px });
+  }
+  if (call === 'service.call') {
+    /* The page's own service and no other: the package is the panel's
+     * word, from the frame that asked. The method, the path, and the body
+     * are carried as the page gave them, the body as the JSON of an
+     * object; the host holds all three to their form. */
+    var c = args || {},
+      callForm = new URLSearchParams({ id: id });
+    if (c.method !== 'GET' && c.method !== 'POST') return Promise.reject('a call is GET or POST');
+    if (typeof c.path !== 'string' || c.path.charAt(0) !== '/') return Promise.reject("a call's path starts with '/'");
+    callForm.set('method', c.method);
+    callForm.set('path', c.path);
+    if (c.body !== undefined && c.body !== null) {
+      if (c.method === 'GET') return Promise.reject('a GET call has no body');
+      if (typeof c.body !== 'object' || Array.isArray(c.body)) return Promise.reject("a call's body is an object");
+      var text = JSON.stringify(c.body);
+      if (text.length > EXT_CALL_BODY_MAX) return Promise.reject("a call's body is at most 4096 bytes");
+      callForm.set('body', text);
+    }
+    return fx('/ext/call', { method: 'POST', body: callForm })
+      .then(extAnswer)
+      .then(function (j) { return { status: j.status, body: j.body }; });
   }
   if (call === 'motion.job.abort') return fx('/job/abort', { method: 'POST' }).then(extAnswer);
   if (call === 'motion.job.state') return fx('/job').then(extAnswer);

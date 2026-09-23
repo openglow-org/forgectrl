@@ -1220,6 +1220,30 @@ static int cb_ext_settings(const struct _u_request *req, struct _u_response *res
     return U_CALLBACK_CONTINUE;
 }
 
+/* A package's page asking its own service, through the bridge. The page
+ * names the call and the panel names the package: the bridge knows which
+ * frame asked, and a page reaches no service but its own. The host holds
+ * the call to its form and waits a bounded time for the answer. */
+static int cb_ext_call(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!settings_get_bool("ext_enabled", 0))
+        return reply_error(res, 409, "extensions are off");
+    char why[300];
+    int status = 500;
+    char *doc = extpkg_call_json(setting_param(req, "id"), setting_param(req, "method"), setting_param(req, "path"),
+                                 setting_param(req, "body"), &status, why, sizeof(why));
+    if (!doc)
+        return reply_error(res, (unsigned)status, why[0] ? why : "no answer");
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_ext_package(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -3215,6 +3239,7 @@ int main(int argc, char **argv)
         { "GET",  "/ext/settings",         cb_ext_settings,     NULL, 0, NULL },
         { "POST", "/ext/settings",         cb_ext_settings,     NULL, 0, NULL },
         { "POST", "/ext/package",          cb_ext_package,      NULL, 0, NULL },
+        { "POST", "/ext/call",             cb_ext_call,         NULL, 0, NULL },
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },
         { "POST", "/ext/install",          cb_ext_install,      NULL, 0, NULL },

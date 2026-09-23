@@ -424,6 +424,85 @@ class MockTest(unittest.TestCase):
             self.assertEqual(self.get_json(m, '/ext/settings', q={'id': 'org.example.mine'})['settings'],
                              {'depth': 3.0})
 
+    def test_page_calls_its_own_service(self):
+        # POST /ext/call: held to the host's form, refused in its words, and
+        # with --call-port carried to the author's own service
+        import http.server
+        import tempfile
+        import threading
+        from urllib.parse import urlencode
+
+        class Service(http.server.BaseHTTPRequestHandler):
+            def answer(self, doc, status=200):
+                data = json.dumps(doc).encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self.answer({'method': 'GET', 'path': self.path})
+
+            def do_POST(self):
+                n = int(self.headers.get('Content-Length') or 0)
+                self.answer({'method': 'POST', 'path': self.path, 'body': json.loads(self.rfile.read(n))}, 201)
+
+            def log_message(self, *a):
+                pass
+
+        def post(m, **form):
+            code, _h, out = self.call(m, 'POST', '/ext/call', body=urlencode(form).encode())
+            return code, json.loads(out)
+
+        m = self.mock()
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'ui'))
+            with open(os.path.join(d, 'manifest.json'), 'w', encoding='utf-8') as f:
+                json.dump({'manifest': 1, 'id': 'org.example.rules', 'name': 'Rules', 'version': '0.1.0',
+                           'author': 'me', 'license': 'MIT', 'api': '0.1', 'runtime': 'python',
+                           'service': {'exec': 'bin/run.py'}, 'capabilities': ['ui', 'events']}, f)
+            with open(os.path.join(d, 'ui', 'index.html'), 'w', encoding='utf-8') as f:
+                f.write('<p>rules</p>')
+            m.ext_install_dir(d, 'unverified')
+        rid = 'org.example.rules'
+        for form, words in (({'id': rid, 'method': 'PUT', 'path': '/x'}, 'a call is GET or POST'),
+                            ({'id': rid, 'method': 'GET', 'path': 'x'}, "a call's path starts with '/'"),
+                            ({'id': rid, 'method': 'GET', 'path': '/x', 'body': '{}'}, 'a GET call has no body'),
+                            ({'id': rid, 'method': 'POST', 'path': '/x', 'body': '[1]'}, "a call's body is a JSON object"),
+                            ({'id': 'org;x', 'method': 'GET', 'path': '/x'}, 'id is a package id')):
+            code, out = post(m, **form)
+            self.assertEqual(code, 400, form)
+            self.assertTrue(out['error'].startswith(words), out)
+        code, out = post(m, id=rid, method='GET', path='/a?b')
+        self.assertEqual(code, 409)
+        self.assertTrue(out['error'].startswith("a call's path starts with"), out)
+        self.assertEqual(post(m, id='org.example.panel', method='GET', path='/x'),
+                         (409, {'error': 'this package has no page that calls a service'}))
+        self.assertEqual(post(m, id='org.example.none', method='GET', path='/x'),
+                         (409, {'error': 'that package is not installed'}))
+        code, out = post(m, id=rid, method='GET', path='/rules')
+        self.assertEqual(code, 409)
+        self.assertIn('the mock runs no service', out['error'])
+
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Service)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            m.call_port = srv.server_address[1]
+            self.assertEqual(post(m, id=rid, method='GET', path='/rules'),
+                             (200, {'ok': True, 'id': rid, 'status': 200, 'body': {'method': 'GET', 'path': '/rules'}}))
+            self.assertEqual(post(m, id=rid, method='POST', path='/rules', body='{"on": true}'),
+                             (200, {'ok': True, 'id': rid, 'status': 201,
+                                    'body': {'method': 'POST', 'path': '/rules', 'body': {'on': True}}}))
+            m.ext_find(rid)['enabled'] = False
+            self.assertEqual(post(m, id=rid, method='GET', path='/rules'),
+                             (409, {'error': 'this package is disabled: its service is not running'}))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        m.ext_find(rid)['enabled'] = True
+        self.assertEqual(post(m, id=rid, method='GET', path='/rules'), (409, {'error': 'its service is not running'}))
+
     def test_page_policy_matches_main_c(self):
         # every page the daemon serves lets no frame navigate anywhere; the
         # mock's pages, and the frame-isolation harness built on them, carry

@@ -51,6 +51,19 @@ char *extpkg_status_json(int ext_enabled);
  * the host's refusal, 502 when the host cannot be asked) and the words. */
 int extpkg_action(const char *id, const char *action, int *status, char *why, size_t wlen);
 
+/* One call from a package's page to its own service, which the bridge
+ * makes for the page: the host's `call` command, whose answer is the
+ * service's status and the JSON it answered (malloc'd). method is GET or
+ * POST, path is a path, body a JSON object of at most EXTPKG_CALL_BODY_MAX
+ * bytes (a POST only; NULL for none); the host judges the rest. NULL with
+ * the HTTP status to refuse with (400 for a call out of form, 409 for the
+ * host's refusal - not installed, no service running, frozen while a job
+ * is armed, no answer in time - and 502 when the host cannot be asked)
+ * and the words. */
+#define EXTPKG_CALL_BODY_MAX    4096
+char *extpkg_call_json(const char *id, const char *method, const char *path, const char *body, int *status, char *why,
+                       size_t wlen);
+
 /* Every package, its data, and the owner's keys, for a change of owner:
  * a package can hold the last owner's credentials, and a key they added
  * would go on making their packages read as trusted. The counts into

@@ -146,6 +146,10 @@ function battery() {
   // Its own frame's height: taken, inside the panel's bounds.
   ask("bridge-height", "frame.height", { px: 99999 });
   ask("bridge-height-bad", "frame.height", { px: "tall" });
+  // Its own service, and no other package's, whatever the message names.
+  ask("bridge-service", "service.call", { method: "POST", path: "/rules", body: { on: true }, id: "org.example.panel" },
+      { from: "org.example.panel" });
+  ask("bridge-service-bad", "service.call", { method: "DELETE", path: "/rules" });
 
   done(2500);
 }
