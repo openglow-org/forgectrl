@@ -79,6 +79,7 @@ add_executable(forgectrl
   src/fwproduct.c
   src/extpkg.c
   src/mcode.c
+  src/wizpkg.c
   src/gates.c
   src/gpu_debayer.c
   src/ipu_copy.c
@@ -412,6 +413,12 @@ add_executable(mcode_test tests/mcode_test.c src/mcode.c src/extpkg.c src/grblpo
 target_compile_options(mcode_test PRIVATE -Wall -Wextra)
 target_compile_definitions(mcode_test PRIVATE MCODE_NO_THREAD=1)
 target_link_libraries(mcode_test jansson pthread)
+
+# A package's check on the Setup page: each step held to its form, and a
+# check run end to end on stand-ins for the runner and the host.
+add_executable(wizpkg_test tests/wizpkg_test.c src/wizpkg.c src/extpkg.c src/sha256.c src/fflog.c)
+target_compile_options(wizpkg_test PRIVATE -Wall -Wextra)
+target_link_libraries(wizpkg_test jansson pthread)
 target_compile_options(extpkg_test PRIVATE -Wall -Wextra)
 target_link_libraries(extpkg_test jansson)
 

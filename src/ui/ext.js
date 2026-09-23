@@ -27,7 +27,8 @@ var EXT_CAPS = {
   'net.outbound.operator': 'Connect to the places you name for it, below',
   'net.listen': 'Listen on port',
   storage: 'Keep data on the machine, in MiB up to',
-  mcode: 'Answer, in a job that names it, holding the job until it does, M'
+  mcode: 'Answer, in a job that names it, holding the job until it does, M',
+  wizard: 'Add a check of its own to the Setup page'
 };
 var EXT_TIERS = {
   official: ['Official', 'b-ok', 'Signed with the OpenGlow extension key.'],

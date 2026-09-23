@@ -760,6 +760,72 @@ char *extpkg_mcode_json(int code, const char *words, char *why, size_t wlen)
     return out;
 }
 
+/* ---- a package's check on the Setup page ------------------------------------------ */
+
+json_t *extpkg_wizard_list(void)
+{
+    json_t *out = json_array();
+    const char *sf = getenv("FORGECTRL_EXT_STATUS");
+    json_t *host = json_load_file(sf && sf[0] ? sf : EXTPKG_STATUS_FILE, 0, NULL), *svc, *p;
+    if (!json_is_object(host) || !host_running(json_integer_value(json_object_get(host, "pid")))) {
+        json_decref(host);
+        return out;
+    }
+    char *text = NULL;
+    const char *argv[] = { "list", NULL };
+    json_t *listed = extpkg_cli(argv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    size_t i, k;
+    json_array_foreach(json_object_get(listed, "packages"), i, p) {
+        const char *id = json_string_value(json_object_get(p, "id"));
+        int has = 0, running = 0;
+        json_t *c;
+        json_array_foreach(json_object_get(p, "effective"), k, c)
+            has |= !strcmp(json_string_value(c) ?: "", "wizard");
+        json_array_foreach(json_object_get(host, "services"), k, svc)
+            running |= id && !strcmp(json_string_value(json_object_get(svc, "id")) ?: "", id)
+                       && !strcmp(json_string_value(json_object_get(svc, "state")) ?: "", "running");
+        if (!id || !has || !running || !json_is_true(json_object_get(p, "enabled")))
+            continue;
+        const char *name = json_string_value(json_object_get(json_object_get(p, "package"), "name"));
+        json_array_append_new(out, json_pack("{s:s, s:s}", "id", id, "name", name ? name : id));
+    }
+    json_decref(listed);
+    json_decref(host);
+    return out;
+}
+
+char *extpkg_wizard_json(const char *id, const char *verb, const char *body, char *why, size_t wlen)
+{
+    static const char *const verbs[] = { "state", "start", "answer", "abort" };
+    int known = 0;
+    for (size_t i = 0; verb && i < sizeof(verbs) / sizeof(verbs[0]); i++)
+        known |= !strcmp(verb, verbs[i]);
+    if (!extpkg_id_ok(id) || !known || (body && (body[0] != '{' || strlen(body) > EXTPKG_CALL_BODY_MAX))) {
+        snprintf(why, wlen, "a package's check is asked state, start, answer, or abort");
+        return NULL;
+    }
+    const char *argv[] = { "wizard", id, verb, body, NULL };
+    char *out = NULL;
+    int rc = extpkg_cli(argv, &out);
+    json_t *j = out ? json_loads(out, 0, NULL) : NULL;
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        free(out);
+        snprintf(why, wlen, "the extension host did not answer");
+        return NULL;
+    }
+    if (!json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        free(out);
+        return NULL;
+    }
+    json_decref(j);
+    return out;
+}
+
 /* ---- the catalog ----------------------------------------------------------------- */
 
 static const char *curl_bin(void)

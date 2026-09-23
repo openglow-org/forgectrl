@@ -37,6 +37,7 @@
 #include "tls.h"
 #include "users.h"
 #include "wizdark.h"
+#include "wizpkg.h"
 #include "wizlive.h"
 
 #include <ctype.h>
@@ -308,6 +309,9 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
         json_array_append_new(cat, w);
     }
     json_object_set_new(st, "wizards", cat);
+    /* The checks packages add: their own, recorded by nobody but them,
+     * and none of them the machine's setup gate. */
+    json_object_set_new(st, "extensions", wizpkg_catalog_json());
     json_object_set_new(st, "changes", setup_changes_json());
     char ds[8192], who[SESSION_ID_HEX + 1];
     requester(req, who, sizeof(who));

@@ -185,4 +185,16 @@ void extpkg_mcode_table(char *out, size_t len);
 #define EXTPKG_MCODE_TIMEOUT_S  25
 char *extpkg_mcode_json(int code, const char *words, char *why, size_t wlen);
 
+/* The packages that add a check of their own to the Setup page and whose
+ * service runs now: [{id, name}], a new reference (an empty list when the
+ * host cannot be asked). */
+#include <jansson.h>
+json_t *extpkg_wizard_list(void);
+
+/* One step of a package's check: the host's wizard command, verb state,
+ * start, answer (with body, the operator's answer as JSON), or abort. The
+ * host's answer (id, the service's status and body), malloc'd; NULL with the
+ * words. */
+char *extpkg_wizard_json(const char *id, const char *verb, const char *body, char *why, size_t wlen);
+
 #endif

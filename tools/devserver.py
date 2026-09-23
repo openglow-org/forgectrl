@@ -1422,6 +1422,10 @@ class Mock:
             'wizards': [{'id': k, 'title': t, 'version': 1,
                          'class': 'dark' if k in DARK else 'live' if k in LIVE else 'form',
                          'done': w['versions'].get(k, 0)} for k, t in WIZARDS],
+            # The checks packages add (wizpkg.c): an enabled package that holds wizard (a --package one may).
+            'extensions': [{'id': 'pkg:' + p['id'], 'title': p['package'].get('name') or p['id'], 'done': False}
+                           for p in self.ext_packages
+                           if p['enabled'] and 'wizard' in p['package'].get('capabilities', [])],
             'dark': self.dark_reply(),
             'users': dict({'exists': bool(w['account']) and not w['reset'],
                            'reset_pending': w['reset'],

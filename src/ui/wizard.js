@@ -269,6 +269,10 @@ function darkApplicable(id) {
 function stepDone(id) {
   if (!W) return false;
   if (id === 'welcome') return true;
+  if (isPackageCheck(id)) {
+    var e = (W.extensions || []).filter(function (x) { return x.id === id; })[0];
+    return !!(e && e.done);
+  }
   /* Done only while every document is accepted at its current hash AND
    * the press stands: a document changed by an update leaves the press
    * recorded but the step open, and the page must show it. */
@@ -279,9 +283,33 @@ function stepDone(id) {
   if (W.versions && W.versions[id] && (W.required || []).indexOf(id) >= 0) return false;
   return !!(W.versions && W.versions[id]);
 }
+/* A check a package adds is never the next open step: nothing of the
+ * machine's setup waits for it, and the operator runs it from the rail. */
 function firstOpen() {
-  for (var i = 0; i < ORDER.length; i++) if (!stepDone(ORDER[i])) return ORDER[i];
+  for (var i = 0; i < ORDER.length; i++) if (!isPackageCheck(ORDER[i]) && !stepDone(ORDER[i])) return ORDER[i];
   return 'done';
+}
+/* The checks packages add (GET /wiz extensions): after the machine's own
+ * and before the end, each run like a check of the machine's, with its
+ * result the package's own. */
+function isPackageCheck(id) {
+  return typeof id === 'string' && id.indexOf('pkg:') === 0;
+}
+function mergeExtensions() {
+  var own = function (a) { return a.filter(function (id) { return !isPackageCheck(id); }); };
+  ORDER = own(ORDER);
+  CHECK_IDS = own(CHECK_IDS);
+  RERUN = own(RERUN);
+  var at = ORDER.indexOf('done');
+  ((W && W.extensions) || []).forEach(function (e) {
+    ORDER.splice(at++, 0, e.id);
+    CHECK_IDS.push(e.id);
+    RERUN.push(e.id);
+    TITLES[e.id] = e.title || e.id;
+    DARK_TEXT[e.id] = e.unanswered
+      ? 'The package that adds this check did not answer: ' + e.unanswered
+      : "A check an extension package adds. Its result is the package's own: nothing of the machine's setup waits for it.";
+  });
 }
 function railResult(id) {
   if (!W) return '';
@@ -366,6 +394,7 @@ function load(then) {
     })
     .then(function (w) {
       W = w;
+      mergeExtensions();
       $('host').textContent = (w.machine && w.machine.firmware) || '';
       loadUnits();
       if (then) then();

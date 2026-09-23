@@ -59,6 +59,11 @@ void wiz_wait_close(void);
 /* The outcome. finish_ok borrows result and applied. */
 void wiz_finish_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void wiz_finish_ok(int version, json_t *result, json_t *applied);
+/* The outcome shown on the page and recorded nowhere by the runner: a
+ * package's check keeps its own result (wizpkg.h). Borrows result. */
+void wiz_finish_shown(json_t *result);
+/* The running wizard's id, for the worker. */
+const char *wiz_current_id(void);
 /* One validated multi-key settings write with the before values. */
 int wiz_write_settings(const char *const *keys, const char *const *vals, size_t n,
                        json_t *applied, char *err, size_t elen);

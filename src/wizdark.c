@@ -31,6 +31,7 @@
 #include "status.h"
 #include "super.h"
 #include "wizcalc.h"
+#include "wizpkg.h"
 #include "wizrun.h"
 
 #include <arpa/inet.h>
@@ -79,7 +80,7 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 
 static struct {
-    char id[32];
+    char id[72];                        /* a package's check is pkg:<id>, 67 at most */
     int running;
     volatile int abort_req;
     char phase[96];
@@ -107,6 +108,7 @@ static int seq_counter;
 /* The wizard holds the machine with no controller running: the button
  * breathes white until the controller is handed the LED back. */
 static char lease_owner[LEASE_OWNER_MAX];    /* the machine lease the running wizard holds */
+static int lease_held;                        /* a package's check holds none */
 static int machine_held;
 
 static uint8_t *shot_jpeg[2];
@@ -1744,6 +1746,11 @@ static const wiz_entry_t wizards[] = {
 };
 #define NWIZ (sizeof(wizards) / sizeof(*wizards))
 
+/* A package's own check (wizpkg.h): one entry for every package, after
+ * both tables, needing neither the idle machine nor the lease. */
+static const wiz_entry_t package_check = { "pkg", wizpkg_run, 0 };
+#define PKG_IX ((int)(NWIZ + wizlive_n))
+
 /* The entry for an id: the dark table first, then the live one
  * (wizlive.c), as one index space. */
 static const wiz_entry_t *entry(int ix)
@@ -1754,6 +1761,8 @@ static const wiz_entry_t *entry(int ix)
         return &wizards[ix];
     if ((size_t)ix - NWIZ < wizlive_n)
         return &wizlive_table[ix - (int)NWIZ];
+    if (ix == PKG_IX)
+        return &package_check;
     return NULL;
 }
 
@@ -1765,6 +1774,8 @@ static int find(const char *id)
     for (size_t i = 0; i < wizlive_n; i++)
         if (!strcmp(wizlive_table[i].id, id))
             return (int)(NWIZ + i);
+    if (wizpkg_known(id))
+        return PKG_IX;
     return -1;
 }
 
@@ -1793,7 +1804,8 @@ static void *worker(void *arg)
     S.owner[0] = '\0';
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
-    lease_release(lease_owner);
+    if (lease_held)
+        lease_release(lease_owner);
     return NULL;
 }
 
@@ -1816,9 +1828,13 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
         return -1;
     }
     /* The machine lease: a diagnostic, an update job, the recorder, or a
-     * log export refuses the wizard, and the refusal names it. */
+     * log export refuses the wizard, and the refusal names it. A package's
+     * check takes none: it holds the machine no more than the package
+     * does, and whatever it does to it, it does through the package's own
+     * capabilities. */
+    lease_held = ix != PKG_IX;
     snprintf(lease_owner, sizeof(lease_owner), "wizard:%s", id);
-    if (lease_take(lease_owner, LEASE_HARDWARE, NULL, err, elen) != 0) {
+    if (lease_held && lease_take(lease_owner, LEASE_HARDWARE, NULL, err, elen) != 0) {
         pthread_mutex_unlock(&mu);
         return -1;
     }
@@ -1851,7 +1867,8 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
         pthread_mutex_lock(&mu);
         S.running = 0;
         pthread_mutex_unlock(&mu);
-        lease_release(lease_owner);
+        if (lease_held)
+            lease_release(lease_owner);
         snprintf(err, elen, "cannot start the wizard thread");
         return -1;
     }
@@ -2068,6 +2085,16 @@ void wiz_finish_err(const char *fmt, ...)
 }
 
 void wiz_finish_ok(int version, json_t *result, json_t *applied) { finish_ok(version, result, applied); }
+void wiz_finish_shown(json_t *result)
+{
+    pthread_mutex_lock(&mu);
+    if (S.result)
+        json_decref(S.result);
+    S.result = json_incref(result);
+    pthread_mutex_unlock(&mu);
+    fflog(LOG_NOTICE, "wiz %s: complete (the package keeps its result)", S.id);
+}
+const char *wiz_current_id(void) { return S.id; }
 
 int wiz_write_settings(const char *const *keys, const char *const *vals, size_t n,
                        json_t *applied, char *err, size_t elen)

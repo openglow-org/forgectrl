@@ -42,7 +42,7 @@ A package that can run a program starts a job the way you would, and the job the
 
 A package that answers an M-code holds a job of yours that names it at that M-code until it answers: the head stands still and the laser is dark while it waits. If it does not answer in 30 seconds, or says it could not do its part, the job is held for you to resume or stop.
 
-This firmware serves the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, a page of its own, running a program, and answering an M-code. Read the list as what you are trusting the author with.
+This firmware serves the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, a page of its own, running a program, answering an M-code, and a check of its own on the Setup page. Read the list as what you are trusting the author with.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 
