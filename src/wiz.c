@@ -72,6 +72,7 @@ static const wiz_def_t catalog[] = {
     { "airflow",             "Airflow",             1, "dark" },
     { "motion",              "Motion",              1, "dark" },
     { "cameras",             "Cameras",             1, "dark" },
+    { "motion.envelope",     "Bed size",            1, "dark" },
     { "cooling.aa-offset",   "Coolant offset",      1, "dark" },
     { "cooling.flow",        "Coolant flow",        1, "dark" },
     { "cooling.tec",         "TEC",                 1, "dark" },

@@ -31,6 +31,7 @@
 #include "status.h"
 #include "super.h"
 #include "wizcalc.h"
+#include "grblport.h"
 #include "wizpkg.h"
 #include "wizrun.h"
 
@@ -1730,6 +1731,202 @@ out:
     json_decref(r);
 }
 
+/* ------------------------------------------------------------ bed size */
+
+/* How far the head really travels in X and Y from its home. The travel the
+ * controller knows ($130, $131) keeps a margin the factory took for its
+ * tolerances; the operator jogs the head to each far end while watching
+ * it, and the envelope's far edge is set ENVELOPE_MARGIN_MM short of where
+ * they stopped (envelope_x_mm, _y). The controller's envelope is opened
+ * for the measurement alone (the travel plus 30 mm; the port's envelope
+ * open), and set from the keys again at the end and on every way out. The
+ * jogs are the port's: an open envelope is the port's jogs' alone, and a
+ * Grbl client's first line closes it (ctlport.c), which fails the check
+ * before anything is written. The machine must be homed: the bed is
+ * measured from its home. */
+#define ENVELOPE_MARGIN_MM 1.0
+#define ENVELOPE_JOG_FEED  600.0
+#define ENVELOPE_BACK_FEED 3000.0
+
+typedef struct {
+    char state[16];
+    int port_jog, homed, open;
+    double x, y;
+} port_state_t;
+
+static int port_state(port_state_t *p)
+{
+    char reply[512];
+    if (grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_STATE, NULL, reply, sizeof(reply)) != GRBLPORT_OK)
+        return -1;
+    json_t *j = json_loads(reply, 0, NULL), *m = json_object_get(j, "mpos");
+    int ok = json_is_array(m) && json_array_size(m) >= 2 && json_is_string(json_object_get(j, "state"));
+    if (ok) {
+        snprintf(p->state, sizeof(p->state), "%s", json_string_value(json_object_get(j, "state")));
+        p->port_jog = json_is_true(json_object_get(j, "port_jog"));
+        p->homed = (int)json_integer_value(json_object_get(j, "homed"));
+        p->open = json_is_true(json_object_get(j, "envelope_open"));
+        p->x = json_number_value(json_array_get(m, 0));
+        p->y = json_number_value(json_array_get(m, 1));
+    }
+    json_decref(j);
+    return ok ? 0 : -1;
+}
+
+static int port_jog_done(void *ctx)
+{
+    port_state_t *p = ctx;
+    return port_state(p) == 0 && !strcmp(p->state, "Idle") && !p->port_jog;
+}
+
+static int envelope_op(const char *what)
+{
+    char reply[128];
+    return grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_ENVELOPE, what, reply, sizeof(reply)) == GRBLPORT_OK
+           && !strcmp(reply, "ok") ? 0 : -1;
+}
+
+/* One port jog, relative, and its end: 0, 1 refused (the reason logged),
+ * -1 aborted or the port gone. */
+static int envelope_jog(double dx, double dy, double feed)
+{
+    char words[96], err[96], reply[64], why[128];
+    if (grblport_jog_words(dx, dy, 0, feed, words, sizeof(words), err, sizeof(err)) != 0) {
+        wlog("%s", err);
+        return 1;
+    }
+    if (grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_JOG, words, reply, sizeof(reply)) != GRBLPORT_OK)
+        return -1;
+    if (grblport_explain(reply, why, sizeof(why)) != 0) {
+        wlog("the jog was refused: %s", why);
+        return 1;
+    }
+    port_state_t p;
+    if (wait_for(port_jog_done, &p, 60) != 0)
+        return -1;
+    kernel_wait_idle(3.0, NULL);
+    return 0;
+}
+
+static const char ENVELOPE_CLOSED[] = "a Grbl client sent a line, which closed the check's envelope: run the check "
+                                      "again when nothing else is sending";
+
+/* Jogs toward one far end until the operator says it is the end: 0 with
+ * the position then, -1 aborted, the envelope closed, or no answer. */
+static int measure_end(char axis, const char *text, double *end_mm)
+{
+    static const char *const x_opts[] = { "X+10", "X+1", "X+0.1", "X-0.1", "X-1", "X-10", "This is the end" };
+    static const char *const y_opts[] = { "Y+10", "Y+1", "Y+0.1", "Y-0.1", "Y-1", "Y-10", "This is the end" };
+    char a[24];
+    port_state_t p;
+    for (;;) {
+        if (ask("jog", axis == 'X' ? "x-end" : "y-end", text, axis == 'X' ? x_opts : y_opts, 7, a, sizeof(a)) != 0)
+            return -1;
+        if (port_state(&p) != 0 || !p.open) {
+            finish_err("%s", ENVELOPE_CLOSED);
+            return -1;
+        }
+        if (!strcmp(a, "This is the end"))
+            break;
+        double d = atof(a + 1);
+        if (a[0] != axis || fabs(d) > 10.0 || d == 0)
+            continue;
+        if (!machine_lid_closed()) {
+            wlog("the lid is open: close it to jog");
+            continue;
+        }
+        if (envelope_jog(axis == 'X' ? d : 0, axis == 'Y' ? d : 0, ENVELOPE_JOG_FEED) < 0)
+            return -1;
+    }
+    *end_mm = axis == 'X' ? p.x : p.y;
+    return 0;
+}
+
+static void run_envelope(void)
+{
+    json_t *r = json_object(), *applied = json_object();
+    int opened = 0;
+    double x_end = 0, y_end = 0;
+    char u1[32], u2[32], u3[32];
+    port_state_t p;
+    if (port_state(&p) != 0) {
+        finish_err("the controller does not answer on its port: the check needs GRBL mode");
+        goto out;
+    }
+    if ((p.homed & 3) != 3) {
+        finish_err("home the machine first (on its stop blocks, or with the camera): the bed is measured from "
+                   "its home");
+        goto out;
+    }
+    if (!machine_lid_closed() &&
+        edge("lid-close", "Close the lid: the head is jogged with it closed.", 3, 1, PROMPT_TIMEOUT_S) != 0)
+        goto out;
+    if (envelope_op("open") != 0) {
+        finish_err("the controller would not open its envelope for the measurement (the machine must be idle, "
+                   "with no armed window)");
+        goto out;
+    }
+    opened = 1;
+    wlog("the envelope is open to the travel plus 30 mm for the measurement");
+    phase("the right end");
+    progress(10);
+    if (measure_end('X', "Jog the head toward the right end of its travel, in smaller steps as it gets close, and "
+                    "stop just short of where it would touch. Watch the head, not the page. Then press This is "
+                    "the end.", &x_end) != 0)
+        goto out;
+    wlog("the right end: X %s", wiz_len(x_end, u1, sizeof(u1)));
+    phase("the front end");
+    progress(50);
+    if (measure_end('Y', "Now jog the head toward the front end of its travel the same way, and press This is the "
+                    "end just short of where it would touch.", &y_end) != 0)
+        goto out;
+    wlog("the front end: Y %s", wiz_len(y_end, u2, sizeof(u2)));
+    progress(80);
+
+    char xs[24], ys[24], err[160];
+    snprintf(xs, sizeof(xs), "%.2f", x_end - ENVELOPE_MARGIN_MM);
+    snprintf(ys, sizeof(ys), "%.2f", y_end - ENVELOPE_MARGIN_MM);
+    static const char *const keys[] = { "envelope_x_mm", "envelope_y_mm" };
+    const char *vals[] = { xs, ys };
+    if (write_settings(keys, vals, 2, applied, err, sizeof(err)) != 0) {
+        finish_err("%s", err);
+        goto out;
+    }
+    if (envelope_op("apply") != 0) {
+        finish_err("the controller did not take the measured envelope: home the machine before a job");
+        goto out;
+    }
+    opened = 0;
+    /* Back toward the home, inside the new envelope, in the port's bounded
+     * steps. A refusal leaves the head where it is. */
+    phase("back toward the home");
+    for (int i = 0; i < 12 && port_state(&p) == 0; i++) {
+        double dx = 10.0 - p.x, dy = 10.0 - p.y;
+        if (fabs(dx) < 0.01 && fabs(dy) < 0.01)
+            break;
+        dx = fmax(-GRBLPORT_JOG_MAX_XY_MM, fmin(GRBLPORT_JOG_MAX_XY_MM, dx));
+        dy = fmax(-GRBLPORT_JOG_MAX_XY_MM, fmin(GRBLPORT_JOG_MAX_XY_MM, dy));
+        if (!machine_lid_closed() || envelope_jog(dx, dy, ENVELOPE_BACK_FEED) != 0)
+            break;
+    }
+    json_object_set_new(r, "x_end_mm", json_real(x_end));
+    json_object_set_new(r, "y_end_mm", json_real(y_end));
+    json_object_set_new(r, "envelope_x_mm", json_real(atof(xs)));
+    json_object_set_new(r, "envelope_y_mm", json_real(atof(ys)));
+    char sum[240];
+    snprintf(sum, sizeof(sum), "The head travels to X %s and Y %s from its home; the envelope ends %s short of both, "
+             "and a job past it is refused.", wiz_len(x_end, u1, sizeof(u1)), wiz_len(y_end, u2, sizeof(u2)),
+             wiz_len(ENVELOPE_MARGIN_MM, u3, sizeof(u3)));
+    json_object_set_new(r, "summary", json_string(sum));
+    progress(100);
+    finish_ok(1, r, applied);
+out:
+    if (opened && envelope_op("apply") != 0)
+        wlog("the controller did not set its envelope back: home the machine before a job");
+    json_decref(r);
+    json_decref(applied);
+}
+
 /* ------------------------------------------------------------ runner */
 
 static const wiz_entry_t wizards[] = {
@@ -1743,6 +1940,7 @@ static const wiz_entry_t wizards[] = {
     { "cooling.tec",         run_cooling_tec,         1 },
     { "motion",              run_motion,              1 },
     { "cameras",             run_cameras,             1 },
+    { "motion.envelope",     run_envelope,            1 },
 };
 #define NWIZ (sizeof(wizards) / sizeof(*wizards))
 

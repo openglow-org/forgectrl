@@ -94,6 +94,14 @@ var HELP = {
       'Used by manual homing alone. The soft limits start at this position and end at the bed\'s travel.'
     ]
   },
+  envelope: {
+    t: 'Work envelope far edges',
+    d: 'usage/setup/#bed-size',
+    p: [
+      'Where the soft limits end in X and Y, as machine coordinates: how far the head really travels from its home. The Setup page\'s Bed size check measures them with you watching the head, and writes them 1 mm short of where you stopped. Blank, the envelope ends at the axis travel the controller knows, which keeps a margin for the factory\'s tolerances.',
+      'Held to 50 mm up to the travel plus 30 mm. A change takes effect at the next home, with every homing method.'
+    ]
+  },
   motor_release: {
     t: 'X and Y motors',
     d: 'usage/homing/',

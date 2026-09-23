@@ -534,6 +534,17 @@ static int valid_mm(const char *v)
     return end != v && *end == '\0' && f >= -1000.0 && f <= 1000.0;
 }
 
+/* The work envelope's far edge in X or Y, as the bed check measured it;
+ * the controller holds it to its own bound (the travel plus 30 mm). */
+static int valid_envelope(const char *v)
+{
+    char *end;
+    if (strlen(v) > VALUE_MAX_LEN)
+        return 0;
+    double f = strtod(v, &end);
+    return end != v && *end == '\0' && f >= 50.0 && f <= 600.0;
+}
+
 /* A manual home's coordinate: where the stop blocks stand. Never negative. */
 static int valid_mm_nonneg(const char *v)
 {
@@ -749,6 +760,8 @@ static const struct {
     { "gfcloud_home_y",         valid_mm,          0 },
     { "manual_home_x",          valid_mm_nonneg,   0 },
     { "manual_home_y",          valid_mm_nonneg,   0 },
+    { "envelope_x_mm",          valid_envelope,    0 },
+    { "envelope_y_mm",          valid_envelope,    0 },
     { "gfcloud_home_timeout_s", valid_timeout,     0 },
     { "gf_serial",              valid_serial,      0 },
     { "gf_password",            valid_password,    1 },

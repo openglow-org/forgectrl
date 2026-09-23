@@ -26,7 +26,10 @@ var W = null,
   pressTimer = null,
   returnTimer = null;
 var DARK_IDS = ['switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
-  'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header'];
+  'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header', 'motion.envelope'];
+/* The checks the setup never asks for: they are listed and run from the
+ * rail, and never opened as the next step. */
+var OPTIONAL = ['motion.envelope'];
 /* The sheet: the live wizards, one press per card, run on the same
  * check section with a preview of the burn. */
 var LIVE_IDS = ['sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
@@ -37,8 +40,8 @@ var CHECK_IDS = DARK_IDS.concat(LIVE_IDS);
 var CONDITIONAL = ['cooling.tec', 'cloud.header'];
 var ORDER = ['welcome', 'advisories', 'account', 'preferences', 'machine', 'cloud',
   'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset', 'cooling.flow',
-  'cooling.tec', 'cloud.header', 'sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor',
-  'laser.dose-curve', 'laser.corner', 'cooling.flow-load', 'done'];
+  'cooling.tec', 'cloud.header', 'motion.envelope', 'sheet.place', 'sheet.frame', 'laser.focus',
+  'laser.floor', 'laser.dose-curve', 'laser.corner', 'cooling.flow-load', 'done'];
 var TITLES = {
   welcome: 'Welcome',
   advisories: 'Advisories',
@@ -51,6 +54,7 @@ var TITLES = {
   airflow: 'Airflow',
   motion: 'Motion',
   cameras: 'Cameras',
+  'motion.envelope': 'Bed size',
   'cooling.aa-offset': 'Coolant offset',
   'cooling.flow': 'Coolant flow',
   'cooling.tec': 'TEC',
@@ -80,6 +84,10 @@ var DARK_TEXT = {
   motion: 'The rail comes up and the liveness probe runs, the lens finds its reference on the ' +
     'hall sensor, then the head jogs 50 mm each way on X and on Y with the accelerometer as ' +
     'the witness and the crash watch armed. Keep the bed clear. About three minutes.',
+  'motion.envelope': 'How far the head really travels from its home, measured by you: the machine keeps a margin ' +
+    'for the factory\'s tolerances, and this gives it back. Home the machine first. You jog the head to the ' +
+    'right end and then to the front end, watching it, and the check sets the envelope 1 mm short of where you ' +
+    'stopped. Keep your Grbl client quiet while it runs: a line from it ends the check with nothing written.',
   cameras: 'With the lid closed, one snapshot from the lid camera and one from the head ' +
     'camera. You confirm each view. About one minute.',
   'cooling.aa-offset': 'The loop settles, then the air-assist fan is switched while the coolant ' +
@@ -286,7 +294,8 @@ function stepDone(id) {
 /* A check a package adds is never the next open step: nothing of the
  * machine's setup waits for it, and the operator runs it from the rail. */
 function firstOpen() {
-  for (var i = 0; i < ORDER.length; i++) if (!isPackageCheck(ORDER[i]) && !stepDone(ORDER[i])) return ORDER[i];
+  for (var i = 0; i < ORDER.length; i++)
+    if (!isPackageCheck(ORDER[i]) && OPTIONAL.indexOf(ORDER[i]) < 0 && !stepDone(ORDER[i])) return ORDER[i];
   return 'done';
 }
 /* The checks packages add (GET /wiz extensions): after the machine's own
@@ -985,7 +994,7 @@ function darkPoll() {
     });
 }
 function darkAnswer(seq, value) {
-  var jog = /^[XY][-+]\d+$/.test(value);
+  var jog = /^[XY][-+][\d.]+$/.test(value);
   if (!jog) $('k-pbtns').innerHTML = '';
   post('/wiz/' + K.id + '/answer', { seq: seq, value: value })
     .then(function () {
@@ -1138,13 +1147,30 @@ function jogButtons(p) {
     return '<button class="btn btn-sm ' + (cls || 'btn-outline-secondary') + '" onclick="darkChoose(' +
       p.seq + ', \'' + esc(val) + '\')">' + label + '</button>';
   }
-  var g = '<div class="wz-jog">';
-  g += '<span></span>' + btn('▲ 10', 'Y-10') + '<span></span>';
-  g += btn('◀ 10', 'X-10') + btn('▲ 1', 'Y-1') + btn('▶ 10', 'X+10');
-  g += btn('◀ 1', 'X-1') + btn('▼ 1', 'Y+1') + btn('▶ 1', 'X+1');
-  g += '<span></span>' + btn('▼ 10', 'Y+10') + '<span></span>';
-  g += '</div>';
-  g += btn('Set origin', 'Set origin', 'btn-primary');
+  var jogs = opts.filter(function (o) { return /^[XY][-+][\d.]+$/.test(o); });
+  var g = '';
+  if (jogs.some(function (o) { return o[0] === 'X'; }) && jogs.some(function (o) { return o[0] === 'Y'; })) {
+    /* Both axes: the pad, the head's four ways. */
+    g = '<div class="wz-jog">';
+    g += '<span></span>' + btn('▲ 10', 'Y-10') + '<span></span>';
+    g += btn('◀ 10', 'X-10') + btn('▲ 1', 'Y-1') + btn('▶ 10', 'X+10');
+    g += btn('◀ 1', 'X-1') + btn('▼ 1', 'Y+1') + btn('▶ 1', 'X+1');
+    g += '<span></span>' + btn('▼ 10', 'Y+10') + '<span></span>';
+    g += '</div>';
+  } else {
+    /* One axis (the bed check's): one row, from the home outward, the
+     * fine steps in the middle. +Y runs toward the front, down the page. */
+    var arrow = { 'X-': '◀', 'X+': '▶', 'Y-': '▲', 'Y+': '▼' };
+    jogs.slice().sort(function (a, b) {
+      return parseFloat(a.slice(1)) - parseFloat(b.slice(1));
+    }).forEach(function (o) {
+      g += btn(arrow[o.slice(0, 2)] + ' ' + o.slice(2), o);
+    });
+  }
+  /* Every other option is the step's own way on (Set origin, This is the end). */
+  opts.forEach(function (o) {
+    if (!/^[XY][-+][\d.]+$/.test(o)) g += btn(esc(o), o, 'btn-primary');
+  });
   g += '<button class="btn btn-sm btn-outline-secondary" onclick="jogRefresh()">Refresh the view</button>';
   return g;
 }

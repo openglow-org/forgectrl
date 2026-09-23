@@ -45,6 +45,7 @@ static const struct {
     [GRBLPORT_RELEASE]  = { "release",  GRBLPORT_SET_PANEL,   0 },
     [GRBLPORT_ENERGIZE] = { "energize", GRBLPORT_SET_PANEL,   0 },
     [GRBLPORT_HOME]     = { "home",     GRBLPORT_SET_PANEL,   0 },
+    [GRBLPORT_ENVELOPE] = { "envelope", GRBLPORT_SET_PANEL,   1 },
     [GRBLPORT_MCODES]   = { "mcodes",   GRBLPORT_SET_DAEMON,  1 },
     [GRBLPORT_MCODE_RESULT] = { "mcode_result", GRBLPORT_SET_DAEMON, 1 },
 };

@@ -409,6 +409,7 @@ SETTINGS_KEYS = (
     'controller_mode', 'homing_mode',
     'gfcloud_home_x', 'gfcloud_home_y',
     'manual_home_x', 'manual_home_y',
+    'envelope_x_mm', 'envelope_y_mm',
     'gfcloud_home_timeout_s', 'gf_serial', 'gf_password', 'ui_units',
     'wifi_country',
     'cool_flow_rise', 'cool_flow_heater_pct', 'cool_flow_check_s',
@@ -515,13 +516,13 @@ WIZARDS = (('advisories', 'Advisories'), ('account', 'Your account'),
            ('motion', 'Motion'), ('cameras', 'Cameras'),
            ('cooling.aa-offset', 'Coolant offset'), ('cooling.flow', 'Coolant flow'),
            ('cooling.tec', 'TEC'), ('cooling.flow-verify', 'Flow check'),
-           ('cloud.header', 'Cloud header'),
+           ('cloud.header', 'Cloud header'), ('motion.envelope', 'Bed size'),
            ('sheet.place', 'Place the sheet'), ('sheet.frame', 'First fire'),
            ('laser.focus', 'Focus'), ('laser.floor', 'Laser floor'),
            ('laser.dose-curve', 'Dose curve'), ('laser.corner', 'Corner rolloff'),
            ('cooling.flow-load', 'Flow under load'))
 DARK = ('switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
-        'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header')
+        'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header', 'motion.envelope')
 # The sheet wizards run on the same mock runner; the daemon's previews
 # are stood in for by a drawing of the card's box.
 LIVE = ('sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
@@ -592,6 +593,10 @@ DARK_PROMPTS = {
     'switches': ('wait', 'lid-open', 'Open the lid.', []),
     'cameras': ('confirm', 'lid-view', 'This is the lid camera. Can you see the bed?', ['Yes', 'No']),
     'motion': ('continue', 'jogs', 'The head moves 50 mm each way on X, then on Y.', ['Continue']),
+    'motion.envelope': ('jog', 'x-end', 'Jog the head toward the right end of its travel, in smaller steps as it '
+                        'gets close, and stop just short of where it would touch. Watch the head, not the page. '
+                        'Then press This is the end.',
+                        ['X+10', 'X+1', 'X+0.1', 'X-0.1', 'X-1', 'X-10', 'This is the end']),
     'cloud.header': ('continue', 'print', 'In the Glowforge app, place any small design and press '
                      'Print. Do not press the machine button.', ['Continue']),
 }
@@ -663,6 +668,9 @@ DARK_RESULTS = {
                'z_passes': [40, 40, 42, 40, 41], 'rail': 'up',
                'moves': {'+X': {'p2p_x': 3100, 'p2p_y': 400, 'witnessed': True}}},
     'cameras': {'sensor': 'OV5648', 'lamp_idle': 236, 'lid_ok': True, 'head_ok': True},
+    'motion.envelope': {'x_end_mm': 506.4, 'y_end_mm': 290.8, 'envelope_x_mm': 505.4, 'envelope_y_mm': 289.8,
+                        'summary': 'The head travels to X 506.4 mm and Y 290.8 mm from its home; the envelope ends '
+                                   '1.0 mm short of both, and a job past it is refused.'},
     'cooling.aa-offset': {'offset_counts': 16.0, 'spread_counts': 1.2, 'recommend': 16.0},
     'cooling.flow': {'flow_max': 6.1, 'noflow_min': 18.9, 'gap': 12.8, 'recommend': 12.5,
                      'heater_pct': 40, 'threshold': 12.5},

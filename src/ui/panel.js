@@ -129,6 +129,8 @@ var FT = {
   gfcloud_home_y: 'len',
   manual_home_x: 'len',
   manual_home_y: 'len',
+  envelope_x_mm: 'len',
+  envelope_y_mm: 'len',
   lens_park_z_mm: 'len',
   lens_hall_edge_z_mm: 'len',
   cool_flow_rise: 'td',
@@ -1409,6 +1411,8 @@ function fill(force) {
   setF('gfcloud_home_y', S.gfcloud_home_y);
   setF('manual_home_x', S.manual_home_x);
   setF('manual_home_y', S.manual_home_y);
+  setF('envelope_x_mm', S.envelope_x_mm);
+  setF('envelope_y_mm', S.envelope_y_mm);
   applyHomingSurface();
   $('homing_mode').onchange = applyHomingSurface;
   setF('gfcloud_home_timeout_s', S.gfcloud_home_timeout_s);

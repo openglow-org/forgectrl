@@ -38,6 +38,7 @@ typedef enum {
     GRBLPORT_RELEASE,           /* panel set only, and the two below */
     GRBLPORT_ENERGIZE,
     GRBLPORT_HOME,
+    GRBLPORT_ENVELOPE,          /* panel set; arg: "open" or "apply" (the bed check's) */
     GRBLPORT_MCODES,            /* daemon set only, and the one below; arg: "-" or "160,161" */
     GRBLPORT_MCODE_RESULT       /* arg: "<seq> ok|fail [<words>]" */
 } grblport_op_t;
