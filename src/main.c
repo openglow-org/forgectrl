@@ -48,6 +48,7 @@
 #include "fflog.h"
 #include "gates.h"
 #include "grblport.h"
+#include "mcode.h"
 #include "hooks.h"
 #include "jobpost.h"
 #include "jobrun.h"
@@ -3312,6 +3313,7 @@ int main(int argc, char **argv)
     events_gather = events_gather_state;
     events_switches = machine_switch_bits;
     events_init();
+    mcode_init();
     apply_wifi(0);
     cam_lamp_apply_idle();
 

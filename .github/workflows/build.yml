@@ -79,6 +79,8 @@ jobs:
         run: ./build/holds_test
       - name: "extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words)"
         run: ./build/extpkg_test
+      - name: "mcode_test (the M-code relay: the table from the host's status, the host's mcode command, the answer line in the port's form, the daemon set)"
+        run: ./build/mcode_test
       - name: Verified fan writes (readback, retry, the duty a device lost put back)
         run: ./build/cool_fanwrite_test
       - name: Airflow gate

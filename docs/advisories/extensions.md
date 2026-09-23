@@ -1,6 +1,6 @@
 # Extensions
 
-Revision: 2 (2026-09-23)
+Revision: 3 (2026-09-23)
 
 Extensions are optional and off by default. This document is shown when you turn them on. To turn them on, type "I UNDERSTAND".
 
@@ -40,7 +40,9 @@ A package with a page of its own can send a little data out of your browser whil
 
 A package that can run a program starts a job the way you would, and the job then waits for the button and stands under every gate and limit your own jobs do.
 
-This firmware serves the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, a page of its own, and running a program. A package may still ask for them, and you will still be shown them, so read the list as what you are trusting the author with when a later firmware serves them.
+A package that answers an M-code holds a job of yours that names it at that M-code until it answers: the head stands still and the laser is dark while it waits. If it does not answer in 30 seconds, or says it could not do its part, the job is held for you to resume or stop.
+
+This firmware serves the capability list: reading the machine, following its events, holding a job, its own settings, a camera, a jog, a page of its own, running a program, and answering an M-code. Read the list as what you are trusting the author with.
 
 A package can stop working, or can hold every job, after a firmware update or after its author changes something on their side. You can always turn it off or remove it.
 

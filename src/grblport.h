@@ -10,13 +10,15 @@
  * the controller lives, because the port treats its client as the jog's
  * dead-man: a client that goes away cancels the jog in flight.
  *
- * The port's operations come in two sets, and the caller names the set
+ * The port's operations come in three sets, and the caller names the set
  * it speaks for before anything else looks at the request. The package
  * set (state, jog, cancel) is what the panel's Jog card, a scoped token,
  * or an extension may reach. The panel set adds the operations that belong to the
  * operator's own panel alone: the motor release, the energize, and the
- * manual home. An operation outside the caller's set is refused here,
- * with nothing written to the socket.
+ * manual home. The daemon set adds what the daemon's own relays say and
+ * no request reaches: which M-codes extension packages answer, and the
+ * answer to the one a job waits at (mcode.h). An operation outside the
+ * caller's set is refused here, with nothing written to the socket.
  */
 #ifndef FORGECTRL_GRBLPORT_H
 #define FORGECTRL_GRBLPORT_H
@@ -25,7 +27,8 @@
 
 typedef enum {
     GRBLPORT_SET_PACKAGE = 0,
-    GRBLPORT_SET_PANEL
+    GRBLPORT_SET_PANEL,
+    GRBLPORT_SET_DAEMON
 } grblport_set_t;
 
 typedef enum {
@@ -34,7 +37,9 @@ typedef enum {
     GRBLPORT_CANCEL,
     GRBLPORT_RELEASE,           /* panel set only, and the two below */
     GRBLPORT_ENERGIZE,
-    GRBLPORT_HOME
+    GRBLPORT_HOME,
+    GRBLPORT_MCODES,            /* daemon set only, and the one below; arg: "-" or "160,161" */
+    GRBLPORT_MCODE_RESULT       /* arg: "<seq> ok|fail [<words>]" */
 } grblport_op_t;
 
 #define GRBLPORT_OK          0  /* the port answered: reply holds its line */

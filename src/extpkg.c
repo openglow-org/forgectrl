@@ -703,6 +703,63 @@ int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen)
     return key_answer(rc, text, status, why, wlen);
 }
 
+/* ---- the M-codes packages answer ------------------------------------------------- */
+
+void extpkg_mcode_table(char *out, size_t len)
+{
+    const char *sf = getenv("FORGECTRL_EXT_STATUS");
+    json_t *host = json_load_file(sf && sf[0] ? sf : EXTPKG_STATUS_FILE, 0, NULL), *e;
+    int bits[32] = { 0 }, any = 0;
+    size_t i;
+    snprintf(out, len, "-");
+    if (!json_is_object(host) || !host_running(json_integer_value(json_object_get(host, "pid")))) {
+        json_decref(host);
+        return;
+    }
+    json_array_foreach(json_object_get(host, "mcodes"), i, e) {
+        json_int_t c = json_integer_value(json_object_get(e, "code"));
+        if (c >= 160 && c <= 179 && json_is_integer(json_object_get(e, "code")))
+            bits[c - 160] = any = 1;
+    }
+    json_decref(host);
+    if (!any)
+        return;
+    size_t n = 0;
+    out[0] = '\0';
+    for (int c = 0; c < 20 && n < len; c++)
+        if (bits[c])
+            n += (size_t)snprintf(out + n, len - n, "%s%d", n ? "," : "", 160 + c);
+}
+
+char *extpkg_mcode_json(int code, const char *words, char *why, size_t wlen)
+{
+    char num[8];
+    if (code < 160 || code > 179 || !words || words[0] != '{' || strlen(words) > 200) {
+        snprintf(why, wlen, "an M-code packages answer is one of M160 to M179, with its words");
+        return NULL;
+    }
+    snprintf(num, sizeof(num), "%d", code);
+    const char *argv[] = { "mcode", num, words, NULL };
+    char *out = NULL;
+    int rc = spawn(bin(), argv, &out, EXTPKG_MCODE_TIMEOUT_S, 0);
+    json_t *j = out ? json_loads(out, 0, NULL) : NULL;
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        free(out);
+        snprintf(why, wlen, "the extension host did not answer");
+        return NULL;
+    }
+    if (!json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        free(out);
+        return NULL;
+    }
+    json_decref(j);
+    return out;
+}
+
 /* ---- the catalog ----------------------------------------------------------------- */
 
 static const char *curl_bin(void)

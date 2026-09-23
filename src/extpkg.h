@@ -171,4 +171,18 @@ int extpkg_catalog_refresh(int *npkgs, char *version, size_t vlen, int *status, 
  * then. */
 char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen);
 
+/* The M-codes extension packages answer now, from the host's own status
+ * file (a running service that may run while a job is armed): "-" for
+ * none, or the numbers in order, comma separated, as the GRBL controller's
+ * port takes them. A host that is not running answers none. */
+void extpkg_mcode_table(char *out, size_t len);
+
+/* M<code> of a job, with its words (a JSON object of P, Q and R), to the
+ * service that answers it: the host's mcode command, bounded by
+ * EXTPKG_MCODE_TIMEOUT_S. Its answer (id, the service's status, and its
+ * body), malloc'd; NULL with the host's refusal in its words, or that the
+ * host could not be asked. */
+#define EXTPKG_MCODE_TIMEOUT_S  25
+char *extpkg_mcode_json(int code, const char *words, char *why, size_t wlen);
+
 #endif
