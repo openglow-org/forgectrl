@@ -10,10 +10,15 @@
  * become exactly the host's commands, nothing of a request is ever a shell
  * word, the host's refusal is passed on in its words, a host that cannot
  * be run or says something that is no JSON is 502, the status document
- * carries the host's own status only while that host is alive, and a
- * page's call to its service is held to its form before the host runs.
+ * carries the host's own status only while that host is alive, a page's
+ * call to its service is held to its form before the host runs, and the
+ * catalog: the index fetched from its one address with curl held to https
+ * and a bound, and verified by the host; a listed package fetched from
+ * where the kept index says, held to its size and SHA-256 before the host
+ * reads it, and staged for the upload's install.
  */
 #include "../src/extpkg.h"
+#include "../src/sha256.h"
 
 #include <jansson.h>
 #include <stdio.h>
@@ -52,7 +57,7 @@ static const char *ran(void)
 
 static void host_says(const char *script_body)
 {
-    char script[2048];
+    char script[8192];
     snprintf(script, sizeof(script), "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > %s\n%s\n", args_file, script_body);
     write_file(stand_in, script, 0755);
     unlink(args_file);
@@ -180,7 +185,7 @@ int main(void)
     unlink(script); } while (0)
 #define INSTALL_RAN() ({ static char t[1024]; char pth[340]; snprintf(pth, sizeof(pth), "%s.install", args_file); \
     FILE *f = fopen(pth, "r"); size_t n = f ? fread(t, 1, sizeof(t) - 1, f) : 0; if (f) fclose(f); t[n] = 0; t; })
-    char expect[400];
+    char expect[400], want_any[700];
 
     HOST_TIER("official");
     CHECK(extpkg_install("hold,job_time.run", NULL, 0, &status, why, sizeof(why)) == 0 && status == 200, "official: %d %s", status, why);
@@ -368,6 +373,128 @@ int main(void)
     host_says("echo 'Segmentation fault'; exit 139");
     CHECK(extpkg_dest("org.example.notify", "add", "plug.lan:80", &status, why, sizeof(why)) != 0 && status == 502,
           "a host that gives no JSON: %d", status);
+
+    /* The catalog. A stand-in for curl records its arguments, and writes
+     * the -o file from curl.body, or fails in curl's words from curl.fail. */
+    char curl[300], curl_args[300], curl_body[300], curl_fail[300], idx_stage[340], text[1024], cscript[4096];
+    snprintf(curl, sizeof(curl), "%s/curl", dir);
+    snprintf(curl_args, sizeof(curl_args), "%s/curl.args", dir);
+    snprintf(curl_body, sizeof(curl_body), "%s/curl.body", dir);
+    snprintf(curl_fail, sizeof(curl_fail), "%s/curl.fail", dir);
+    snprintf(idx_stage, sizeof(idx_stage), "%s/ext-index.ffi", dir);
+    snprintf(cscript, sizeof(cscript),
+             "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > %s\nout=; prev=\n"
+             "for a in \"$@\"; do [ \"$prev\" = -o ] && out=\"$a\"; prev=\"$a\"; done\n"
+             "if [ -f %s ]; then cat %s >&2; exit 22; fi\ncp %s \"$out\"\n", curl_args, curl_fail, curl_fail, curl_body);
+    write_file(curl, cscript, 0755);
+    setenv("FORGECTRL_CURL", curl, 1);
+    setenv("FORGECTRL_EXT_INDEX_URL", "https://example.org/index.ffi", 1);
+#define CURL_RAN() ({ static char t[1024]; FILE *f = fopen(curl_args, "r"); size_t n = f ? fread(t, 1, sizeof(t) - 1, f) : 0; \
+    if (f) fclose(f); t[n] = 0; t; })
+
+    host_says("echo '{\"ok\": true, \"index\": null}'");
+    doc = extpkg_catalog_json(&status, why, sizeof(why));
+    j = doc ? json_loads(doc, 0, NULL) : NULL;
+    CHECK(j && status == 200 && json_is_null(json_object_get(j, "index")) && !json_object_get(j, "ok") &&
+          !strcmp(json_string_value(json_object_get(j, "url")), "https://example.org/index.ffi") && !strcmp(ran(), "index\n"),
+          "no index kept: %s, ran [%s]", doc ? doc : why, ran());
+    json_decref(j);
+    free(doc);
+
+    /* The fetch: curl, https alone and bounded, into the file beside the
+     * staged package, which the host verifies and which is not kept. */
+    write_file(curl_body, "an index", 0644);
+    snprintf(cscript, sizeof(cscript), "[ \"$1\" = index-verify ] && [ \"$(cat \"$2\")\" = 'an index' ] && "
+             "echo '{\"ok\": true, \"version\": \"2026.9.23\", \"packages\": 2}' && exit 0\n"
+             "echo '{\"ok\": false, \"error\": \"not what was fetched\"}'; exit 1");
+    host_says(cscript);
+    int n = -1;
+    char version[40];
+    int rc = extpkg_catalog_refresh(&n, version, sizeof(version), &status, why, sizeof(why));
+    snprintf(want_any, sizeof(want_any), "-fsS\n-L\n--proto\n=https\n--proto-redir\n=https\n--max-redirs\n5\n--max-time\n30\n"
+             "--max-filesize\n2097152\n-o\n%s\nhttps://example.org/index.ffi\n", idx_stage);
+    CHECK(rc == 0 && status == 200 && n == 2 && !strcmp(version, "2026.9.23"), "the catalog fetched and kept: %d %s", status, why);
+    CHECK(!strcmp(CURL_RAN(), want_any), "curl ran with [%s]", CURL_RAN());
+    snprintf(want_any, sizeof(want_any), "index-verify\n%s\n", idx_stage);
+    CHECK(!strcmp(ran(), want_any) && access(idx_stage, F_OK) != 0, "the host verified the fetched file, and it is gone: [%s]",
+          ran());
+
+    write_file(curl_fail, "curl: (22) The requested URL returned error: 404", 0644);
+    host_says("echo '{\"ok\": true}'");
+    rc = extpkg_catalog_refresh(&n, version, sizeof(version), &status, why, sizeof(why));
+    CHECK(rc != 0 && status == 502 && strstr(why, "could not be fetched") && strstr(why, "404") && !ran()[0] &&
+          access(idx_stage, F_OK) != 0, "a fetch that fails: %d %s, ran [%s]", status, why, ran());
+    unlink(curl_fail);
+    host_says("echo '{\"ok\": false, \"error\": \"the index is not signed with the OpenGlow extension key\"}'; exit 1");
+    rc = extpkg_catalog_refresh(&n, version, sizeof(version), &status, why, sizeof(why));
+    CHECK(rc != 0 && status == 409 && strstr(why, "OpenGlow extension key") && access(idx_stage, F_OK) != 0,
+          "an index the host refuses: %d %s", status, why);
+
+    /* A listed package: where it is and what it is are the kept index's. */
+    static const char body[] = "the package's bytes";
+    unsigned char dg[SHA256_LEN];
+    char hex[2 * SHA256_LEN + 1];
+    sha256(body, strlen(body), dg);
+    sha256_hex(dg, SHA256_LEN, hex);
+    write_file(curl_body, body, 0644);
+#define HOST_INDEX(url, sha, size, pid) do { \
+    snprintf(text, sizeof(text), "{\"ok\": true, \"index\": {\"version\": \"1\", \"packages\": [{\"id\": \"org.example.other\"}, " \
+             "{\"id\": \"org.example.listed\", \"url\": \"%s\", \"sha256\": \"%s\", \"size\": %d}]}}", url, sha, (int)(size)); \
+    snprintf(cscript, sizeof(cscript), "if [ \"$1\" = index ]; then echo '%s'; exit 0; fi\n" \
+             "echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"package\": {\"id\": \"%s\"}}'", text, pid); \
+    host_says(cscript); unlink(curl_args); extpkg_stage_discard(); } while (0)
+
+    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed");
+    doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
+    j = doc ? json_loads(doc, 0, NULL) : NULL;
+    CHECK(j && status == 200 && !strcmp(json_string_value(json_object_get(j, "consent")), "typed") &&
+          json_is_true(json_object_get(j, "catalog")), "a listed package staged: %s", doc ? doc : why);
+    json_decref(j);
+    free(doc);
+    snprintf(want_any, sizeof(want_any), "-fsS\n-L\n--proto\n=https\n--proto-redir\n=https\n--max-redirs\n5\n--max-time\n240\n"
+             "--max-filesize\n%d\n-o\n%s\nhttps://example.org/listed.ffx\n", (int)strlen(body), stage);
+    CHECK(!strcmp(CURL_RAN(), want_any), "curl for the package, bounded to its size: [%s]", CURL_RAN());
+    snprintf(want_any, sizeof(want_any), "inspect\n%s\n", stage);
+    CHECK(!strcmp(ran(), want_any) && access(stage, F_OK) == 0, "the host inspected the staged file, which stays: [%s]", ran());
+    host_says("if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true}'; exit 0; fi\n"
+              "echo '{\"ok\": true}'");
+    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, "catalog names") &&
+          strstr(why, EXTPKG_PHRASE), "its install takes the phrase, in the catalog's words: %d %s", status, why);
+    extpkg_stage_discard();
+
+    static const struct { const char *what, *url; int sha_ok, size_delta; const char *pid; int status; const char *words; int curl; } gets[] = {
+        { "bytes that are not the listed ones", "https://example.org/listed.ffx", 0, 0, "org.example.listed", 409, "SHA-256", 1 },
+        { "bytes of another size", "https://example.org/listed.ffx", 1, 1, "org.example.listed", 409, "size", 1 },
+        { "an archive of another package", "https://example.org/listed.ffx", 1, 0, "org.example.other", 409, "another package", 1 },
+        { "an entry to fetch over http", "http://example.org/listed.ffx", 1, 0, "org.example.listed", 502, "out of form", 0 },
+    };
+    for (size_t k = 0; k < sizeof(gets) / sizeof(gets[0]); k++) {
+        HOST_INDEX(gets[k].url, gets[k].sha_ok ? hex : "0000000000000000000000000000000000000000000000000000000000000000",
+                   strlen(body) + gets[k].size_delta, gets[k].pid);
+        doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
+        CHECK(!doc && status == gets[k].status && strstr(why, gets[k].words) && access(stage, F_OK) != 0 &&
+              (access(curl_args, F_OK) == 0) == gets[k].curl, "%s: %d %s, curl %s", gets[k].what, status, why,
+              access(curl_args, F_OK) == 0 ? "ran" : "did not run");
+        free(doc);
+    }
+    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed");
+    write_file(curl_fail, "curl: (6) Could not resolve host: example.org", 0644);
+    doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
+    CHECK(!doc && status == 502 && strstr(why, "Could not resolve") && access(stage, F_OK) != 0, "a fetch that fails: %d %s", status, why);
+    free(doc);
+    unlink(curl_fail);
+    unlink(curl_args);
+    doc = extpkg_catalog_get("org.example.unlisted", &status, why, sizeof(why));
+    CHECK(!doc && status == 404 && strstr(why, "not in the catalog") && access(curl_args, F_OK) != 0, "an id it does not list: %d %s",
+          status, why);
+    free(doc);
+    doc = extpkg_catalog_get("org.example;reboot", &status, why, sizeof(why));
+    CHECK(!doc && status == 400, "an id that is none: %d", status);
+    free(doc);
+    host_says("echo '{\"ok\": true, \"index\": null}'");
+    doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
+    CHECK(!doc && status == 409 && strstr(why, "fetch it first") && access(curl_args, F_OK) != 0, "no index kept: %d %s", status, why);
+    free(doc);
 
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);

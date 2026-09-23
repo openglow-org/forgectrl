@@ -134,4 +134,41 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
 int extpkg_key_add(const char *name, const char *key, size_t klen, int button_held, int *status, char *why, size_t wlen);
 int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen);
 
+/* The catalog: the signed index of the packages OpenGlow lists, and the
+ * way to get one of them. It is fetched only when the operator asks (the
+ * privacy advisory says so), from one fixed https:// address, with curl
+ * and no shell, and the extension host verifies it - signed with the
+ * OpenGlow extension key and by nothing else - and keeps it. A package
+ * from it is fetched from the address the kept index names, and its bytes
+ * must be the size and the SHA-256 the index names before the host reads
+ * them. Then it is staged as an upload is, and the install that follows is
+ * the upload's, with the consent its tier takes: the catalog changes where
+ * an archive comes from, and nothing about how it is judged. */
+#define EXTPKG_CURL_DEFAULT     "/usr/bin/curl"
+#define EXTPKG_INDEX_URL \
+    "https://github.com/openglow-org/forgefirm-extensions/releases/latest/download/index.ffi"
+#define EXTPKG_INDEX_FETCH_MAX  (2UL * 1024 * 1024)
+#define EXTPKG_INDEX_FETCH_S    30
+#define EXTPKG_PKG_FETCH_S      240
+
+/* GET /ext/catalog: the host's kept index ({"index": the document, or null
+ * when none is kept}) and the address it is fetched from, malloc'd; NULL
+ * with the status (502) and the words. */
+char *extpkg_catalog_json(int *status, char *why, size_t wlen);
+
+/* Fetch the index and have the host verify and keep it. 0 with its number
+ * of packages and its version; otherwise the status (502 when it could not
+ * be fetched or the host cannot be asked, 409 for the host's refusal: the
+ * one it kept stays) and the words. */
+int extpkg_catalog_refresh(int *npkgs, char *version, size_t vlen, int *status, char *why, size_t wlen);
+
+/* Fetch the package the kept index lists under id and stage it: the host's
+ * inspect of it, with "consent" and "catalog" added, malloc'd. NULL with
+ * the status (400 for an id with no such form, 409 with no index kept or
+ * for bytes that are not the ones it names, 404 for an id it does not
+ * list, 400 when the host refuses the archive, 502 when it could not be
+ * fetched or the host cannot be asked) and the words; nothing stays staged
+ * then. */
+char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen);
+
 #endif

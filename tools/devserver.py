@@ -1000,6 +1000,7 @@ class Mock:
         # The extension packages, as the extension host lists them (src/extpkg.c relays its command
         # line): one official package that runs, and one a person installed unsigned, with a hold.
         self.ext_keys = {'a-maker': 'ab' * 32}
+        self.ext_index = None       # the catalog the host keeps: none until the operator fetches it
         self.ext_values = {}        # package id -> the settings the operator or the page set
         self.burn_marks = []        # where the head stood for each lit job the mock's runner played
         self.ext_packages = [
@@ -1709,6 +1710,52 @@ class Mock:
                        'bytes': len(body), 'update': False, 'downgrade': False, 'from_version': '',
                        'needs_grant': ['hold'], 'new_capabilities': self.EXT_UPLOAD['capabilities'], 'consent': 'typed'})
 
+    # The catalog (extpkg.c): the index the host keeps once the operator has fetched it, and a listed package
+    # fetched into the staging file, whose install is then the upload's. The mock's index lists the upload's
+    # package, signed by its author's key, which the index endorses, and one more.
+    EXT_INDEX_URL = 'https://github.com/openglow-org/forgefirm-extensions/releases/latest/download/index.ffi'
+    EXT_INDEX = {'index': 1, 'version': '2026.9.23', 'packages': [
+        {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0', 'author': 'A maker', 'license': 'MIT',
+         'description': 'Holds a job when the filter is spent.', 'url': 'https://example.org/filter-0.2.0.ffx',
+         'sha256': '5e' * 32, 'size': 18432, 'capabilities': ['hold', 'machine.read', 'storage:4'],
+         'key': 'sH0KeYDtE+o+fiK7n/n4gRtB/b7aBEJNip1evzeYEa4=', 'key_id': 'd5' * 32},
+        {'id': 'org.example.dust', 'name': 'Dust counter', 'version': '0.1.0', 'author': 'Another maker',
+         'license': 'MIT', 'description': 'Counts the hours the exhaust ran, for the filter.',
+         'homepage': 'https://example.org/dust', 'url': 'https://example.org/dust-0.1.0.ffx', 'sha256': '7a' * 32,
+         'size': 9216, 'capabilities': ['events', 'storage:1'],
+         'key': 'TdGuuHVwVFRssMevq3+3w+3Vi5wF0Dx1eZRbFvBt04g=', 'key_id': '3b' * 32}]}
+
+    def ext_catalog_reply(self):
+        return {'index': self.ext_index, 'url': self.EXT_INDEX_URL}
+
+    def ext_catalog_post(self, path, form, J, T):
+        if path == '/ext/catalog/refresh':
+            self.ext_index = json.loads(json.dumps(self.EXT_INDEX))
+            self._log('ext: the catalog 2026.9.23 is kept: 2 packages (fetched for the operator)')
+            return J(200, self.ext_catalog_reply())
+        pid = form.get('id', '')
+        if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid):
+            return T(400, 'id is a package id')
+        if self.lease_refusal():
+            return T(409, self.lease_refusal())
+        if not self.idle():
+            return T(409, 'the machine is not idle')
+        if self.ext_index is None:
+            return T(409, 'no catalog is kept here: fetch it first')
+        e = next((x for x in self.ext_index['packages'] if x['id'] == pid), None)
+        if e is None:
+            return T(404, '%s is not in the catalog' % pid)
+        pkg = {k: e[k] for k in ('id', 'name', 'version', 'description', 'author', 'license')}
+        pkg.update(runtime='python', capabilities=list(e['capabilities']), modes=['grbl', 'cloud'])
+        need = [c for c in e['capabilities'] if c in self.EXT_NEEDS_GRANT]
+        have = self.ext_find(pid)
+        self.ext_staged = {'package': pkg, 'key': e['key_id'], 'needs_grant': need}
+        self._log('ext: %s was fetched from the catalog and is staged' % pid)
+        return J(200, {'ok': True, 'package': pkg, 'tier': 'community', 'endorsed': True, 'key': e['key_id'],
+                       'files': 4, 'bytes': e['size'], 'update': have is not None, 'downgrade': False,
+                       'from_version': have['version'] if have else '', 'needs_grant': need,
+                       'new_capabilities': pkg['capabilities'], 'consent': 'typed', 'catalog': True})
+
     def ext_install_post(self, form, J, T):
         if self.lease_refusal():
             return T(409, self.lease_refusal())
@@ -1719,6 +1766,24 @@ class Mock:
             return T(400, 'grants is a comma-separated list of at most 8 capability names')
         if not getattr(self, 'ext_staged', False):
             return T(409, 'no package is staged: upload one first')
+        staged = self.ext_staged
+        if isinstance(staged, dict):
+            # one from the catalog: signed by its author's key, which the index endorses
+            if form.get('phrase') != 'I UNDERSTAND':
+                return T(400, "this package is signed by its author's key, which OpenGlow's catalog names for it, "
+                              'not by OpenGlow: type I UNDERSTAND to install it')
+            extra = [g for g in grants if g not in staged['needs_grant']]
+            if extra:
+                return T(409, 'a grant it does not ask for: %s' % extra[0])
+            self.ext_staged = False
+            m = staged['package']
+            self.ext_packages = [x for x in self.ext_packages if x['id'] != m['id']] + [
+                {'id': m['id'], 'version': m['version'], 'previous': '', 'tier': 'community', 'key': staged['key'],
+                 'enabled': True, 'quarantined': False, 'grants': grants, 'account': 'ffx3', 'package': m,
+                 **({'hold': 'advisory'} if 'hold' in grants else {})}]
+            self._log('ext: a package was installed (by the operator, through the panel; grants: %s)'
+                      % (','.join(grants) or 'none'))
+            return J(200, self.ext_status_reply())
         if form.get('phrase') != 'I UNDERSTAND':
             return T(400, 'this package is signed by a key you added, not by OpenGlow: type I UNDERSTAND to install it')
         if grants != ['hold']:
@@ -2438,6 +2503,10 @@ class Mock:
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
                 return J(200, self.ext_status_reply())
+            if path == '/ext/catalog':
+                if not self._authorized(headers, q):
+                    return J(403, {'error': 'authentication required'})
+                return J(200, self.ext_catalog_reply())
             if path == '/ext/settings':
                 if not self._authorized(headers, q):
                     return J(403, {'error': 'authentication required'})
@@ -2823,6 +2892,8 @@ class Mock:
             return J(200, {'discarded': True})
         if path == '/ext/install':
             return self.ext_install_post(form, J, T)
+        if path in ('/ext/catalog/refresh', '/ext/catalog/get'):
+            return self.ext_catalog_post(path, form, J, T)
         if path in ('/ext/key', '/ext/key/remove'):
             return self.ext_key_post(path, form, J, T)
         if path == '/job':

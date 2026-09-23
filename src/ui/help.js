@@ -345,8 +345,17 @@ var HELP = {
     d: 'usage/extensions/',
     p: [
       'An extension package is software that is not part of ForgeFIRM. Somebody else writes it; you install it here, and it runs on the machine in a sandbox with only what you grant it.',
-      'The machine tells you who signed a package before you install it: official (the OpenGlow extension key), community (a key you added; you type I UNDERSTAND), or unverified (nobody the machine trusts; you hold the button on the machine, as for unsigned firmware). A signature says who made a package, not that it is safe.',
+      'The machine tells you who signed a package before you install it: official (the OpenGlow extension key), community (a key you added, or its author\'s key that the catalog names for it; you type I UNDERSTAND), or unverified (nobody the machine trusts; you hold the button on the machine, as for unsigned firmware). A signature says who made a package, not that it is safe.',
       'While a job is armed every package is frozen, unless you let one keep running. A package you gave a hold can hold a job; turning that package off, turning extensions off, or entering safe mode ends the hold at once.'
+    ]
+  },
+  extcatalog: {
+    t: 'The catalog',
+    d: 'usage/extensions/#the-catalog',
+    p: [
+      'The catalog is OpenGlow\'s list of packages, signed with the OpenGlow extension key. The machine fetches it only when you press Fetch the catalog, and a package from it only when you press Get. Nothing is fetched, installed, or updated on its own.',
+      'A package OpenGlow makes reads as official. Every other listed package is signed by its author\'s key, which the catalog names for that one package, and it reads as community: you install it with the typed phrase. OpenGlow read it before listing it, under the listing policy; that is not a test, and nobody vouches for it.',
+      'Get fetches the package from the address the catalog names and checks that it is the very archive the catalog lists. Then it shows you what the package is and what it asks for, as an upload does, and you install it or discard it.'
     ]
   },
   extkeys: {

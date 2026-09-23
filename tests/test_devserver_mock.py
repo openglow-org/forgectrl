@@ -595,6 +595,44 @@ class MockTest(unittest.TestCase):
         code, hdrs, body = self.call(m, 'POST', '/ext/upload', body=b'an archive', token=False)
         self.assertEqual(code, 403)
 
+    def test_ext_catalog_matches_extpkg_c(self):
+        # as extpkg.c and main.c rule it: no catalog until the operator fetches one; a listed package fetched
+        # and staged, and its install the upload's, with the phrase asked for in the catalog's words
+        src, hdr = read('src/extpkg.c'), read('src/extpkg.h')
+        m = self.mock()
+        self.assertIn(m.EXT_INDEX_URL, hdr)
+        self.assertEqual(self.get_json(m, '/ext/catalog'), {'index': None, 'url': m.EXT_INDEX_URL})
+        code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.dust'})
+        self.assertEqual((code, body.decode()), (409, 'no catalog is kept here: fetch it first'))
+        self.assertIn(body.decode(), src)
+        code, _h, body = self.call(m, 'POST', '/ext/catalog/refresh')
+        doc = json.loads(body)
+        self.assertEqual((code, doc['index']['version'], [e['id'] for e in doc['index']['packages']]),
+                         (200, '2026.9.23', ['org.example.filter', 'org.example.dust']))
+        self.assertEqual(self.get_json(m, '/ext/catalog'), doc)
+        for form, want in (({'id': 'org.example;x'}, 400), ({'id': 'org.example.none'}, 404), ({}, 400)):
+            code, _h, body = self.call(m, 'POST', '/ext/catalog/get', form)
+            self.assertEqual(code, want, form)
+        self.assertIn('%s is not in the catalog', src)
+        code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.dust'})
+        doc = json.loads(body)
+        self.assertEqual((code, doc['tier'], doc['consent'], doc['catalog'], doc['endorsed'], doc['package']['id']),
+                         (200, 'community', 'typed', True, True, 'org.example.dust'))
+        for w in ('"consent"', '"catalog"'):
+            self.assertIn(w, src)
+        code, _h, body = self.call(m, 'POST', '/ext/install', {'grants': ''})
+        self.assertEqual(code, 400)
+        self.assertIn("which OpenGlow's catalog names for it", body.decode())
+        self.assertIn("which OpenGlow's catalog names for it", src)
+        code, _h, body = self.call(m, 'POST', '/ext/install', {'phrase': 'I UNDERSTAND', 'grants': 'hold'})
+        self.assertEqual(code, 409)                 # it asks for no hold
+        code, _h, body = self.call(m, 'POST', '/ext/install', {'phrase': 'I UNDERSTAND'})
+        self.assertEqual(code, 200)
+        self.assertIn('org.example.dust', [p['id'] for p in json.loads(body)['packages']])
+        for path in ('/ext/catalog/refresh', '/ext/catalog/get'):
+            code, _h, body = self.call(m, 'POST', path, {'id': 'org.example.dust'}, token=False)
+            self.assertEqual(code, 403, path)
+
     def test_ext_keys_match_extpkg_c(self):
         # as extpkg.c rules it: a name's form, and the button held
         src = read('src/extpkg.c')

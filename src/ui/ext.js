@@ -7,9 +7,10 @@
  * The operator's door to extension packages: whether extensions are on
  * (turned on over their advisory), what is installed and how each is
  * doing, the switch and the hold's kind and the removal of one package,
- * and the install of a new one with the consent its tier takes. Every
- * decision is forgectrl's and the extension host's: this card shows what
- * GET /ext/status says and sends what the operator chose.
+ * and the install of a new one with the consent its tier takes, from a
+ * file or from the catalog. Every decision is forgectrl's and the extension
+ * host's: this card shows what GET /ext/status and GET /ext/catalog say and
+ * sends what the operator chose.
  */
 var EXT_CAPS = {
   'machine.read': "Read the machine's status, cooling status, mode, and position",
@@ -29,12 +30,13 @@ var EXT_CAPS = {
 };
 var EXT_TIERS = {
   official: ['Official', 'b-ok', 'Signed with the OpenGlow extension key.'],
-  community: ['Community', 'b-warn', 'Signed with a key you added to this machine, not by OpenGlow.'],
+  community: ['Community', 'b-warn', "Signed with a key you added to this machine, or with its author's key that OpenGlow's catalog names for it; not by OpenGlow."],
   unverified: ['Unverified', 'b-bad', 'Signed by nobody this machine trusts, or not signed at all.']
 };
 var EXT_DOC = 'extensions';             /* the advisory turning extensions on agrees to */
 var extStaged = null,
-  extAdvisory = null;
+  extAdvisory = null,
+  extCatalog = null;
 
 function extCap(c) {
   var i = c.indexOf(':'),
@@ -101,6 +103,7 @@ function renderExt(j) {
     list = j.packages || [],
     i,
     c;
+  EXT_LAST = j;                         /* the bridge and the catalog go by the latest word */
   extFramesFollow(list);
   g += kv(
     'Extensions',
@@ -176,8 +179,105 @@ function renderExt(j) {
   if (!list.length) g += "<p class='hint'>No package is installed.</p>";
   $('extpkgs').innerHTML = g;
   renderExtKeys(j.keys || []);
+  if (extCatalog) renderCatalog(extCatalog);
   $('extswitch').textContent = j.enabled ? 'Turn extensions off' : 'Turn extensions on…';
   $('extswitch').setAttribute('data-on', j.enabled ? '1' : '0');
+}
+/* The catalog: OpenGlow's signed list of packages, which the machine
+ * fetches only when the operator asks. Getting one fetches it into the
+ * staging file, and from there it is an upload: the host says what it is,
+ * and the install takes the consent its tier takes. */
+function extHostOf(url) {
+  var m = /^https:\/\/([^\/?#]+)/.exec(url || '');
+  return m ? m[1] : 'the catalog\'s host';
+}
+function renderCatalog(j) {
+  var idx = j && j.index,
+    have = {},
+    g = '',
+    i,
+    c;
+  extCatalog = j;
+  if (!idx) {
+    $('extcatalog').innerHTML =
+      "<p class='hint'>This machine has not fetched the catalog. Fetch the catalog asks " +
+      esc(extHostOf(j && j.url)) +
+      ' for it, this once.</p>';
+    return;
+  }
+  (EXT_LAST.packages || []).forEach(function (p) {
+    have[p.id] = p.version;
+  });
+  for (i = 0; i < (idx.packages || []).length; i++) {
+    var e = idx.packages[i],
+      caps = [],
+      inst = have[e.id];
+    for (c = 0; c < (e.capabilities || []).length; c++) caps.push(extCap(e.capabilities[c]));
+    g += kv(
+      e.name || e.id,
+      /* An entry the index names no key for is OpenGlow's own; the tier the
+       * install goes by is the host's reading of the archive itself. */
+      extTier(e.key ? 'community' : 'official') +
+        " <span class='mono'>" +
+        esc(e.id) +
+        ' ' +
+        esc(e.version) +
+        '</span>' +
+        (e.author ? ', by ' + esc(e.author) : '') +
+        (e.homepage ? " <a href='" + esc(e.homepage) + "' target='_blank' rel='noopener noreferrer'>home page</a>" : '') +
+        (e.description ? '<br>' + esc(e.description) : '') +
+        (caps.length ? "<br>It asks to:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '<br>') +
+        (inst === e.version
+          ? "<span class='hint'>Installed.</span>"
+          : "<button class='btn btn-sm btn-outline-secondary extcatget' data-id='" +
+            esc(e.id) +
+            "'>" +
+            (inst ? 'Get ' + esc(e.version) + ' (this machine has ' + esc(inst) + ')' : 'Get') +
+            '</button>')
+    );
+  }
+  $('extcatalog').innerHTML =
+    (g || "<p class='hint'>The catalog lists no package.</p>") +
+    "<p class='hint'>Catalog " +
+    esc(idx.version || '') +
+    ', signed with the OpenGlow extension key.</p>';
+}
+function loadCatalog() {
+  fx('/ext/catalog')
+    .then(extAnswer)
+    .then(renderCatalog)
+    .catch(function (e) {
+      $('extcatalog').innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
+    });
+}
+function extCatalogRefresh() {
+  extSay('msg-extcat', 'fetching the catalog\u2026');
+  fx('/ext/catalog/refresh', { method: 'POST' })
+    .then(extAnswer)
+    .then(function (j) {
+      extSay('msg-extcat', '');
+      renderCatalog(j);
+    })
+    .catch(function (e) {
+      extSay('msg-extcat', String(e));
+    });
+}
+function extCatalogGet(id) {
+  /* The one staging file is this fetch's now: whatever was staged goes. */
+  extStaged = null;
+  $('extstaged').style.display = 'none';
+  extSay('msg-extcat', 'fetching ' + id + '\u2026');
+  fx('/ext/catalog/get', { method: 'POST', body: new URLSearchParams({ id: id }) })
+    .then(extAnswer)
+    .then(function (j) {
+      extSay('msg-extcat', '');
+      extStaged = j;
+      renderStaged(j);
+      $('extstaged').scrollIntoView({ block: 'nearest' });
+    })
+    .catch(function (e) {
+      extSay('msg-extcat', String(e));
+    });
 }
 /* The owner's keys: what makes a package community rather than unverified.
  * Adding one takes the machine's button held, as unsigned firmware does. */
@@ -522,11 +622,8 @@ function extFrameOwner(id) {
 function loadExt() {
   fx('/ext/status')
     .then(extAnswer)
-    .then(function (j) {
-      EXT_LAST = j;
-      return j;
-    })
     .then(renderExt)
+    .then(loadCatalog)
     .catch(function (e) {
       $('extpkgs').innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
     });
@@ -537,7 +634,6 @@ function extDest(id, action, dest) {
     .then(extAnswer)
     .then(function (j) {
       extSay('msg-ext', '');
-      EXT_LAST = j;
       renderExt(j);
     })
     .catch(function (e) {
@@ -669,6 +765,10 @@ function renderStaged(j) {
   );
   $('extstagedkv').innerHTML = g;
   $('extconsent-typed').style.display = j.consent === 'typed' ? '' : 'none';
+  $('extconsent-typed-why').textContent = j.endorsed
+    ? "Its author's key, which OpenGlow's catalog names for this package, signed it, not OpenGlow. OpenGlow read it " +
+      'before listing it; that is not a test, and nobody vouches for it.'
+    : 'A key you added to this machine signed this package, not OpenGlow. Nobody reviewed it.';
   $('extconsent-button').style.display = j.consent === 'button' ? '' : 'none';
   $('extinstallphrase').value = '';
   $('extstaged').style.display = '';
@@ -711,6 +811,8 @@ document.addEventListener('click', function (ev) {
   if (k) extKeyRemove(k.getAttribute('data-name'));
   var u = ev.target.closest('.extui');
   if (u) extOpenUi(u.getAttribute('data-id'));
+  var cg = ev.target.closest('.extcatget');
+  if (cg) extCatalogGet(cg.getAttribute('data-id'));
   var da = ev.target.closest('.extdestadd');
   if (da) {
     var inp = document.querySelector(".extdestin[data-id='" + da.getAttribute('data-id') + "']");

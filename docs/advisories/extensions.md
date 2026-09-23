@@ -1,6 +1,6 @@
 # Extensions
 
-Revision: 1 (2026-09-21)
+Revision: 2 (2026-09-23)
 
 Extensions are optional and off by default. This document is shown when you turn them on. To turn them on, type "I UNDERSTAND".
 
@@ -8,10 +8,10 @@ Extensions are optional and off by default. This document is shown when you turn
 
 An extension package is software that is not part of ForgeFIRM. Somebody else can write it. You install it on the machine, and it can run there for as long as the machine is on.
 
-The project does not review, test, or vouch for a package unless the package is signed with the OpenGlow extension key. The machine tells you which kind a package is before you install it:
+The project does not test or vouch for a package unless the package is signed with the OpenGlow extension key. The machine tells you which kind a package is before you install it:
 
 - **Official.** Signed with the OpenGlow extension key.
-- **Community.** Signed with a key that you added to the machine. The machine asks for your typed consent.
+- **Community.** Signed with a key that you added to the machine, or with its author's key that OpenGlow's catalog names for that package. The machine asks for your typed consent. OpenGlow read a community package in its catalog before it listed it; that is not a test.
 - **Unverified.** Signed by nobody the machine trusts, or not signed at all. The machine asks you to hold the button, as it does for unsigned firmware.
 
 A signature says who made a package. It does not say the package is safe, correct, or useful.
@@ -52,7 +52,7 @@ If you report a problem with the machine, first see whether it happens in safe m
 
 When you type "I UNDERSTAND" to turn extensions on, you acknowledge these points:
 
-- An extension package is not part of ForgeFIRM. The project does not review or vouch for a package that is not signed with the OpenGlow extension key.
+- An extension package is not part of ForgeFIRM. The project does not test or vouch for a package that is not signed with the OpenGlow extension key, in its catalog or not.
 - The sandbox lowers the risk of a package and does not remove it.
 - The capabilities of a package, and the grants you give it, are your decision. They are a list of what you trust its author with.
 - You can turn extensions off, enter safe mode, or remove a package at any time, and you will do that before you report a problem with the machine.

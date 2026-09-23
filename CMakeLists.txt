@@ -403,7 +403,7 @@ target_compile_options(fwproduct_test PRIVATE -Wall -Wextra)
 # The operator's door to extension packages: the extension host's command
 # line run as an argument vector, a closed list of actions, a package id in
 # the form of one, the host's refusal passed on in its words.
-add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c)
+add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c src/sha256.c)
 target_compile_options(extpkg_test PRIVATE -Wall -Wextra)
 target_link_libraries(extpkg_test jansson)
 

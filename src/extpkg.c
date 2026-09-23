@@ -22,6 +22,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "sha256.h"
+
 static const char *bin(void)
 {
     const char *v = getenv("FORGECTRL_FORGEEXT");       /* a test's stand-in */
@@ -47,12 +49,16 @@ static double mono(void)
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
-int extpkg_cli(const char *const argv_in[], char **out)
+/* Run prog with these arguments and no shell: its standard output (and its
+ * standard error too, with both) into *out, within timeout_s. The exit
+ * status, or -1 when it could not be run, did not end in time, or said more
+ * than EXTPKG_OUT_MAX. */
+static int spawn(const char *prog, const char *const argv_in[], char **out, int timeout_s, int both)
 {
     const char *argv[32];
     int n = 0, pfd[2];
     *out = NULL;
-    argv[n++] = bin();
+    argv[n++] = prog;
     for (int i = 0; argv_in[i] && n < 31; i++)
         argv[n++] = argv_in[i];
     argv[n] = NULL;
@@ -71,6 +77,8 @@ int extpkg_cli(const char *const argv_in[], char **out)
             dup2(null, 2);
         }
         dup2(pfd[1], 1);
+        if (both)
+            dup2(pfd[1], 2);
         /* Nothing of forgectrl's goes along: it holds the pulse device, and
          * that descriptor is inheritable on purpose, for the controllers. */
         if (close_range(3, ~0U, 0) != 0)
@@ -83,7 +91,7 @@ int extpkg_cli(const char *const argv_in[], char **out)
     char *buf = malloc(EXTPKG_OUT_MAX + 1);
     size_t len = 0;
     int bad = buf == NULL;
-    double end = mono() + EXTPKG_TIMEOUT_S;
+    double end = mono() + timeout_s;
     while (!bad) {
         struct pollfd p = { pfd[0], POLLIN, 0 };
         double left = end - mono();
@@ -113,6 +121,11 @@ int extpkg_cli(const char *const argv_in[], char **out)
     buf[len] = '\0';
     *out = buf;
     return WEXITSTATUS(status);
+}
+
+int extpkg_cli(const char *const argv[], char **out)
+{
+    return spawn(bin(), argv, out, EXTPKG_TIMEOUT_S, 0);
 }
 
 static int host_running(json_int_t pid)
@@ -547,9 +560,12 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     const char *flag = NULL;
     if (!strcmp(consent, "typed")) {
         if (!phrase || strcmp(phrase, EXTPKG_PHRASE) != 0) {
+            int endorsed = json_is_true(json_object_get(j, "endorsed"));
             json_decref(j);
             *status = 400;
-            snprintf(why, wlen, "this package is signed by a key you added, not by OpenGlow: type " EXTPKG_PHRASE " to install it");
+            snprintf(why, wlen, "%s, not by OpenGlow: type " EXTPKG_PHRASE " to install it",
+                     endorsed ? "this package is signed by its author's key, which OpenGlow's catalog names for it"
+                              : "this package is signed by a key you added");
             return -1;
         }
         flag = "--consent-community";
@@ -685,4 +701,253 @@ int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen)
     char *text = NULL;
     int rc = extpkg_cli(argv, &text);
     return key_answer(rc, text, status, why, wlen);
+}
+
+/* ---- the catalog ----------------------------------------------------------------- */
+
+static const char *curl_bin(void)
+{
+    const char *v = getenv("FORGECTRL_CURL");           /* a test's stand-in */
+    return v && v[0] ? v : EXTPKG_CURL_DEFAULT;
+}
+
+static const char *index_url(void)
+{
+    const char *v = getenv("FORGECTRL_EXT_INDEX_URL");  /* a test's */
+    return v && v[0] ? v : EXTPKG_INDEX_URL;
+}
+
+/* The directory the staged package goes in, made when it is not there. */
+static void stage_dir(void)
+{
+    char dir[300];
+    snprintf(dir, sizeof(dir), "%s", extpkg_stage_path());
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        (void)mkdir(dir, 0700);
+    }
+}
+
+/* The index is fetched beside the staged package, and never kept there. */
+static void index_stage(char *out, size_t len)
+{
+    const char *stage = extpkg_stage_path(), *slash = strrchr(stage, '/');
+    if (slash)
+        snprintf(out, len, "%.*s/ext-index.ffi", (int)(slash - stage), stage);
+    else
+        snprintf(out, len, "ext-index.ffi");
+}
+
+/* The host's answer to one command, a JSON object with "ok" true; NULL with
+ * the status (refused for the host's refusal, 502 when it gives no answer)
+ * and the words. */
+static json_t *host_json(const char *const argv[], int refused, int *status, char *why, size_t wlen)
+{
+    char *text = NULL;
+    int rc = extpkg_cli(argv, &text);
+    json_t *j = text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    if (rc < 0 || !json_is_object(j)) {
+        json_decref(j);
+        *status = 502;
+        snprintf(why, wlen, "the extension host's command line does not answer");
+        return NULL;
+    }
+    if (rc != 0 || !json_is_true(json_object_get(j, "ok"))) {
+        const char *e = json_string_value(json_object_get(j, "error"));
+        *status = refused;
+        snprintf(why, wlen, "%s", e && e[0] ? e : "the extension host refused");
+        json_decref(j);
+        return NULL;
+    }
+    return j;
+}
+
+/* An https:// address into a file, with curl and no shell: https alone,
+ * through redirects too, and bounded in bytes and in time. 0, or -1 with
+ * curl's words and the file removed. */
+static int fetch(const char *url, const char *path, unsigned long max_bytes, int max_s, char *why, size_t wlen)
+{
+    char size[24], secs[16];
+    if (!url || strncmp(url, "https://", 8) != 0) {
+        snprintf(why, wlen, "the address is not https://");
+        return -1;
+    }
+    snprintf(size, sizeof(size), "%lu", max_bytes);
+    snprintf(secs, sizeof(secs), "%d", max_s);
+    const char *argv[] = { "-fsS", "-L", "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+                           "--max-time", secs, "--max-filesize", size, "-o", path, url, NULL };
+    char *out = NULL;
+    unlink(path);
+    int rc = spawn(curl_bin(), argv, &out, max_s + 5, 1);
+    if (rc != 0) {
+        const char *t = out ? out : "";
+        size_t n = strcspn(t, "\n");
+        if (rc < 0)
+            snprintf(why, wlen, "no answer in %d s", max_s);
+        else
+            snprintf(why, wlen, "%.*s", (int)(n < 200 ? n : 200), n ? t : "curl failed");
+        free(out);
+        unlink(path);
+        return -1;
+    }
+    free(out);
+    return 0;
+}
+
+static int file_sha256(const char *path, char hex[2 * SHA256_LEN + 1], long long *size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    sha256_ctx c;
+    unsigned char buf[16384], d[SHA256_LEN];
+    size_t n;
+    *size = 0;
+    sha256_init(&c);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        sha256_update(&c, buf, n);
+        *size += (long long)n;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    sha256_final(&c, d);
+    sha256_hex(d, SHA256_LEN, hex);
+    return bad ? -1 : 0;
+}
+
+char *extpkg_catalog_json(int *status, char *why, size_t wlen)
+{
+    const char *argv[] = { "index", NULL };
+    json_t *j = host_json(argv, 502, status, why, wlen);
+    if (!j)
+        return NULL;
+    json_object_del(j, "ok");
+    json_object_set_new(j, "url", json_string(index_url()));
+    char *doc = json_dumps(j, JSON_COMPACT);
+    json_decref(j);
+    if (!doc) {
+        *status = 500;
+        snprintf(why, wlen, "out of memory");
+        return NULL;
+    }
+    *status = 200;
+    return doc;
+}
+
+int extpkg_catalog_refresh(int *npkgs, char *version, size_t vlen, int *status, char *why, size_t wlen)
+{
+    char path[320], words[240];
+    *npkgs = 0;
+    if (version && vlen)
+        version[0] = '\0';
+    index_stage(path, sizeof(path));
+    stage_dir();
+    if (fetch(index_url(), path, EXTPKG_INDEX_FETCH_MAX, EXTPKG_INDEX_FETCH_S, words, sizeof(words)) != 0) {
+        *status = 502;
+        snprintf(why, wlen, "the catalog could not be fetched: %s", words);
+        return -1;
+    }
+    const char *argv[] = { "index-verify", path, NULL };
+    json_t *j = host_json(argv, 409, status, why, wlen);
+    unlink(path);
+    if (!j)
+        return -1;
+    *npkgs = (int)json_integer_value(json_object_get(j, "packages"));
+    if (version && vlen)
+        snprintf(version, vlen, "%s", json_string_value(json_object_get(j, "version")) ?: "");
+    json_decref(j);
+    *status = 200;
+    return 0;
+}
+
+char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen)
+{
+    char url[1100], sha[2 * SHA256_LEN + 1], got[2 * SHA256_LEN + 1], words[240];
+    long long size = 0, have = 0;
+    *status = 400;
+    if (!extpkg_id_ok(id)) {
+        snprintf(why, wlen, "id is a package id");
+        return NULL;
+    }
+
+    /* Where it is and what it is, from the index the host verified, and
+     * nothing of it from the request. */
+    const char *argv[] = { "index", NULL };
+    json_t *j = host_json(argv, 502, status, why, wlen), *idx = json_object_get(j, "index"), *entry = NULL, *e;
+    if (!j)
+        return NULL;
+    if (!json_is_object(idx)) {
+        json_decref(j);
+        *status = 409;
+        snprintf(why, wlen, "no catalog is kept here: fetch it first");
+        return NULL;
+    }
+    size_t i;
+    json_array_foreach(json_object_get(idx, "packages"), i, e) {
+        const char *eid = json_string_value(json_object_get(e, "id"));
+        if (eid && !strcmp(eid, id))
+            entry = e;
+    }
+    if (!entry) {
+        json_decref(j);
+        *status = 404;
+        snprintf(why, wlen, "%s is not in the catalog", id);
+        return NULL;
+    }
+    const char *u = json_string_value(json_object_get(entry, "url")), *h = json_string_value(json_object_get(entry, "sha256"));
+    size = json_integer_value(json_object_get(entry, "size"));
+    int form = u && strlen(u) < sizeof(url) && !strncmp(u, "https://", 8) && h && strlen(h) == 2 * SHA256_LEN
+               && size >= 1 && size <= (long long)EXTPKG_UPLOAD_MAX;
+    if (form) {
+        snprintf(url, sizeof(url), "%s", u);
+        snprintf(sha, sizeof(sha), "%s", h);
+    }
+    json_decref(j);
+    if (!form) {
+        *status = 502;
+        snprintf(why, wlen, "the catalog's entry for %s is out of form", id);
+        return NULL;
+    }
+
+    /* The bytes, held to the size and the SHA-256 the index names before
+     * the host reads a byte of them. */
+    stage_dir();
+    if (fetch(url, extpkg_stage_path(), (unsigned long)size, EXTPKG_PKG_FETCH_S, words, sizeof(words)) != 0) {
+        *status = 502;
+        snprintf(why, wlen, "%s could not be fetched: %s", id, words);
+        return NULL;
+    }
+    if (file_sha256(extpkg_stage_path(), got, &have) != 0 || have != size || strcmp(got, sha) != 0) {
+        extpkg_stage_discard();
+        *status = 409;
+        snprintf(why, wlen, "what was fetched for %s is not the archive the catalog names: its size or its SHA-256 differs",
+                 id);
+        return NULL;
+    }
+
+    /* And from here on it is an upload: the host says what it is. */
+    json_t *in = inspect(status, why, wlen);
+    if (!in)
+        return NULL;
+    const char *pid = json_string_value(json_object_get(json_object_get(in, "package"), "id"));
+    if (!pid || strcmp(pid, id) != 0) {
+        json_decref(in);
+        extpkg_stage_discard();
+        *status = 409;
+        snprintf(why, wlen, "the archive the catalog names for %s is another package", id);
+        return NULL;
+    }
+    json_object_set_new(in, "consent", json_string(consent_of(in)));
+    json_object_set_new(in, "catalog", json_true());
+    char *doc = json_dumps(in, JSON_COMPACT);
+    json_decref(in);
+    if (!doc) {
+        *status = 500;
+        snprintf(why, wlen, "out of memory");
+        return NULL;
+    }
+    *status = 200;
+    return doc;
 }

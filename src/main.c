@@ -1286,6 +1286,7 @@ static uint64_t extup_bytes;
 static int extup_error;
 static time_t extup_last;
 static char extup_refusal[96];
+static int extcat_busy;                 /* a package is being fetched from the catalog into the staging file */
 
 static int ext_upload_sink(const struct _u_request *req, const char *data, uint64_t off, size_t size)
 {
@@ -1309,6 +1310,8 @@ static int ext_upload_sink(const struct _u_request *req, const char *data, uint6
         extup_bytes = 0;
         if (lease_refusal(extup_refusal, sizeof(extup_refusal)))
             ;                           /* the holder, in words */
+        else if (extcat_busy)
+            snprintf(extup_refusal, sizeof(extup_refusal), "a package is being fetched from the catalog");
         else if (!machine_is_idle())
             snprintf(extup_refusal, sizeof(extup_refusal), "the machine is not idle");
         if (!extup_refusal[0]) {
@@ -1436,6 +1439,85 @@ static int cb_ext_upload_discard(const struct _u_request *req, struct _u_respons
     extpkg_stage_discard();
     ulfius_set_string_body_response(res, 200, "{\"discarded\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The catalog (extpkg.h): the index this machine keeps, the operator's
+ * fetch of a fresh one, and the fetch of one listed package into the
+ * staging file, after which the install is the upload's. Nothing here
+ * reaches the network unless the operator asked for it. */
+static int cb_ext_catalog(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char why[300];
+    int status;
+    char *doc = extpkg_catalog_json(&status, why, sizeof(why));
+    if (!doc)
+        return reply_error(res, (unsigned)status, why);
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
+}
+
+static pthread_mutex_t extcat_fetch_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int cb_ext_catalog_refresh(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (pthread_mutex_trylock(&extcat_fetch_mu) != 0)
+        return reply_error(res, 409, "the catalog is being fetched already");
+    char why[300], version[40];
+    int status, n;
+    int rc = extpkg_catalog_refresh(&n, version, sizeof(version), &status, why, sizeof(why));
+    pthread_mutex_unlock(&extcat_fetch_mu);
+    if (rc != 0) {
+        fflog(LOG_NOTICE, "ext: the catalog was not kept: %s", why);
+        return reply_error(res, (unsigned)status, why);
+    }
+    fflog(LOG_NOTICE, "ext: the catalog %s is kept: %d package%s (fetched for the operator)", version, n,
+          n == 1 ? "" : "s");
+    return cb_ext_catalog(req, res, NULL);
+}
+
+static int cb_ext_catalog_get(const struct _u_request *req, struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char why[300];
+    int status;
+    /* Gated as the upload's staging write is, and the one staging file is
+     * the upload's or this fetch's, never both at once. */
+    if (lease_refusal(why, sizeof(why)))
+        return reply_error(res, 409, why);
+    if (!machine_is_idle())
+        return reply_error(res, 409, "the machine is not idle");
+    pthread_mutex_lock(&extup_mu);
+    if ((extup_fp && time(NULL) - extup_last < 60) || extcat_busy) {
+        pthread_mutex_unlock(&extup_mu);
+        return reply_error(res, 409, extcat_busy ? "a package is being fetched from the catalog already"
+                                                 : "an upload is in progress");
+    }
+    extcat_busy = 1;
+    pthread_mutex_unlock(&extup_mu);
+    const char *id = setting_param(req, "id");
+    char *doc = extpkg_catalog_get(id, &status, why, sizeof(why));
+    pthread_mutex_lock(&extup_mu);
+    extcat_busy = 0;
+    pthread_mutex_unlock(&extup_mu);
+    if (!doc)
+        return reply_error(res, (unsigned)status, why);
+    fflog(LOG_NOTICE, "ext: %s was fetched from the catalog and is staged", id);
+    ulfius_set_string_body_response(res, 200, doc);
+    free(doc);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
     return U_CALLBACK_CONTINUE;
 }
 
@@ -3269,6 +3351,9 @@ int main(int argc, char **argv)
         { "POST", "/ext/dest",             cb_ext_dest,         NULL, 0, NULL },
         { "POST", "/ext/upload",           cb_ext_upload,       NULL, 0, NULL },
         { "POST", "/ext/upload/discard",   cb_ext_upload_discard, NULL, 0, NULL },
+        { "GET",  "/ext/catalog",          cb_ext_catalog,      NULL, 0, NULL },
+        { "POST", "/ext/catalog/refresh",  cb_ext_catalog_refresh, NULL, 0, NULL },
+        { "POST", "/ext/catalog/get",      cb_ext_catalog_get,  NULL, 0, NULL },
         { "POST", "/ext/install",          cb_ext_install,      NULL, 0, NULL },
         { "POST", "/ext/key",              cb_ext_key,          NULL, 0, NULL },
         { "POST", "/ext/key/remove",       cb_ext_key_remove,   NULL, 0, NULL },

@@ -726,6 +726,13 @@
               </div>
             </div>
           </div>
+          <h3>The catalog<button class="hlp" data-help="extcatalog" data-nolock="1" type="button">?</button></h3>
+          <div id="extcatalog"></div>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" onclick="extCatalogRefresh()">Fetch the catalog</button
+            ><span class="msg" id="msg-extcat"></span>
+          </div>
+          <h3>From a file</h3>
           <div class="btns">
             <input class="form-control form-control-sm" id="extfile" type="file" accept=".ffx" style="max-width: 18rem" /><button
               class="btn btn-sm btn-outline-secondary"
@@ -738,7 +745,7 @@
             <div class="alert alert-secondary" style="margin: 0.5rem 0">
               <div id="extstagedkv"></div>
               <div id="extconsent-typed" style="display: none">
-                <p class="hint">
+                <p class="hint" id="extconsent-typed-why">
                   A key you added to this machine signed this package, not OpenGlow. Nobody reviewed it.
                 </p>
                 <input
