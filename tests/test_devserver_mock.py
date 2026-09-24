@@ -842,6 +842,24 @@ class MockTest(unittest.TestCase):
         self.assertTrue(body.decode().startswith('an update job ('), body)
         self.assertTrue(body.decode().endswith('holds the machine - settings are locked'), body)
 
+    def test_update_probe(self):
+        # A probe download fetches the release's acceptance record, which
+        # the verification refuses; nothing is staged, as in update.c.
+        src = read('src/update.c')
+        m = self.mock()
+        code, hdrs, body = self.call(m, 'POST', '/update/download', {'probe': 'yes'})
+        self.assertEqual((code, json.loads(body)), (400, {'error': 'probe is 1 or 0'}))
+        self.assertIn('"probe is 1 or 0"', src)
+        code, hdrs, body = self.call(m, 'POST', '/update/download', {'probe': '1'})
+        self.assertEqual((code, json.loads(body)), (202, {'started': True}))
+        self.assertEqual(m.update['kind'], 'download')
+        m._job_end()
+        result = self.get_json(m, '/update/status')['result']
+        self.assertEqual(result, {'ok': False, 'error': 'signature verification failed - archive discarded'})
+        self.assertIn('signature verification "', src)
+        self.assertIn('"failed - archive discarded', src)
+        self.assertFalse(self.get_json(m, '/slots')['staged']['download']['present'])
+
     def test_logs_shapes(self):
         src = read('src/logs.c')
         m = self.mock()

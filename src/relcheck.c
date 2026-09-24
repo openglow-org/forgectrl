@@ -37,6 +37,15 @@ int relcheck_tag_ok(const char *s)
     return 1;
 }
 
+int relcheck_download_url(char *out, size_t len, const char *tag, int probe)
+{
+    if (!relcheck_tag_ok(tag))
+        return -1;
+    int n = snprintf(out, len, RELCHECK_DOWNLOAD_FMT, tag,
+                     probe ? RELCHECK_PROBE_ASSET : RELCHECK_ASSET);
+    return n > 0 && (size_t)n < len ? 0 : -1;
+}
+
 /* Copy src into dst, cut to len, never splitting a UTF-8 sequence: a
  * cut that lands inside one backs up to the sequence's start. */
 static void copy_text(char *dst, size_t len, const char *src)

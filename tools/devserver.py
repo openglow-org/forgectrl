@@ -2181,7 +2181,10 @@ class Mock:
     def _job_end(self):
         u, a = self.update, self.job_args
         slots = self.slots['slots']
-        if u['kind'] == 'download':
+        if u['kind'] == 'download' and a.get('probe'):
+            # the release's acceptance record: refused, and nothing kept
+            result = {'ok': False, 'error': 'signature verification failed - archive discarded'}
+        elif u['kind'] == 'download':
             self.slots['staged']['download'] = {
                 'present': True, 'bytes': 87654321, 'version': MOCK_RELEASE}
             result = {'ok': True, 'file': 'download',
@@ -2967,7 +2970,10 @@ class Mock:
             self.dismissed = v
             return J(200, self.release_reply())
         if path == '/update/download':
-            return self._job_start('download', {}, J)
+            probe = form.get('probe', '')
+            if probe not in ('', '0', '1'):
+                return J(400, {'error': 'probe is 1 or 0'})
+            return self._job_start('download', {'probe': probe == '1'}, J)
         if path == '/update/apply':
             slot, err = self._slot_target(form, J)
             if err:

@@ -16,6 +16,9 @@
  * lower number, than a prerelease of its own number, and than any
  * installed version that is not a release version (a development
  * build's stamp), and it is never newer than itself or a higher one.
+ *
+ * The download's URL is tested on its own too: a probe download asks for
+ * the release's acceptance record, never for the firmware file.
  */
 #include "../src/relcheck.h"
 
@@ -280,6 +283,32 @@ static void t_version_order(void)
     CHECK(!relcheck_is_newer("v0.0", "v0.0.3"), "two numbers are not a version");
 }
 
+/* The download's URL: the firmware file for a download, the acceptance
+ * record for a probe, and never the firmware file for a probe, because a
+ * probe exists so that a test adds nothing to the file's download count. */
+static void t_download_url(void)
+{
+    printf("the download's URL\n");
+    char url[256];
+    CHECK(relcheck_download_url(url, sizeof(url), "v0.0.6", 0) == 0 &&
+              !strcmp(url, "https://github.com/openglow-org/forgefirm/"
+                           "releases/download/v0.0.6/forgefirm.fw"),
+          "a download requests the firmware file");
+    printf("  url '%s'\n", url);
+    CHECK(relcheck_download_url(url, sizeof(url), "v0.0.6", 1) == 0 &&
+              !strcmp(url, "https://github.com/openglow-org/forgefirm/"
+                           "releases/download/v0.0.6/acceptance.json"),
+          "a probe requests the acceptance record");
+    printf("  url '%s'\n", url);
+    CHECK(!strstr(url, RELCHECK_ASSET), "a probe never names the firmware file");
+    CHECK(relcheck_download_url(url, sizeof(url), "v0.0.6 -o /etc/x", 1) != 0,
+          "a tag that is not one names no file");
+    CHECK(relcheck_download_url(url, sizeof(url), "", 0) != 0,
+          "an empty tag names no file");
+    CHECK(relcheck_download_url(url, 40, "v0.0.6", 0) != 0,
+          "a URL that does not fit is refused, not cut");
+}
+
 int main(void)
 {
     t_published_with_file();
@@ -292,6 +321,7 @@ int main(void)
     t_not_json();
     t_long_notes();
     t_version_order();
+    t_download_url();
     printf("%s: %d failure%s\n", failures ? "FAIL" : "PASS", failures,
            failures == 1 ? "" : "s");
     return failures ? 1 : 0;

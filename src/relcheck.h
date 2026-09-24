@@ -17,11 +17,15 @@
     "https://api.github.com/repos/openglow-org/forgefirm/releases/latest"
 /* The firmware file every release carries under this fixed name. */
 #define RELCHECK_ASSET "forgefirm.fw"
-/* The firmware file of a release, by its tag. This is the URL GitHub
- * counts as a download, so only the download itself requests it. */
+/* The acceptance record every release carries. A probe download fetches
+ * it in place of the firmware file: the same path end to end, on a file
+ * whose download count tracks no install. */
+#define RELCHECK_PROBE_ASSET "acceptance.json"
+/* A file of a release, by its tag and its name. The firmware file's URL
+ * is the one GitHub counts as a download, so only a download requests
+ * it, and never a probe. */
 #define RELCHECK_DOWNLOAD_FMT \
-    "https://github.com/openglow-org/forgefirm/releases/download/%s/" \
-    RELCHECK_ASSET
+    "https://github.com/openglow-org/forgefirm/releases/download/%s/%s"
 
 /* Ceilings: the API reply a fetch may hand over, and the release notes
  * kept from it (cut at a character boundary past the ceiling). */
@@ -62,5 +66,10 @@ int relcheck_is_newer(const char *tag, const char *current);
 /* True when s is made of tag characters only (letters, digits, . - _ +)
  * and is not empty: safe to quote into a reply and into a command. */
 int relcheck_tag_ok(const char *s);
+
+/* The URL a download of release tag requests: the firmware file, or with
+ * probe set the acceptance record. 0, or -1 when the tag is not one or
+ * the URL does not fit in len. */
+int relcheck_download_url(char *out, size_t len, const char *tag, int probe);
 
 #endif

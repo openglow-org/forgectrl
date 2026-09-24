@@ -25,7 +25,9 @@
  * answer is kept here and served to the panel, which raises an alert
  * for a release newer than the installed version until the operator
  * dismisses that release. Only the download requests the firmware
- * file's URL, once, so GitHub's download counter counts installs.
+ * file's URL, once, so GitHub's download counter counts installs. A
+ * probe download runs the same job on the release's acceptance record
+ * instead, into a file of its own, and keeps nothing.
  */
 #define _GNU_SOURCE
 #include "update.h"
@@ -58,6 +60,7 @@
 #define DATA_DIR    "/data/forgefirm"
 #define ARCHIVE_DIR DATA_DIR "/archive"
 #define DL_FW       DATA_DIR "/download.fw"
+#define DL_PROBE    DATA_DIR "/download-probe"
 #define UP_FW       DATA_DIR "/upload.fw"
 #define LOCK_FILE   DATA_DIR "/update.lock"
 #define KEY_RELEASE "/etc/forgefirm/keys/forgefirm-release.pub"
@@ -885,9 +888,17 @@ int cb_update_dismiss(const struct _u_request *req, struct _u_response *res,
 
 /* --------------------------------------------------- download worker */
 
+/* The mark a probe's worker is handed. A probe fetches the release's
+ * acceptance record into a file of its own, so a download the operator
+ * staged is never touched; the verification refuses the record, as it
+ * refuses every file that is not a signed ForgeFIRM archive, and a probe
+ * keeps nothing either way. */
+static char dl_probe_mark;
+
 static void *dl_worker(void *arg)
 {
-    (void)arg;
+    int probe = arg == &dl_probe_mark;
+    const char *path = probe ? DL_PROBE : DL_FW;
     /* The file of the release the last check found; a download before
      * any check runs the check first. The tag was whitelisted by the
      * check, so it is safe on the command line. */
@@ -908,31 +919,45 @@ static void *dl_worker(void *arg)
                    "download\"}");
         return NULL;
     }
+    char url[256];
+    if (relcheck_download_url(url, sizeof(url), tag, probe) != 0) {
+        job_finish("{\"ok\":false,\"error\":\"the release's tag does not "
+                   "name a file\"}");
+        return NULL;
+    }
+    if (probe)
+        fflog(LOG_NOTICE, "update: a probe download of %s", url);
 
     job_set_phase("downloading");
     pthread_mutex_lock(&mu);
-    snprintf(progress_file, sizeof(progress_file), "%s", DL_FW);
+    snprintf(progress_file, sizeof(progress_file), "%s", path);
     pthread_mutex_unlock(&mu);
 
     mkdir(DATA_DIR, 0755);
-    unlink(DL_FW);
+    unlink(path);
     char cmd[512], out[512];
     snprintf(cmd, sizeof(cmd),
              "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
-             " -o " DL_FW " " RELCHECK_DOWNLOAD_FMT " 2>&1", tag);
+             " -o %s %s 2>&1", path, url);
     int rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
-        unlink(DL_FW);
+        unlink(path);
         job_finish("{\"ok\":false,\"error\":\"download failed\","
                    "\"detail\":\"%s\"}", out);
         return NULL;
     }
 
     job_set_phase("verifying signature");
-    if (fw_classify(DL_FW) != 2) {
-        unlink(DL_FW);
+    if (fw_classify(path) != 2) {
+        unlink(path);
         job_finish("{\"ok\":false,\"error\":\"signature verification "
                    "failed - archive discarded\"}");
+        return NULL;
+    }
+    if (probe) {
+        unlink(path);
+        job_finish("{\"ok\":false,\"error\":\"a probe keeps nothing - "
+                   "archive discarded\"}");
         return NULL;
     }
     const char *not_fw = fwproduct_gate(DL_FW, FWCLASS_RELEASE);
@@ -956,8 +981,13 @@ int cb_update_download(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    const char *p = param(req, "probe");
+    if (p && *p && strcmp(p, "0") != 0 && strcmp(p, "1") != 0)
+        return reply_err(res, 400, "probe is 1 or 0");
+    int probe = p && !strcmp(p, "1");
     char why[128];
-    int rc = job_start("download", dl_worker, NULL, why, sizeof(why));
+    int rc = job_start("download", dl_worker, probe ? &dl_probe_mark : NULL,
+                       why, sizeof(why));
     return job_start_reply(res, rc, why);
 }
 
