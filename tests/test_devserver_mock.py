@@ -626,19 +626,41 @@ class MockTest(unittest.TestCase):
         src, hdr = read('src/extpkg.c'), read('src/extpkg.h')
         m = self.mock()
         self.assertIn(m.EXT_INDEX_URL, hdr)
-        self.assertEqual(self.get_json(m, '/ext/catalog'), {'index': None, 'url': m.EXT_INDEX_URL})
+        self.assertEqual(self.get_json(m, '/ext/catalog'), {'index': None, 'url': m.EXT_INDEX_URL,
+                                                            'core_version': m.EXT_CORE, 'core_checked': True})
         code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.dust'})
         self.assertEqual((code, body.decode()), (409, 'no catalog is kept here: fetch it first'))
         self.assertIn(body.decode(), src)
+        self.assertIsNone(next(p for p in self.get_json(m, '/ext/status')['packages'] if p['id'] == 'org.example.panel')
+                          ['withdrawn'])
         code, _h, body = self.call(m, 'POST', '/ext/catalog/refresh')
         doc = json.loads(body)
         self.assertEqual((code, doc['index']['version'], [e['id'] for e in doc['index']['packages']]),
-                         (200, '2026.9.23', ['org.example.filter', 'org.example.dust']))
+                         (200, '2026.923.1', ['org.example.filter', 'org.example.dust', 'org.example.later',
+                                              'org.example.panel']))
         self.assertEqual(self.get_json(m, '/ext/catalog'), doc)
+        # judged as the host reads it out: the newest version this firmware runs is the one offered
+        pk = {e['id']: e for e in doc['index']['packages']}
+        self.assertEqual((pk['org.example.filter']['offer'], [v['usable'] for v in pk['org.example.filter']['versions']]),
+                         ('0.2.0', [False, True]))
+        self.assertEqual((pk['org.example.later']['offer'], pk['org.example.later']['why']),
+                         (None, 'org.example.later 1.0.0 needs firmware 0.0.9 or newer, and this is 0.0.7'))
+        # an installed copy of a withdrawn version stays, and says so
+        st = {p['id']: p for p in self.get_json(m, '/ext/status')['packages']}
+        self.assertEqual(st['org.example.panel']['withdrawn'],
+                         {'scope': 'version', 'reason': 'its page could leave the camera lamp on'})
+        self.assertIsNone(st['org.openglow.notify']['withdrawn'])
         for form, want in (({'id': 'org.example;x'}, 400), ({'id': 'org.example.none'}, 404), ({}, 400)):
             code, _h, body = self.call(m, 'POST', '/ext/catalog/get', form)
             self.assertEqual(code, want, form)
         self.assertIn('%s is not in the catalog', src)
+        code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.later'})
+        self.assertEqual((code, body.decode()), (409, 'no version of org.example.later in the catalog runs on this '
+                                                      'firmware: org.example.later 1.0.0 needs firmware 0.0.9 or newer, '
+                                                      'and this is 0.0.7'))
+        self.assertIn('no version of %s in the catalog runs on this firmware', src)
+        code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.filter'})
+        self.assertEqual((code, json.loads(body)['package']['version']), (200, '0.2.0'))
         code, _h, body = self.call(m, 'POST', '/ext/catalog/get', {'id': 'org.example.dust'})
         doc = json.loads(body)
         self.assertEqual((code, doc['tier'], doc['consent'], doc['catalog'], doc['endorsed'], doc['package']['id']),

@@ -363,7 +363,9 @@ var HELP = {
     p: [
       'The catalog is OpenGlow\'s list of packages, signed with the OpenGlow extension key. The machine fetches it only when you press Fetch the catalog, and a package from it only when you press Get. Nothing is fetched, installed, or updated on its own.',
       'A package OpenGlow makes reads as official. Every other listed package is signed by its author\'s key, which the catalog names for that one package, and it reads as community: you install it with the typed phrase. OpenGlow read it before listing it, under the listing policy; that is not a test, and nobody vouches for it.',
-      'Get fetches the package from the address the catalog names and checks that it is the very archive the catalog lists. Then it shows you what the package is and what it asks for, as an upload does, and you install it or discard it.'
+      'The catalog can list several versions of a package. The machine offers the newest one this firmware runs, and says why a newer one does not run here. A firmware update shows what it now runs without fetching the catalog again.',
+      'Get fetches that version from the address the catalog names and checks that it is the very archive the catalog lists. Then it shows you what the package is and what it asks for, as an upload does, and you install it or discard it.',
+      'When OpenGlow withdraws a package or one version of it, a copy you installed stays installed and the card says so. The machine removes nothing on its own. A withdrawn version does not install again.'
     ]
   },
   extkeys: {

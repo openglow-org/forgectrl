@@ -1,6 +1,6 @@
 # Privacy
 
-Revision: 3 (2026-09-23)
+Revision: 4 (2026-09-25)
 
 This document says what the machine sends, what it keeps, and who can see it. Tick the box when you have read it.
 
@@ -13,7 +13,7 @@ The machine talks to these places, and to nothing else:
 - **The release check.** The machine checks for a new release once a day, and when you ask for it in the panel. The check asks the release host's API what is published. It does not send your version or your identity. The release host sees the machine's network address. The request uses the HTTP client's own name, not ForgeFIRM. The panel shows an alert when a newer release is published; the machine downloads nothing until you start the install.
 - **The Glowforge service.** The machine contacts it only if you turn cloud mode on, or if you choose cloud homing for GRBL. The session and the socket name this firmware as `ForgeFIRM/<version>`. Image uploads go to a storage host the service names, with a different client name. Cloud mode also contacts the vendor status host and asks what factory version is current. The Glowforge cloud service document says the rest of what it sends.
 - **Remote logging.** The machine forwards log lines only if you set a log server in the panel. It is off by default.
-- **The extension catalog.** The machine fetches OpenGlow's catalog of extension packages only when you press Fetch the catalog on the Extension packages card, and a package from it only when you press Get. Both come from the release host. The request does not send your version or your identity, and it uses the HTTP client's own name. The release host sees the machine's network address.
+- **The extension catalog.** The machine fetches OpenGlow's catalog of extension packages only when you press Fetch the catalog on the Extension packages card. The catalog comes from the release host. The machine fetches a package from the catalog only when you press Get, and it fetches it from the address that the catalog names for that package. That address can be on another host, such as the release page of the package's author. The requests do not send your version or your identity, and they use the HTTP client's own name. The host that each request goes to sees the machine's network address.
 - **Extension packages.** Only when you turn extensions on and install a package: the package reaches the places its capabilities name and the places you named for it, and nothing else. The Extensions document says what a package can send.
 
 The machine sends nothing else. There is no telemetry, no analytics, and no crash reporting to the project.

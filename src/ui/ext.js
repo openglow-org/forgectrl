@@ -155,6 +155,7 @@ function renderExt(j) {
         (m.author ? ', by ' + esc(m.author) : '') +
         '<br>' +
         extStateOf(j, p) +
+        extWithdrawn(p.withdrawn, true) +
         (m.description ? '<br>' + esc(m.description) : '') +
         (caps.length ? "<br>It may:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '<br>') +
         named +
@@ -193,6 +194,28 @@ function extHostOf(url) {
   var m = /^https:\/\/([^\/?#]+)/.exec(url || '');
   return m ? m[1] : 'the catalog\'s host';
 }
+/* MAJOR.MINOR.PATCH compared by number; the host's judgment is the one
+ * that counts, and this only picks which listed version to name. */
+function extVerCmp(a, b) {
+  var x = String(a).split('-')[0].split('.'),
+    y = String(b).split('-')[0].split('.'),
+    i;
+  for (i = 0; i < 3; i++) if (+x[i] !== +y[i]) return +x[i] < +y[i] ? -1 : 1;
+  return 0;
+}
+/* What OpenGlow's catalog says it withdrew, of a package installed here or
+ * staged: the machine removes nothing on its own. */
+function extWithdrawn(w, installed) {
+  if (!w) return '';
+  return (
+    "<br><span class='b-warn'>OpenGlow withdrew " +
+    (w.scope === 'version' ? 'this version' : 'this package') +
+    ' from its catalog</span>' +
+    (w.reason ? ': ' + esc(w.reason) : '') +
+    '.' +
+    (installed ? ' It stays installed; remove it if you no longer want it.' : '')
+  );
+}
 function renderCatalog(j) {
   var idx = j && j.index,
     have = {},
@@ -211,10 +234,21 @@ function renderCatalog(j) {
     have[p.id] = p.version;
   });
   for (i = 0; i < (idx.packages || []).length; i++) {
+    /* The host judged every listed version against this firmware as it
+     * read the index: the one offered is the newest this firmware runs,
+     * and a newer one that it does not run says why. */
     var e = idx.packages[i],
+      vers = e.versions || [],
       caps = [],
-      inst = have[e.id];
-    for (c = 0; c < (e.capabilities || []).length; c++) caps.push(extCap(e.capabilities[c]));
+      inst = have[e.id],
+      off = null,
+      newest = null;
+    for (c = 0; c < vers.length; c++) {
+      if (vers[c].version === e.offer) off = vers[c];
+      if (!newest || extVerCmp(vers[c].version, newest.version) > 0) newest = vers[c];
+    }
+    var shown = off || newest || {};
+    for (c = 0; c < (shown.capabilities || []).length; c++) caps.push(extCap(shown.capabilities[c]));
     g += kv(
       e.name || e.id,
       /* An entry the index names no key for is OpenGlow's own; the tier the
@@ -223,18 +257,23 @@ function renderCatalog(j) {
         " <span class='mono'>" +
         esc(e.id) +
         ' ' +
-        esc(e.version) +
+        esc(shown.version || '') +
         '</span>' +
         (e.author ? ', by ' + esc(e.author) : '') +
         (e.homepage ? " <a href='" + esc(e.homepage) + "' target='_blank' rel='noopener noreferrer'>home page</a>" : '') +
         (e.description ? '<br>' + esc(e.description) : '') +
         (caps.length ? "<br>It asks to:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '<br>') +
-        (inst === e.version
+        (off && newest && newest !== off
+          ? "<span class='hint'>" + esc(newest.version) + ' is listed too, and ' + esc(newest.why || 'does not run here') + '.</span><br>'
+          : '') +
+        (!off
+          ? "<span class='b-warn'>No version of it runs on this firmware</span>" + (e.why ? ': ' + esc(e.why) : '') + '.'
+          : inst === off.version
           ? "<span class='hint'>Installed.</span>"
           : "<button class='btn btn-sm btn-outline-secondary extcatget' data-id='" +
             esc(e.id) +
             "'>" +
-            (inst ? 'Get ' + esc(e.version) + ' (this machine has ' + esc(inst) + ')' : 'Get') +
+            'Get ' + esc(off.version) + (inst ? ' (this machine has ' + esc(inst) + ')' : '') +
             '</button>')
     );
   }
@@ -762,6 +801,7 @@ function renderStaged(j) {
       (j.update
         ? '<br>' + (j.downgrade ? "<span class='b-warn'>An older version</span> than" : 'An update of') + ' the installed ' + esc(j.from_version)
         : '') +
+      extWithdrawn(j.withdrawn, false) +
       (m.description ? '<br>' + esc(m.description) : '') +
       (caps.length ? "<br>It asks to:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '')
   );

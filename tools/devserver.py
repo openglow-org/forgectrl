@@ -1722,28 +1722,95 @@ class Mock:
                        'bytes': len(body), 'update': False, 'downgrade': False, 'from_version': '',
                        'needs_grant': ['hold'], 'new_capabilities': self.EXT_UPLOAD['capabilities'], 'consent': 'typed'})
 
-    # The catalog (extpkg.c): the index the host keeps once the operator has fetched it, and a listed package
-    # fetched into the staging file, whose install is then the upload's. The mock's index lists the upload's
-    # package, signed by its author's key, which the index endorses, and one more.
-    EXT_INDEX_URL = 'https://github.com/openglow-org/forgefirm-extensions/releases/latest/download/index.ffi'
-    EXT_INDEX = {'index': 1, 'version': '2026.9.23', 'packages': [
-        {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0', 'author': 'A maker', 'license': 'MIT',
-         'description': 'Holds a job when the filter is spent.', 'url': 'https://example.org/filter-0.2.0.ffx',
-         'sha256': '5e' * 32, 'size': 18432, 'capabilities': ['hold', 'machine.read', 'storage:4'],
-         'key': 'sH0KeYDtE+o+fiK7n/n4gRtB/b7aBEJNip1evzeYEa4=', 'key_id': 'd5' * 32},
-        {'id': 'org.example.dust', 'name': 'Dust counter', 'version': '0.1.0', 'author': 'Another maker',
-         'license': 'MIT', 'description': 'Counts the hours the exhaust ran, for the filter.',
-         'homepage': 'https://example.org/dust', 'url': 'https://example.org/dust-0.1.0.ffx', 'sha256': '7a' * 32,
-         'size': 9216, 'capabilities': ['events', 'storage:1'],
-         'key': 'TdGuuHVwVFRssMevq3+3w+3Vi5wF0Dx1eZRbFvBt04g=', 'key_id': '3b' * 32}]}
+    # The catalog (extpkg.c): the index the host keeps once the operator has fetched it, and the version of a
+    # listed package the host offers fetched into the staging file, whose install is then the upload's. The
+    # mock's index lists the upload's package in two versions (the newer needs firmware newer than the mock's),
+    # one more, one whose only version needs newer firmware, and withdraws a version of the installed example
+    # panel and a package whole. The host judges it against its firmware when it reads it (forgeext's index).
+    EXT_INDEX_URL = 'https://github.com/openglow-org/forgefirm-extensions-catalog/releases/latest/download/index-1.ffi'
+    EXT_CORE = '0.0.7'
+    EXT_INDEX = {'index': 1, 'version': '2026.923.1', 'packages': [
+        {'id': 'org.example.filter', 'name': 'Filter life', 'author': 'A maker', 'license': 'MIT',
+         'description': 'Holds a job when the filter is spent.',
+         'key': 'sH0KeYDtE+o+fiK7n/n4gRtB/b7aBEJNip1evzeYEa4=', 'key_id': 'd5' * 32,
+         'versions': [
+             {'version': '0.3.0', 'url': 'https://example.org/filter-0.3.0.ffx', 'sha256': '5f' * 32, 'size': 18944,
+              'api': '0.1', 'capabilities': ['hold', 'machine.read', 'storage:4'], 'core': {'min': '0.0.9'}},
+             {'version': '0.2.0', 'url': 'https://example.org/filter-0.2.0.ffx', 'sha256': '5e' * 32, 'size': 18432,
+              'api': '0.1', 'capabilities': ['hold', 'machine.read', 'storage:4']}]},
+        {'id': 'org.example.dust', 'name': 'Dust counter', 'author': 'Another maker', 'license': 'MIT',
+         'description': 'Counts the hours the exhaust ran, for the filter.', 'homepage': 'https://example.org/dust',
+         'key': 'TdGuuHVwVFRssMevq3+3w+3Vi5wF0Dx1eZRbFvBt04g=', 'key_id': '3b' * 32,
+         'versions': [{'version': '0.1.0', 'url': 'https://example.org/dust-0.1.0.ffx', 'sha256': '7a' * 32,
+                       'size': 9216, 'api': '0.1', 'capabilities': ['events', 'storage:1']}]},
+        {'id': 'org.example.later', 'name': 'Later', 'author': 'A maker', 'license': 'MIT',
+         'description': 'Needs a newer firmware than this one.',
+         'key': 'sH0KeYDtE+o+fiK7n/n4gRtB/b7aBEJNip1evzeYEa4=', 'key_id': 'd5' * 32,
+         'versions': [{'version': '1.0.0', 'url': 'https://example.org/later-1.0.0.ffx', 'sha256': '8b' * 32,
+                       'size': 4096, 'api': '0.1', 'capabilities': ['machine.read'], 'core': {'min': '0.0.9'}}]},
+        {'id': MOCK_UI_ID, 'name': 'Example panel', 'author': 'A maker', 'license': 'MIT',
+         'description': 'A package with an interface of its own.',
+         'key': 'q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=', 'key_id': 'ab' * 32,
+         'versions': [{'version': '2.2.0', 'url': 'https://example.org/panel-2.2.0.ffx', 'sha256': '9c' * 32,
+                       'size': 12288, 'api': '0.1', 'capabilities': ['ui', 'machine.read', 'settings.own', 'camera.lid']}],
+         'withdrawn': [{'version': '2.1.0', 'reason': 'its page could leave the camera lamp on'}]}],
+        'withdrawn': [{'id': 'org.example.gone', 'key': 'Z29uZWdvbmVnb25lZ29uZWdvbmVnb25lZ29uZWdvbmU=',
+                       'key_id': 'ee' * 32, 'reason': 'its author asked'}]}
+
+    @staticmethod
+    def ext_vcmp(a, b):
+        na, nb = [int(x) for x in a.split('-')[0].split('.')], [int(x) for x in b.split('-')[0].split('.')]
+        return (na > nb) - (na < nb)
+
+    def ext_judged_index(self):
+        """forgeext's index_judge() for the mock's firmware: each version usable or why not, the offer, and why
+        a package is offered nothing. The mock judges the core range alone."""
+        if self.ext_index is None:
+            return None
+        doc = json.loads(json.dumps(self.ext_index))
+        for p in doc['packages']:
+            offer, newest = None, None
+            for v in p['versions']:
+                lo, hi = (v.get('core') or {}).get('min'), (v.get('core') or {}).get('max')
+                why = ('needs firmware %s or newer, and this is %s' % (lo, self.EXT_CORE)
+                       if lo and self.ext_vcmp(self.EXT_CORE, lo) < 0 else
+                       'needs firmware %s or older, and this is %s' % (hi, self.EXT_CORE)
+                       if hi and self.ext_vcmp(self.EXT_CORE, hi) > 0 else None)
+                v['usable'] = why is None
+                if why:
+                    v['why'] = why
+                if not why and (offer is None or self.ext_vcmp(v['version'], offer) > 0):
+                    offer = v['version']
+                if newest is None or self.ext_vcmp(v['version'], newest['version']) > 0:
+                    newest = v
+            p['offer'] = offer
+            if offer is None and newest and newest.get('why'):
+                p['why'] = '%s %s %s' % (p['id'], newest['version'], newest['why'])
+        return doc
+
+    def ext_withdrawn(self, p):
+        """forgeext's index_withdrawn() for an installed package: its id, under the key the kept index names."""
+        idx = self.ext_index or {}
+        official = p['id'].startswith(('org.openglow.', 'org.forgefirm.'))
+        signer = (lambda e: p['tier'] == 'official') if official else (lambda e: e.get('key_id') == p['key'] and p['key'])
+        for e in idx.get('withdrawn', []):
+            if e['id'] == p['id'] and signer(e):
+                return {'scope': 'package', 'reason': e.get('reason', '')}
+        for e in idx.get('packages', []):
+            if e['id'] == p['id'] and signer(e):
+                for w in e.get('withdrawn', []):
+                    if w['version'] == p['version']:
+                        return {'scope': 'version', 'reason': w.get('reason', '')}
+        return None
 
     def ext_catalog_reply(self):
-        return {'index': self.ext_index, 'url': self.EXT_INDEX_URL}
+        return {'index': self.ext_judged_index(), 'core_version': self.EXT_CORE, 'core_checked': True,
+                'url': self.EXT_INDEX_URL}
 
     def ext_catalog_post(self, path, form, J, T):
         if path == '/ext/catalog/refresh':
             self.ext_index = json.loads(json.dumps(self.EXT_INDEX))
-            self._log('ext: the catalog 2026.9.23 is kept: 2 packages (fetched for the operator)')
+            self._log('ext: the catalog 2026.923.1 is kept: 4 packages (fetched for the operator)')
             return J(200, self.ext_catalog_reply())
         pid = form.get('id', '')
         if not re.fullmatch(r'(?=.{3,63}$)[a-z0-9][a-z0-9-]*(\.[a-z0-9-]+)+', pid):
@@ -1754,19 +1821,22 @@ class Mock:
             return T(409, 'the machine is not idle')
         if self.ext_index is None:
             return T(409, 'no catalog is kept here: fetch it first')
-        e = next((x for x in self.ext_index['packages'] if x['id'] == pid), None)
+        e = next((x for x in self.ext_judged_index()['packages'] if x['id'] == pid), None)
         if e is None:
             return T(404, '%s is not in the catalog' % pid)
-        pkg = {k: e[k] for k in ('id', 'name', 'version', 'description', 'author', 'license')}
-        pkg.update(runtime='python', capabilities=list(e['capabilities']), modes=['grbl', 'cloud'])
-        need = [c for c in e['capabilities'] if c in self.EXT_NEEDS_GRANT]
+        if e['offer'] is None:
+            return T(409, 'no version of %s in the catalog runs on this firmware%s' % (pid, ': ' + e['why'] if e.get('why') else ''))
+        v = next(x for x in e['versions'] if x['version'] == e['offer'])
+        pkg = {k: e[k] for k in ('id', 'name', 'description', 'author', 'license')}
+        pkg.update(version=v['version'], runtime='python', capabilities=list(v['capabilities']), modes=['grbl', 'cloud'])
+        need = [c for c in v['capabilities'] if c in self.EXT_NEEDS_GRANT]
         have = self.ext_find(pid)
         self.ext_staged = {'package': pkg, 'key': e['key_id'], 'needs_grant': need}
-        self._log('ext: %s was fetched from the catalog and is staged' % pid)
+        self._log('ext: %s %s was fetched from the catalog and is staged' % (pid, v['version']))
         return J(200, {'ok': True, 'package': pkg, 'tier': 'community', 'endorsed': True, 'key': e['key_id'],
-                       'files': 4, 'bytes': e['size'], 'update': have is not None, 'downgrade': False,
+                       'files': 4, 'bytes': v['size'], 'update': have is not None, 'downgrade': False,
                        'from_version': have['version'] if have else '', 'needs_grant': need,
-                       'new_capabilities': pkg['capabilities'], 'consent': 'typed', 'catalog': True})
+                       'new_capabilities': pkg['capabilities'], 'withdrawn': None, 'consent': 'typed', 'catalog': True})
 
     def ext_install_post(self, form, J, T):
         if self.lease_refusal():
@@ -1817,7 +1887,8 @@ class Mock:
                 'host': {'running': True, 'pid': 477, 'enabled': on, 'armed': False, 'not_ready': '',
                          'off_reason': '' if on else 'extensions are off (ext_enabled)', 'services': services},
                 'packages': [dict({k: v for k, v in p.items() if not k.startswith('_')},
-                                  effective=self.ext_effective(p), destinations=list(p.get('destinations', [])))
+                                  effective=self.ext_effective(p), destinations=list(p.get('destinations', [])),
+                                  withdrawn=self.ext_withdrawn(p))
                              for p in self.ext_packages]}
 
     @staticmethod

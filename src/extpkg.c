@@ -987,7 +987,7 @@ int extpkg_catalog_refresh(int *npkgs, char *version, size_t vlen, int *status, 
 
 char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen)
 {
-    char url[1100], sha[2 * SHA256_LEN + 1], got[2 * SHA256_LEN + 1], words[240];
+    char url[1100], sha[2 * SHA256_LEN + 1], got[2 * SHA256_LEN + 1], words[240], want[40] = "";
     long long size = 0, have = 0;
     *status = 400;
     if (!extpkg_id_ok(id)) {
@@ -1019,13 +1019,32 @@ char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen)
         snprintf(why, wlen, "%s is not in the catalog", id);
         return NULL;
     }
-    const char *u = json_string_value(json_object_get(entry, "url")), *h = json_string_value(json_object_get(entry, "sha256"));
-    size = json_integer_value(json_object_get(entry, "size"));
-    int form = u && strlen(u) < sizeof(url) && !strncmp(u, "https://", 8) && h && strlen(h) == 2 * SHA256_LEN
-               && size >= 1 && size <= (long long)EXTPKG_UPLOAD_MAX;
+
+    /* The version the host offers: the newest one it judged this firmware
+     * runs. None is a refusal in the host's words for the newest listed. */
+    const char *offer = json_string_value(json_object_get(entry, "offer"));
+    json_t *vers = json_object_get(entry, "versions"), *ver = NULL;
+    json_array_foreach(vers, i, e) {
+        const char *v = json_string_value(json_object_get(e, "version"));
+        if (offer && v && !strcmp(v, offer))
+            ver = e;
+    }
+    if (!offer) {
+        const char *newest = json_string_value(json_object_get(entry, "why"));
+        snprintf(why, wlen, "no version of %s in the catalog runs on this firmware%s%s", id, newest ? ": " : "",
+                 newest ? newest : "");
+        json_decref(j);
+        *status = 409;
+        return NULL;
+    }
+    const char *u = json_string_value(json_object_get(ver, "url")), *h = json_string_value(json_object_get(ver, "sha256"));
+    size = json_integer_value(json_object_get(ver, "size"));
+    int form = ver && strlen(offer) < sizeof(want) && u && strlen(u) < sizeof(url) && !strncmp(u, "https://", 8) && h
+               && strlen(h) == 2 * SHA256_LEN && size >= 1 && size <= (long long)EXTPKG_UPLOAD_MAX;
     if (form) {
         snprintf(url, sizeof(url), "%s", u);
         snprintf(sha, sizeof(sha), "%s", h);
+        snprintf(want, sizeof(want), "%s", offer);
     }
     json_decref(j);
     if (!form) {
@@ -1055,11 +1074,12 @@ char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen)
     if (!in)
         return NULL;
     const char *pid = json_string_value(json_object_get(json_object_get(in, "package"), "id"));
-    if (!pid || strcmp(pid, id) != 0) {
+    const char *pver = json_string_value(json_object_get(json_object_get(in, "package"), "version"));
+    if (!pid || strcmp(pid, id) != 0 || !pver || strcmp(pver, want) != 0) {
         json_decref(in);
         extpkg_stage_discard();
         *status = 409;
-        snprintf(why, wlen, "the archive the catalog names for %s is another package", id);
+        snprintf(why, wlen, "the archive the catalog names for %s %s is another package or another version", id, want);
         return NULL;
     }
     json_object_set_new(in, "consent", json_string(consent_of(in)));

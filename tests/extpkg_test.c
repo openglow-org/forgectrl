@@ -13,9 +13,11 @@
  * carries the host's own status only while that host is alive, a page's
  * call to its service is held to its form before the host runs, and the
  * catalog: the index fetched from its one address with curl held to https
- * and a bound, and verified by the host; a listed package fetched from
- * where the kept index says, held to its size and SHA-256 before the host
- * reads it, and staged for the upload's install.
+ * and a bound, and verified by the host; the version of a listed package
+ * the host offers fetched from where the kept index says, held to its size
+ * and SHA-256 before the host reads it, refused when it is another package
+ * or another version, and staged for the upload's install; and a package
+ * with no version this firmware runs refused before anything is fetched.
  */
 #include "../src/extpkg.h"
 #include "../src/sha256.h"
@@ -376,7 +378,7 @@ int main(void)
 
     /* The catalog. A stand-in for curl records its arguments, and writes
      * the -o file from curl.body, or fails in curl's words from curl.fail. */
-    char curl[300], curl_args[300], curl_body[300], curl_fail[300], idx_stage[340], text[1024], cscript[4096];
+    char curl[300], curl_args[300], curl_body[300], curl_fail[300], idx_stage[340], text[2048], cscript[4096];
     snprintf(curl, sizeof(curl), "%s/curl", dir);
     snprintf(curl_args, sizeof(curl_args), "%s/curl.args", dir);
     snprintf(curl_body, sizeof(curl_body), "%s/curl.body", dir);
@@ -437,14 +439,23 @@ int main(void)
     sha256(body, strlen(body), dg);
     sha256_hex(dg, SHA256_LEN, hex);
     write_file(curl_body, body, 0644);
-#define HOST_INDEX(url, sha, size, pid) do { \
+/* The kept index as the host reads it out: each listed version judged, and
+ * the one it offers - 1.1.0, where 1.2.0 needs newer firmware - and a
+ * package with no version this firmware runs. */
+#define HOST_INDEX(url, sha, size, pid, pver) do { \
     snprintf(text, sizeof(text), "{\"ok\": true, \"index\": {\"version\": \"1\", \"packages\": [{\"id\": \"org.example.other\"}, " \
-             "{\"id\": \"org.example.listed\", \"url\": \"%s\", \"sha256\": \"%s\", \"size\": %d}]}}", url, sha, (int)(size)); \
+             "{\"id\": \"org.example.listed\", \"offer\": \"1.1.0\", \"versions\": [{\"version\": \"1.2.0\", " \
+             "\"url\": \"https://example.org/newer.ffx\", \"sha256\": \"%s\", \"size\": 5, \"usable\": false}, " \
+             "{\"version\": \"1.1.0\", \"url\": \"%s\", \"sha256\": \"%s\", \"size\": %d, \"usable\": true}]}, " \
+             "{\"id\": \"org.example.later\", \"offer\": null, \"why\": \"org.example.later 2.0.0 needs firmware 0.0.9 or newer\", " \
+             "\"versions\": [{\"version\": \"2.0.0\", \"url\": \"https://example.org/later.ffx\", \"sha256\": \"%s\", " \
+             "\"size\": 5, \"usable\": false}]}]}}", sha, url, sha, (int)(size), sha); \
     snprintf(cscript, sizeof(cscript), "if [ \"$1\" = index ]; then echo '%s'; exit 0; fi\n" \
-             "echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"package\": {\"id\": \"%s\"}}'", text, pid); \
+             "echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"package\": {\"id\": \"%s\", \"version\": \"%s\"}}'", \
+             text, pid, pver); \
     host_says(cscript); unlink(curl_args); extpkg_stage_discard(); } while (0)
 
-    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed");
+    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed", "1.1.0");
     doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
     j = doc ? json_loads(doc, 0, NULL) : NULL;
     CHECK(j && status == 200 && !strcmp(json_string_value(json_object_get(j, "consent")), "typed") &&
@@ -462,22 +473,23 @@ int main(void)
           strstr(why, EXTPKG_PHRASE), "its install takes the phrase, in the catalog's words: %d %s", status, why);
     extpkg_stage_discard();
 
-    static const struct { const char *what, *url; int sha_ok, size_delta; const char *pid; int status; const char *words; int curl; } gets[] = {
-        { "bytes that are not the listed ones", "https://example.org/listed.ffx", 0, 0, "org.example.listed", 409, "SHA-256", 1 },
-        { "bytes of another size", "https://example.org/listed.ffx", 1, 1, "org.example.listed", 409, "size", 1 },
-        { "an archive of another package", "https://example.org/listed.ffx", 1, 0, "org.example.other", 409, "another package", 1 },
-        { "an entry to fetch over http", "http://example.org/listed.ffx", 1, 0, "org.example.listed", 502, "out of form", 0 },
+    static const struct { const char *what, *url; int sha_ok, size_delta; const char *pid, *pver; int status; const char *words; int curl; } gets[] = {
+        { "bytes that are not the listed ones", "https://example.org/listed.ffx", 0, 0, "org.example.listed", "1.1.0", 409, "SHA-256", 1 },
+        { "bytes of another size", "https://example.org/listed.ffx", 1, 1, "org.example.listed", "1.1.0", 409, "size", 1 },
+        { "an archive of another package", "https://example.org/listed.ffx", 1, 0, "org.example.other", "1.1.0", 409, "another package", 1 },
+        { "an archive of another version", "https://example.org/listed.ffx", 1, 0, "org.example.listed", "1.2.0", 409, "another version", 1 },
+        { "an entry to fetch over http", "http://example.org/listed.ffx", 1, 0, "org.example.listed", "1.1.0", 502, "out of form", 0 },
     };
     for (size_t k = 0; k < sizeof(gets) / sizeof(gets[0]); k++) {
         HOST_INDEX(gets[k].url, gets[k].sha_ok ? hex : "0000000000000000000000000000000000000000000000000000000000000000",
-                   strlen(body) + gets[k].size_delta, gets[k].pid);
+                   strlen(body) + gets[k].size_delta, gets[k].pid, gets[k].pver);
         doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
         CHECK(!doc && status == gets[k].status && strstr(why, gets[k].words) && access(stage, F_OK) != 0 &&
               (access(curl_args, F_OK) == 0) == gets[k].curl, "%s: %d %s, curl %s", gets[k].what, status, why,
               access(curl_args, F_OK) == 0 ? "ran" : "did not run");
         free(doc);
     }
-    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed");
+    HOST_INDEX("https://example.org/listed.ffx", hex, strlen(body), "org.example.listed", "1.1.0");
     write_file(curl_fail, "curl: (6) Could not resolve host: example.org", 0644);
     doc = extpkg_catalog_get("org.example.listed", &status, why, sizeof(why));
     CHECK(!doc && status == 502 && strstr(why, "Could not resolve") && access(stage, F_OK) != 0, "a fetch that fails: %d %s", status, why);
@@ -487,6 +499,11 @@ int main(void)
     doc = extpkg_catalog_get("org.example.unlisted", &status, why, sizeof(why));
     CHECK(!doc && status == 404 && strstr(why, "not in the catalog") && access(curl_args, F_OK) != 0, "an id it does not list: %d %s",
           status, why);
+    free(doc);
+    doc = extpkg_catalog_get("org.example.later", &status, why, sizeof(why));
+    CHECK(!doc && status == 409 && strstr(why, "no version of org.example.later in the catalog runs on this firmware: "
+          "org.example.later 2.0.0 needs firmware 0.0.9 or newer") && access(curl_args, F_OK) != 0,
+          "a package with no version this firmware runs, and nothing fetched: %d %s", status, why);
     free(doc);
     doc = extpkg_catalog_get("org.example;reboot", &status, why, sizeof(why));
     CHECK(!doc && status == 400, "an id that is none: %d", status);

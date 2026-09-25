@@ -138,15 +138,20 @@ int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen);
  * way to get one of them. It is fetched only when the operator asks (the
  * privacy advisory says so), from one fixed https:// address, with curl
  * and no shell, and the extension host verifies it - signed with the
- * OpenGlow extension key and by nothing else - and keeps it. A package
- * from it is fetched from the address the kept index names, and its bytes
- * must be the size and the SHA-256 the index names before the host reads
- * them. Then it is staged as an upload is, and the install that follows is
- * the upload's, with the consent its tier takes: the catalog changes where
- * an archive comes from, and nothing about how it is judged. */
+ * OpenGlow extension key and by nothing else, and never older than the
+ * one it keeps - and keeps it. The host judges each listed version against
+ * this firmware when it reads the index, and offers the newest one it
+ * runs; a package from it is that version, fetched from the address the
+ * kept index names, and its bytes must be the size and the SHA-256 the
+ * index names before the host reads them. Then it is staged as an upload
+ * is, and the install that follows is the upload's, with the consent its
+ * tier takes: the catalog changes where an archive comes from, and nothing
+ * about how it is judged. The address names the index's schema (index-1):
+ * a catalog that ever changes its form publishes a second file beside
+ * this one, and this firmware keeps reading its own. */
 #define EXTPKG_CURL_DEFAULT     "/usr/bin/curl"
 #define EXTPKG_INDEX_URL \
-    "https://github.com/openglow-org/forgefirm-extensions/releases/latest/download/index.ffi"
+    "https://github.com/openglow-org/forgefirm-extensions-catalog/releases/latest/download/index-1.ffi"
 #define EXTPKG_INDEX_FETCH_MAX  (2UL * 1024 * 1024)
 #define EXTPKG_INDEX_FETCH_S    30
 #define EXTPKG_PKG_FETCH_S      240
@@ -162,13 +167,14 @@ char *extpkg_catalog_json(int *status, char *why, size_t wlen);
  * one it kept stays) and the words. */
 int extpkg_catalog_refresh(int *npkgs, char *version, size_t vlen, int *status, char *why, size_t wlen);
 
-/* Fetch the package the kept index lists under id and stage it: the host's
- * inspect of it, with "consent" and "catalog" added, malloc'd. NULL with
- * the status (400 for an id with no such form, 409 with no index kept or
- * for bytes that are not the ones it names, 404 for an id it does not
- * list, 400 when the host refuses the archive, 502 when it could not be
- * fetched or the host cannot be asked) and the words; nothing stays staged
- * then. */
+/* Fetch the version of the package the kept index lists under id that the
+ * host offers - the newest one this firmware runs - and stage it: the
+ * host's inspect of it, with "consent" and "catalog" added, malloc'd. NULL
+ * with the status (400 for an id with no such form, 409 with no index
+ * kept, for a package with no version this firmware runs, and for bytes
+ * that are not the ones it names, 404 for an id it does not list, 400 when
+ * the host refuses the archive, 502 when it could not be fetched or the
+ * host cannot be asked) and the words; nothing stays staged then. */
 char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen);
 
 /* The M-codes extension packages answer now, from the host's own status
