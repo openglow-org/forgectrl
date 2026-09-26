@@ -1854,7 +1854,7 @@ static void run_envelope(void)
         goto out;
     }
     if ((p.homed & 3) != 3) {
-        finish_err("home the machine first (on its stop blocks, or with the camera): the bed is measured from "
+        finish_err("home the machine first (on its gantry stops, or with the camera): the bed is measured from "
                    "its home");
         goto out;
     }

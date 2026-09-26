@@ -84,10 +84,9 @@ var DARK_TEXT = {
   motion: 'The rail comes up and the liveness probe runs, the lens finds its reference on the ' +
     'hall sensor, then the head jogs 50 mm each way on X and on Y with the accelerometer as ' +
     'the witness and the crash watch armed. Keep the bed clear. About three minutes.',
-  'motion.envelope': 'How far the head really travels from its home, measured by you: the machine keeps a margin ' +
-    'for the factory\'s tolerances, and this gives it back. Home the machine first. You jog the head to the ' +
-    'right end and then to the front end, watching it, and the check sets the envelope 1 mm short of where you ' +
-    'stopped. Keep your Grbl client quiet while it runs: a line from it ends the check with nothing written.',
+  'motion.envelope': 'Optional. Run it only with the gantry stops installed. It measures how far the head can go ' +
+    'from X0 Y0. Home first, then jog the head to the right end and to the front end while you watch it. Keep ' +
+    'your Grbl client quiet while it runs.',
   cameras: 'With the lid closed, one snapshot from the lid camera and one from the head ' +
     'camera. You confirm each view. About one minute.',
   'cooling.aa-offset': 'The loop settles, then the air-assist fan is switched while the coolant ' +

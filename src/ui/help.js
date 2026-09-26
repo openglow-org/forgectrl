@@ -90,7 +90,7 @@ var HELP = {
     t: 'Manual home position',
     d: 'usage/homing/',
     p: [
-      'How far from the stop blocks X0 Y0 is. Blank: the blocks are X0 Y0. With 1 and 1, Set home here moves the head 1 mm off the blocks in X and Y and makes that X0 Y0. After changing these, run the Bed size check again.'
+      'How far from the gantry stops X0 Y0 is. Blank: the gantry stops are X0 Y0. With 1 and 1, Set home here moves the head 1 mm off the stops in X and Y and makes that X0 Y0. After changing these, run the Bed size check again.'
     ]
   },
   envelope: {

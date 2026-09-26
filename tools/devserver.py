@@ -1297,7 +1297,7 @@ class Mock:
             st['homed_axes'] |= 3
             st['homed'] = st['homed_axes'] == 7
             st['home_source'] = 'manual'
-            # The head at the blocks is minus the offsets, and the home jogs
+            # The head at the gantry stops is minus the offsets, and the home jogs
             # it to the origin before it answers.
             st['pos'].update(x=0.0, y=0.0)
             self._log('grbl: manual home')

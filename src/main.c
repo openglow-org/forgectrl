@@ -545,7 +545,8 @@ static int valid_envelope(const char *v)
     return end != v && *end == '\0' && f >= 50.0 && f <= 600.0;
 }
 
-/* A manual home's coordinate: where the stop blocks stand. Never negative. */
+/* A manual home's offset: how far X0 Y0 lies in front of the gantry stops.
+ * Never negative. */
 static int valid_mm_nonneg(const char *v)
 {
     char *end;
