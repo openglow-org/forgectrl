@@ -350,7 +350,7 @@ var HELP = {
     t: 'Extension packages',
     d: 'usage/extensions/',
     p: [
-      'An extension package is software that is not part of ForgeFIRM. Somebody else writes it; you install it here, and it runs on the machine in a sandbox with only what you grant it.',
+      'An extension package is software that is not part of ForgeFIRM. Somebody else writes it; you install it here, and it runs on the machine in a sandbox with only what you grant it. A package with a page of its own shows it on the Extensions tab while it is turned on. The page runs only while that tab is open, unless you let it keep running.',
       'The machine tells you who signed a package before you install it: official (the OpenGlow extension key), community (a key you added, or its author\'s key that the catalog names for it; you type I UNDERSTAND), or unverified (nobody the machine trusts; you hold the button on the machine, as for unsigned firmware). A signature says who made a package, not that it is safe.',
       'While a job is armed every package is frozen, unless you let one keep running. A package you gave a hold can hold a job; turning that package off, turning extensions off, or entering safe mode ends the hold at once.'
     ]

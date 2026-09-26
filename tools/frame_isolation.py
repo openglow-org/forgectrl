@@ -9,10 +9,10 @@ The browser harness for a package's page. It runs the panel as the mock
 serves it (devserver.py: the files under src/ui/, the page's own headers),
 installs one more package in the mock, org.forgetest.hostile, and gives it
 frame_isolation_hostile.html as its page. A driver script, added to one
-copy of the panel page and to nothing else, opens that page through the
-panel's own extOpenUi() once per variant - the whole battery, then one
-navigation each - so the frame, its policy, its label and the bridge are
-exactly the panel's.
+copy of the panel page and to nothing else, opens that page in its card
+on the panel's Extensions tab, through the panel's own extOpenUi(), once
+per variant - the whole battery, then one navigation each - so the card,
+the frame, its policy, its label and the bridge are exactly the panel's.
 
 Three listeners stand in for everywhere that is not the machine:
 
@@ -31,7 +31,12 @@ navigation leaves the frame; nothing of the panel is read; nothing draws
 over it; the bridge answers what the package may use and refuses the rest
 by name; the frame is sandboxed with scripts alone and carries the policy
 first; the panel's label sits outside the frame; the panel page sends
-frame-src 'none'. What is recorded and not asserted, as the operator
+frame-src 'none'; the page reads the panel's color scheme as its own,
+with the panel set against the browser's preference so that this cannot
+pass by accident; leaving the Extensions tab stops every page but one the
+operator granted ui.background, which starts with the panel and goes on
+running, and the grant is the machine's word (a manifest that asks without
+the grant is stopped too). What is recorded and not asserted, as the operator
 decided: WebRTC and a connection hint, the two residuals the frame policy
 cannot close (a package with a page can send a little out of the
 operator's browser; one without cannot).
@@ -61,6 +66,12 @@ import devserver as ds  # noqa: E402
 
 HOSTILE_ID = 'org.forgetest.hostile'
 HOSTILE_FILE = os.path.join(ds.HERE, 'frame_isolation_hostile.html')
+# Two pages that only beat, four times a second: one the operator granted ui.background, and one whose manifest
+# asks for it without the grant, which the panel must treat as a page with no such permission.
+KEEP_ID = 'org.forgetest.keep'
+CLAIMS_ID = 'org.forgetest.claims'
+BEAT_PAGE = ("<!doctype html><p>beats</p><script>var n = 0;"
+             "setInterval(function () { parent.postMessage({ harness: 1, beat: ++n }, '*'); }, 250);</script>")
 
 NET = ['fetch-panel', 'xhr-panel', 'img-panel', 'fetch-other', 'xhr-other', 'beacon-other', 'ws-other',
        'eventsource-other', 'img-other', 'imgset-other', 'script-other', 'css-link-other', 'css-bg-other',
@@ -127,19 +138,29 @@ def hostile_page(mech, variant, host, port):
 
 DRIVER = r"""<script>
 /* frame_isolation.py's driver: added to this copy of the panel page alone.
- * It opens the hostile package's page through the panel's own extOpenUi(),
- * forwards what each frame reports to the harness, and draws the verdict. */
+ * It opens the hostile package's page in its card on the Extensions tab,
+ * through the panel's own extOpenUi(), forwards what each frame reports to
+ * the harness, and draws the verdict. */
 (function () {
   'use strict';
-  var ID = '__ID__', NAVS = __NAVS__, waiting = null, control = null;
+  var ID = '__ID__', KEEP = '__KEEP__', CLAIMS = '__CLAIMS__', NAVS = __NAVS__;
+  var waiting = null, control = null, theme = null, beats = null;
+  function cardOf(id) { return document.querySelector('.extcard[data-id="' + id + '"]'); }
+  function frameOf(id) { var c = cardOf(id); return c && c.querySelector('iframe'); }
+  function card() { return cardOf(ID); }
+  function frame() { return frameOf(ID); }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function post(path, obj) {
     return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) });
   }
   window.addEventListener('message', function (ev) {
     var m = ev.data;
+    if (m && m.harness === 1 && m.beat) {
+      if (beats) for (var b in beats.win) if (beats.win[b] && beats.win[b] === ev.source) beats.n[b]++;
+      return;
+    }
     if (!m || m.harness !== 1 || !waiting) return;
-    var f = document.querySelector('#extframe iframe');
+    var f = frame();
     if ((f && ev.source === f.contentWindow) || (control && ev.source === control.contentWindow)) waiting(m);
   });
   function awaitReport(ms) {
@@ -149,17 +170,52 @@ DRIVER = r"""<script>
   function open(variant, ms) {
     return fetch('/harness/variant?v=' + variant).then(function () {
       var p = awaitReport(ms);
-      extOpenUi(ID);
+      /* The first open is the tab's own: showing it makes the card. */
+      if (location.hash !== '#ext') location.hash = '#ext';
+      else extOpenUi(ID);
       return p;
     });
   }
+  /* The panel's theme set against the browser's own preference, so that a
+   * page that read the browser rather than the panel would be caught. */
+  function themeAgainstBrowser() {
+    try { theme = localStorage.getItem('ff_theme'); } catch (e) {}
+    var dark = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches;
+    try { localStorage.setItem('ff_theme', dark ? 'light' : 'dark'); } catch (e) {}
+    applyTheme();
+  }
+  /* Leaving the tab: a page runs on only with ui.background granted, and
+   * the grant is the machine's word, never the manifest's. */
+  function offTab() {
+    var keep = frameOf(KEEP), claims = frameOf(CLAIMS),
+      before = { keep: !!keep, claims: !!claims, hostile: !!frame() };
+    beats = { win: {}, n: {} };
+    beats.win[KEEP] = keep && keep.contentWindow;
+    beats.n[KEEP] = 0;
+    location.hash = '#status';
+    return sleep(3000).then(function () {
+      var out = { before: before, hostile: !!frame(), claims: !!frameOf(CLAIMS),
+                  keep: !!keep && frameOf(KEEP) === keep, keep_beats: beats.n[KEEP], hash: location.hash };
+      beats = null;
+      return out;
+    });
+  }
+  function themeBack() {
+    try {
+      if (theme) localStorage.setItem('ff_theme', theme);
+      else localStorage.removeItem('ff_theme');
+    } catch (e) {}
+    applyTheme();
+  }
   function panelChecks() {
-    var host = document.getElementById('extframe'),
+    var host = card(),
       f = host && host.querySelector('iframe'),
       label = host && host.querySelector('.extframe-label'),
       out = {};
     out.frame = !!f;
+    out.theme = document.documentElement.getAttribute('data-bs-theme');
     if (f) {
+      out.color_scheme = getComputedStyle(f).colorScheme;
       out.sandbox = f.getAttribute('sandbox');
       out.allow = f.getAttribute('allow');
       out.policy_first = (f.getAttribute('srcdoc') || f.srcdoc || '').indexOf('<meta http-equiv="Content-Security-Policy"') === 0;
@@ -182,8 +238,21 @@ DRIVER = r"""<script>
     document.body.appendChild(d);
     document.title = v.verdict + ' frame isolation';
   }
+  /* The panel's first moments, on the Status tab, with no help from here:
+   * a page granted ui.background starts, and no other page does. */
+  function atStart() {
+    var t0 = Date.now();
+    return (function poll() {
+      if (frameOf(KEEP) || Date.now() - t0 > 8000)
+        return post('/harness/report', { variant: 'start', report: {
+          keep: !!frameOf(KEEP), claims: !!frameOf(CLAIMS), hostile: !!frame(), hash: location.hash } });
+      return sleep(200).then(poll);
+    })();
+  }
   function run() {
-    location.hash = '#system';
+    atStart().then(wait0);
+  }
+  function wait0() {
     var t0 = Date.now();
     (function wait() {
       var list = (window.EXT_LAST && EXT_LAST.packages) || [];
@@ -207,6 +276,7 @@ DRIVER = r"""<script>
       control = null;
       return post('/harness/report', { variant: 'control', report: m });
     }).then(function () {
+      themeAgainstBrowser();
       return open('main', 6000);
     }).then(function (m) {
       return panelChecks().then(function (pc) {
@@ -223,6 +293,8 @@ DRIVER = r"""<script>
       });
       return chain;
     }).then(function () {
+      return offTab().then(function (r) { return post('/harness/report', { variant: 'offtab', report: r }); });
+    }).then(function () {
       return post('/harness/prelim', {});
     }).then(function () {
       /* Last: a top navigation that got out would take this page away. */
@@ -230,6 +302,7 @@ DRIVER = r"""<script>
     }).then(function (m) {
       return post('/harness/report', { variant: 'nav-top', report: m });
     }).then(function () {
+      themeBack();
       return post('/harness/done', { ua: navigator.userAgent });
     }).then(function (r) { return r.json(); }).then(show);
   }
@@ -294,7 +367,25 @@ def verdict(ua):
         "the panel's label sits outside the frame": pc.get('label_outside') is True,
         "the panel page sends frame-src 'none'": "frame-src 'none'" in (pc.get('page_policy') or ''),
         'the frame is no taller than the panel allows': 0 < (pc.get('height') or 0) <= 1400.5,
+        "the frame takes the panel's color scheme": pc.get('theme') in ('light', 'dark')
+        and pc.get('color_scheme') == pc.get('theme'),
+        "the page reads the panel's color scheme": main.get('scheme') == pc.get('theme'),
     }
+    notes['scheme'] = main.get('scheme', '(no report)')
+    off = reports.get('offtab') or {}
+    was = off.get('before') or {}
+    checks["a page without ui.background stops when its tab is left"] = (
+        was.get('hostile') is True and off.get('hostile') is False)
+    checks["a manifest's ui.background without the grant stops too"] = (
+        was.get('claims') is True and off.get('claims') is False)
+    start = reports.get('start') or {}
+    checks["a page granted ui.background starts with the panel, and no other page does"] = (
+        start.get('keep') is True and start.get('claims') is False and start.get('hostile') is False
+        and start.get('hash') in ('', '#status'))
+    notes['start'] = start
+    checks["a page granted ui.background runs on another tab"] = (
+        was.get('keep') is True and off.get('keep') is True and (off.get('keep_beats') or 0) >= 2)
+    notes['offtab'] = off
     for k, ok in checks.items():
         if not ok:
             failed.append(k + ': no (%s)' % json.dumps(pc)[:160])
@@ -350,6 +441,9 @@ def make_handler(port):
                     return self._harness_post(u.path)
                 if u.path == '/harness/verdict':
                     return self._reply(200, 'application/json', json.dumps(STATE['verdict']))
+                if u.path == '/ext/ui' and q.get('id') in (KEEP_ID, CLAIMS_ID) and self.command == 'GET':
+                    return self._reply(200, 'application/json',
+                                       json.dumps({'ok': True, 'id': q['id'], 'bytes': len(BEAT_PAGE), 'html': BEAT_PAGE}))
                 if u.path == '/ext/ui' and q.get('id') == HOSTILE_ID and self.command == 'GET':
                     page = hostile_page('frame', STATE['variant'], self._host(), port)
                     return self._reply(200, 'application/json',
@@ -367,7 +461,8 @@ def make_handler(port):
         def _harness_page(self):
             token, label = self._token_label()
             page = self.panel.render(token, label, True, self.bundled)
-            drv = DRIVER.replace('__ID__', HOSTILE_ID).replace('__NAVS__', json.dumps(NAVS))
+            drv = (DRIVER.replace('__ID__', HOSTILE_ID).replace('__KEEP__', KEEP_ID).replace('__CLAIMS__', CLAIMS_ID)
+                   .replace('__NAVS__', json.dumps(NAVS)))
             k = page.rfind('</body>')
             page = page + drv if k < 0 else page[:k] + drv + page[k:]
             with LOCK:
@@ -469,6 +564,14 @@ def main():
         'package': {'id': HOSTILE_ID, 'name': 'Hostile page', 'version': '1.0.0', 'author': 'forgetest',
                     'license': 'MIT', 'description': 'Tries every way out of its frame.', 'runtime': 'ui',
                     'capabilities': ['ui', 'machine.read', 'settings.own', 'camera.lid'], 'modes': ['grbl', 'cloud']}})
+    for pid, grants, account, name in ((KEEP_ID, ['ui.background'], 'ffx7', 'Kept running'),
+                                       (CLAIMS_ID, [], 'ffx8', 'Asks to keep running')):
+        mock.ext_packages.append({
+            'id': pid, 'version': '1.0.0', 'previous': '', 'tier': 'unverified', 'key': '', 'enabled': True,
+            'quarantined': False, 'grants': grants, 'account': account,
+            'package': {'id': pid, 'name': name, 'version': '1.0.0', 'author': 'forgetest', 'license': 'MIT',
+                        'description': 'Beats four times a second.', 'runtime': 'ui',
+                        'capabilities': ['ui', 'ui.background'], 'modes': ['grbl', 'cloud']}})
     relay = mock.ext_call_post
 
     def record_call(form, J):

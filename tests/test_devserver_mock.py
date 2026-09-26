@@ -363,6 +363,14 @@ class MockTest(unittest.TestCase):
         m = self.mock()
         m.ext_packages[1]['grants'] = []
         self.assertEqual([p['effective'] for p in self.get_json(m, '/ext/status')['packages']][1], ['machine.read'])
+        # a page kept running off its tab is the operator's to grant, as in caps.c
+        panel = m.ext_packages[2]
+        panel['package']['capabilities'] = panel['package']['capabilities'] + ['ui.background']
+        eff = {p['id']: p['effective'] for p in self.get_json(m, '/ext/status')['packages']}
+        self.assertNotIn('ui.background', eff['org.example.panel'])
+        panel['grants'] = ['ui.background']
+        eff = {p['id']: p['effective'] for p in self.get_json(m, '/ext/status')['packages']}
+        self.assertIn('ui.background', eff['org.example.panel'])
 
     def test_snapshot_parameters_match_main_c(self):
         # a package's page asks for a frame through the bridge, which carries
@@ -565,6 +573,21 @@ class MockTest(unittest.TestCase):
         src = read('src/ui/ext.js')
         self.assertIn("destinations: extDestinations(list[i])", src)
         self.assertIn("'net.outbound.operator'", src)
+
+    def test_package_frame_takes_the_panel_theme(self):
+        # a package's frame carries the panel's light or dark color scheme,
+        # which its page reads as prefers-color-scheme (the frame-isolation
+        # harness proves the reading in the browser); the frame document
+        # names light dark for a page that names none, after the policy
+        css = read('src/ui/theme.css')
+        self.assertRegex(css, r"\.extframe \{[^}]*color-scheme: light;")
+        self.assertRegex(css, r"\[data-bs-theme='dark'\] \.extframe \{\s*color-scheme: dark;")
+        src = read('src/ui/ext.js')
+        doc = re.search(r'function extFrameDoc\(html\) \{.*?\n\}', src, re.S).group(0)
+        policy = doc.index('Content-Security-Policy')
+        scheme = doc.index('<meta name="color-scheme" content="light dark">')
+        self.assertLess(policy, scheme)
+        self.assertLess(scheme, doc.index('html\n'))
 
     def test_page_policy_matches_main_c(self):
         # every page the daemon serves lets no frame navigate anywhere; the

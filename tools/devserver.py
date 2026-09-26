@@ -1689,7 +1689,7 @@ class Mock:
     EXT_ACTIONS = ('enable', 'disable', 'remove', 'remove-keep-data', 'hold-required', 'hold-advisory')
     # The capabilities the operator grants by hand (forgeext's caps.c): a package may use one only once it is
     # granted, and every other capability it asked for it may use as installed.
-    EXT_NEEDS_GRANT = ('motion.job', 'hold', 'job_time.run')
+    EXT_NEEDS_GRANT = ('motion.job', 'hold', 'job_time.run', 'ui.background')
     # What an upload to the mock is: a package a person signed with a key the owner added, which wants a hold.
     EXT_UPLOAD = {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0',
                   'description': 'Holds a job when the filter is spent.', 'author': 'A maker', 'license': 'MIT',
@@ -2007,7 +2007,7 @@ class Mock:
 
     def ext_page(self, p):
         """A package's page: the one the mock was given, or the author's file read fresh at every open, so an
-        edit shows at the next Open."""
+        edit shows the next time the Extensions tab opens."""
         if p.get('_dir'):
             try:
                 with open(os.path.join(p['_dir'], 'ui', 'index.html'), encoding='utf-8') as f:
@@ -3349,7 +3349,7 @@ def main():
                     help='log every request, including the polls')
     ap.add_argument('--package', action='append', default=[], metavar='DIR',
                     help='install the package in DIR (manifest.json at its top) in the mock: its page is read '
-                         'from DIR/ui/index.html at every Open, its settings follow its manifest, and every '
+                         'from DIR/ui/index.html each time the Extensions tab opens, its settings follow its manifest, and every '
                          'capability that takes the operator\'s grant is granted (implies --mock)')
     ap.add_argument('--tier', default='unverified', choices=('official', 'community', 'unverified'),
                     help='the tier --package installs at (default unverified)')

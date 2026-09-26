@@ -1,5 +1,5 @@
 /*
- * ext.js - forgectrl panel: the Extension packages card
+ * ext.js - forgectrl panel: the Extension packages card and the Extensions tab
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -11,6 +11,11 @@
  * file or from the catalog. Every decision is forgectrl's and the extension
  * host's: this card shows what GET /ext/status and GET /ext/catalog say and
  * sends what the operator chose.
+ *
+ * The Extensions tab holds a card for each package that is turned on and
+ * has a page of its own: the heading is the panel's label, the body the
+ * package's page in its sandboxed frame, with the bridge below serving
+ * every frame open there.
  */
 var EXT_CAPS = {
   'machine.read': "Read the machine's status, cooling status, mode, and position",
@@ -22,7 +27,8 @@ var EXT_CAPS = {
   'motion.job': "Run a program as the machine's one sender",
   hold: 'Hold a job until it clears the hold',
   'job_time.run': 'Keep running while a job is armed',
-  ui: 'Show a tab or cards of its own in this panel',
+  ui: 'Show a card of its own on the Extensions tab',
+  'ui.background': 'Keep its page running while you are on another tab',
   'net.outbound': 'Connect to',
   'net.outbound.operator': 'Connect to the places you name for it, below',
   'net.listen': 'Listen on port',
@@ -84,20 +90,8 @@ function extStateOf(j, p) {
     );
   return esc(svc.state) + (svc.reason ? ': ' + esc(svc.reason) : '');
 }
-/* An open frame goes when its package does. Disabling a package, or
- * removing it, is the operator's way out of everything it does, and a
- * frame left open would go on asking the bridge for as long as the panel
- * stayed on the page. */
-function extFramesFollow(list) {
-  if (!EXT_FRAMES.length) return;
-  var id = EXT_FRAMES[0].id,
-    i,
-    still = false;
-  for (i = 0; i < list.length; i++) if (list[i].id === id && list[i].enabled) still = true;
-  if (still) return;
-  var h = $('extframe');
-  if (h) h.innerHTML = '';
-  EXT_FRAMES = [];
+function extHasPage(p) {
+  return ((p.package || {}).capabilities || []).indexOf('ui') >= 0;
 }
 
 function renderExt(j) {
@@ -106,7 +100,8 @@ function renderExt(j) {
     i,
     c;
   EXT_LAST = j;                         /* the bridge and the catalog go by the latest word */
-  extFramesFollow(list);
+  applyExtSurface(!!j.enabled);
+  extCardsFollow(j);
   g += kv(
     'Extensions',
     (j.enabled ? "<span class='b-ok'>on</span>" : 'off') +
@@ -123,8 +118,7 @@ function renderExt(j) {
       caps.push(
         extCap(m.capabilities[c]) + ((p.grants || []).indexOf(m.capabilities[c]) >= 0 ? " <span class='hint'>(granted by you)</span>" : '')
       );
-    var hasUi = (m.capabilities || []).indexOf('ui') >= 0,
-      named = '';
+    var named = '';
     /* The places the operator named for a package that asks to be given
      * some: the operator's own list, on the panel's card, never the
      * package's page. */
@@ -149,12 +143,12 @@ function renderExt(j) {
         ' ' +
         esc(p.version) +
         '</span>' +
-        (hasUi && p.enabled
-          ? " <button type='button' class='extui' data-id='" + esc(p.id) + "'>Open</button>"
-          : '') +
         (m.author ? ', by ' + esc(m.author) : '') +
         '<br>' +
         extStateOf(j, p) +
+        (extHasPage(p) && p.enabled && j.enabled
+          ? "<br>Its page: <a href='#ext' data-nolock='1'>Extensions tab</a>"
+          : '') +
         extWithdrawn(p.withdrawn, true) +
         (m.description ? '<br>' + esc(m.description) : '') +
         (caps.length ? "<br>It may:<ul class='extcaps'><li>" + caps.join('</li><li>') + '</li></ul>' : '<br>') +
@@ -379,8 +373,15 @@ var EXT_FRAME_POLICY =
 function extFrameDoc(html) {
   /* The policy goes first, before anything the package wrote, so that it
    * governs the whole document. A package may add its own policy after
-   * it and only make it stricter. */
-  return '<meta http-equiv="Content-Security-Policy" content="' + EXT_FRAME_POLICY + '">' + html;
+   * it and only make it stricter. Then the color scheme: the frame takes
+   * the panel's own (theme.css), which the page reads as its
+   * prefers-color-scheme, so a page that names no scheme of its own
+   * follows the panel's light or dark theme. */
+  return (
+    '<meta http-equiv="Content-Security-Policy" content="' + EXT_FRAME_POLICY + '">' +
+    '<meta name="color-scheme" content="light dark">' +
+    html
+  );
 }
 
 /* ---- the bridge ----
@@ -399,10 +400,11 @@ function extFrameDoc(html) {
  *      camera key never go into a message: a camera frame is fetched
  *      here and handed over as bytes.
  */
-var EXT_FRAMES = [];            /* {win, id} for each open frame */
+var EXT_FRAMES = [];            /* {id, version, card, el, win} for each card on the Extensions tab */
 
 function extBridgeOwner(win) {
   var i;
+  if (!win) return null;
   for (i = 0; i < EXT_FRAMES.length; i++) if (EXT_FRAMES[i].win === win) return EXT_FRAMES[i].id;
   return null;
 }
@@ -564,7 +566,7 @@ function extBridgeCall(id, call, args) {
     var px = (args || {}).px,
       fr = null;
     if (typeof px !== 'number' || !isFinite(px)) return Promise.reject('px is a number of pixels');
-    for (var f = 0; f < EXT_FRAMES.length; f++) if (EXT_FRAMES[f].id === id) fr = EXT_FRAMES[f].el;
+    for (var f = 0; f < EXT_FRAMES.length; f++) if (EXT_FRAMES[f].id === id && EXT_FRAMES[f].el) fr = EXT_FRAMES[f].el;
     if (!fr) return Promise.reject('this page has no frame open');
     px = Math.max(EXT_FRAME_MIN, Math.min(EXT_FRAME_MAX, Math.round(px)));
     fr.style.height = px + 'px';
@@ -612,41 +614,147 @@ window.addEventListener('message', function (ev) {
   );
 });
 
+/* ---- the Extensions tab ----
+ *
+ * One card for each package that is turned on and has a page, in the
+ * order the machine lists them. A page runs while the tab is shown: one
+ * nobody is looking at asks the machine for nothing, and nothing it does
+ * starts from a tab the operator has left. The exception is the operator's
+ * to make: a page granted ui.background loads when the panel does and keeps
+ * running on every tab, until the panel closes or its package is turned off.
+ */
+var extTabOn = false,
+  extTabTimer = null;
+
+function extTabShown(on) {
+  if (on === extTabOn) return;
+  extTabOn = on;
+  if (on) extStatusPoll();
+  else extCardsFollow(EXT_LAST);
+}
+
+/* A page that may run off its tab: the machine's word, its effective
+ * list, never the manifest's. */
+function extBackground(p) {
+  return p.enabled && (p.effective || []).indexOf('ui.background') >= 0;
+}
+
+/* The machine's list is asked for again every 5 s while any page runs, so
+ * a package turned off anywhere takes its page with it. */
+function extPollKeep() {
+  var need = extTabOn || EXT_FRAMES.length > 0;
+  if (need && !extTabTimer) extTabTimer = setInterval(extStatusPoll, 5000);
+  if (!need && extTabTimer) {
+    clearInterval(extTabTimer);
+    extTabTimer = null;
+  }
+}
+
+function extStatusPoll() {
+  fx('/ext/status')
+    .then(extAnswer)
+    .then(renderExt)
+    .catch(function (e) {
+      if (EXT_FRAMES.length) return;      /* the cards stand; the next answer decides */
+      $('extnonemsg').textContent = String(e);
+      $('extnone').style.display = '';
+    });
+}
+
+function extCardOf(id) {
+  var i;
+  for (i = 0; i < EXT_FRAMES.length; i++) if (EXT_FRAMES[i].id === id) return EXT_FRAMES[i];
+  return null;
+}
+
+function extListIndex(id) {
+  var list = EXT_LAST.packages || [],
+    i;
+  for (i = 0; i < list.length; i++) if (list[i].id === id) return i;
+  return list.length;
+}
+
+/* The cards follow the machine's list. A card goes when its package is
+ * turned off, removed, or loses its page, and when the tab is left unless
+ * its page may run off it: turning a package off is the operator's way out
+ * of everything it does, and a frame left open would go on asking the
+ * bridge. An updated package's page loads afresh. */
+function extCardsFollow(j) {
+  var list = (j && j.packages) || [],
+    want = [],
+    i,
+    k;
+  if (j && j.enabled)
+    for (i = 0; i < list.length; i++)
+      if (list[i].enabled && extHasPage(list[i]) && (extTabOn || extBackground(list[i]))) want.push(list[i]);
+  EXT_FRAMES = EXT_FRAMES.filter(function (fr) {
+    for (k = 0; k < want.length; k++) if (want[k].id === fr.id && want[k].version === fr.version) return true;
+    fr.card.remove();
+    return false;
+  });
+  for (i = 0; i < want.length; i++) if (!extCardOf(want[i].id)) extOpenUi(want[i].id);
+  $('extnonemsg').textContent =
+    "No package that is turned on has a page. Install and turn on packages in the System tab's " +
+    'Extension packages card.';
+  $('extnone').style.display = extTabOn && !want.length ? '' : 'none';
+  extPollKeep();
+}
+
+/* A package's card, made when the tab has none for it yet, with its page
+ * loaded afresh into it. */
 function extOpenUi(id) {
-  var host = $('extframe');
+  var host = $('extcards'),
+    fr = extCardOf(id),
+    i;
   if (!host) return;
-  host.innerHTML = "<p class='hint'>Loading the interface...</p>";
+  if (!fr) {
+    var pkg = extFrameOwner(id),
+      card = document.createElement('div'),
+      at = extListIndex(id),
+      before = null;
+    card.className = 'card extcard';
+    card.setAttribute('data-id', id);
+    /* The label is the panel's: the card's heading, above the frame and
+     * outside it. The name and the tier are the panel's own knowledge of
+     * the package. When it has none - the list has not loaded - the label
+     * says the id and nothing it cannot stand behind. */
+    card.innerHTML =
+      "<h2 class='extframe-label'>" +
+      esc(pkg.name || id) +
+      (pkg.tier ? ' ' + extTier(pkg.tier) : '') +
+      " <span class='mono'>" +
+      esc(id) +
+      "</span></h2><div class='extframe-body'></div>";
+    for (i = 0; i < EXT_FRAMES.length; i++)
+      if (extListIndex(EXT_FRAMES[i].id) > at && (!before || extListIndex(EXT_FRAMES[i].id) < extListIndex(before.getAttribute('data-id'))))
+        before = EXT_FRAMES[i].card;
+    host.insertBefore(card, before);
+    fr = { id: id, version: pkg.version, card: card, el: null, win: null };
+    EXT_FRAMES.push(fr);
+  }
+  var body = fr.card.querySelector('.extframe-body');
+  fr.el = fr.win = null;
+  body.innerHTML = "<p class='hint'>Loading the page…</p>";
   fx('/ext/ui?id=' + encodeURIComponent(id))
     .then(extAnswer)
     .then(function (j) {
-      var pkg = extFrameOwner(id),
-        f = document.createElement('iframe');
-      host.innerHTML = '';
-      /* The label is the panel's, above the frame and outside it. */
-      var label = document.createElement('div');
-      label.className = 'extframe-label';
-      /* The name and the tier are the panel's own knowledge of the
-       * package. When it has none - the list has not loaded - the label
-       * says the id and nothing it cannot stand behind. */
-      label.innerHTML =
-        '<b>' + esc(pkg.name || id) + '</b> ' +
-        (pkg.tier ? extTier(pkg.tier) + ' ' : '') +
-        "<span class='mono'>" + esc(id) + "</span>" +
-        " <button type='button' class='extframeclose'>Close</button>";
-      host.appendChild(label);
+      if (EXT_FRAMES.indexOf(fr) < 0) return;      /* the card went while the page was on its way */
+      var f = document.createElement('iframe');
       /* No allow-same-origin: with it the frame would hold the panel's
        * session and the rest of this would be decoration. */
       f.setAttribute('sandbox', 'allow-scripts');
       f.setAttribute('referrerpolicy', 'no-referrer');
       f.className = 'extframe';
       f.srcdoc = extFrameDoc(j.html || '');
-      host.appendChild(f);
+      body.innerHTML = '';
+      body.appendChild(f);
       /* Remembered by its window, which is how the bridge will know it:
        * the frame's origin is null and tells the panel nothing. */
-      EXT_FRAMES = [{ win: f.contentWindow, id: id, el: f }];
+      fr.el = f;
+      fr.win = f.contentWindow;
     })
     .catch(function (e) {
-      host.innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
+      if (EXT_FRAMES.indexOf(fr) >= 0) body.innerHTML = "<p class='hint'>" + esc(String(e)) + '</p>';
     });
 }
 
@@ -656,7 +764,7 @@ function extFrameOwner(id) {
   var list = EXT_LAST.packages || [],
     i;
   for (i = 0; i < list.length; i++)
-    if (list[i].id === id) return { name: (list[i].package || {}).name, tier: list[i].tier };
+    if (list[i].id === id) return { name: (list[i].package || {}).name, tier: list[i].tier, version: list[i].version };
   return {};
 }
 
@@ -851,8 +959,6 @@ document.addEventListener('click', function (ev) {
   if (b) extAct(b.getAttribute('data-id'), b.getAttribute('data-action'));
   var k = ev.target.closest('.extkeyrm');
   if (k) extKeyRemove(k.getAttribute('data-name'));
-  var u = ev.target.closest('.extui');
-  if (u) extOpenUi(u.getAttribute('data-id'));
   var cg = ev.target.closest('.extcatget');
   if (cg) extCatalogGet(cg.getAttribute('data-id'));
   var da = ev.target.closest('.extdestadd');
@@ -862,11 +968,6 @@ document.addEventListener('click', function (ev) {
   }
   var dr = ev.target.closest('.extdestrm');
   if (dr) extDest(dr.getAttribute('data-id'), 'remove', dr.getAttribute('data-dest'));
-  if (ev.target.closest('.extframeclose')) {
-    var h = $('extframe');
-    if (h) h.innerHTML = '';
-    EXT_FRAMES = [];
-  }
 });
 document.addEventListener('change', function (ev) {
   var s = ev.target;

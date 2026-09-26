@@ -40,6 +40,8 @@ function el(tagName, attrs) {
 }
 function done(ms) {
   setTimeout(function () {
+    /* Not an escape: the color scheme the page reads, which is the panel's. */
+    note("scheme", matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     try { parent.postMessage({ harness: 1, mech: MECH, variant: VARIANT, seen: seen }, "*"); } catch (e) {}
   }, ms);
 }

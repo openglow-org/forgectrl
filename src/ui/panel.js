@@ -17,6 +17,8 @@
  *             plus the fuse-identity viewer (modal, on demand)
  *   #grbl     GRBL-mode settings (controller info; tunables land here
  *             as the driver exposes them)
+ *   #ext      one card for each extension package that is turned on and
+ *             has a page of its own (ext.js); shown while extensions are on
  *   #diag     setup - the checks the setup ran and what the
  *             machine asks for again, and the cooling tools that take
  *             the hardware over (the motion controller is stopped for
@@ -368,7 +370,7 @@ function setMode(m) {
       el.textContent = 'no response';
     });
 }
-var TABS = ['status', 'machine', 'gfcloud', 'grbl', 'diag', 'logs', 'system'],
+var TABS = ['status', 'machine', 'gfcloud', 'grbl', 'ext', 'diag', 'logs', 'system'],
   curTab = null,
   hashRevert = false;
 function tabOf(hash) {
@@ -401,6 +403,7 @@ function tab() {
     $('s-' + t).className = t === h ? 'on' : '';
     $('t-' + t).className = t === h ? 'on' : '';
   }
+  extTabShown(h === 'ext');
   if (h === 'system') {
     loadSsh();
     loadExtensions();
@@ -884,6 +887,11 @@ function applyCloudSurface() {
   var opt = $('homing_mode').querySelector('option[value=gfcloud]');
   if (opt) opt.disabled = !on;
   if (!on && tabOf(location.hash) === 'gfcloud') location.hash = '#status';
+}
+/* The Extensions tab exists on the panel only while extensions are on. */
+function applyExtSurface(on) {
+  $('t-ext').style.display = on ? '' : 'none';
+  if (!on && tabOf(location.hash) === 'ext') location.hash = '#status';
 }
 /* Each homing method has its own home position, and the other's means
  * nothing to it: only the selected method's pair is shown. */
@@ -2547,6 +2555,9 @@ fetch('/settings')
     S = s;
     fill(true);
     applyCloudSurface();
+    applyExtSurface(S.ext_enabled === '1');
+    /* A page granted ui.background runs from the panel's first moment. */
+    if (S.ext_enabled === '1' && !extTabOn) extStatusPoll();
   })
   .catch(function () {});
 initHelp();

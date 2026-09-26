@@ -65,6 +65,7 @@
       <div class="nrow">
         <a href="#status" id="t-status">Status</a><a href="#machine" id="t-machine">Machine</a
         ><a href="#gfcloud" id="t-gfcloud">GF Cloud</a><a href="#grbl" id="t-grbl">GRBL</a
+        ><a href="#ext" id="t-ext" style="display: none">Extensions</a
         ><a href="#diag" id="t-diag">Setup</a><a href="#logs" id="t-logs">Logs</a
         ><a href="#system" id="t-system">System</a>
       </div>
@@ -520,6 +521,12 @@
           </div>
         </div>
       </section>
+      <section id="s-ext">
+        <div id="extcards"></div>
+        <div class="card" id="extnone" style="display: none">
+          <p class="hint" id="extnonemsg" style="margin-top: 0"></p>
+        </div>
+      </section>
       <section id="s-diag">
         <div class="card">
           <h2>Checks<button class="hlp" data-help="wizards" data-nolock="1" type="button">?</button></h2>
@@ -716,7 +723,6 @@
         <div class="card">
           <h2>Extension packages<button class="hlp" data-help="extpkg" data-nolock="1" type="button">?</button></h2>
           <div id="extpkgs"></div>
-          <div id="extframe"></div>
           <div class="btns">
             <button class="btn btn-sm btn-outline-secondary" id="extswitch" onclick="extSwitch()">Turn extensions on…</button
             ><span class="msg" id="msg-ext"></span>
