@@ -405,7 +405,7 @@ static void program_done(void *ctx, int rc, const jobstream_run_t *run, const ch
     p->f = NULL;
 }
 
-int jobrun_program_start(const char *path, const char *name, double lit_timeout_s,
+int jobrun_program_start(const char *path, const char *name, const char *under, double lit_timeout_s,
                          double run_timeout_s, int unlock, char *err, size_t elen)
 {
     char who[LEASE_OWNER_MAX];
@@ -423,6 +423,7 @@ int jobrun_program_start(const char *path, const char *name, double lit_timeout_
     snprintf(who, sizeof(who), "job:%s", name);
     jobrun_cfg_t cfg = {
         .owner = who,
+        .under = under,
         /* A program that must light is judged by the witnesses, so it gets
          * the full rate: at a fifth of it a burn shorter than 200 ms can
          * fall between two samples and fail the job as dark. A program

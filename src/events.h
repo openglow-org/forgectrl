@@ -80,7 +80,7 @@ typedef struct {
     unsigned homed_axes;
     char home_source[16];
     int released;                   /* the X and Y motors */
-    char lease[48];                 /* the machine lease's innermost holder, "" with none */
+    char lease[72];                 /* the machine lease's innermost holder, "" with none (LEASE_OWNER_MAX) */
     int button_wait;                /* this daemon waits for a press (the setup's, an install's) */
     char update[48];                /* a release newer than the installed one, "" with none */
     int gate_open;                  /* the setup's controller gate */

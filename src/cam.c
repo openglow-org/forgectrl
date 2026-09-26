@@ -17,11 +17,15 @@
  * everything downstream of the media graph is driven from the sensor profile
  * that matches whichever driver bound (see sensor_profiles).
  *
- * PRIVACY GATE: neither camera captures unless the lid is closed. An open
- * lid points the lid camera into the room, and in cloud mode the image
- * request comes from a remote service, so the check lives here - at the one
- * process that owns the capture path - rather than at each caller: the
- * engine refuses to start, and a lid that opens mid-capture stops it. The
+ * PRIVACY GATE: the lid camera never captures unless the lid is closed:
+ * an open lid points it into the room. The head camera looks at the bed
+ * however the lid stands, and a local viewer (the panel, or an extension
+ * package through the host) may use it with the lid open; every other
+ * requester - in cloud mode the image request comes from a remote service -
+ * keeps the lid rule for both. The check lives here, at the one process
+ * that owns the capture path, rather than at each caller: the engine
+ * refuses to start, a lid that opens mid-capture stops it (unless a local
+ * viewer has the head camera, when only the others' streams end), and the
  * check fails closed (see machine_lid_closed()).
  *
  * Threading: a control mutex serializes engine start/stop/switch; the
@@ -243,6 +247,10 @@ static struct {
                                      * cleared when an engine start
                                      * succeeds (which needs a closed lid) */
     int             lamp_prev;      /* -1 = unknown, restore to 0 */
+    int             head_open_ok;   /* a local viewer has the head camera: it may run with the lid open */
+    int             snap_local;     /* the pending snapshot's requester is a local viewer */
+    int             snap_lid;       /* the pending snapshot was refused for the lid */
+    int             stream_lamp;    /* a stream client's lamp level, -1 = the engine's */
     int             cached_bufs;    /* capture mmaps are CPU-cached
                                      * (non-coherent); no bounce copy */
     /* Frame-health ladder (camhealth.h). Like the capture resources above
@@ -273,6 +281,7 @@ static struct {
     .h264_cv = PTHREAD_COND_INITIALIZER,
     .fd = -1,
     .lamp_prev = -1,
+    .stream_lamp = -1,
     .stream_quality = 75,
     .lamp_level = 132,
     .h264_kbps = 1500,
@@ -861,15 +870,17 @@ static int restream(void)
 }
 
 /* Configure the media graph and sensor, light the lamp, and bring up the
- * V4L2 capture node streaming. Called with ctl held, engine not running. */
-static int start_capture(cam_id_t cam, char *err, size_t errlen)
+ * V4L2 capture node streaming. Called with ctl held, engine not running.
+ * head_open: a local viewer asks for the head camera, which may start with
+ * the lid open. */
+static int start_capture(cam_id_t cam, int head_open, char *err, size_t errlen)
 {
     const struct camdef *c = &camdefs[cam];
     char sensor[64], other[64] = "";
 
     /* Privacy gate, checked before the media graph is touched and before
      * the lamp is raised, so an open lid leaves no trace of an attempt. */
-    if (!machine_lid_closed()) {
+    if (!machine_lid_closed() && !(cam == CAM_HEAD && head_open)) {
         snprintf(err, errlen, "%s", CAM_ERR_LID);
         return -1;
     }
@@ -905,7 +916,7 @@ static int start_capture(cam_id_t cam, char *err, size_t errlen)
     eng.cam = cam;
     eng.prof = p;
     eng.seen[cam] = p;
-    eng.lid_stopped = 0;    /* reaching here means the lid read closed */
+    eng.lid_stopped = 0;    /* the lid read closed, or a local viewer has the head camera */
     pthread_mutex_unlock(&eng.lock);
 
     /* Scene lighting for the duration; the previous level is restored at
@@ -1392,6 +1403,7 @@ static void *worker(void *arg)
     int dq_timeouts = 0;
     int lamp_skip = 0;      /* frames left to drain after a lamp override */
     int lamp_restore = -1;  /* engine lamp level to restore, -1 = none */
+    int lamp_applied = eng.lamp_level;  /* what the served camera's lamp is at */
     /* FPS cap pacing (eng.fps_cap is set once at init) */
     double cap_period = eng.fps_cap > 0 ? 1.0 / eng.fps_cap : 0;
     double next_due = 0;
@@ -1414,6 +1426,9 @@ static void *worker(void *arg)
         int snap = eng.snap_pending == 1 && eng.snap_cam == eng.home_cam;
         int borrow = eng.snap_pending == 1 && eng.snap_cam != eng.home_cam;
         int snap_lamp = eng.snap_lamp;
+        int snap_local = eng.snap_local;
+        int open_ok = eng.cam == CAM_HEAD && eng.head_open_ok;
+        int want_lamp = eng.stream_lamp >= 0 ? eng.stream_lamp : eng.lamp_level;
         cam_id_t borrow_cam = eng.snap_cam;
         cam_id_t orig_cam = eng.home_cam;
         int idle = clients == 0 && h264c == 0 && !snap && !borrow &&
@@ -1426,13 +1441,31 @@ static void *worker(void *arg)
         /* Privacy gate, re-checked every frame: a lid opened mid-capture
          * tears the pipeline down within one frame time, so streams end
          * and the sensors stop rather than filming the room. A pending
-         * snapshot fails with the same refusal (see the exit path). */
-        if (!machine_lid_closed()) {
+         * snapshot fails with the same refusal (see the exit path). The
+         * head camera a local viewer has goes on; the other viewers'
+         * streams end in their next(), and a snapshot that is not a local
+         * viewer's is refused here. */
+        int lid_closed = machine_lid_closed();
+        if (!lid_closed && !open_ok) {
             fflog(LOG_INFO, "cam: lid opened, stopping capture");
             pthread_mutex_lock(&eng.lock);
             eng.lid_stopped = 1;
             pthread_mutex_unlock(&eng.lock);
             break;
+        }
+        if (!lid_closed && (snap || borrow) && !snap_local) {
+            pthread_mutex_lock(&eng.lock);
+            eng.snap_lid = 1;
+            pthread_mutex_unlock(&eng.lock);
+            fail_snap();
+            continue;
+        }
+
+        /* A stream client's lamp level, or the engine's again when none
+         * asks, outside a snapshot's own relight. */
+        if (lamp_restore < 0 && want_lamp != lamp_applied) {
+            sysfs_write_int(camdefs[orig_cam].lamp, want_lamp);
+            lamp_applied = want_lamp;
         }
 
         /* Same-camera snapshot with a lamp override: relight, then let
@@ -1440,7 +1473,7 @@ static void *worker(void *arg)
          * is restored after delivery (or if the requester gives up). */
         if (snap && snap_lamp >= 0 && lamp_restore < 0) {
             sysfs_write_int(camdefs[orig_cam].lamp, snap_lamp);
-            lamp_restore = eng.lamp_level;
+            lamp_restore = lamp_applied;
             lamp_skip = LAMP_SKIP_FRAMES;
         } else if (!snap && lamp_restore >= 0) {
             sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
@@ -1453,7 +1486,7 @@ static void *worker(void *arg)
         if (borrow) {
             char berr[128];
             release_capture();
-            if (start_capture(borrow_cam, berr, sizeof(berr)) == 0) {
+            if (start_capture(borrow_cam, snap_local, berr, sizeof(berr)) == 0) {
                 int skip = 0;
                 if (snap_lamp >= 0) {
                     sysfs_write_int(camdefs[borrow_cam].lamp, snap_lamp);
@@ -1467,11 +1500,12 @@ static void *worker(void *arg)
                 fflog(LOG_ERR, "cam: borrow start failed: %s", berr);
                 fail_snap();
             }
-            if (start_capture(orig_cam, berr, sizeof(berr))) {
+            if (start_capture(orig_cam, open_ok, berr, sizeof(berr))) {
                 fflog(LOG_ERR, "cam: restore after borrow failed: %s",
                       berr);
                 break;  /* engine dies; streams end; reconnect heals */
             }
+            lamp_applied = eng.lamp_level;      /* start_capture lit it at that */
             continue;
         }
 
@@ -1943,6 +1977,7 @@ out:
     pthread_mutex_lock(&eng.lock);
     eng.running = 0;
     eng.h264_up = 0;
+    eng.head_open_ok = 0;
     /* fail any waiter: stream clients see running==0, a pending snapshot
      * is marked failed */
     if (eng.snap_pending == 1)
@@ -1957,8 +1992,9 @@ out:
 /* ------------------------------------------------------- engine control */
 
 /* With ctl held: make the engine run on `cam`. Fails if clients hold the
- * other camera. */
-static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
+ * other camera. local: the requester is a local viewer, which lets the
+ * head camera run with the lid open. */
+static int ensure_engine(cam_id_t cam, int local, char *err, size_t errlen)
 {
     for (;;) {
         pthread_mutex_lock(&eng.lock);
@@ -1971,8 +2007,14 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
         int tid_valid = eng.tid_valid;
         pthread_mutex_unlock(&eng.lock);
 
-        if (running && cur == cam)
+        if (running && cur == cam) {
+            if (cam == CAM_HEAD && local) {
+                pthread_mutex_lock(&eng.lock);
+                eng.head_open_ok = 1;
+                pthread_mutex_unlock(&eng.lock);
+            }
             return 0;
+        }
 
         if (running && cur != cam) {
             if (clients > 0) {
@@ -2025,10 +2067,11 @@ static int ensure_engine(cam_id_t cam, char *err, size_t errlen)
          * transient VPU, H.264 or GPU failure must not demote the stream
          * to the CPU paths for the daemon's lifetime. */
         vpu_disabled = h264_disabled = gpu_disabled = 0;
-        if (start_capture(cam, err, errlen))
+        if (start_capture(cam, local, err, errlen))
             return -1;
         pthread_mutex_lock(&eng.lock);
         eng.running = 1;
+        eng.head_open_ok = cam == CAM_HEAD && local;
         eng.stop_flag = 0;
         eng.seq = 0;
         eng.fps = 0;
@@ -2142,14 +2185,14 @@ void cam_engine_shutdown(void)
 
 /* ------------------------------------------------------------ snapshots */
 
-int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
+int cam_snapshot(cam_id_t cam, int full, int quality, int lamp, int local,
                  uint8_t **jpeg, size_t *len, char *err, size_t errlen)
 {
     /* Refuse before taking the control mutex: an open lid is answered
      * immediately, not after the snapshot timeout. start_capture() and
      * the worker enforce the same rule, so a lid that opens during the
      * wait still ends the request. */
-    if (!machine_lid_closed()) {
+    if (!machine_lid_closed() && !(cam == CAM_HEAD && local)) {
         snprintf(err, errlen, "%s", CAM_ERR_LID);
         return -1;
     }
@@ -2164,13 +2207,15 @@ int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
                           eng.clients > 0;
     pthread_mutex_unlock(&eng.lock);
 
-    if (!streaming_other && ensure_engine(cam, err, errlen)) {
+    if (!streaming_other && ensure_engine(cam, local, err, errlen)) {
         pthread_mutex_unlock(&eng.ctl);
         return -1;
     }
 
     pthread_mutex_lock(&eng.lock);
     eng.snap_pending = 1;
+    eng.snap_local = local;
+    eng.snap_lid = 0;
     eng.snap_cam = cam;
     eng.snap_full = full;
     eng.snap_quality = quality;
@@ -2194,7 +2239,7 @@ int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
         eng.snap_jpg = NULL;
         eng.snap_len = 0;
         eng.snap_pending = 0;
-    } else if (eng.lid_stopped) {
+    } else if (eng.lid_stopped || eng.snap_lid) {
         /* The lid opened while this snapshot was in flight: report the
          * refusal rather than a generic failure, so the caller sees the
          * same answer it would have got a moment earlier. */
@@ -2221,16 +2266,27 @@ struct cam_client {
     uint64_t gen;       /* kick generation at open; a bump ends the stream */
     uint8_t *buf;
     size_t   cap;
+    int      local;     /* a local viewer: the head camera's frames reach it with the lid open */
+    double   period;    /* at most one frame per this many seconds, 0 = every frame */
+    double   next_due;  /* CLOCK_MONOTONIC */
 };
 
-cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen)
+static double mono_now(void)
 {
-    if (!machine_lid_closed()) {
+    struct timespec ts;
+    now_ts(&ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+cam_client_t *cam_client_open(cam_id_t cam, int local, double fps, int lamp,
+                              char *err, size_t errlen)
+{
+    if (!machine_lid_closed() && !(cam == CAM_HEAD && local)) {
         snprintf(err, errlen, "%s", CAM_ERR_LID);
         return NULL;
     }
     pthread_mutex_lock(&eng.ctl);
-    if (ensure_engine(cam, err, errlen)) {
+    if (ensure_engine(cam, local, err, errlen)) {
         pthread_mutex_unlock(&eng.ctl);
         return NULL;
     }
@@ -2240,8 +2296,12 @@ cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen)
         snprintf(err, errlen, "out of memory");
         return NULL;
     }
+    c->local = local;
+    c->period = fps > 0 ? 1.0 / fps : 0;
     pthread_mutex_lock(&eng.lock);
     eng.clients++;
+    if (lamp >= 0)
+        eng.stream_lamp = lamp;
     c->gen = eng.kick_gen;
     now_ts(&eng.last_activity);
     pthread_mutex_unlock(&eng.lock);
@@ -2249,8 +2309,32 @@ cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen)
     return c;
 }
 
+/* A viewer that is not local sees nothing with the lid open. When the
+ * engine runs on regardless (the head camera, held open for a local
+ * viewer), such a viewer ends itself here; otherwise the worker stops the
+ * capture within a frame, records that the lid stopped it, and the viewer
+ * ends through that teardown like every other. */
+static int lid_ends_viewer(int local)
+{
+    if (local || machine_lid_closed())
+        return 0;
+    pthread_mutex_lock(&eng.lock);
+    int runs_on = eng.running && eng.cam == CAM_HEAD && eng.head_open_ok;
+    pthread_mutex_unlock(&eng.lock);
+    return runs_on;
+}
+
 long cam_client_next(cam_client_t *c, const uint8_t **jpeg)
 {
+    if (lid_ends_viewer(c->local))
+        return -1;
+    /* A paced client waits out its period first, then takes the newest
+     * frame: the ones between are dropped for it alone. */
+    double wait = c->period > 0 ? c->next_due - mono_now() : 0;
+    if (wait > 0) {
+        struct timespec ts = { (time_t)wait, (long)((wait - (double)(time_t)wait) * 1e9) };
+        nanosleep(&ts, NULL);
+    }
     pthread_mutex_lock(&eng.lock);
     int timeouts = 0;
     while (eng.running && c->gen == eng.kick_gen && eng.seq <= c->last_seq) {
@@ -2279,6 +2363,8 @@ long cam_client_next(cam_client_t *c, const uint8_t **jpeg)
     c->last_seq = eng.seq;
     now_ts(&eng.last_activity);
     pthread_mutex_unlock(&eng.lock);
+    if (c->period > 0)
+        c->next_due = mono_now() + c->period;
     *jpeg = c->buf;
     return len;
 }
@@ -2290,6 +2376,8 @@ void cam_client_close(cam_client_t *c)
     pthread_mutex_lock(&eng.lock);
     if (eng.clients > 0)
         eng.clients--;
+    if (eng.clients == 0)
+        eng.stream_lamp = -1;
     now_ts(&eng.last_activity);
     pthread_mutex_unlock(&eng.lock);
     free(c->buf);
@@ -2304,17 +2392,18 @@ struct cam_h264_client {
     int      started;   /* first delivered unit must be an IDR */
     uint8_t *buf;
     size_t   cap;
+    int      local;
 };
 
-cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
+cam_h264_client_t *cam_h264_client_open(cam_id_t cam, int local, char *err,
                                         size_t errlen)
 {
-    if (!machine_lid_closed()) {
+    if (!machine_lid_closed() && !(cam == CAM_HEAD && local)) {
         snprintf(err, errlen, "%s", CAM_ERR_LID);
         return NULL;
     }
     pthread_mutex_lock(&eng.ctl);
-    if (ensure_engine(cam, err, errlen)) {
+    if (ensure_engine(cam, local, err, errlen)) {
         pthread_mutex_unlock(&eng.ctl);
         return NULL;
     }
@@ -2324,6 +2413,7 @@ cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
         snprintf(err, errlen, "out of memory");
         return NULL;
     }
+    c->local = local;
     pthread_mutex_lock(&eng.lock);
     eng.h264_clients++;
     eng.h264_key_req = 1;   /* this viewer needs an IDR to start on */
@@ -2338,6 +2428,8 @@ cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
 long cam_h264_next(cam_h264_client_t *c, const uint8_t **au,
                    uint64_t *pts90k, int *key)
 {
+    if (lid_ends_viewer(c->local))
+        return -1;
     pthread_mutex_lock(&eng.lock);
     for (;;) {
         int timeouts = 0;

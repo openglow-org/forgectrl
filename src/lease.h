@@ -36,10 +36,12 @@ typedef enum {
     LEASE_HARDWARE = 0,     /* the owner drives the machine itself; the controller is its to stop */
     LEASE_SENDER,           /* the owner is the Grbl sender for a job of its own */
     LEASE_SYSTEM,           /* the owner changes the system under everything: an update job */
-    LEASE_EXPORT            /* the owner only reads the machine at rest: the log export */
+    LEASE_EXPORT,           /* the owner only reads the machine at rest: the log export */
+    LEASE_EXTENSION         /* an extension package that keeps the Grbl sender out ("ext:<id>") */
 } lease_kind_t;
 
-#define LEASE_OWNER_MAX 48
+/* "ext:" and a package id of up to 63 characters, with room to spare. */
+#define LEASE_OWNER_MAX 72
 
 /* Takes the lease. under is NULL, or the owner the caller runs inside
  * of, which must be the current holder. 0, or -1 with the reason in why:
@@ -61,6 +63,11 @@ int lease_refusal_for(const char *as, char *why, size_t len);
  * controller's start, the quiet hold): every holder but a log export,
  * which only reads, and which a settings write does not disturb. */
 int lease_refusal_locks(char *why, size_t len);
+
+/* As lease_refusal_locks(), and nothing for a caller that holds the
+ * machine at any level (as), the way lease_refusal_for() judges: an
+ * extension's own jogs under its own hold. */
+int lease_refusal_locks_for(const char *as, char *why, size_t len);
 
 /* The innermost holder's name: 1 and the name, or 0. */
 int lease_holder(char *owner, size_t len);

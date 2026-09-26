@@ -15,11 +15,17 @@
  * or 8 MP OV8856), so callers take the frame size from cam_status rather
  * than assuming one.
  *
- * Privacy: no camera captures unless the lid is closed. Every entry point
- * below refuses while the lid is open, a lid opened mid-capture stops the
- * engine, and the lid check fails closed. This is enforced here rather
- * than at the callers so it covers the panel, stream clients and the
- * cloud client alike.
+ * Privacy: the lid camera never captures unless the lid is closed: an
+ * open lid points it into the room. The head camera looks down at the bed
+ * whatever the lid does, so a LOCAL viewer (the panel, or an extension
+ * package through the host: auth_local_viewer()) may use it with the lid
+ * open; for everyone else - the cloud client, a camera key, a token from
+ * the network - it keeps the lid rule too. Every entry point below takes
+ * the requester's `local` and refuses by that rule, a lid opened
+ * mid-capture stops the engine unless a local viewer has the head
+ * camera (and then ends every other viewer's stream), and the lid check
+ * fails closed. This is enforced here rather than at the callers so it
+ * covers the panel, stream clients and the cloud client alike.
  */
 #ifndef FORGECTRL_CAM_H
 #define FORGECTRL_CAM_H
@@ -35,7 +41,7 @@ typedef enum {
 /* The privacy gate's refusal, reported through the `err` buffer of every
  * entry point below. Callers that map failures to a status code match on
  * it, so it lives here rather than being spelled twice. */
-#define CAM_ERR_LID "lid is open: the cameras only capture with the lid closed"
+#define CAM_ERR_LID "lid is open: this capture needs the lid closed"
 
 /* A snapshot nobody is waiting for is refused while somebody is watching.
  * A snapshot borrows the mux for a frame and freezes a running stream for
@@ -67,9 +73,10 @@ void cam_engine_shutdown(void);
  * requested lighting. On success *jpeg is malloc'd (caller frees). If
  * the other camera is streaming, the worker borrows the mux for one
  * frame (the stream freezes for a few seconds) - snapshots do not fail
- * busy. Returns 0, or -1 with a message in err (pipeline failure,
- * timeout). */
-int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
+ * busy. local: the requester is a local viewer (see the privacy note).
+ * Returns 0, or -1 with a message in err (pipeline failure, timeout, the
+ * lid). */
+int cam_snapshot(cam_id_t cam, int full, int quality, int lamp, int local,
                  uint8_t **jpeg, size_t *len, char *err, size_t errlen);
 
 /* Stream client: open makes the engine serve `cam` (starting it, or
@@ -79,7 +86,13 @@ int cam_snapshot(cam_id_t cam, int full, int quality, int lamp,
  * into a client-owned buffer, close releases the pin. */
 typedef struct cam_client cam_client_t;
 
-cam_client_t *cam_client_open(cam_id_t cam, char *err, size_t errlen);
+/* local: the viewer is local (the privacy note). fps above 0 paces this
+ * client to at most that many frames a second (the others keep the
+ * engine's rate). lamp 0..1023 lights the camera at that level while the
+ * client streams (-1: the engine's level); the last to ask wins, and the
+ * engine's level returns when no stream client is left. */
+cam_client_t *cam_client_open(cam_id_t cam, int local, double fps, int lamp,
+                              char *err, size_t errlen);
 /* Returns frame length (>0), or -1 when the engine stopped / timed out and
  * the stream should end. The returned pointer stays valid until the next
  * cam_client_next() or cam_client_close(). */
@@ -92,7 +105,7 @@ void cam_client_close(cam_client_t *c);
  * forced when it opens), so a viewer can start decoding immediately. */
 typedef struct cam_h264_client cam_h264_client_t;
 
-cam_h264_client_t *cam_h264_client_open(cam_id_t cam, char *err,
+cam_h264_client_t *cam_h264_client_open(cam_id_t cam, int local, char *err,
                                         size_t errlen);
 /* Blocks for an access unit newer than the last one returned. Returns
  * its length (>0) with *pts90k the frame timestamp (90 kHz, monotonic)
@@ -128,8 +141,9 @@ struct cam_status {
     int      snap_w, snap_h;
     int      stream_w, stream_h;
     /* Privacy gate: lid_closed is the live lid reading (capture is
-     * refused whenever it is 0), lid_stopped records that the last
-     * capture ended because the lid opened rather than going idle. */
+     * refused whenever it is 0, but for the head camera to a local
+     * viewer), lid_stopped records that the last capture ended because
+     * the lid opened rather than going idle. */
     int      lid_closed;
     int      lid_stopped;
     /* Frame health since the daemon started, across every capture: frames

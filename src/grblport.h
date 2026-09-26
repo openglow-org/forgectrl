@@ -16,8 +16,9 @@
  * or an extension may reach. The panel set adds the operations that belong to the
  * operator's own panel alone: the motor release, the energize, and the
  * manual home. The daemon set adds what the daemon's own relays say and
- * no request reaches: which M-codes extension packages answer, and the
- * answer to the one a job waits at (mcode.h). An operation outside the
+ * no request reaches: which M-codes extension packages answer, the
+ * answer to the one a job waits at (mcode.h), and whether the Grbl socket
+ * keeps senders from the network out (senderout.h). An operation outside the
  * caller's set is refused here, with nothing written to the socket.
  */
 #ifndef FORGECTRL_GRBLPORT_H
@@ -40,7 +41,8 @@ typedef enum {
     GRBLPORT_HOME,
     GRBLPORT_ENVELOPE,          /* panel set; arg: "open" or "apply" (the bed check's) */
     GRBLPORT_MCODES,            /* daemon set only, and the one below; arg: "-" or "160,161" */
-    GRBLPORT_MCODE_RESULT       /* arg: "<seq> ok|fail [<words>]" */
+    GRBLPORT_MCODE_RESULT,      /* arg: "<seq> ok|fail [<words>]" */
+    GRBLPORT_SENDER             /* daemon set; arg: "out" or "in" (senderout.h) */
 } grblport_op_t;
 
 #define GRBLPORT_OK          0  /* the port answered: reply holds its line */

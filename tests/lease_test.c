@@ -120,11 +120,38 @@ int main(void)
     CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"kind\":\"export\""), "its kind: %s", doc);
     lease_release("logs.export");
 
+    /* An extension that keeps the sender out locks the controls, and its
+     * own requests, and a job run under it, are its own. */
+    CHECK(lease_take("ext:org.openglow.alignment", LEASE_EXTENSION, NULL, why, sizeof(why)) == 0,
+          "the extension's hold: %s", why);
+    CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"kind\":\"extension\""), "its kind: %s", doc);
+    CHECK(lease_refusal_locks(why, sizeof(why)) == 1 &&
+          !strcmp(why, "an extension (org.openglow.alignment) holds the machine"),
+          "it locks the controls: '%s'", why);
+    CHECK(lease_refusal_locks_for("ext:org.openglow.alignment", why, sizeof(why)) == 0,
+          "but not its own requests");
+    CHECK(lease_refusal_locks_for("ext:org.example.other", why, sizeof(why)) == 1,
+          "and every other extension's");
+    CHECK(lease_refusal_locks_for(NULL, why, sizeof(why)) == 1, "and every caller that names nobody");
+    CHECK(lease_take("job:org.openglow.alignment", LEASE_SENDER, "ext:org.openglow.alignment", why, sizeof(why)) == 0,
+          "its job runs under it: %s", why);
+    CHECK(lease_refusal_locks_for("ext:org.openglow.alignment", why, sizeof(why)) == 0,
+          "and it is still its own under the job");
+    lease_release("job:org.openglow.alignment");
+    lease_release("ext:org.openglow.alignment");
+    lease_take("logs.export", LEASE_EXPORT, NULL, why, sizeof(why));
+    CHECK(lease_refusal_locks_for("ext:org.example.other", why, sizeof(why)) == 0,
+          "a log export locks nobody's controls");
+    lease_release("logs.export");
+
     /* Names that cannot be held. */
     CHECK(lease_take("", LEASE_SYSTEM, NULL, why, sizeof(why)) != 0, "an empty owner");
     CHECK(lease_take("a\"b", LEASE_SYSTEM, NULL, why, sizeof(why)) != 0, "an owner with a quote in it");
-    CHECK(lease_take("0123456789012345678901234567890123456789012345678", LEASE_SYSTEM, NULL, why, sizeof(why)) != 0,
-          "an owner too long to hold");
+    CHECK(lease_take("ext:01234567890123456789012345678901234567890123456789012345678901234567", LEASE_SYSTEM,
+                     NULL, why, sizeof(why)) != 0, "an owner too long to hold");
+    CHECK(lease_take("ext:org.example.a-package-id-of-sixty-three-characters-at-the-bound", LEASE_EXTENSION,
+                     NULL, why, sizeof(why)) == 0, "an extension's owner with the longest package id: %s", why);
+    lease_release("ext:org.example.a-package-id-of-sixty-three-characters-at-the-bound");
     CHECK(lease_holder(who, sizeof(who)) == 0, "a refused name left a holder: '%s'", who);
 
     /* The words. */

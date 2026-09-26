@@ -63,4 +63,8 @@ long supply_temp_raw(void);
 double soc_degc(void);
 long soc_throttle_state(void);
 
+/* The "sender_out" member of /status: an extension package that keeps
+ * the Grbl sender out (senderout.h). Set at start; NULL leaves it out. */
+extern int (*status_senderout_json)(char *buf, size_t len, int with_key);
+
 #endif

@@ -765,7 +765,7 @@ class MockTest(unittest.TestCase):
     def test_status_shape(self):
         # gates_off is spliced in by the route, and lease by lease.c
         # (test_lease_shape holds that one to its source).
-        keys = c_keys(read('src/status.c')) | {'gates_off', 'lease'}
+        keys = c_keys(read('src/status.c')) | {'gates_off', 'lease', 'sender_out'}
         doc = self.get_json(self.mock(), '/status')
         lease = doc_keys(doc.get('lease'))
         self.assertTrue(keys <= doc_keys(doc), keys - doc_keys(doc))
@@ -777,6 +777,36 @@ class MockTest(unittest.TestCase):
         if os.path.isfile(ctl):
             with open(ctl, encoding='utf-8') as f:
                 self.assertEqual(doc_keys(report), c_keys(f.read()))
+
+    def test_sender_out_shape(self):
+        """An extension that keeps the Grbl sender out, in /status and at
+        /motion/sender, held to src/senderout.c; and the operator's end."""
+        src = read('src/senderout.c')
+        m = self.mock()
+        self.assertEqual(self.get_json(m, '/status')['sender_out'], {'holder': None, 'notice': None})
+        self.assertIn('"%s{\\"holder\\":%s,\\"notice\\":%s}"', src)
+        self.assertIn('"{\\"id\\":\\"%s\\",\\"for_s\\":%.0f}"', src)
+        self.assertIn('"{\\"id\\":\\"%s\\",\\"why\\":\\"stopped\\"}"', src)
+        m.sender_out = {'holder': {'id': 'org.openglow.alignment', 'for_s': 3}, 'notice': None}
+        doc = self.get_json(m, '/status')
+        self.assertEqual(doc['sender_out']['holder']['id'], 'org.openglow.alignment')
+        self.assertEqual((doc['lease']['holder']['owner'], doc['lease']['holder']['kind']),
+                         ('ext:org.openglow.alignment', 'extension'))
+        self.assertIn('LEASE_EXTENSION ? "extension"', read('src/lease.c'))
+        code, hdrs, body = self.call(m, 'POST', '/motion/jog', {'x': '1'})
+        self.assertEqual((code, body.decode()), (409, 'an extension (org.openglow.alignment) holds the machine'))
+        code, hdrs, body = self.call(m, 'POST', '/motion/sender', {'id': 'org.openglow.alignment', 'out': '0'})
+        self.assertEqual(code, 403)
+        self.assertIn(body.decode(), read('src/main.c'))
+        code, hdrs, body = self.call(m, 'POST', '/motion/sender', {'out': '1'})
+        self.assertEqual(code, 400)
+        self.assertIn(body.decode(), read('src/main.c'))
+        code, hdrs, body = self.call(m, 'POST', '/motion/sender', {'out': '0'})
+        self.assertEqual((code, json.loads(body)['holder']), (200, None))
+        self.assertIsNone(self.get_json(m, '/status')['lease']['holder'])
+        m.sender_out['notice'] = {'id': 'org.openglow.alignment', 'why': 'stopped'}
+        code, hdrs, body = self.call(m, 'POST', '/motion/sender', {'notice': 'clear'})
+        self.assertEqual((code, json.loads(body)['notice']), (200, None))
 
     def test_lease_shape(self):
         """The machine lease in /status, its words, and its refusals, held

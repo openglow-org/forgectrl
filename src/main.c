@@ -49,6 +49,7 @@
 #include "gates.h"
 #include "grblport.h"
 #include "mcode.h"
+#include "senderout.h"
 #include "hooks.h"
 #include "jobpost.h"
 #include "jobrun.h"
@@ -257,10 +258,10 @@ static void h264_free_cb(void *cls)
     free(hc);
 }
 
-static int do_h264(cam_id_t cam, struct _u_response *res)
+static int do_h264(cam_id_t cam, int local, struct _u_response *res)
 {
     char err[256];
-    cam_h264_client_t *cl = cam_h264_client_open(cam, err, sizeof(err));
+    cam_h264_client_t *cl = cam_h264_client_open(cam, local, err, sizeof(err));
     if (!cl)
         return reply_error(res, cam_err_status(err), err);
 
@@ -331,10 +332,10 @@ static unsigned cam_err_status(const char *err)
     return (strstr(err, "busy") || !strcmp(err, CAM_ERR_LID)) ? 409 : 503;
 }
 
-static int do_stream(cam_id_t cam, struct _u_response *res)
+static int do_stream(cam_id_t cam, int local, double fps, int lamp, struct _u_response *res)
 {
     char err[256];
-    cam_client_t *cl = cam_client_open(cam, err, sizeof(err));
+    cam_client_t *cl = cam_client_open(cam, local, fps, lamp, err, sizeof(err));
     if (!cl)
         return reply_error(res, cam_err_status(err), err);
 
@@ -353,13 +354,13 @@ static int do_stream(cam_id_t cam, struct _u_response *res)
     return U_CALLBACK_CONTINUE;
 }
 
-static int do_snapshot(cam_id_t cam, int full, int quality, int lamp,
+static int do_snapshot(cam_id_t cam, int full, int quality, int lamp, int local,
                        struct _u_response *res)
 {
     uint8_t *jpg = NULL;
     size_t len = 0;
     char err[256];
-    if (cam_snapshot(cam, full, quality, lamp, &jpg, &len, err, sizeof(err)))
+    if (cam_snapshot(cam, full, quality, lamp, local, &jpg, &len, err, sizeof(err)))
         return reply_error(res, cam_err_status(err), err);
     ulfius_set_binary_body_response(res, 200, (const char *)jpg, len);
     ulfius_add_header_to_response(res, "Content-Type", "image/jpeg");
@@ -380,7 +381,23 @@ static int cb_stream(const struct _u_request *req, struct _u_response *res,
     cam_id_t cam = parse_cam(req, &ok);
     if (!ok)
         return reply_error(res, 400, "cam must be 'lid' or 'head'");
-    return do_stream(cam, res);
+    /* fps paces this viewer alone (1 to 15; none: every frame the engine
+     * makes); lamp lights the camera while it watches (0 to 1023). */
+    double fps = 0;
+    int lamp = -1;
+    const char *v;
+    if ((v = u_map_get(req->map_url, "fps")) != NULL) {
+        char *end;
+        fps = strtod(v, &end);
+        if (*end || !(fps >= 1 && fps <= 15))
+            return reply_error(res, 400, "fps must be 1..15");
+    }
+    if ((v = u_map_get(req->map_url, "lamp")) != NULL) {
+        lamp = atoi(v);
+        if (lamp < 0 || lamp > 1023)
+            return reply_error(res, 400, "lamp must be 0..1023");
+    }
+    return do_stream(cam, auth_local_viewer(req), fps, lamp, res);
 }
 
 static int cb_h264(const struct _u_request *req, struct _u_response *res,
@@ -393,7 +410,7 @@ static int cb_h264(const struct _u_request *req, struct _u_response *res,
     cam_id_t cam = parse_cam(req, &ok);
     if (!ok)
         return reply_error(res, 400, "cam must be 'lid' or 'head'");
-    return do_h264(cam, res);
+    return do_h264(cam, auth_local_viewer(req), res);
 }
 
 static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
@@ -446,11 +463,11 @@ static int cb_snapshot(const struct _u_request *req, struct _u_response *res,
                 return reply_error(res, 409, CAM_ERR_ARMED);
             struct cam_status st;
             cam_get_status(&st);
-            if (st.clients > 0)
+            if (st.clients + st.h264_clients > 0)
                 return reply_error(res, 409, CAM_ERR_WATCHED);
         }
     }
-    return do_snapshot(cam, full, quality, lamp, res);
+    return do_snapshot(cam, full, quality, lamp, auth_local_viewer(req), res);
 }
 
 static int cb_status(const struct _u_request *req, struct _u_response *res,
@@ -1997,7 +2014,7 @@ static int cb_mode_post(const struct _u_request *req,
  * cancel, and the state are the package set; the release, the energize,
  * and the manual home are the panel's alone. */
 static int motion_port(struct _u_response *res, grblport_set_t set,
-                       grblport_op_t op, const char *arg)
+                       grblport_op_t op, const char *arg, const char *as)
 {
     char reply[256], why[160];
     if (!super_grbl_running())
@@ -2005,8 +2022,9 @@ static int motion_port(struct _u_response *res, grblport_set_t set,
     /* Whoever holds the machine moves it alone: a job of the daemon's own
      * is a sender the port would jog beside in any pause of its lines.
      * The state and the cancel are always answered; a log export only
-     * reads, and a jog does not disturb it. */
-    if (op != GRBLPORT_STATE && op != GRBLPORT_CANCEL && lease_refusal_locks(why, sizeof(why)))
+     * reads, and a jog does not disturb it. An extension that keeps the
+     * sender out holds the machine, and its own jogs (as) are its own. */
+    if (op != GRBLPORT_STATE && op != GRBLPORT_CANCEL && lease_refusal_locks_for(as, why, sizeof(why)))
         return reply_error(res, 409, why);
     int rc = grblport_request(set, op, arg, reply, sizeof(reply));
     if (rc == GRBLPORT_FORBIDDEN)
@@ -2034,7 +2052,19 @@ static int cb_motion_state(const struct _u_request *req,
     (void)user_data;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_STATE, NULL);
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_STATE, NULL, NULL);
+}
+
+/* The lease owner a request speaks for: "ext:<id>" when the extension
+ * host sends it for a package, whose id is the host's word and no one
+ * else's; NULL otherwise. */
+static const char *motion_as(const struct _u_request *req, char *buf, size_t len)
+{
+    const char *id = setting_param(req, "id");
+    if (!auth_by_host() || !senderout_id_ok(id))
+        return NULL;
+    snprintf(buf, len, "ext:%s", id);
+    return buf;
 }
 
 /* A number in a request: absent reads as the default, and anything that
@@ -2066,10 +2096,10 @@ static int cb_motion_jog(const struct _u_request *req,
     if (motion_num(req, "x", 0, &x) || motion_num(req, "y", 0, &y) ||
         motion_num(req, "z", 0, &z) || motion_num(req, "feed", MOTION_JOG_FEED_DEFAULT, &feed))
         return reply_error(res, 400, "x, y, z, and feed must be numbers");
-    char words[96], err[96];
+    char words[96], err[96], as[LEASE_OWNER_MAX];
     if (grblport_jog_words(x, y, z, feed, words, sizeof(words), err, sizeof(err)) != 0)
         return reply_error(res, 400, err);
-    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_JOG, words);
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_JOG, words, motion_as(req, as, sizeof(as)));
 }
 
 static int cb_motion_cancel(const struct _u_request *req,
@@ -2078,7 +2108,56 @@ static int cb_motion_cancel(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_CANCEL, NULL);
+    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_CANCEL, NULL, NULL);
+}
+
+/* An extension package keeps the Grbl sender out (senderout.h). The
+ * package's own requests come through the extension host and name it
+ * (id): out=1 keeps the sender out, out=0 lets it back in, and a GET
+ * says how its claim stands. The operator's own, from the panel: out=0
+ * lets the sender back in whoever keeps it out, notice=clear clears the
+ * notice of one that stopped while it did. A scoped token reaches none of
+ * it: the route's capability is the host's. */
+static int cb_motion_sender(const struct _u_request *req,
+                            struct _u_response *res, void *user_data)
+{
+    int post = !strcmp(req->http_verb, "POST");
+    (void)user_data;
+    if (post ? !auth_write_ok(req, res) : !auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (auth_by_scoped())
+        return reply_error(res, 403, "no scoped token reaches this route");
+    const char *id = setting_param(req, "id"), *out = setting_param(req, "out");
+    const char *notice = setting_param(req, "notice");
+    char body[512], why[200];
+    int rc = 0;
+    if (id && !auth_by_host())
+        return reply_error(res, 403, "only the extension host speaks for a package");
+    if (!post) {
+        if (id ? senderout_pkg_json(id, body, sizeof(body)) < 0 : senderout_json(body, sizeof(body), 0) < 0)
+            return reply_error(res, 500, "the answer does not fit");
+    } else if (id) {
+        if (!out || (strcmp(out, "1") && strcmp(out, "0")))
+            return reply_error(res, 400, "out is 1 (keep the sender out) or 0 (let it back in)");
+        rc = !strcmp(out, "1") ? senderout_claim(id, why, sizeof(why)) : senderout_end(id, why, sizeof(why));
+        if (rc)
+            return reply_error(res, (unsigned)rc, why);
+        senderout_pkg_json(id, body, sizeof(body));
+    } else {
+        if (auth_by_host())
+            return reply_error(res, 400, "the extension host names the package (id)");
+        if (notice && !strcmp(notice, "clear"))
+            senderout_notice_clear();
+        else if (out && !strcmp(out, "0"))
+            senderout_release(why, sizeof(why));
+        else
+            return reply_error(res, 400, "out=0 lets the sender back in, notice=clear clears the notice");
+        senderout_json(body, sizeof(body), 0);
+    }
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
 }
 
 /* The panel's own: release, energize, home (user_data names which). */
@@ -2091,7 +2170,7 @@ static int cb_motion_panel(const struct _u_request *req,
     grblport_op_t op = !strcmp(which, "release")  ? GRBLPORT_RELEASE
                      : !strcmp(which, "energize") ? GRBLPORT_ENERGIZE
                                                   : GRBLPORT_HOME;
-    return motion_port(res, GRBLPORT_SET_PANEL, op, NULL);
+    return motion_port(res, GRBLPORT_SET_PANEL, op, NULL, NULL);
 }
 
 /* -------------------------------------------------------------- events */
@@ -3099,9 +3178,9 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
     const char *action = u_map_get(req->map_url, "action");
     if (action) {
         if (!strcmp(action, "stream"))
-            return do_stream(CAM_LID, res);
+            return do_stream(CAM_LID, 0, 0, -1, res);
         if (!strcmp(action, "snapshot"))
-            return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, -1, res);
+            return do_snapshot(CAM_LID, 1, SNAP_Q_DEF, -1, 0, res);
         return reply_error(res, 400, "unknown action");
     }
     return cb_root_page(req, res, NULL);
@@ -3328,6 +3407,8 @@ int main(int argc, char **argv)
     events_switches = machine_switch_bits;
     events_init();
     mcode_init();
+    senderout_init();
+    status_senderout_json = senderout_json;
     apply_wifi(0);
     cam_lamp_apply_idle();
 
@@ -3385,6 +3466,8 @@ int main(int argc, char **argv)
         { "GET",  "/motion/state",         cb_motion_state,     NULL, 1, "machine.read" },
         { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0, "motion.jog" },
         { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0, "motion.jog" },
+        { "GET",  "/motion/sender",        cb_motion_sender,    NULL, 0, "motion.jog" },
+        { "POST", "/motion/sender",        cb_motion_sender,    NULL, 0, "motion.jog" },
         { "POST", "/motion/release",       cb_motion_panel,     "release", 0, NULL },
         { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0, NULL },
         { "POST", "/motion/home",          cb_motion_panel,     "home", 0, NULL },

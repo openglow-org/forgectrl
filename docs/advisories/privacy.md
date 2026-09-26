@@ -1,6 +1,6 @@
 # Privacy
 
-Revision: 4 (2026-09-25)
+Revision: 5 (2026-09-26)
 
 This document says what the machine sends, what it keeps, and who can see it. Tick the box when you have read it.
 
@@ -20,9 +20,11 @@ The machine sends nothing else. There is no telemetry, no analytics, and no cras
 
 ## The cameras
 
-The machine has two cameras. One is in the lid and looks down at the bed. One is in the head and looks at the material under the lens. Neither camera captures anything while the lid is open. This covers the live view, snapshots, and every image the Glowforge service asks for.
+The machine has two cameras. One is in the lid and looks down at the bed. One is in the head and looks at the material under the lens.
 
-The reason is where the lid camera points. When you raise the lid, the lid camera faces the room. The rule removes the question. A closed lid is the condition for an image to exist.
+The lid camera captures nothing while the lid is open. This covers the live view, snapshots, and every image the Glowforge service asks for. The reason is where the lid camera points. When you raise the lid, the lid camera faces the room. A closed lid is the condition for a lid camera image to exist.
+
+The head camera points straight down at the bed, so it sees the material and the bed even with the lid open. With the lid open, the panel can still use it, and so can an extension package that has the head camera permission. The alignment tool uses this so you can place material while you watch where the laser will hit. The Glowforge service cannot: in cloud mode, the head camera captures nothing for the service while the lid is open.
 
 On the ordinary path the machine reads a frame from the camera, encodes it, sends it, and frees it. It does not write an image file.
 

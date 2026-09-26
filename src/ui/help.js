@@ -55,7 +55,7 @@ var HELP = {
     d: 'usage/control-panel/#status',
     p: [
       'A scaled snapshot, refreshed on demand; Live switches to the stream (H.264 when the browser supports it, MJPEG otherwise) and Stop returns to the snapshot.',
-      'The cameras are off while the lid is open; that is the privacy gate, not a fault. Several viewers can watch the same camera; a request for the other camera takes the stream over.'
+      'The lid camera is off while the lid is open; that is the privacy gate, not a fault. The head camera looks down at the bed and still works for the panel. Several viewers can watch the same camera; a request for the other camera takes the stream over.'
     ]
   },
   camkey: {

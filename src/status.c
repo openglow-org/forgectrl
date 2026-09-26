@@ -39,6 +39,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+/* senderout_json(), set by main.c; the host tests leave it unset. */
+int (*status_senderout_json)(char *buf, size_t len, int with_key);
+
 /* Append into a fixed buffer, keeping the running offset within bounds
  * (snprintf returns the would-have-written length, so an unclamped
  * accumulator can underflow the next `size - off`). */
@@ -634,10 +637,14 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     snprintf(released, sizeof(released), "%s/motors.released", run_dir());
     append(buf, len, &off, "\"motors_released\":%s,",
            access(released, F_OK) == 0 ? "true" : "false");
-    /* Who has the machine, and what is seen outside the lease. */
-    char lease[256];
+    /* Who has the machine, and what is seen outside the lease; and an
+     * extension that keeps the Grbl sender out. */
+    char lease[512];
     if (lease_json(lease, sizeof(lease)) > 0)
         append(buf, len, &off, "%s,", lease);
+    char sout[320];
+    if (status_senderout_json && status_senderout_json(sout, sizeof(sout), 1) > 0)
+        append(buf, len, &off, "%s,", sout);
     if (have_pos)
         append(buf, len, &off,
             "\"pos\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},", x, y, z);

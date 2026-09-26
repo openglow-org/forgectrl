@@ -1011,6 +1011,7 @@ class Mock:
         self.ext_index = None       # the catalog the host keeps: none until the operator fetches it
         self.ext_values = {}        # package id -> the settings the operator or the page set
         self.burn_marks = []        # where the head stood for each lit job the mock's runner played
+        self.sender_out = {'holder': None, 'notice': None}
         self.ext_packages = [
             {'id': 'org.openglow.notify', 'version': '1.0.0', 'previous': '', 'tier': 'official', 'key': 'c7' * 32,
              'enabled': True, 'quarantined': False, 'grants': [], 'account': 'ffx0',
@@ -1148,6 +1149,8 @@ class Mock:
             return self.prog['owner'], 'sender'
         if self.update['running']:
             return 'update:%s' % self.update['kind'], 'system'
+        if self.sender_out['holder']:
+            return 'ext:%s' % self.sender_out['holder']['id'], 'extension'
         return None
 
     def lease_words(self, owner):
@@ -1229,8 +1232,8 @@ class Mock:
             except ValueError:
                 return T(400, 'lit_within_s is 0 to 3600 and timeout_s 0 to 86400, in seconds')
         name = parts.get('name', b'').decode('ascii', 'replace')
-        if not re.fullmatch(r'[A-Za-z0-9._-]{1,32}', name):
-            return T(400, "name says who sends the job: 1 to 32 of letters, digits, "
+        if not re.fullmatch(r'[A-Za-z0-9._-]{1,63}', name):
+            return T(400, "name says who sends the job: 1 to 63 of letters, digits, "
                           "'.', '_' and '-'")
         lines, offense = self.job_check(parts['program'])
         if offense:
@@ -1483,9 +1486,34 @@ class Mock:
         self.report_at = time.time()
         self._log('super: controller started pid %d' % self.pid)
 
+    # An extension package that keeps the Grbl sender out (src/senderout.c):
+    # self.sender_out. The mock has no extension host, so nothing claims it
+    # but a test that sets it.
+
+    def sender_out_reply(self):
+        return {'holder': self.sender_out['holder'], 'notice': self.sender_out['notice']}
+
+    def sender_post(self, form, J, T):
+        """POST /motion/sender: the operator's release and the notice's
+        clearing. A package's own claim comes through the extension host,
+        which the mock does not have."""
+        if form.get('id'):
+            return T(403, 'only the extension host speaks for a package')
+        if form.get('notice') == 'clear':
+            self.sender_out['notice'] = None
+        elif form.get('out') == '0':
+            if self.sender_out['holder']:
+                self._log('senderout: the operator let the Grbl sender back in (%s kept it out)'
+                          % self.sender_out['holder']['id'])
+            self.sender_out['holder'] = None
+        else:
+            return T(400, 'out=0 lets the sender back in, notice=clear clears the notice')
+        return J(200, self.sender_out_reply())
+
     def status_reply(self):
         self.status['diag'] = self.diag['running']
         self.status['lease'] = self.lease_reply()
+        self.status['sender_out'] = self.sender_out_reply()
         self.status['switches']['button'] = self.button
         grbl = None
         if self.mode == 'grbl' and self.controller == 'running':
@@ -1654,6 +1682,7 @@ class Mock:
         ('GET', '/cam/stream'): 'camera', ('GET', '/cam/h264'): 'camera',
         ('GET', '/cam/snapshot'): 'camera', ('GET', '/cam/status'): 'camera.any',
         ('POST', '/motion/jog'): 'motion.jog', ('POST', '/motion/cancel'): 'motion.jog',
+        ('GET', '/motion/sender'): 'motion.jog', ('POST', '/motion/sender'): 'motion.jog',
         ('POST', '/job'): 'motion.job', ('POST', '/job/abort'): 'motion.job',
     }
 
@@ -2630,6 +2659,8 @@ class Mock:
                 return 200, {'Content-Type': 'text/event-stream',
                              'Cache-Control': 'no-store'}, (
                     b'retry: 5000\nevent: hello\ndata: {"max_streams":3}\n\n')
+            if path == '/motion/sender':
+                return J(200, self.sender_out_reply())
             if path == '/motion/state':
                 if self.mode != 'grbl' or self.controller != 'running':
                     return T(409, 'the GRBL controller is not running')
@@ -2911,6 +2942,8 @@ class Mock:
             self.motion = 'unverified'
             self._log('super: mode -> %s' % m)
             return J(200, self.mode_reply())
+        if path == '/motion/sender':
+            return self.sender_post(form, J, T)
         if path.startswith('/motion/'):
             return self.motion_post(path[8:], form, J, T)
         if path == '/controller/stop':

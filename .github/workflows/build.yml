@@ -81,6 +81,8 @@ jobs:
         run: ./build/extpkg_test
       - name: "mcode_test (the M-code relay: the table from the host's status, the host's mcode command, the answer line in the port's form, the daemon set)"
         run: ./build/mcode_test
+      - name: "senderout_test (an extension keeps the Grbl sender out: the claim and its refusals, the package's, the operator's and a stale keeper's end, the controller brought back in line)"
+        run: ./build/senderout_test
       - name: "wizpkg_test (a package's check on the Setup page: each step held to its form, the check run through the host, the result the package's own)"
         run: ./build/wizpkg_test
       - name: Verified fan writes (readback, retry, the duty a device lost put back)

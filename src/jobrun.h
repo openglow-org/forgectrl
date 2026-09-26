@@ -42,7 +42,7 @@
 
 #define JOBRUN_PROGRAM_MAX (16u * 1024u * 1024u)    /* a posted program, in bytes */
 #define JOBRUN_LINE_MAX    250                      /* one line of it, comments stripped */
-#define JOBRUN_NAME_MAX    32
+#define JOBRUN_NAME_MAX    63
 
 /* A started run's last preparation, once the lease is the run's and
  * before its thread exists, on the starter's thread: 0, or -1 with the
@@ -86,7 +86,7 @@ int jobrun_program_check(const char *path, int *lines, char *err, size_t elen);
  * here: it is opened and its name removed, started or refused. lit_timeout_s
  * above 0 says the program must show a discharge within that long (the
  * press included) or fail; unlock sends the runner's $X first. */
-int jobrun_program_start(const char *path, const char *name, double lit_timeout_s,
+int jobrun_program_start(const char *path, const char *name, const char *under, double lit_timeout_s,
                          double run_timeout_s, int unlock, char *err, size_t elen);
 /* Abort a posted program: 0, or -1 with why not in err (nothing runs,
  * or the run is not a posted program's). */

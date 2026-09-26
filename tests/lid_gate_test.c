@@ -5,10 +5,10 @@
  * SPDX-License-Identifier: MIT
  *
  * The camera privacy gate is only as good as its lid read. Every camera
- * entry point in cam.c refuses while machine_lid_closed() is false, so a
- * read that failed OPEN would let the sensors capture - and in cloud mode
- * upload - with the enclosure open, which is exactly the case the gate
- * exists to prevent.
+ * entry point in cam.c refuses while machine_lid_closed() is false, but
+ * for the head camera to a local viewer, so a read that failed OPEN would
+ * let the sensors capture - and in cloud mode upload - with the enclosure
+ * open, which is exactly the case the gate exists to prevent.
  *
  * The positive direction needs the real switch hardware and is covered by
  * the bench acceptance test (camera.lid-privacy). What is provable on a

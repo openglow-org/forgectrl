@@ -79,6 +79,7 @@ add_executable(forgectrl
   src/fwproduct.c
   src/extpkg.c
   src/mcode.c
+  src/senderout.c
   src/wizpkg.c
   src/gates.c
   src/gpu_debayer.c
@@ -413,6 +414,15 @@ add_executable(mcode_test tests/mcode_test.c src/mcode.c src/extpkg.c src/grblpo
 target_compile_options(mcode_test PRIVATE -Wall -Wextra)
 target_compile_definitions(mcode_test PRIVATE MCODE_NO_THREAD=1)
 target_link_libraries(mcode_test jansson pthread)
+
+# An extension that keeps the Grbl sender out: the claim, its refusals,
+# its ends (the package's, the operator's, a stale keeper's), and the
+# controller brought back in line, over a scripted port and the real lease.
+add_executable(senderout_test tests/senderout_test.c src/senderout.c src/lease.c src/fflog.c)
+target_compile_options(senderout_test PRIVATE -Wall -Wextra)
+target_compile_definitions(senderout_test PRIVATE SENDEROUT_NO_THREAD=1 SENDEROUT_GRACE_S=0.3
+                           SENDEROUT_FRESH_S=0.3 SENDEROUT_REPUSH_S=0.3)
+target_link_libraries(senderout_test jansson pthread)
 
 # A package's check on the Setup page: each step held to its form, and a
 # check run end to end on stand-ins for the runner and the host.

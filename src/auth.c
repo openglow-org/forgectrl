@@ -291,17 +291,31 @@ int auth_dev_image(void)
 
 static __thread const char *route_cap;
 static __thread int route_plain;
+static __thread int judged_host;        /* the host's credential passed */
+static __thread int judged_scoped;      /* an operator's scoped token passed */
 
 void auth_route_begin(const char *cap, int plain_http)
 {
     route_cap = cap;
     route_plain = plain_http;
+    judged_host = judged_scoped = 0;
 }
 
 void auth_route_end(void)
 {
     route_cap = NULL;
     route_plain = 0;
+    judged_host = judged_scoped = 0;
+}
+
+int auth_by_host(void)
+{
+    return judged_host;
+}
+
+int auth_by_scoped(void)
+{
+    return judged_scoped;
 }
 
 /* The scoped token a request presents, or NULL: the Authorization
@@ -357,6 +371,7 @@ static int scoped_judge(const struct _u_request *req, const char *cap, int plain
             snprintf(why, len, "that credential is not accepted from here");
             return 0;
         }
+        judged_host = 1;
         return 1;
     }
     int rc = tokens_check(tok, cap, id);
@@ -385,7 +400,21 @@ static int scoped_judge(const struct _u_request *req, const char *cap, int plain
             snprintf(why, len, "no scoped token reaches this route");
         return 0;
     }
+    judged_scoped = 1;
     return 1;
+}
+
+int auth_local_viewer(const struct _u_request *req)
+{
+    const char *client = u_map_get_case(req->map_header, "X-ForgeFIRM-Client");
+    if (client && !strcmp(client, "extension-host") && auth_peer_local(req))
+        return 1;
+    int in_url;
+    if (scoped_presented(req, route_cap, &in_url) || !origin_ok(req))
+        return 0;
+    if (auth_session_ok(req))
+        return 1;
+    return token_eq(u_map_get_case(req->map_header, "X-ForgeFIRM-Token"));
 }
 
 /* Who may change state, beyond the token: a logged-in session, this

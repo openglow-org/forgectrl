@@ -329,8 +329,10 @@ function lockApply() {
   if (locked) {
     var h = leaseHolder();
     $('locknote').textContent = h
-      ? h.words.charAt(0).toUpperCase() + h.words.slice(1) +
-        ' holds the machine: controls are locked until it is done.'
+      ? (h.owner.indexOf('ext:') === 0
+          ? extName(h.owner.slice(4)) + ' is using the machine'
+          : h.words.charAt(0).toUpperCase() + h.words.slice(1) + ' holds the machine') +
+        ': controls are locked until it is done.'
       : D.running
         ? 'A diagnostic is running: controls are locked until it completes.'
         : 'Settings are locked while the machine is busy (state: ' + (M.state || 'unknown') + ').';
@@ -546,7 +548,7 @@ $('cam').onerror = function () {
       // An open lid is the privacy gate, not a fault: say so and stop
       // retrying, because retrying cannot succeed until the lid closes.
       if (s.capture_allowed === false) {
-        $('cammsg').textContent = 'lid open: the cameras are off';
+        $('cammsg').textContent = 'lid open: the lid camera is off';
         toggleLive();
         return;
       }
@@ -1329,7 +1331,7 @@ function renderStat() {
     "<span class='mono'>" + esc(location.hostname) + ':23</span> (Grbl 1.1)'
   );
   var sensor = CS.sensor && CS.sensor !== 'unknown' ? CS.sensor + ', ' : '';
-  if (CS.capture_allowed === false)
+  if (CS.capture_allowed === false && !CS.running)
     g += txt('Camera engine', sensor + 'off (lid open: privacy)');
   else if (CS.running)
     g += txt(
@@ -2533,8 +2535,38 @@ function loadMach() {
       renderSwitches();
       renderGfSvc();
       renderGrbl();
+      renderSenderOut();
     })
     .catch(function () {});
+}
+
+/* An extension package that keeps the Grbl sender out, and the operator's
+ * way to let it back in; or one that stopped while it did. */
+function renderSenderOut() {
+  var so = M.sender_out || {},
+    b = $('sout-banner');
+  if (so.holder && (EXT_LAST.packages || []).length === 0) extStatusPoll();
+  if (so.holder) {
+    b.className = 'banner';
+    b.innerHTML =
+      '<b>' + esc(extName(so.holder.id)) + '</b> is using the machine: the Grbl sender is ' +
+      "disconnected until it is done. <a href='#' data-nolock='1' onclick='senderIn(); return false;'>" +
+      'Let the sender back in</a>';
+    b.style.display = '';
+  } else if (so.notice) {
+    b.className = 'banner banner-bad';
+    b.innerHTML =
+      '<b>' + esc(extName(so.notice.id)) + '</b> stopped while the Grbl sender was disconnected. ' +
+      'The head may not be where a job expects it: check it before you start one. ' +
+      "<a href='#' data-nolock='1' onclick='senderNoticeClear(); return false;'>Dismiss</a>";
+    b.style.display = '';
+  } else b.style.display = 'none';
+}
+function senderIn() {
+  fx('/motion/sender', { method: 'POST', body: new URLSearchParams({ out: '0' }) }).then(loadMach, loadMach);
+}
+function senderNoticeClear() {
+  fx('/motion/sender', { method: 'POST', body: new URLSearchParams({ notice: 'clear' }) }).then(loadMach, loadMach);
 }
 function loadCam() {
   fetch('/cam/status')

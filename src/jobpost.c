@@ -108,10 +108,13 @@ int jobpost_sink(const struct _u_request *req, const char *key, const char *data
         up_bytes = 0;
         up_error = 0;
         up_refusal[0] = '\0';
-        /* No point staging megabytes the runner is going to refuse. */
-        char held[128], path[192];
+        /* No point staging megabytes the runner is going to refuse. The
+         * extension host's upload under an extension's own hold is the
+         * route's to judge by its name. */
+        char held[128], path[192], h[LEASE_OWNER_MAX];
         staging_path(path, sizeof(path));
-        if (lease_refusal(held, sizeof(held)))
+        int ext_held = lease_holder(h, sizeof(h)) && !strncmp(h, "ext:", 4);
+        if (!(auth_by_host() && ext_held) && lease_refusal(held, sizeof(held)))
             refuse_locked(409, held);
         else if (!(up_fp = fopen(path, "wb")))
             refuse_locked(500, "cannot open the staging file");
@@ -183,7 +186,7 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
     }
     if (!name || !*name || jobrun_name_ok(name) != 0) {
         unlink(path);
-        return reply_text(res, 400, "name says who sends the job: 1 to 32 of letters, digits, "
+        return reply_text(res, 400, "name says who sends the job: 1 to 63 of letters, digits, "
                                     "'.', '_' and '-'");
     }
     int lines = 0;
@@ -191,8 +194,16 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
         unlink(path);
         return reply_text(res, 400, why);
     }
+    /* An extension that keeps the Grbl sender out holds the machine as
+     * ext:<id>, and the job its host sends in its name runs under that
+     * hold. The name is the host's word, and no one else's. */
+    char ext_owner[LEASE_OWNER_MAX], holder[LEASE_OWNER_MAX];
+    const char *under = NULL;
+    snprintf(ext_owner, sizeof(ext_owner), "ext:%s", name);
+    if (auth_by_host() && lease_holder(holder, sizeof(holder)) && !strcmp(holder, ext_owner))
+        under = ext_owner;
     const char *unlock = u_map_get(req->map_post_body, "unlock");
-    if (jobrun_program_start(path, name, lit_s, run_s, unlock && !strcmp(unlock, "1"),
+    if (jobrun_program_start(path, name, under, lit_s, run_s, unlock && !strcmp(unlock, "1"),
                              why, sizeof(why)) != 0)
         return reply_text(res, 409, why);
     return reply_record(res);

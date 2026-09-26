@@ -1518,7 +1518,7 @@ static int shot(cam_id_t cam, const char *name)
     uint8_t *jpeg = NULL;
     size_t len = 0;
     char err[128] = "";
-    if (cam_snapshot(cam, 0, 80, -1, &jpeg, &len, err, sizeof(err)) != 0) {
+    if (cam_snapshot(cam, 0, 80, -1, 0, &jpeg, &len, err, sizeof(err)) != 0) {
         wlog("%s snapshot: %s", name, err);
         return -1;
     }

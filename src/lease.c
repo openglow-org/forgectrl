@@ -37,7 +37,7 @@ static double mono_s(void)
 static const char *kind_name(lease_kind_t k)
 {
     return k == LEASE_HARDWARE ? "hardware" : k == LEASE_SENDER ? "sender" :
-           k == LEASE_SYSTEM ? "system" : "export";
+           k == LEASE_SYSTEM ? "system" : k == LEASE_EXTENSION ? "extension" : "export";
 }
 
 void lease_words(const char *owner, char *buf, size_t len)
@@ -138,6 +138,19 @@ int lease_refusal_locks(char *why, size_t len)
 {
     pthread_mutex_lock(&mu);
     int is = depth > 0 && held[depth - 1].kind != LEASE_EXPORT;
+    if (is)
+        refusal_locked(why, len);
+    pthread_mutex_unlock(&mu);
+    return is;
+}
+
+int lease_refusal_locks_for(const char *as, char *why, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    int is = depth > 0 && held[depth - 1].kind != LEASE_EXPORT;
+    for (int i = 0; as && i < depth; i++)
+        if (!strcmp(held[i].owner, as))
+            is = 0;
     if (is)
         refusal_locked(why, len);
     pthread_mutex_unlock(&mu);

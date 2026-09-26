@@ -138,6 +138,11 @@ int main(void)
         rc = grblport_request(GRBLPORT_SET_PACKAGE, panel_ops[i], NULL, reply, sizeof(reply));
         CHECK(rc == GRBLPORT_FORBIDDEN, "panel op %d from the package set: rc %d", (int)panel_ops[i], rc);
     }
+    /* Keeping the sender out is the daemon's alone. */
+    rc = grblport_request(GRBLPORT_SET_PACKAGE, GRBLPORT_SENDER, "out", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_FORBIDDEN, "sender out from the package set: rc %d", rc);
+    rc = grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_SENDER, "in", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_FORBIDDEN, "sender in from the panel set: rc %d", rc);
     rc = grblport_request(GRBLPORT_SET_PACKAGE, (grblport_op_t)99, NULL, reply, sizeof(reply));
     CHECK(rc == GRBLPORT_FORBIDDEN, "an unknown op: rc %d", rc);
     settle();

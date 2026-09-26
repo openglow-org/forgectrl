@@ -218,9 +218,12 @@ static void test_check(void)
     stage(longline, sizeof(longline));
     CHECK(jobrun_program_check(staged, &n, err, sizeof(err)) == 0 && n == 1, "a long comment: n %d \"%s\"", n, err);
 
-    CHECK(jobrun_name_ok("panel") == 0 && jobrun_name_ok("a.b_c-9") == 0, "good names refused");
+    CHECK(jobrun_name_ok("panel") == 0 && jobrun_name_ok("a.b_c-9") == 0 &&
+          jobrun_name_ok("org.example.a-package-id-of-sixty-three-characters-at-the-bound") == 0,
+          "good names refused (a package id of 63 characters is one)");
     CHECK(jobrun_name_ok("") != 0 && jobrun_name_ok("a b") != 0 && jobrun_name_ok("a\"b") != 0 &&
-          jobrun_name_ok("0123456789012345678901234567890123") != 0, "a bad name passed");
+          jobrun_name_ok("0123456789012345678901234567890123456789012345678901234567890123") != 0,
+          "a bad name passed");
 }
 
 static void test_program_plays(void)
@@ -228,7 +231,7 @@ static void test_program_plays(void)
     char err[160] = "", who[64] = "", lease[512];
     mock_clear();
     STAGE("(header)\nG21\nG4 P77 ; held\nG1 X5 F600\n");
-    CHECK(jobrun_program_start(staged, "test", 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "test", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(access(staged, F_OK) != 0, "the staged file kept its name under a job that plays");
     CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
 
@@ -240,7 +243,7 @@ static void test_program_plays(void)
           strstr(st, "\"program\":true") && strstr(st, "\"lines\":3"), "record while it plays: %s", st);
 
     STAGE("G21\n");
-    CHECK(jobrun_program_start(staged, "second", 0, 30, 0, err, sizeof(err)) == -1 &&
+    CHECK(jobrun_program_start(staged, "second", NULL, 0, 30, 0, err, sizeof(err)) == -1 &&
           strstr(err, "a job (test) holds the machine"), "a second program: \"%s\"", err);
     CHECK(access(staged, F_OK) != 0, "a refused program was left staged");
     CHECK(lease_take("wizard:motion", LEASE_HARDWARE, NULL, err, sizeof(err)) == -1 &&
@@ -265,7 +268,7 @@ static void test_own_m2(void)
     char err[160] = "";
     mock_clear();
     STAGE("G21\nM5\nM2\n");
-    CHECK(jobrun_program_start(staged, "ends", 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "ends", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_state("done", 5000), "the job did not end: %s", status());
     msleep(200);
     CHECK(mock.lines == 3 && !strcmp(mock.seen[2], "M2"), "%d lines, the last \"%s\"", mock.lines, mock.seen[2]);
@@ -276,7 +279,7 @@ static void test_unlock(void)
     char err[160] = "";
     mock_clear();
     STAGE("G21\n");
-    CHECK(jobrun_program_start(staged, "unlock", 0, 30, 1, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "unlock", NULL, 0, 30, 1, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_state("done", 5000), "the job did not end: %s", status());
     msleep(200);
     CHECK(mock.lines == 3 && !strcmp(mock.seen[0], "$X") && !strcmp(mock.seen[1], "G21") &&
@@ -303,7 +306,7 @@ static void test_done_is_idle(void)
     mock_clear();
     kernel_state("running");
     STAGE("G21\nG1 X5 F600\n");
-    CHECK(jobrun_program_start(staged, "tail", 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "tail", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     msleep(1000);
     CHECK(strstr(status(), "\"acked\":3") && strstr(status(), "\"state\":\"running\""),
           "with the kernel still playing: %s", status());
@@ -318,7 +321,7 @@ static void test_abort(void)
     mock_clear();
     CHECK(jobrun_program_abort(err, sizeof(err)) == -1 && strstr(err, "no job"), "abort of nothing: \"%s\"", err);
     STAGE("G21\nG4 P77\nG1 X5 F600\n");
-    CHECK(jobrun_program_start(staged, "stopme", 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "stopme", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
     CHECK(jobrun_program_abort(err, sizeof(err)) == 0, "abort: \"%s\"", err);
     /* The abort waits for the run: the record and the lease are final here. */
@@ -339,7 +342,7 @@ static void test_client_refuses(void)
     mock_clear();
     client_on = 1;
     STAGE("G21\n");
-    CHECK(jobrun_program_start(staged, "test", 0, 30, 0, err, sizeof(err)) == -1 &&
+    CHECK(jobrun_program_start(staged, "test", NULL, 0, 30, 0, err, sizeof(err)) == -1 &&
           strstr(err, "a sender is connected"), "with a client on the socket: \"%s\"", err);
     client_on = 0;
     msleep(200);
@@ -469,7 +472,7 @@ static void test_witness_rate(void)
     for (int must_light = 0; must_light < 2; must_light++) {
         mock_clear();
         STAGE("G21\nG4 P77\n");
-        CHECK(jobrun_program_start(staged, "rate", must_light ? 30 : 0, 30, 0, err, sizeof(err)) == 0,
+        CHECK(jobrun_program_start(staged, "rate", NULL, must_light ? 30 : 0, 30, 0, err, sizeof(err)) == 0,
               "start: %s", err);
         CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
         msleep(1000);
@@ -487,7 +490,7 @@ static void test_must_light(void)
     char err[160] = "";
     mock_clear();
     STAGE("M3 S100\nG1 X1 F600\nM5\n");
-    CHECK(jobrun_program_start(staged, "dark", 5, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, "dark", NULL, 5, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_state("failed", 8000), "a dark run passed as lit: %s", status());
     CHECK(strstr(status(), "without a discharge"), "record: %s", status());
     msleep(200);

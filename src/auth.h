@@ -72,6 +72,20 @@ int auth_write_permitted_cap(const struct _u_request *req, const char *cap);
 void auth_route_begin(const char *cap, int plain_http);
 void auth_route_end(void);
 
+/* Who the guard let in, on this request's thread: the extension host's
+ * own credential (whose word about a package id is the only one taken),
+ * or an operator's scoped token. Neither: a session, the panel token, a
+ * camera key, or an open read. */
+int auth_by_host(void);
+int auth_by_scoped(void);
+
+/* A camera request from the panel itself (a session, or the panel
+ * token) or from the extension host on this machine (its client header,
+ * from the loopback, where no package reaches). Only such a request may
+ * use the head camera with the lid open; the cloud client, a camera key,
+ * or a token from the network is none of these. */
+int auth_local_viewer(const struct _u_request *req);
+
 /* Operator-present factor: true only while the physical button is held.
  * Gates the irrevocable fuse view and unsigned-firmware installs. */
 int operator_present(void);

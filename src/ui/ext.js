@@ -29,6 +29,7 @@ var EXT_CAPS = {
   'job_time.run': 'Keep running while a job is armed',
   ui: 'Show a card of its own on the Extensions tab',
   'ui.background': 'Keep its page running while you are on another tab',
+  'sender.keep_out': 'Disconnect the Grbl sender while it uses the machine (only when the machine is idle)',
   'net.outbound': 'Connect to',
   'net.outbound.operator': 'Connect to the places you name for it, below',
   'net.listen': 'Listen on port',
@@ -90,6 +91,14 @@ function extStateOf(j, p) {
     );
   return esc(svc.state) + (svc.reason ? ': ' + esc(svc.reason) : '');
 }
+/* A package's name as the machine lists it, or its id. */
+function extName(id) {
+  var list = EXT_LAST.packages || [],
+    i;
+  for (i = 0; i < list.length; i++) if (list[i].id === id) return (list[i].package || {}).name || id;
+  return id;
+}
+
 function extHasPage(p) {
   return ((p.package || {}).capabilities || []).indexOf('ui') >= 0;
 }
@@ -400,7 +409,7 @@ function extFrameDoc(html) {
  *      camera key never go into a message: a camera frame is fetched
  *      here and handed over as bytes.
  */
-var EXT_FRAMES = [];            /* {id, version, card, el, win} for each card on the Extensions tab */
+var EXT_FRAMES = [];            /* {id, version, card, el, win, stream} for each card on the Extensions tab */
 
 function extBridgeOwner(win) {
   var i;
@@ -437,6 +446,7 @@ var EXT_BRIDGE_CALLS = {
   'settings.get': { cap: 'settings.own' },
   'settings.set': { cap: 'settings.own' },
   'camera.frame': { cap: null },
+  'camera.stream': { cap: null },
   'motion.jog': { cap: 'motion.jog' },
   'motion.cancel': { cap: 'motion.jog' },
   'motion.job': { cap: 'motion.job' },
@@ -472,6 +482,97 @@ function extDestinations(p) {
   return out;
 }
 
+/* ---- a camera's video, for a page ----
+ *
+ * A frame can fetch nothing, so the panel fetches the camera's stream
+ * under its own session, and hands the page each picture as bytes, with
+ * nothing of the session in them. One stream a page; it ends when the
+ * page asks, when the page goes away, or when the machine ends it, and
+ * the page is told which. */
+var EXT_STREAM_BOUNDARY = '--forgectrl-frame';
+
+function extStreamStop(fr) {
+  if (fr && fr.stream) {
+    fr.stream.abort();
+    fr.stream = null;
+  }
+}
+
+function extStreamTell(fr, msg) {
+  msg.forgefirm = 1;
+  msg.stream = 'camera';
+  try {
+    if (fr.win) fr.win.postMessage(msg, '*');
+  } catch (e) {
+    /* the frame went away */
+  }
+}
+
+function extStreamStart(fr, url) {
+  var ctl = new AbortController();
+  fr.stream = ctl;
+  return fx(url, { signal: ctl.signal }).then(function (r) {
+    if (!r.ok)
+      return r.text().then(function (t) {
+        fr.stream = null;
+        throw t || 'the camera did not answer';
+      });
+    var reader = r.body.getReader(),
+      buf = new Uint8Array(0),
+      marker = new TextEncoder().encode('\r\n\r\n');
+    function find(hay, needle, from) {
+      outer: for (var i = from; i <= hay.length - needle.length; i++) {
+        for (var j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+        return i;
+      }
+      return -1;
+    }
+    function frames() {
+      /* Each part: the boundary, its headers with a Content-Length, a
+       * blank line, and that many bytes of JPEG. */
+      for (;;) {
+        var end = find(buf, marker, 0);
+        if (end < 0) return;
+        var head = new TextDecoder().decode(buf.subarray(0, end)),
+          m = /Content-Length:\s*(\d+)/i.exec(head);
+        if (!m || head.indexOf(EXT_STREAM_BOUNDARY) < 0) {
+          buf = buf.subarray(end + 4);
+          continue;
+        }
+        var n = +m[1];
+        if (buf.length < end + 4 + n) return;
+        var jpeg = buf.slice(end + 4, end + 4 + n);
+        buf = buf.subarray(end + 4 + n);
+        extStreamTell(fr, { frame: new Blob([jpeg], { type: 'image/jpeg' }) });
+      }
+    }
+    (function pump() {
+      reader.read().then(
+        function (chunk) {
+          if (fr.stream !== ctl) return;
+          if (chunk.done) {
+            fr.stream = null;
+            extStreamTell(fr, { end: true, error: 'the camera stream ended' });
+            return;
+          }
+          var joined = new Uint8Array(buf.length + chunk.value.length);
+          joined.set(buf);
+          joined.set(chunk.value, buf.length);
+          buf = joined;
+          frames();
+          pump();
+        },
+        function () {
+          if (fr.stream !== ctl) return;
+          fr.stream = null;
+          extStreamTell(fr, { end: true, error: 'the camera stream ended' });
+        }
+      );
+    })();
+    return { on: true };
+  });
+}
+
 function extBridgeCall(id, call, args) {
   var spec = EXT_BRIDGE_CALLS[call];
   if (call === 'self') {
@@ -491,6 +592,27 @@ function extBridgeCall(id, call, args) {
           destinations: extDestinations(list[i])
         });
     return Promise.reject('this package is not installed');
+  }
+  if (call === 'camera.stream') {
+    var sa = args || {},
+      own = extCardOf(id),
+      cam = sa.camera === 'head' ? 'head' : 'lid';
+    if (!own) return Promise.reject('this page has no frame open');
+    extStreamStop(own);
+    if (sa.on === false) return Promise.resolve({ on: false });
+    if (!extHolds(id, 'camera.' + cam)) return Promise.reject('this package does not hold that camera');
+    var q = new URLSearchParams({ cam: cam });
+    if (sa.fps !== undefined) {
+      if (typeof sa.fps !== 'number' || sa.fps % 1 !== 0 || sa.fps < 1 || sa.fps > 15)
+        return Promise.reject('fps is a whole number from 1 to 15');
+    }
+    q.set('fps', String(sa.fps || 5));
+    if (sa.lamp !== undefined) {
+      if (typeof sa.lamp !== 'number' || sa.lamp % 1 !== 0 || sa.lamp < 0 || sa.lamp > 1023)
+        return Promise.reject('lamp is a whole number from 0 to 1023');
+      q.set('lamp', String(sa.lamp));
+    }
+    return extStreamStart(own, '/cam/stream?' + q.toString());
   }
   if (call === 'camera.frame') {
     var a = args || {},
@@ -689,6 +811,7 @@ function extCardsFollow(j) {
       if (list[i].enabled && extHasPage(list[i]) && (extTabOn || extBackground(list[i]))) want.push(list[i]);
   EXT_FRAMES = EXT_FRAMES.filter(function (fr) {
     for (k = 0; k < want.length; k++) if (want[k].id === fr.id && want[k].version === fr.version) return true;
+    extStreamStop(fr);
     fr.card.remove();
     return false;
   });
@@ -729,10 +852,11 @@ function extOpenUi(id) {
       if (extListIndex(EXT_FRAMES[i].id) > at && (!before || extListIndex(EXT_FRAMES[i].id) < extListIndex(before.getAttribute('data-id'))))
         before = EXT_FRAMES[i].card;
     host.insertBefore(card, before);
-    fr = { id: id, version: pkg.version, card: card, el: null, win: null };
+    fr = { id: id, version: pkg.version, card: card, el: null, win: null, stream: null };
     EXT_FRAMES.push(fr);
   }
   var body = fr.card.querySelector('.extframe-body');
+  extStreamStop(fr);
   fr.el = fr.win = null;
   body.innerHTML = "<p class='hint'>Loading the page…</p>";
   fx('/ext/ui?id=' + encodeURIComponent(id))
