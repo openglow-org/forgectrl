@@ -90,16 +90,14 @@ var HELP = {
     t: 'Manual home position',
     d: 'usage/homing/',
     p: [
-      'Machine coordinates of the head when it rests against the stop blocks, which is where a manual home puts it. Leave blank and the blocks are the origin, X0 Y0. Never negative: nothing is reachable behind the blocks.',
-      'Used by manual homing alone. The soft limits start at this position and end at the bed\'s travel.'
+      'How far from the stop blocks X0 Y0 is. Blank: the blocks are X0 Y0. With 1 and 1, Set home here moves the head 1 mm off the blocks in X and Y and makes that X0 Y0. After changing these, run the Bed size check again.'
     ]
   },
   envelope: {
-    t: 'Work envelope far edges',
+    t: 'Work area',
     d: 'usage/setup/#bed-size',
     p: [
-      'Where the soft limits end in X and Y, as machine coordinates: how far the head really travels from its home. The Setup page\'s Bed size check measures them with you watching the head, and writes them 1 mm short of where you stopped. Blank, the envelope ends at the axis travel the controller knows, which keeps a margin for the factory\'s tolerances.',
-      'Held to 50 mm up to the travel plus 30 mm. A change takes effect at the next home, with every homing method.'
+      'How far the head can go in X and Y from X0 Y0. Blank: the axis travel. The Setup page\'s Bed size check measures it.'
     ]
   },
   motor_release: {

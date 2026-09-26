@@ -1297,8 +1297,9 @@ class Mock:
             st['homed_axes'] |= 3
             st['homed'] = st['homed_axes'] == 7
             st['home_source'] = 'manual'
-            st['pos'].update(x=float(self.settings.get('manual_home_x') or 0),
-                             y=float(self.settings.get('manual_home_y') or 0))
+            # The head at the blocks is minus the offsets, and the home jogs
+            # it to the origin before it answers.
+            st['pos'].update(x=0.0, y=0.0)
             self._log('grbl: manual home')
             return J(200, {'ok': True})
         return T(404, 'not found')
