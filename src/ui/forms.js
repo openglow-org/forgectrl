@@ -37,6 +37,10 @@ var FIELDS_BASE = [
   'laser_button_timeout_s',
   'laser_disarm_s',
   'laser_floor_density',
+  'lens_park_z_mm',
+  'lens_hall_edge_z_mm',
+  'lens_stop_below_steps',
+  'lens_stop_above_steps',
   'tray_offset_mm',
   'laser_dose_curve',
   'laser_corner_gamma',
@@ -57,6 +61,7 @@ function appliesWhen(k) {
   if (k.indexOf('log_') === 0 || k.indexOf('syslog_') === 0) return 'reboot';
   if (k.indexOf('cool_') === 0 || k.indexOf('laser_') === 0) return 'job';
   if (k === 'xy_microsteps') return 'restart';
+  if (k.indexOf('lens_') === 0) return 'lens';
   return 'now';
 }
 function logPairs() {
@@ -150,7 +155,7 @@ function postSettings(pairs) {
 function saveAll(cb) {
   var p = collect(),
     keys = Object.keys(p),
-    when = { reboot: 0, job: 0, restart: 0, now: 0 },
+    when = { reboot: 0, job: 0, restart: 0, lens: 0, now: 0 },
     i;
   if (!keys.length) {
     if (cb) cb();
@@ -182,6 +187,7 @@ function saveAll(cb) {
       if (when.reboot) notes.push('logging changes apply at the next reboot');
       if (when.job) notes.push('cooling changes apply from the next job');
       if (when.restart) notes.push('the microstep mode applies at the controller start');
+      if (when.lens) notes.push('the lens settings apply at the next controller start or home');
       toast(
         'Saved ' + keys.length + ' setting' + (keys.length === 1 ? '' : 's'),
         notes.join('; '),
