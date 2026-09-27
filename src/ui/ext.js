@@ -589,7 +589,10 @@ function extBridgeCall(id, call, args) {
           capabilities: list[i].effective || [],
           /* Where its service may connect, its manifest's and then the
            * places the operator named: GET /v0/self's list too. */
-          destinations: extDestinations(list[i])
+          destinations: extDestinations(list[i]),
+          /* The panel's display units, so a page shows lengths as the
+           * panel does; every value it exchanges stays in millimeters. */
+          units: isImp() ? 'imperial' : 'metric'
         });
     return Promise.reject('this package is not installed');
   }

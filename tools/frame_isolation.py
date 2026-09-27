@@ -33,7 +33,8 @@ by name; the frame is sandboxed with scripts alone and carries the policy
 first; the panel's label sits outside the frame; the panel page sends
 frame-src 'none'; the page reads the panel's color scheme as its own,
 with the panel set against the browser's preference so that this cannot
-pass by accident; leaving the Extensions tab stops every page but one the
+pass by accident; the bridge's self answer carries the panel's display
+units, with the panel set to inches against the default; leaving the Extensions tab stops every page but one the
 operator granted ui.background, which starts with the panel and goes on
 running, and the grant is the machine's word (a manifest that asks without
 the grant is stopped too). What is recorded and not asserted, as the operator
@@ -144,7 +145,7 @@ DRIVER = r"""<script>
 (function () {
   'use strict';
   var ID = '__ID__', KEEP = '__KEEP__', CLAIMS = '__CLAIMS__', NAVS = __NAVS__;
-  var waiting = null, control = null, theme = null, beats = null;
+  var waiting = null, control = null, theme = null, units = null, beats = null;
   function cardOf(id) { return document.querySelector('.extcard[data-id="' + id + '"]'); }
   function frameOf(id) { var c = cardOf(id); return c && c.querySelector('iframe'); }
   function card() { return cardOf(ID); }
@@ -184,6 +185,12 @@ DRIVER = r"""<script>
     try { localStorage.setItem('ff_theme', dark ? 'light' : 'dark'); } catch (e) {}
     applyTheme();
   }
+  /* The panel's display units set against their default, so that a bridge
+   * that answered a fixed value would be caught. */
+  function unitsAgainstDefault() {
+    units = S.ui_units;
+    S.ui_units = 'imperial';
+  }
   /* Leaving the tab: a page runs on only with ui.background granted, and
    * the grant is the machine's word, never the manifest's. */
   function offTab() {
@@ -201,6 +208,7 @@ DRIVER = r"""<script>
     });
   }
   function themeBack() {
+    S.ui_units = units;
     try {
       if (theme) localStorage.setItem('ff_theme', theme);
       else localStorage.removeItem('ff_theme');
@@ -214,6 +222,7 @@ DRIVER = r"""<script>
       out = {};
     out.frame = !!f;
     out.theme = document.documentElement.getAttribute('data-bs-theme');
+    out.units = S.ui_units;
     if (f) {
       out.color_scheme = getComputedStyle(f).colorScheme;
       out.sandbox = f.getAttribute('sandbox');
@@ -277,6 +286,7 @@ DRIVER = r"""<script>
       return post('/harness/report', { variant: 'control', report: m });
     }).then(function () {
       themeAgainstBrowser();
+      unitsAgainstDefault();
       return open('main', 6000);
     }).then(function (m) {
       return panelChecks().then(function (pc) {
@@ -370,8 +380,11 @@ def verdict(ua):
         "the frame takes the panel's color scheme": pc.get('theme') in ('light', 'dark')
         and pc.get('color_scheme') == pc.get('theme'),
         "the page reads the panel's color scheme": main.get('scheme') == pc.get('theme'),
+        "the bridge tells the page the panel's units": pc.get('units') == 'imperial'
+        and main.get('bridge-units') == 'ok: "imperial"',
     }
     notes['scheme'] = main.get('scheme', '(no report)')
+    notes['units'] = main.get('bridge-units', '(no report)')
     off = reports.get('offtab') or {}
     was = off.get('before') or {}
     checks["a page without ui.background stops when its tab is left"] = (

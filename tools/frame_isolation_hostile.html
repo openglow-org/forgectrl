@@ -52,13 +52,14 @@ window.addEventListener("message", function (ev) {
   var m = ev.data;
   if (m && m.forgefirm === 1 && bridgeWaiting[m.id]) { bridgeWaiting[m.id](m); delete bridgeWaiting[m.id]; }
 });
-function ask(name, call, args, extra) {
+function ask(name, call, args, extra, pick) {
   var id = ++bridgeN, msg = { forgefirm: 1, id: id, call: call, args: args };
   for (var k in (extra || {})) msg[k] = extra[k];
   var t = setTimeout(function () { if (bridgeWaiting[id]) { delete bridgeWaiting[id]; note(name, "no reply"); } }, 1500);
   bridgeWaiting[id] = function (m) {
     clearTimeout(t);
-    note(name, m.ok ? "ok: " + JSON.stringify(m.value).slice(0, 120) : "refused: " + m.error);
+    var v = pick ? (m.value || {})[pick] : m.value;
+    note(name, m.ok ? "ok: " + JSON.stringify(v).slice(0, 120) : "refused: " + m.error);
   };
   try { parent.postMessage(msg, "*"); } catch (e) { note(name, "threw: " + e); }
 }
@@ -131,6 +132,8 @@ function battery() {
 
   // 5. the bridge: what it gives, and what it must refuse
   ask("bridge-self", "self");
+  // The panel's display units, which the harness sets against their default.
+  ask("bridge-units", "self", undefined, undefined, "units");
   ask("bridge-granted", "machine.mode");
   ask("bridge-ungranted", "motion.jog", { x: 1 });
   ask("bridge-other-camera", "camera.frame", { camera: "head" });
