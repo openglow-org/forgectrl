@@ -65,6 +65,7 @@
 #include "super.h"
 #include "tls.h"
 #include "tokens.h"
+#include "tray.h"
 #include "ui.h"
 #include "update.h"
 #include "users.h"
@@ -825,6 +826,7 @@ static const struct {
     { "lens_park_z_mm",         valid_park_z,      0 },
     { "lens_stop_below_steps",  valid_stop_steps,  0 },
     { "lens_stop_above_steps",  valid_stop_steps,  0 },
+    { "tray_offset_mm",         tray_offset_valid, 0 },
     { "laser_pulse_ticks",      valid_pulse_ticks, 0 },
     { "laser_pulse_min_ticks",  valid_pulse_ticks, 0 },
     { "rail_settle_s",          valid_settle_s,    0 },
@@ -1752,6 +1754,13 @@ static int cb_settings_post(const struct _u_request *req,
             return reply_error(res, 400, "type I UNDERSTAND to turn extensions on");
         ext_accept = hash;
     }
+    /* The tray offset changes only while the tray is in: the controller's
+     * live frame is shifted by the offset it switched with (tray.h). */
+    {
+        char why[128];
+        if (tray_offset_refusal(setting_param(req, "tray_offset_mm"), why, sizeof(why)))
+            return reply_error(res, 409, why);
+    }
     const char *ce = setting_param(req, "cloud_enabled");
     {
         /* The key is the owner's decision from the cloud step, never a
@@ -2160,13 +2169,20 @@ static int cb_motion_sender(const struct _u_request *req,
     return U_CALLBACK_CONTINUE;
 }
 
-/* The panel's own: release, energize, home (user_data names which). */
+/* The panel's own: release, energize, home, and the crumb tray's mode,
+ * tray=in or tray=out (user_data names which). */
 static int cb_motion_panel(const struct _u_request *req,
                            struct _u_response *res, void *user_data)
 {
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     const char *which = user_data;
+    if (!strcmp(which, "tray")) {
+        const char *v = setting_param(req, "tray");
+        if (!v || (strcmp(v, "in") && strcmp(v, "out")))
+            return reply_error(res, 400, "tray=in or tray=out");
+        return motion_port(res, GRBLPORT_SET_PANEL, GRBLPORT_TRAY, v, NULL);
+    }
     grblport_op_t op = !strcmp(which, "release")  ? GRBLPORT_RELEASE
                      : !strcmp(which, "energize") ? GRBLPORT_ENERGIZE
                                                   : GRBLPORT_HOME;
@@ -3471,6 +3487,7 @@ int main(int argc, char **argv)
         { "POST", "/motion/release",       cb_motion_panel,     "release", 0, NULL },
         { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0, NULL },
         { "POST", "/motion/home",          cb_motion_panel,     "home", 0, NULL },
+        { "POST", "/motion/tray",          cb_motion_panel,     "tray", 0, NULL },
         { "POST", "/cool/state",           cb_cool_state,       NULL, 0, NULL },
         { "GET",  "/cool/status",          cb_cool_status,      NULL, 1, "machine.read" },
         { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0, NULL },

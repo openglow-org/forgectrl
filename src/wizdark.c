@@ -30,6 +30,7 @@
 #include "settings.h"
 #include "status.h"
 #include "super.h"
+#include "tray.h"
 #include "wizcalc.h"
 #include "grblport.h"
 #include "wizpkg.h"
@@ -2023,6 +2024,12 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
     if (entry(ix)->needs_idle && !machine_is_idle()) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "the machine is not idle");
+        return -1;
+    }
+    /* The setup cards burn on the tray and measure the tray-in frame: they
+     * run only with the crumb tray in (tray.h). Nothing is sent. */
+    if (ix >= (int)NWIZ && ix < PKG_IX && tray_setup_refusal(err, elen)) {
+        pthread_mutex_unlock(&mu);
         return -1;
     }
     /* The machine lease: a diagnostic, an update job, the recorder, or a

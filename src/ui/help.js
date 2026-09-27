@@ -121,7 +121,16 @@ var HELP = {
     d: 'usage/setup/',
     p: [
       "Z is the focal point's height above the tray: a job on 3 mm material runs at Z 3, and a job's Z moves the lens. The setup focus card measures the focus height with the lens on its hall reference and finds the free travel each way from it by the head accelerometer; a home puts the lens on the reference and parks the focus at the park height.",
-      "The lens never moves without a reference: before a home, a Z move is refused (a jog with an error, a program with the soft-limit alarm), and after one, a Z beyond the free travel is refused the same way. Blank fields use the built-in values, the bench reference machine's; the free travel counts are half-steps of the lens screw, about 0.34 mm each, and hold the fallback window when the focus card could not find the stops."
+      "The lens never moves without a reference: before a home, a Z move is refused (a jog with an error, a program with the soft-limit alarm), and after one, a Z beyond the free travel is refused the same way. Blank fields use the built-in values, the bench reference machine's; the free travel counts are half-steps of the lens screw, about 0.34 mm each, and hold the fallback window when the focus card could not find the stops.",
+      'Floor below the tray: how far Z moves up when the crumb tray is out. Blank: 1.35 in. Change it with the tray in.'
+    ]
+  },
+  tray: {
+    t: 'Crumb tray',
+    d: 'usage/control-panel/#machine',
+    p: [
+      'Take the crumb tray out to fit taller work. Tray out: Z is the height above the floor of the machine. Tray in: Z is the height above the tray. Switching moves nothing.',
+      'Setup needs the tray in.'
     ]
   },
   microsteps: {

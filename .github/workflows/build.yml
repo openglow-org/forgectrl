@@ -33,6 +33,8 @@ jobs:
         run: ./build/sheet_test
       - name: lens_test (the lens frame, every Z inside the controller's window)
         run: ./build/lens_test
+      - name: tray_test (the crumb tray's mode, its offset, and what it refuses)
+        run: ./build/tray_test
       - name: jobstream_test (the daemon's own sender)
         run: ./build/jobstream_test
       - name: grblport_test (the controller port's client and its two operation sets)

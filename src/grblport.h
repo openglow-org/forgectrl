@@ -14,8 +14,8 @@
  * it speaks for before anything else looks at the request. The package
  * set (state, jog, cancel) is what the panel's Jog card, a scoped token,
  * or an extension may reach. The panel set adds the operations that belong to the
- * operator's own panel alone: the motor release, the energize, and the
- * manual home. The daemon set adds what the daemon's own relays say and
+ * operator's own panel alone: the motor release, the energize, the manual
+ * home, the bed check's envelope, and the crumb tray's mode. The daemon set adds what the daemon's own relays say and
  * no request reaches: which M-codes extension packages answer, the
  * answer to the one a job waits at (mcode.h), and whether the Grbl socket
  * keeps senders from the network out (senderout.h). An operation outside the
@@ -40,6 +40,7 @@ typedef enum {
     GRBLPORT_ENERGIZE,
     GRBLPORT_HOME,
     GRBLPORT_ENVELOPE,          /* panel set; arg: "open" or "apply" (the bed check's) */
+    GRBLPORT_TRAY,              /* panel set; arg: "in" or "out" (the crumb tray, tray.h) */
     GRBLPORT_MCODES,            /* daemon set only, and the one below; arg: "-" or "160,161" */
     GRBLPORT_MCODE_RESULT,      /* arg: "<seq> ok|fail [<words>]" */
     GRBLPORT_SENDER             /* daemon set; arg: "out" or "in" (senderout.h) */

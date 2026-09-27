@@ -135,6 +135,7 @@ var FT = {
   envelope_y_mm: 'len',
   lens_park_z_mm: 'len',
   lens_hall_edge_z_mm: 'len',
+  tray_offset_mm: 'len',
   cool_flow_rise: 'td',
   cool_temp_max: 'ta',
   cool_temp_resume: 'ta',
@@ -647,6 +648,7 @@ function renderMotion() {
       'Z ' + posN(M.lens.reach_min) + ' to ' + posN(M.lens.reach_max) + ' ' + uL() +
       (M.lens.stops_found ? '' : ' (fallback window)');
     g += kv('Lens reach', reach);
+    if (M.grbl) g += txt('Crumb tray', M.lens.tray === 'out' ? 'out' : 'in', 'b-dim');
     var lr = $('lens_reach');
     if (lr)
       lr.textContent =
@@ -731,6 +733,12 @@ function renderPort() {
   $('motors').style.display = up ? '' : 'none';
   $('mhome').style.display = up ? '' : 'none';
   $('mrel').textContent = M.motors_released ? 'Energize motors' : 'Release motors';
+  var trayOut = !!(M.lens && M.lens.tray === 'out');
+  $('traybox').style.display = up && M.lens ? '' : 'none';
+  $('traybtn').textContent = trayOut ? 'Tray in' : 'Tray out';
+  $('traystate').textContent = trayOut
+    ? 'The tray is out: Z is the height above the floor.'
+    : 'The tray is in: Z is the height above the tray.';
   if (JOG.unit !== uL()) {
     JOG.unit = uL();
     jogControls();
@@ -808,6 +816,11 @@ function motorsToggle() {
 }
 function manualHome() {
   portPost('/motion/home', 'msg-mhome');
+}
+/* The crumb tray: Z from the tray, or from the floor with the tray out.
+ * The controller switches the numbers; nothing moves. */
+function trayToggle() {
+  portPost('/motion/tray?tray=' + (M.lens && M.lens.tray === 'out' ? 'in' : 'out'), 'msg-tray');
 }
 function rpm(v) {
   return v > 0 ? v + ' rpm' : 'stopped';
@@ -1439,6 +1452,7 @@ function fill(force) {
   setF('lens_hall_edge_z_mm', S.lens_hall_edge_z_mm);
   setF('lens_stop_below_steps', S.lens_stop_below_steps);
   setF('lens_stop_above_steps', S.lens_stop_above_steps);
+  setF('tray_offset_mm', S.tray_offset_mm);
   setF('laser_dose_curve', S.laser_dose_curve);
   setF('laser_corner_gamma', S.laser_corner_gamma);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
@@ -1463,6 +1477,7 @@ function fill(force) {
     $(pk).placeholder = fnum(PH[pk][1] === 'ta' ? dTa(PH[pk][0]) : dTd(PH[pk][0]), 1);
   $('lens_park_z_mm').placeholder = fnum(dLen(3), 3);
   $('lens_hall_edge_z_mm').placeholder = fnum(dLen(3.35), 3);
+  $('tray_offset_mm').placeholder = fnum(dLen(34.29), 3);
   $('host').textContent = (S.machine_id || '') + (S.version ? ' \u00b7 ' + S.version : '');
   fillForce = false;
   renderGateNotes();

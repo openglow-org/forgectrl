@@ -428,7 +428,7 @@ SETTINGS_KEYS = (
     'cool_fan_grace_s',
     'laser_button_timeout_s', 'laser_disarm_s', 'laser_floor_density',
     'laser_dose_curve', 'laser_corner_gamma', 'lens_hall_edge_z_mm', 'lens_park_z_mm',
-    'lens_stop_below_steps', 'lens_stop_above_steps',
+    'lens_stop_below_steps', 'lens_stop_above_steps', 'tray_offset_mm',
     'laser_pulse_ticks',
     'laser_pulse_min_ticks', 'rail_settle_s', 'lid_lamp_idle',
     'cloud_pause_backtrack_ticks', 'cloud_resume_lead_ticks',
@@ -933,7 +933,7 @@ class Mock:
         # gates_off are filled in per request.
         self.status = {
             'lens': {'edge_z': 3.48, 'below': 14, 'above': 20, 'stops_found': True,
-                     'reach_min': -1.31, 'reach_max': 10.32},
+                     'reach_min': -1.31, 'reach_max': 10.32, 'tray': 'in', 'tray_offset_mm': 34.29},
             'state': 'idle', 'homed': True, 'homed_axes': 7, 'home_source': 'gfcloud', 'diag': False,
             'motors_released': False,
             'lease': {'holder': None, 'observed': {'sender': False, 'motors_released': False}},
@@ -1126,6 +1126,11 @@ class Mock:
             return v in SETTING_CHOICES[key]
         if key.startswith('log_'):
             return v in LOG_LEVELS
+        if key == 'tray_offset_mm':
+            try:
+                return 13 <= float(v) <= 60
+            except ValueError:
+                return False
         return True
 
     def idle(self):
@@ -1291,6 +1296,25 @@ class Mock:
         if op == 'energize':
             st['motors_released'] = False
             self._log('grbl: X and Y energized')
+            return J(200, {'ok': True})
+        if op == 'tray':
+            want = form.get('tray')
+            if want not in ('in', 'out'):
+                return T(400, 'tray=in or tray=out')
+            lens = st['lens']
+            if want != lens['tray']:
+                # The controller's shift: the offset on the lens step grid.
+                try:
+                    mm = min(60.0, max(13.0, float(self.settings.get('tray_offset_mm') or 34.29)))
+                except ValueError:
+                    mm = 34.29
+                grid = round(mm * 2.922) / 2.922 * (1 if want == 'out' else -1)
+                lens['reach_min'] = round(lens['reach_min'] + grid, 2)
+                lens['reach_max'] = round(lens['reach_max'] + grid, 2)
+                st['pos']['z'] = round(st['pos']['z'] + grid, 3)
+                lens['tray'] = want
+                lens['tray_offset_mm'] = round(mm, 2)
+                self._log('grbl: tray %s' % want)
             return J(200, {'ok': True})
         if op == 'home':
             if self.settings.get('homing_mode') != 'manual':
@@ -2416,6 +2440,9 @@ class Mock:
                 return J(409, {'error': 'accept the advisories first'})
             if d['running']:
                 return J(409, {'error': 'a wizard is already running (%s)' % d['id']})
+            # The setup cards run only with the crumb tray in (src/tray.c).
+            if wid in LIVE and self.status['lens']['tray'] == 'out':
+                return J(409, {'error': 'Put the crumb tray in and set Tray in on the Machine tab.'})
             if self.lease_refusal():
                 return J(409, {'error': self.lease_refusal()})
             self.dark = {'id': wid, 'running': True, 'started': time.time(), 'answered': 0.0,
@@ -2670,7 +2697,7 @@ class Mock:
                     'sender': False, 'port_jog': False,
                     'released': st['motors_released'],
                     'mpos': [st['pos']['x'], st['pos']['y'], st['pos']['z']],
-                    'homed': st['homed_axes']})
+                    'homed': st['homed_axes'], 'tray': st['lens']['tray']})
             if path == '/cam/status':
                 return J(200, self.cam_reply())
             if path in ('/cam/snapshot', '/cam/stream') or (
@@ -2890,6 +2917,10 @@ class Mock:
             for k in known:
                 if form[k] and not self.setting_valid(k, form[k]):
                     return T(400, 'invalid value for %s' % k)
+            # The tray offset changes only while the tray is in (src/tray.c).
+            if 'tray_offset_mm' in form and self.status['lens']['tray'] == 'out' and \
+                    form['tray_offset_mm'] != self.settings.get('tray_offset_mm', ''):
+                return T(409, 'set the tray in first: the tray offset changes only while the tray is in')
             # cloud_enabled is the cloud step's decision: on takes the
             # typed phrase here too, off sweeps the cloud choices
             if form.get('cloud_enabled') == '1' and self.settings.get('cloud_enabled') != '1' \

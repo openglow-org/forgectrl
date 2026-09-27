@@ -119,6 +119,7 @@ add_executable(forgectrl
   src/sheetid.c
   src/tls.c
   src/tokens.c
+  src/tray.c
   src/users.c
   src/wiz.c
   src/wizcalc.c
@@ -144,7 +145,7 @@ install(TARGETS forgectrl RUNTIME DESTINATION bin)
 # a read failure - including fd exhaustion under a connection flood -
 # must report not-idle. Built everywhere, installed nowhere; CI runs it
 # after the build.
-add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c src/lease.c)
+add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c src/lease.c src/tray.c)
 target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_idle_test m pthread)
 
@@ -154,11 +155,11 @@ add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jo
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
-add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c src/lease.c)
+add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c src/lease.c src/tray.c)
 target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_grbl_test m pthread)
 
-add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c src/lease.c)
+add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c src/lease.c src/tray.c)
 target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
 target_link_libraries(status_sys_test m pthread)
 
@@ -171,7 +172,7 @@ target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
 # Host unit test for the camera privacy gate's lid read: every way it
 # can fail must land on "not closed", or the cameras could capture with
 # the enclosure open. CI runs it after the build.
-add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c src/lease.c)
+add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c src/lease.c src/tray.c)
 target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(lid_gate_test m pthread)
 
@@ -348,6 +349,13 @@ target_link_libraries(sheet_test m)
 add_executable(lens_test tests/lens_test.c src/lens.c)
 target_compile_options(lens_test PRIVATE -Wall -Wextra)
 target_link_libraries(lens_test m)
+
+# The crumb tray's mode as the daemon reads it: the controller's marker,
+# the offset on the controller's grid, a change of it refused while the
+# tray is out, and the setup cards refused while it is out.
+add_executable(tray_test tests/tray_test.c src/tray.c)
+target_compile_options(tray_test PRIVATE -Wall -Wextra)
+target_link_libraries(tray_test m)
 
 # The daemon's own sender against a mock controller on a local port.
 add_executable(jobstream_test tests/jobstream_test.c src/jobstream.c src/fflog.c)

@@ -250,8 +250,20 @@
               <label for="lens_stop_above_steps">Free travel above the reference<span class="u">half-steps</span></label
               ><input class="form-control form-control-sm" id="lens_stop_above_steps" inputmode="numeric" placeholder="12" />
             </div>
+            <div class="frow">
+              <label for="tray_offset_mm">Floor below the tray<span class="u ulen">mm</span></label
+              ><input class="form-control form-control-sm" id="tray_offset_mm" inputmode="decimal" placeholder="34.29" />
+            </div>
           </div>
           <div id="lens_reach" class="small text-body-secondary"></div>
+          <div id="traybox" style="display: none">
+          <h3>Crumb tray<button class="hlp" data-help="tray" data-nolock="1" type="button">?</button></h3>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-secondary" id="traybtn" onclick="trayToggle()">Tray out</button
+            ><span class="msg" id="msg-tray"></span>
+          </div>
+          <div id="traystate" class="small text-body-secondary"></div>
+          </div>
         </div>
         <div class="card">
           <h2>Stepper drive<button class="hlp" data-help="microsteps" data-nolock="1" type="button">?</button></h2>

@@ -7,8 +7,8 @@
  * A mock port on a Unix socket in a scratch run directory records every
  * line it receives and answers from a script. Cases: no controller on
  * the port; a request and its reply; one connection kept across
- * requests; the package set cannot reach a panel operation, and nothing
- * is written when it tries; an argument that carries a line break is
+ * requests; the package set cannot reach a panel operation (the crumb
+ * tray's mode among them), and nothing is written when it tries; an argument that carries a line break is
  * refused with nothing written; a controller that restarted costs the
  * next request nothing; a port that never answers is given up on and
  * the request is not repeated; the jog's words and their bounds; what
@@ -138,6 +138,11 @@ int main(void)
         rc = grblport_request(GRBLPORT_SET_PACKAGE, panel_ops[i], NULL, reply, sizeof(reply));
         CHECK(rc == GRBLPORT_FORBIDDEN, "panel op %d from the package set: rc %d", (int)panel_ops[i], rc);
     }
+    /* The crumb tray's mode is the panel's too, argument and all. */
+    rc = grblport_request(GRBLPORT_SET_PACKAGE, GRBLPORT_TRAY, "out", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_FORBIDDEN, "tray out from the package set: rc %d", rc);
+    rc = grblport_request(GRBLPORT_SET_PACKAGE, GRBLPORT_TRAY, "in", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_FORBIDDEN, "tray in from the package set: rc %d", rc);
     /* Keeping the sender out is the daemon's alone. */
     rc = grblport_request(GRBLPORT_SET_PACKAGE, GRBLPORT_SENDER, "out", reply, sizeof(reply));
     CHECK(rc == GRBLPORT_FORBIDDEN, "sender out from the package set: rc %d", rc);
@@ -166,9 +171,14 @@ int main(void)
     CHECK(rc == GRBLPORT_OK, "energize: rc %d", rc);
     rc = grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_HOME, NULL, reply, sizeof(reply));
     CHECK(rc == GRBLPORT_OK, "home: rc %d", rc);
+    rc = grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_TRAY, "out", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_OK && !strcmp(reply, "ok"), "tray out: rc %d, '%s'", rc, reply);
+    rc = grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_TRAY, "in\nrelease", reply, sizeof(reply));
+    CHECK(rc == GRBLPORT_FORBIDDEN, "a tray op that smuggles a line: rc %d", rc);
     settle();
-    CHECK(mock.lines == before + 3 && !strcmp(mock.seen[before], "release") &&
-          !strcmp(mock.seen[before + 1], "energize") && !strcmp(mock.seen[before + 2], "home"),
+    CHECK(mock.lines == before + 4 && !strcmp(mock.seen[before], "release") &&
+          !strcmp(mock.seen[before + 1], "energize") && !strcmp(mock.seen[before + 2], "home") &&
+          !strcmp(mock.seen[before + 3], "tray out"),
           "the panel operations: %d lines", mock.lines - before);
 
     /* A refusal is a reply like any other. */
@@ -231,6 +241,8 @@ int main(void)
     CHECK(grblport_explain("busy:sender", why, sizeof(why)) == 409 && strstr(why, "client"), "busy:sender");
     CHECK(grblport_explain("busy:state", why, sizeof(why)) == 409, "busy:state");
     CHECK(grblport_explain("error:mode", why, sizeof(why)) == 409 && strstr(why, "manual"), "error:mode");
+    CHECK(grblport_explain("busy:mcode", why, sizeof(why)) == 409 && strstr(why, "M-code"), "busy:mcode");
+    CHECK(grblport_explain("error:saved", why, sizeof(why)) == 409 && strstr(why, "tray"), "error:saved");
     CHECK(grblport_explain("error:15", why, sizeof(why)) == 409 && strstr(why, "envelope"), "error:15");
     CHECK(grblport_explain("error:9", why, sizeof(why)) == 409 && strstr(why, "alarm"), "error:9");
     CHECK(grblport_explain("error:33", why, sizeof(why)) == 409 && strstr(why, "error:33"), "error:33");

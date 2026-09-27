@@ -9,8 +9,10 @@
  * supervisor holds a live GRBL controller. A dead controller, an absent
  * file, a torn body (no closing brace) or an absurd age must all read
  * as no block at all - the panel treats absence as "no controller",
- * never as stale truth. Drives the real machine_status_json() with
- * GF_RUN_DIR pointed at a temp dir and the supervisor stubbed.
+ * never as stale truth. The lens block's reach moves up by the crumb
+ * tray's offset while the controller's tray.out marker stands. Drives the
+ * real machine_status_json() with GF_RUN_DIR and FORGECTRL_DATA_DIR
+ * pointed at a temp dir and the supervisor stubbed.
  */
 #define _GNU_SOURCE
 #include "../src/status.h"
@@ -62,6 +64,7 @@ int main(void)
     }
     setenv("GF_RUN_DIR", dir, 1);
     setenv("GF_SYSFS_ROOT", dir, 1);    /* every machine attribute absent */
+    setenv("FORGECTRL_DATA_DIR", dir, 1);
 
     char doc[3072];
 
@@ -97,6 +100,24 @@ int main(void)
               now_mono() - 7200.0);
     machine_status_json(doc, sizeof(doc), "\"x\":1");
     CHECK(strstr(doc, "\"grbl\"") == NULL, "an absurd age reads as absent");
+
+    /* The lens block follows the crumb tray: the controller's marker in
+     * the data directory moves the reach up by the offset on its grid
+     * (1.35 in: 100 half-steps, 34.22 mm). */
+    printf("/status lens block and the crumb tray:\n");
+    char marker[128];
+    snprintf(marker, sizeof(marker), "%s/tray.out", dir);
+    machine_status_json(doc, sizeof(doc), "\"x\":1");
+    CHECK(strstr(doc, "\"reach_min\":-0.07,\"reach_max\":7.46,\"tray\":\"in\",\"tray_offset_mm\":34.29") != NULL,
+          "tray in: the reach above the tray, and the offset");
+    FILE *m = fopen(marker, "w");
+    fputs("out\n", m);
+    fclose(m);
+    machine_status_json(doc, sizeof(doc), "\"x\":1");
+    CHECK(strstr(doc, "\"reach_min\":34.15,\"reach_max\":41.68,\"tray\":\"out\"") != NULL,
+          "tray out: the reach moves up by the offset's grid");
+    CHECK(strstr(doc, "\"edge_z\":3.35,") != NULL, "tray out: the edge setting reads as set");
+    unlink(marker);
 
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the grbl block is echoed fresh and gated on a live controller\n",

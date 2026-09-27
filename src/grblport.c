@@ -46,6 +46,7 @@ static const struct {
     [GRBLPORT_ENERGIZE] = { "energize", GRBLPORT_SET_PANEL,   0 },
     [GRBLPORT_HOME]     = { "home",     GRBLPORT_SET_PANEL,   0 },
     [GRBLPORT_ENVELOPE] = { "envelope", GRBLPORT_SET_PANEL,   1 },
+    [GRBLPORT_TRAY]     = { "tray",     GRBLPORT_SET_PANEL,   1 },
     [GRBLPORT_MCODES]   = { "mcodes",   GRBLPORT_SET_DAEMON,  1 },
     [GRBLPORT_MCODE_RESULT] = { "mcode_result", GRBLPORT_SET_DAEMON, 1 },
     [GRBLPORT_SENDER]   = { "sender",   GRBLPORT_SET_DAEMON,  1 },
@@ -233,6 +234,10 @@ int grblport_explain(const char *reply, char *why, size_t len)
         snprintf(why, len, "the Grbl client is sending: it goes first");
     else if (!strcmp(reply, "busy:state"))
         snprintf(why, len, "the controller is busy (a program, a hold, an alarm, or the client's own jog)");
+    else if (!strcmp(reply, "busy:mcode"))
+        snprintf(why, len, "a job waits at an extension's M-code");
+    else if (!strcmp(reply, "error:saved"))
+        snprintf(why, len, "the controller could not save the tray mode: nothing changed");
     else if (!strcmp(reply, "error:mode"))
         snprintf(why, len, "the homing method is not manual: a home is the Grbl client's to start");
     else if (!strcmp(reply, "error:15"))

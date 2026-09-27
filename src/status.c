@@ -25,6 +25,7 @@
 #include "lease.h"
 #include "lens.h"
 #include "settings.h"
+#include "tray.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -616,17 +617,21 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     unsigned long sw = read_switches();
 
     /* The lens: the head's reference and the reach around it, from the
-     * same keys the controller opens its Z limit from (lens.h). */
+     * same keys the controller opens its Z limit from (lens.h). With the
+     * crumb tray out the controller's Z is the height above the floor, and
+     * the reach moves up by the offset it shifts by (tray.h). */
     int below, above;
     int stops_found = lens_window(&below, &above);
-    double edge_z = lens_edge_z(), reach_lo, reach_hi;
+    int tray_out = tray_is_out();
+    double edge_z = lens_edge_z(), reach_lo, reach_hi, shift = tray_out ? tray_grid_mm() : 0.0;
     lens_reach(edge_z, LENS_STEPS_PER_MM, below, above, &reach_lo, &reach_hi);
 
     size_t off = 0;
     append(buf, len, &off,
         "{\"lens\":{\"edge_z\":%.2f,\"below\":%d,\"above\":%d,\"stops_found\":%s,"
-        "\"reach_min\":%.2f,\"reach_max\":%.2f},",
-        edge_z, below, above, stops_found ? "true" : "false", reach_lo, reach_hi);
+        "\"reach_min\":%.2f,\"reach_max\":%.2f,\"tray\":\"%s\",\"tray_offset_mm\":%.2f},",
+        edge_z, below, above, stops_found ? "true" : "false", reach_lo + shift, reach_hi + shift,
+        tray_out ? "out" : "in", tray_offset_mm());
     append(buf, len, &off,
         "\"state\":\"%s\",\"homed\":%s,\"homed_axes\":%u,\"home_source\":\"%s\",\"diag\":%s,",
         state[0] ? state : "unknown", homed ? "true" : "false", homed_axes,
