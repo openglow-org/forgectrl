@@ -14,7 +14,9 @@
  * the bench acceptance test (camera.lid-privacy). What is provable on a
  * host, and what matters most, is that every way the read can fail lands
  * on "not closed": the device missing, the path not being an input device
- * at all, and the fd table exhausted under a connection flood.
+ * at all, and the fd table exhausted under a connection flood. The reader
+ * keeps one fd across calls, so the failures are also repeated in one
+ * process: none may read closed, and none may leave an fd behind.
  *
  * The test drives the real machine_lid_closed() from status.c through the
  * GF_SWITCH_DEV seam.
@@ -22,6 +24,7 @@
 #define _GNU_SOURCE
 #include "../src/status.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -97,6 +100,47 @@ static int lid_closed_under_emfile(const char *dev)
     return WEXITSTATUS(st);
 }
 
+static int count_fds(void)
+{
+    int n = 0;
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    while (readdir(d))
+        n++;
+    closedir(d);
+    return n;
+}
+
+/* The reader keeps one fd across calls, and only after a read succeeds:
+ * a hundred failing reads in one process must each report NOT closed and
+ * leave the fd table as they found it. 0 = held, 1 = a read reported
+ * closed, 3 = the fd count moved. */
+static int lid_repeated_with(const char *dev)
+{
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(2);
+    }
+    if (pid == 0) {
+        setenv("GF_SWITCH_DEV", dev, 1);
+        machine_lid_closed();
+        int before = count_fds();
+        for (int i = 0; i < 100; i++)
+            if (machine_lid_closed())
+                _exit(1);
+        _exit(before < 0 || count_fds() != before ? 3 : 0);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) {
+        fprintf(stderr, "child did not exit normally\n");
+        exit(2);
+    }
+    return WEXITSTATUS(st);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/forgectrl-lid-XXXXXX";
@@ -123,6 +167,13 @@ int main(void)
     int emfile = lid_closed_under_emfile(regular);
     CHECK(emfile != 2, "fd table was actually exhausted (EMFILE)");
     CHECK(emfile == 0, "reports NOT closed under EMFILE");
+
+    CHECK(lid_repeated_with(missing) == 0,
+          "100 reads of a missing device: each NOT closed, no fd kept");
+    CHECK(lid_repeated_with(regular) == 0,
+          "100 reads of a non-input path: each NOT closed, no fd kept");
+    CHECK(lid_repeated_with("/dev/null") == 0,
+          "100 reads without EVIOCGSW: each NOT closed, no fd kept");
 
     unlink(regular);
     rmdir(dir);

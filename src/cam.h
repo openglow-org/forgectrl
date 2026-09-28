@@ -154,6 +154,18 @@ struct cam_status {
     uint64_t frames;
     uint64_t corrupt;
     unsigned recoveries;
+    /* Stream frames not published because a neighbor came back flagged
+     * (a torn frame's error flag can land on the buffer after it), and
+     * frames passed over because a newer one was already waiting. */
+    uint64_t withheld;
+    uint64_t skipped;
+    /* Per-stage means over the last couple of seconds of streaming, in
+     * ms: capture end to publication, the demosaic (GPU render or CPU),
+     * the IPU crop, and the JPEG encode. Zero while nothing streams. */
+    double   latency_ms;
+    double   convert_ms;
+    double   copy_ms;
+    double   encode_ms;
 };
 void cam_get_status(struct cam_status *st);
 

@@ -135,6 +135,7 @@ struct stream_ctx {
     size_t        chunk_cap;
     size_t        chunk_len;
     size_t        off;
+    int           opened;   /* the opening delimiter has been sent */
 };
 
 static ssize_t stream_cb(void *cls, uint64_t pos, char *buf, size_t max)
@@ -148,12 +149,18 @@ static ssize_t stream_cb(void *cls, uint64_t pos, char *buf, size_t max)
         if (len < 0)
             return U_STREAM_END;
 
+        /* Each part ends with the delimiter that opens the next: a
+         * viewer that finds a part's end by the boundary (a browser's
+         * <img>) shows the frame as soon as it arrives, not when the
+         * next one starts. */
+        static const char delim[] = "\r\n--" BOUNDARY "\r\n";
         char head[128];
-        int headlen = snprintf(head, sizeof(head),
-                               "--" BOUNDARY "\r\n"
+        int headlen = snprintf(head, sizeof(head), "%s"
                                "Content-Type: image/jpeg\r\n"
-                               "Content-Length: %ld\r\n\r\n", len);
-        size_t need = (size_t)headlen + (size_t)len + 2;
+                               "Content-Length: %ld\r\n\r\n",
+                               sc->opened ? "" : "--" BOUNDARY "\r\n", len);
+        sc->opened = 1;
+        size_t need = (size_t)headlen + (size_t)len + sizeof(delim) - 1;
         if (sc->chunk_cap < need) {
             uint8_t *nb = realloc(sc->chunk, need);
             if (!nb)
@@ -163,7 +170,7 @@ static ssize_t stream_cb(void *cls, uint64_t pos, char *buf, size_t max)
         }
         memcpy(sc->chunk, head, (size_t)headlen);
         memcpy(sc->chunk + headlen, jpg, (size_t)len);
-        memcpy(sc->chunk + headlen + len, "\r\n", 2);
+        memcpy(sc->chunk + headlen + len, delim, sizeof(delim) - 1);
         sc->chunk_len = need;
         sc->off = 0;
     }
@@ -479,7 +486,7 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
         return U_CALLBACK_COMPLETE;
     struct cam_status st;
     cam_get_status(&st);
-    char body[768];
+    char body[1024];
     snprintf(body, sizeof(body),
              "{\"running\":%s,\"cam\":\"%s\",\"clients\":%d,"
              "\"frames\":%llu,\"fps\":%.1f,\"fps_cap\":%.1f,"
@@ -490,7 +497,9 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
              "\"snapshot\":{\"width\":%d,\"height\":%d},"
              "\"h264\":{\"active\":%s,\"clients\":%d},"
              "\"health\":{\"captured\":%llu,\"corrupt\":%llu,"
-             "\"restarts\":%u},"
+             "\"restarts\":%u,\"withheld\":%llu},"
+             "\"timing\":{\"latency_ms\":%.1f,\"convert_ms\":%.1f,"
+             "\"copy_ms\":%.1f,\"encode_ms\":%.1f,\"skipped\":%llu},"
              "\"capture_allowed\":%s,\"stopped_by_lid\":%s}",
              st.running ? "true" : "false", cam_name(st.cam), st.clients,
              (unsigned long long)st.seq, st.fps, st.fps_cap,
@@ -501,7 +510,9 @@ static int cb_status(const struct _u_request *req, struct _u_response *res,
              st.stream_w, st.stream_h, st.snap_w, st.snap_h,
              st.h264_up ? "true" : "false", st.h264_clients,
              (unsigned long long)st.frames, (unsigned long long)st.corrupt,
-             st.recoveries,
+             st.recoveries, (unsigned long long)st.withheld,
+             st.latency_ms, st.convert_ms, st.copy_ms, st.encode_ms,
+             (unsigned long long)st.skipped,
              st.lid_closed ? "true" : "false",
              st.lid_stopped ? "true" : "false");
     ulfius_set_string_body_response(res, 200, body);

@@ -4,30 +4,44 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * Three fragment-shader passes turn the raw BGGR frame into the planar
- * YUV420 layout the CODA encoders take, with the same superpixel
- * semantics as debayer_bggr_half_yuv420: every 2x2 Bayer quad becomes
- * one pixel (R and B taken, the two greens averaged), luma per pixel,
- * chroma per 2x2 pixel block, JFIF full-range ITU-R 601.
+ * Two fragment-shader passes turn the raw BGGR frame into the NV12
+ * layout (a luma plane, then one plane of interleaved Cb/Cr) with the
+ * same superpixel semantics as debayer_bggr_half_yuv420: every 2x2 Bayer
+ * quad becomes one pixel (R and B taken, the two greens averaged), luma
+ * per pixel, chroma per 2x2 pixel block, JFIF full-range ITU-R 601.
  *
  * Both ends are dmabufs: the V4L2 capture buffers are imported as
  * textures and the destination (the IPU stride-fix buffer, ipu_copy.h,
  * whose stride sits on the GPU's 64-byte render boundary) as the render
  * target, so the frame never crosses the CPU. Buffers are byte streams
- * to the GPU, not pictures: the raw side binds as GR88 (one texel per
- * Bayer byte pair) and the YUV planes as ARGB8888 (four bytes per
- * texel, memory bytes 0..3 writing as .b .g .r .a through
- * gl_FragColor; it must be ARGB, not XRGB, because the render engine
- * writes an XRGB surface's X byte as opaque, clobbering every fourth
- * output byte), and the shaders do the byte indexing.
+ * to the GPU, not pictures: the raw side binds as ARGB8888 with two raw
+ * rows to a texture row (four Bayer bytes, two superpixels' worth of one
+ * raw row, per texel; the stack refuses a linear import one row of a
+ * 5 MP frame wide, 648 texels, and takes one two rows wide, 1296), and
+ * the NV12 planes as ARGB8888 too (memory bytes
+ * 0..3 read and write as .b .g .r .a; it must be ARGB, not XRGB, because
+ * the render engine writes an XRGB surface's X byte as opaque, clobbering
+ * every fourth output byte), and the shaders do the byte indexing.
+ *
+ * The render is bound by texture fetches, so the layout is chosen for
+ * them: a four-byte raw texel feeds two superpixels, and the Cb and Cr
+ * of a chroma site come from the same fetches in one pass. Four luma
+ * bytes take four fetches and two chroma sites take four, and every
+ * fetch coordinate is a varying the vertex stage computes (a linear
+ * function of the output position), so no fetch depends on arithmetic
+ * in the fragment stage and the mirror is compiled in.
  *
  * GLES2 has no integer textures and no multiple render targets on this
- * class of GPU, which is why the passes are three (Y, U, V) and the
- * indexing is float math with floor(). A raw frame taller than the
- * GPU's maximum texture size is imported as row tiles of one dmabuf
+ * class of GPU, which is why the passes are two (Y, CbCr) and the
+ * indexing is float math with floor(). A raw frame taller than twice
+ * the GPU's maximum texture size is imported as row tiles of one dmabuf
  * (the EGL import offset selects the tile) and each pass draws once per
  * tile under a scissor; the conversion is quad-local, so tile seams at
  * multiple-of-4 raw rows are exact.
+ *
+ * A render's completion is a native fence file descriptor where the
+ * stack offers EGL_ANDROID_native_fence_sync, so the caller can poll it
+ * beside the capture queue; otherwise a plain EGL fence it waits on.
  *
  * Everything is dlopen'd (libEGL.so.1, libGLESv2.so.2) and probed, so a
  * build has no GL dependency and an image without Mesa (or a kernel
@@ -41,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ---------------------------------------------- minimal EGL/GLES2 ABI */
 
@@ -86,11 +101,12 @@ typedef unsigned int   GLbitfield;
 #define EGL_CONDITION_SATISFIED_KHR 0x30F6
 #define EGL_TIMEOUT_EXPIRED_KHR     0x30F5
 #define EGL_FOREVER_KHR             0xFFFFFFFFFFFFFFFFull
+#define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
+#define EGL_NO_NATIVE_FENCE_FD_ANDROID (-1)
 typedef void *EGLSyncKHR;
 typedef uint64_t EGLTimeKHR;
 
 #define DRM_FORMAT_ARGB8888         0x34325241  /* 'AR24' */
-#define DRM_FORMAT_GR88             0x38385247  /* 'GR88' */
 
 #define GL_FALSE                    0
 #define GL_TRIANGLES                0x0004
@@ -143,6 +159,7 @@ struct egl_api {
     EGLBoolean  (*DestroySyncKHR)(EGLDisplay, EGLSyncKHR);
     EGLint      (*ClientWaitSyncKHR)(EGLDisplay, EGLSyncKHR, EGLint,
                                      EGLTimeKHR);
+    EGLint      (*DupNativeFenceFDANDROID)(EGLDisplay, EGLSyncKHR);
 };
 
 struct gles_api {
@@ -169,6 +186,7 @@ struct gles_api {
     void    (*Uniform1f)(GLint, GLfloat);
     void    (*Uniform2f)(GLint, GLfloat, GLfloat);
     void    (*Uniform3f)(GLint, GLfloat, GLfloat, GLfloat);
+    void    (*Uniform4f)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
     void    (*Uniform1i)(GLint, GLint);
     void    (*GenTextures)(GLsizei, GLuint *);
     void    (*DeleteTextures)(GLsizei, const GLuint *);
@@ -204,9 +222,9 @@ struct gles_api {
 
 struct dst {
     int         attached;
-    EGLImageKHR img[3];     /* Y, U, V plane views of the one dmabuf */
-    GLuint      rb[3];
-    GLuint      fbo[3];
+    EGLImageKHR img[2];     /* Y and CbCr plane views of the one dmabuf */
+    GLuint      rb[2];
+    GLuint      fbo[2];
 };
 
 struct gpu_debayer {
@@ -217,98 +235,101 @@ struct gpu_debayer {
     int             raw_w, raw_h;
     int             hflip;
     int             tiles;          /* row tiles the raw frame imports as */
-    int             tile_h;         /* raw rows per tile (multiple of 4) */
+    int             tile_h;         /* texture rows (raw row pairs) per tile,
+                                     * even */
     EGLImageKHR     raw_img[MAX_RAW_SLOTS][MAX_TILES];
     GLuint          raw_tex[MAX_RAW_SLOTS][MAX_TILES];
     int             raw_attached[MAX_RAW_SLOTS];
     struct dst      dst[MAX_DST_SLOTS];
     EGLSyncKHR      fence[MAX_DST_SLOTS];
+    int             fence_fd[MAX_DST_SLOTS];    /* pollable completion, or -1 */
     int             fences_ok;      /* EGL_KHR_fence_sync usable */
-    GLuint          prog_y, prog_c;
-    /* uniform/attrib locations */
-    GLint           y_a_pos, y_u_texsz, y_u_ow, y_u_flip, y_u_rowbase;
-    GLint           c_a_pos, c_u_texsz, c_u_ow, c_u_flip, c_u_rowbase,
-                    c_u_coef, c_u_off;
+    int             native_ok;      /* EGL_ANDROID_native_fence_sync usable */
+    GLuint          prog[2];        /* the Y and CbCr passes */
+    /* attrib/uniform locations, per pass */
+    GLint           a_pos[2], u_out[2], u_u[2], u_v[2];
     int             max_tex;
     int             dead;
 };
 
 /* ------------------------------------------------------------- shaders */
 
+/* The raw frame binds as ARGB8888, texture row y holding raw rows 2y
+ * (texels 0..half-1) and 2y+1 (texels half..): texel t of a raw row
+ * holds bytes 4t..4t+3, read as .b .g .r .a, which are two superpixels'
+ * worth of that row. An even raw row reads (B, G1) of superpixel 2t in
+ * .b .g and of superpixel 2t+1 in .r .a; an odd row reads (G2, R) the
+ * same way.
+ *
+ * Each output texel needs two raw texel columns, a and b, on an even and
+ * an odd raw row: four fetches. Their coordinates are linear in the
+ * output position, so the vertex stage computes them from p, the
+ * position in output texels: u = u_u.x * p.x + u_u.y (column a) or
+ * + u_u.z (column b), plus u_u.w for the odd raw row, and v = u_v.x *
+ * p.y + u_v.y. draw_pass sets the coefficients for the pass, the mirror
+ * and the tile. */
 static const char VS_SRC[] =
     "attribute vec2 a_pos;\n"
-    "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
-
-/* The raw frame binds as GR88: one texel per Bayer byte pair, byte 0 in
- * .r and byte 1 in .g, so superpixel column c is texel column c. An even
- * raw row's pair is (B, G1), an odd row's is (G2, R). u_inv carries the
- * reciprocal texture size: a divide per fetch is what this GPU cannot
- * afford, so the callers hoist the row coordinates and sp() multiplies. */
-#define SP_FETCH \
-    "vec3 sp(float c, float vy, float vy2) {\n"                          \
-    "  float u = (c + 0.5) * u_inv.x;\n"                                 \
-    "  vec4 e = texture2D(u_raw, vec2(u, vy));\n"                        \
-    "  vec4 o = texture2D(u_raw, vec2(u, vy2));\n"                       \
-    "  return vec3(o.g, (e.g + o.r) * 0.5, e.r);\n"  /* R G B */         \
-    "}\n"
-
-/* One output texel = 4 luma bytes = 4 superpixels. gl_FragCoord is in
- * output texels; raw rows for output row ty are 2ty and 2ty+1 (the sp()
- * helper adds the odd row itself). */
-static const char FS_Y_SRC[] =
-    "PRECISION\n"
-    "uniform sampler2D u_raw;\n"
-    "uniform vec2  u_inv;\n"
-    "uniform float u_ow;\n"
-    "uniform float u_flip;\n"
-    "uniform float u_rowbase;\n"
-    SP_FETCH
-    "float luma(vec3 rgb) {\n"
-    "  return dot(rgb, vec3(0.299, 0.587, 0.114));\n"
-    "}\n"
+    "uniform vec2 u_out;\n"
+    "uniform vec4 u_u;\n"
+    "uniform vec2 u_v;\n"
+    "varying vec2 v_ea, v_eb, v_oa, v_ob;\n"
     "void main() {\n"
-    "  float tx = floor(gl_FragCoord.x);\n"
-    "  float ry = 2.0 * floor(gl_FragCoord.y) - u_rowbase;\n"
-    "  float vy  = (ry + 0.5) * u_inv.y;\n"
-    "  float vy2 = (ry + 1.5) * u_inv.y;\n"
-    "  vec4 y;\n"
-    "  for (int k = 0; k < 4; k++) {\n"
-    "    float s = 4.0 * tx + float(k);\n"
-    "    float c = mix(s, u_ow - 1.0 - s, u_flip);\n"
-    "    y[k] = luma(sp(c, vy, vy2));\n"
-    "  }\n"
-    "  gl_FragColor = vec4(y[2], y[1], y[0], y[3]);\n"
+    "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
+    "  vec2 p = (a_pos + 1.0) * 0.5 * u_out;\n"
+    "  float v = u_v.x * p.y + u_v.y;\n"
+    "  float ua = u_u.x * p.x + u_u.y;\n"
+    "  float ub = u_u.x * p.x + u_u.z;\n"
+    "  v_ea = vec2(ua, v);\n"
+    "  v_eb = vec2(ub, v);\n"
+    "  v_oa = vec2(ua + u_u.w, v);\n"
+    "  v_ob = vec2(ub + u_u.w, v);\n"
     "}\n";
 
-/* One output texel = 4 chroma bytes = 4 chroma sites. Each site is
- * point-sampled from its block's top-left superpixel rather than
- * box-averaged over the 2x2: the box costs four times the fetches, and
- * measured on the GC880 that is the difference between 6 and 14 frames
- * a second. The CPU path keeps the box filter, so the one-shot compare
- * reports chroma separately (cam.c). u_coef/u_off select U or V. */
+#define FS_HEAD \
+    "uniform sampler2D u_raw;\n"                                         \
+    "varying vec2 v_ea, v_eb, v_oa, v_ob;\n"                             \
+    "void main() {\n"                                                    \
+    "  vec4 ea = texture2D(u_raw, v_ea);\n"                              \
+    "  vec4 oa = texture2D(u_raw, v_oa);\n"                              \
+    "  vec4 eb = texture2D(u_raw, v_eb);\n"                              \
+    "  vec4 ob = texture2D(u_raw, v_ob);\n"
+
+/* One output texel = 4 luma bytes = 4 superpixels: both superpixels of
+ * column a, then both of column b (each pair swapped under the mirror,
+ * whose columns the coordinates already swapped). Memory bytes 0..3 are
+ * .b .g .r .a. */
+static const char FS_Y_SRC[] =
+    "PRECISION\n"
+    FS_HEAD
+    "  vec2 la = oa.ga * 0.299 + (ea.ga + oa.br) * 0.2935 + ea.br * 0.114;\n"
+    "  vec2 lb = ob.ga * 0.299 + (eb.ga + ob.br) * 0.2935 + eb.br * 0.114;\n"
+    "#if FLIP\n"
+    "  gl_FragColor = vec4(lb.y, la.x, la.y, lb.x);\n"
+    "#else\n"
+    "  gl_FragColor = vec4(lb.x, la.y, la.x, lb.y);\n"
+    "#endif\n"
+    "}\n";
+
+/* One output texel = 4 bytes of the CbCr plane = the Cb and Cr of two
+ * chroma sites. Each site is point-sampled from its block's top-left
+ * superpixel (in the raw frame's own order), which is the first of the
+ * two in its raw texel, rather than box-averaged over the 2x2: the box
+ * costs more fetches, and fetches are what bound this GPU. The CPU path
+ * keeps the box filter, so the one-shot compare reports chroma
+ * separately (cam.c). Raw rows 4ty and 4ty+1 (texture row 2ty) feed
+ * chroma row ty. */
 static const char FS_C_SRC[] =
     "PRECISION\n"
-    "uniform sampler2D u_raw;\n"
-    "uniform vec2  u_inv;\n"
-    "uniform float u_ow;\n"
-    "uniform float u_flip;\n"
-    "uniform float u_rowbase;\n"
-    "uniform vec3  u_coef;\n"
-    "uniform float u_off;\n"
-    SP_FETCH
-    "void main() {\n"
-    "  float tx = floor(gl_FragCoord.x);\n"
-    "  float ry = 4.0 * floor(gl_FragCoord.y) - u_rowbase;\n"
-    "  float va  = (ry + 0.5) * u_inv.y;\n"
-    "  float va2 = (ry + 1.5) * u_inv.y;\n"
-    "  float uvw = u_ow * 0.5;\n"    /* chroma columns per row */
-    "  vec4 outv;\n"
-    "  for (int k = 0; k < 4; k++) {\n"
-    "    float cc = 4.0 * tx + float(k);\n"
-    "    float sx = 2.0 * mix(cc, uvw - 1.0 - cc, u_flip);\n"
-    "    outv[k] = dot(sp(sx, va, va2), u_coef) + u_off;\n"
-    "  }\n"
-    "  gl_FragColor = vec4(outv[2], outv[1], outv[0], outv[3]);\n"
+    FS_HEAD
+    "  vec3 p = vec3(oa.g, (ea.g + oa.b) * 0.5, ea.b);\n"   /* R G B */
+    "  vec3 q = vec3(ob.g, (eb.g + ob.b) * 0.5, eb.b);\n"
+    "  vec3 cb = vec3(-0.169, -0.331, 0.500);\n"
+    "  vec3 cr = vec3(0.500, -0.419, -0.081);\n"
+    "  float o = 128.0 / 255.0;\n"
+    /* memory order Cb(p) Cr(p) Cb(q) Cr(q) is .b .g .r .a */
+    "  gl_FragColor = vec4(dot(q, cb) + o, dot(p, cr) + o,\n"
+    "                      dot(p, cb) + o, dot(q, cr) + o);\n"
     "}\n";
 
 /* ------------------------------------------------------------- loading */
@@ -340,6 +361,8 @@ static int load_egl(struct egl_api *e)
     *(void **)&e->DestroySyncKHR = e->GetProcAddress("eglDestroySyncKHR");
     *(void **)&e->ClientWaitSyncKHR =
         e->GetProcAddress("eglClientWaitSyncKHR");
+    *(void **)&e->DupNativeFenceFDANDROID =
+        e->GetProcAddress("eglDupNativeFenceFDANDROID");
     return 0;
 }
 
@@ -365,7 +388,7 @@ static int load_gles(struct gles_api *g,
     G(AttachShader); G(LinkProgram); G(GetProgramiv);
     G(GetProgramInfoLog); G(UseProgram); G(DeleteProgram);
     G(GetUniformLocation); G(GetAttribLocation); G(Uniform1f);
-    G(Uniform2f); G(Uniform3f); G(Uniform1i); G(GenTextures);
+    G(Uniform2f); G(Uniform3f); G(Uniform4f); G(Uniform1i); G(GenTextures);
     G(DeleteTextures); G(BindTexture); G(ActiveTexture); G(TexParameteri);
     G(GenFramebuffers); G(DeleteFramebuffers); G(BindFramebuffer);
     G(FramebufferRenderbuffer); G(CheckFramebufferStatus);
@@ -405,19 +428,21 @@ static GLuint compile(gpu_debayer_t *g, GLenum kind, const char *src)
     return sh;
 }
 
-/* Substitute the PRECISION line and build a program; highp first, since
- * the row indexing needs more mantissa than fp16 offers on tall frames,
- * then mediump so a stack that lacks fragment highp still comes up (the
- * indexing error is checked by the one-shot compare, see cam.c). */
-static GLuint build_prog(gpu_debayer_t *g, const char *fs_tmpl)
+/* Substitute the PRECISION line (with the mirror's define) and build a
+ * program; highp first, since the fetch coordinates need more mantissa
+ * than fp16 offers across a frame this wide, then mediump so a stack
+ * that lacks fragment highp still comes up (the indexing error is
+ * checked by the one-shot compare, see cam.c). */
+static GLuint build_prog(gpu_debayer_t *g, const char *fs_tmpl, int flip)
 {
     static const char *prec[2] = { "precision highp float;",
                                    "precision mediump float;" };
     for (int i = 0; i < 2; i++) {
         char fs[4096];
         const char *at = strstr(fs_tmpl, "PRECISION");
-        snprintf(fs, sizeof(fs), "%.*s%s%s", (int)(at - fs_tmpl), fs_tmpl,
-                 prec[i], at + strlen("PRECISION"));
+        snprintf(fs, sizeof(fs), "%.*s%s\n#define FLIP %d%s",
+                 (int)(at - fs_tmpl), fs_tmpl, prec[i], flip ? 1 : 0,
+                 at + strlen("PRECISION"));
         GLuint v = compile(g, GL_VERTEX_SHADER, VS_SRC);
         GLuint f = compile(g, GL_FRAGMENT_SHADER, fs);
         if (!v || !f) {
@@ -495,6 +520,8 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
     gpu_debayer_t *g = calloc(1, sizeof(*g));
     if (!g)
         return NULL;
+    for (int i = 0; i < MAX_DST_SLOTS; i++)
+        g->fence_fd[i] = -1;
     g->raw_w = raw_w;
     g->raw_h = raw_h;
     g->hflip = !!hflip;
@@ -530,6 +557,9 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
                    g->egl.ClientWaitSyncKHR;
     if (!g->fences_ok)
         fflog(LOG_INFO, "gpu: no EGL fences, renders will not overlap");
+    g->native_ok = g->fences_ok &&
+                   strstr(dext, "EGL_ANDROID_native_fence_sync") &&
+                   g->egl.DupNativeFenceFDANDROID;
 
     static const EGLenum EGL_OPENGL_ES_API = 0x30A0;
     g->egl.BindAPI(EGL_OPENGL_ES_API);
@@ -579,49 +609,45 @@ gpu_debayer_t *gpu_debayer_open(int raw_w, int raw_h, int hflip)
     g->gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &g->max_tex);
     GLint max_rb = 0;
     g->gl.GetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
-    /* The raw import is raw_w/2 texels wide (one texel per Bayer pair),
-     * so only the height can exceed the cap; tile by rows. Output planes
-     * are half and quarter height and never wider than the raw import. */
+    /* The raw import is raw_w/2 texels wide (two raw rows of four Bayer
+     * bytes per texel) and raw_h/2 rows tall, so only the height can
+     * exceed the cap; tile by rows. Output planes are raw_w/8 texels wide
+     * and half the raw height at most. */
     if (raw_w / 2 > g->max_tex || raw_h / 2 > max_rb) {
         fflog(LOG_INFO, "gpu: frame exceeds GPU limits (tex %d, rb %d)",
               g->max_tex, max_rb);
         goto fail;
     }
     g->tiles = 1;
-    g->tile_h = raw_h;
+    g->tile_h = raw_h / 2;
     while (g->tile_h > g->max_tex) {
         g->tiles *= 2;
         g->tile_h /= 2;
     }
-    if (g->tiles > MAX_TILES || g->tile_h % 4) {
+    if (g->tiles > MAX_TILES || g->tile_h % 2) {
         fflog(LOG_INFO, "gpu: cannot tile %d rows under max texture %d",
               raw_h, g->max_tex);
         goto fail;
     }
 
-    g->prog_y = build_prog(g, FS_Y_SRC);
-    g->prog_c = build_prog(g, FS_C_SRC);
-    if (!g->prog_y || !g->prog_c)
+    g->prog[0] = build_prog(g, FS_Y_SRC, g->hflip);
+    g->prog[1] = build_prog(g, FS_C_SRC, g->hflip);
+    if (!g->prog[0] || !g->prog[1])
         goto fail;
-    g->y_a_pos    = g->gl.GetAttribLocation(g->prog_y, "a_pos");
-    g->y_u_texsz  = g->gl.GetUniformLocation(g->prog_y, "u_inv");
-    g->y_u_ow     = g->gl.GetUniformLocation(g->prog_y, "u_ow");
-    g->y_u_flip   = g->gl.GetUniformLocation(g->prog_y, "u_flip");
-    g->y_u_rowbase = g->gl.GetUniformLocation(g->prog_y, "u_rowbase");
-    g->c_a_pos    = g->gl.GetAttribLocation(g->prog_c, "a_pos");
-    g->c_u_texsz  = g->gl.GetUniformLocation(g->prog_c, "u_inv");
-    g->c_u_ow     = g->gl.GetUniformLocation(g->prog_c, "u_ow");
-    g->c_u_flip   = g->gl.GetUniformLocation(g->prog_c, "u_flip");
-    g->c_u_rowbase = g->gl.GetUniformLocation(g->prog_c, "u_rowbase");
-    g->c_u_coef   = g->gl.GetUniformLocation(g->prog_c, "u_coef");
-    g->c_u_off    = g->gl.GetUniformLocation(g->prog_c, "u_off");
+    for (int pass = 0; pass < 2; pass++) {
+        g->a_pos[pass] = g->gl.GetAttribLocation(g->prog[pass], "a_pos");
+        g->u_out[pass] = g->gl.GetUniformLocation(g->prog[pass], "u_out");
+        g->u_u[pass] = g->gl.GetUniformLocation(g->prog[pass], "u_u");
+        g->u_v[pass] = g->gl.GetUniformLocation(g->prog[pass], "u_v");
+    }
 
     if (!gl_ok(g, "setup"))
         goto fail;
 
     fflog(LOG_INFO, "gpu: GLES2 debayer up for %dx%d (%d tile%s of %d "
-          "rows, max texture %d)", raw_w, raw_h, g->tiles,
-          g->tiles > 1 ? "s" : "", g->tile_h, g->max_tex);
+          "rows, max texture %d, %s fences)", raw_w, raw_h, g->tiles,
+          g->tiles > 1 ? "s" : "", 2 * g->tile_h, g->max_tex,
+          g->native_ok ? "native" : g->fences_ok ? "EGL" : "no");
     return g;
 
 fail:
@@ -653,7 +679,7 @@ void gpu_debayer_close(gpu_debayer_t *g)
                         g->egl.DestroyImageKHR(g->dpy, g->raw_img[i][t]);
                 }
             for (int i = 0; i < MAX_DST_SLOTS; i++)
-                for (int pl = 0; pl < 3; pl++) {
+                for (int pl = 0; pl < 2; pl++) {
                     if (g->dst[i].fbo[pl])
                         g->gl.DeleteFramebuffers(1, &g->dst[i].fbo[pl]);
                     if (g->dst[i].rb[pl])
@@ -661,16 +687,18 @@ void gpu_debayer_close(gpu_debayer_t *g)
                     if (g->dst[i].img[pl])
                         g->egl.DestroyImageKHR(g->dpy, g->dst[i].img[pl]);
                 }
-            if (g->prog_y)
-                g->gl.DeleteProgram(g->prog_y);
-            if (g->prog_c)
-                g->gl.DeleteProgram(g->prog_c);
+            for (int pass = 0; pass < 2; pass++)
+                if (g->prog[pass])
+                    g->gl.DeleteProgram(g->prog[pass]);
             g->egl.MakeCurrent(g->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
                                EGL_NO_CONTEXT);
             g->egl.DestroyContext(g->dpy, g->ctx);
         }
         g->egl.Terminate(g->dpy);
     }
+    for (int i = 0; i < MAX_DST_SLOTS; i++)
+        if (g->fence_fd[i] >= 0)
+            close(g->fence_fd[i]);
     if (g->gl.lib)
         dlclose(g->gl.lib);
     if (g->egl.lib)
@@ -686,9 +714,9 @@ int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd)
         return -1;
     for (int t = 0; t < g->tiles; t++) {
         EGLImageKHR img = import_bytes(g, fd,
-                                       (size_t)t * g->tile_h * g->raw_w,
-                                       g->raw_w / 2, g->tile_h, g->raw_w,
-                                       DRM_FORMAT_GR88);
+                                       (size_t)t * g->tile_h * 2 * g->raw_w,
+                                       g->raw_w / 2, g->tile_h,
+                                       2 * g->raw_w, DRM_FORMAT_ARGB8888);
         if (img == EGL_NO_IMAGE)
             return -1;
         GLuint tex;
@@ -716,34 +744,39 @@ int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd)
 }
 
 int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
-                           int y_stride, size_t buf_len)
+                           int stride, size_t uv_offset, size_t buf_len)
 {
     if (g->dead || slot < 0 || slot >= MAX_DST_SLOTS)
         return -1;
     const int ow = g->raw_w / 2, oh = g->raw_h / 2;
-    if (y_stride < ow || y_stride % 128) {
-        fflog(LOG_WARNING, "gpu: unusable destination stride %d", y_stride);
+    if (stride < ow || stride % 64) {
+        fflog(LOG_WARNING, "gpu: unusable destination stride %d", stride);
         return -1;
     }
-    size_t y_sz = (size_t)y_stride * oh;
-    size_t c_sz = (size_t)(y_stride / 2) * (oh / 2);
-    if (buf_len < y_sz + 2 * c_sz) {
-        fflog(LOG_WARNING, "gpu: encoder buffer too small (%zu)", buf_len);
+    /* Each plane is followed by room for its rows rounded up to 8: the
+     * render may land whole row groups past the last one it was asked
+     * for, and that must stay inside the buffer. */
+    size_t y_room = (size_t)stride * (size_t)((oh + 7) & ~7);
+    size_t uv_room = (size_t)stride * (size_t)((oh / 2 + 7) & ~7);
+    if (uv_offset < y_room || uv_offset % 64 ||
+        buf_len < uv_offset + uv_room) {
+        fflog(LOG_WARNING, "gpu: destination layout unusable (stride %d, "
+              "CbCr at %zu, %zu bytes)", stride, uv_offset, buf_len);
         return -1;
     }
     struct {
         size_t off;
-        int    w_bytes, h, pitch;
-    } plane[3] = {
-        { 0,            ow,     oh,     y_stride     },
-        { y_sz,         ow / 2, oh / 2, y_stride / 2 },
-        { y_sz + c_sz,  ow / 2, oh / 2, y_stride / 2 },
+        int    h;
+    } plane[2] = {
+        { 0,         oh     },
+        { uv_offset, oh / 2 },
     };
     struct dst *d = &g->dst[slot];
-    for (int pl = 0; pl < 3; pl++) {
-        d->img[pl] = import_bytes(g, fd, plane[pl].off,
-                                  plane[pl].w_bytes / 4, plane[pl].h,
-                                  plane[pl].pitch, DRM_FORMAT_ARGB8888);
+    for (int pl = 0; pl < 2; pl++) {
+        /* Both planes are ow bytes wide: ow luma samples, or ow/2 sites
+         * of a Cb and a Cr. */
+        d->img[pl] = import_bytes(g, fd, plane[pl].off, ow / 4,
+                                  plane[pl].h, stride, DRM_FORMAT_ARGB8888);
         if (d->img[pl] == EGL_NO_IMAGE)
             return -1;
         g->gl.GenRenderbuffers(1, &d->rb[pl]);
@@ -770,55 +803,46 @@ int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
 
 static const GLfloat FS_TRI[6] = { -1.f, -1.f, 3.f, -1.f, -1.f, 3.f };
 
-/* Draw one pass over every tile: `pass` selects the plane (0 Y, 1 U,
- * 2 V), which fixes the program, the output geometry and the number of
- * raw rows one output row consumes. */
+/* Draw one pass over every tile: `pass` selects the plane (0 Y, 1 CbCr),
+ * which fixes the program, the output height and the number of texture
+ * rows one output row steps over. Both planes are ow bytes (ow/4 texels)
+ * wide. The coefficients follow VS_SRC: at output texel tx (p.x = tx +
+ * 0.5) column a is raw texel 2tx, or half - 1 - 2tx under the mirror,
+ * and column b the next one over (the previous one under the mirror);
+ * at output row ty the pass reads texture row ty (Y) or 2ty (CbCr). */
 static void draw_pass(gpu_debayer_t *g, int idx, struct dst *d, int pass)
 {
     const int ow = g->raw_w / 2, oh = g->raw_h / 2;
-    const int out_w = (pass == 0 ? ow : ow / 2) / 4;
+    const int out_w = ow / 4;
     const int out_h = pass == 0 ? oh : oh / 2;
-    const int rows_per = pass == 0 ? 2 : 4;   /* raw rows per output row */
-    GLuint prog = pass == 0 ? g->prog_y : g->prog_c;
-    GLint a_pos = pass == 0 ? g->y_a_pos : g->c_a_pos;
+    const int rows_per = pass == 0 ? 1 : 2;   /* texture rows per output row */
+    const GLfloat tw = (GLfloat)(g->raw_w / 2);     /* texture width */
+    const GLfloat half = (GLfloat)(g->raw_w / 4);   /* texels per raw row */
+    const GLfloat th = (GLfloat)g->tile_h;
 
-    g->gl.UseProgram(prog);
+    g->gl.UseProgram(g->prog[pass]);
     g->gl.BindFramebuffer(GL_FRAMEBUFFER, d->fbo[pass]);
     g->gl.Viewport(0, 0, out_w, out_h);
-    g->gl.VertexAttribPointer((GLuint)a_pos, 2, GL_FLOAT, GL_FALSE, 0,
-                              FS_TRI);
-    g->gl.EnableVertexAttribArray((GLuint)a_pos);
-    if (pass == 0) {
-        g->gl.Uniform2f(g->y_u_texsz, 1.f / (GLfloat)(g->raw_w / 2),
-                        1.f / (GLfloat)g->tile_h);
-        g->gl.Uniform1f(g->y_u_ow, (GLfloat)ow);
-        g->gl.Uniform1f(g->y_u_flip, (GLfloat)g->hflip);
-    } else {
-        g->gl.Uniform2f(g->c_u_texsz, 1.f / (GLfloat)(g->raw_w / 2),
-                        1.f / (GLfloat)g->tile_h);
-        g->gl.Uniform1f(g->c_u_ow, (GLfloat)ow);
-        g->gl.Uniform1f(g->c_u_flip, (GLfloat)g->hflip);
-        static const GLfloat coef[2][3] = {
-            { -0.169f, -0.331f,  0.500f },      /* Cb */
-            {  0.500f, -0.419f, -0.081f },      /* Cr */
-        };
-        const GLfloat *c = coef[pass - 1];
-        g->gl.Uniform3f(g->c_u_coef, c[0], c[1], c[2]);
-        g->gl.Uniform1f(g->c_u_off, 128.f / 255.f);
-    }
+    g->gl.VertexAttribPointer((GLuint)g->a_pos[pass], 2, GL_FLOAT, GL_FALSE,
+                              0, FS_TRI);
+    g->gl.EnableVertexAttribArray((GLuint)g->a_pos[pass]);
+    g->gl.Uniform2f(g->u_out[pass], (GLfloat)out_w, (GLfloat)out_h);
+    if (g->hflip)
+        g->gl.Uniform4f(g->u_u[pass], -2.f / tw, (half + 0.5f) / tw,
+                        (half - 0.5f) / tw, half / tw);
+    else
+        g->gl.Uniform4f(g->u_u[pass], 2.f / tw, -0.5f / tw, 0.5f / tw,
+                        half / tw);
 
-    if (g->tiles == 1) {
-        g->gl.Uniform1f(pass == 0 ? g->y_u_rowbase : g->c_u_rowbase, 0.f);
-        g->gl.BindTexture(GL_TEXTURE_2D, g->raw_tex[idx][0]);
-        g->gl.DrawArrays(GL_TRIANGLES, 0, 3);
-        return;
-    }
     g->gl.Enable(GL_SCISSOR_TEST);
     for (int t = 0; t < g->tiles; t++) {
+        GLfloat rowbase = (GLfloat)(t * g->tile_h);
+        if (pass == 0)
+            g->gl.Uniform2f(g->u_v[pass], 1.f / th, -rowbase / th);
+        else
+            g->gl.Uniform2f(g->u_v[pass], 2.f / th, (-0.5f - rowbase) / th);
         int y0 = t * g->tile_h / rows_per;
         g->gl.Scissor(0, y0, out_w, g->tile_h / rows_per);
-        g->gl.Uniform1f(pass == 0 ? g->y_u_rowbase : g->c_u_rowbase,
-                        (GLfloat)(t * g->tile_h));
         g->gl.BindTexture(GL_TEXTURE_2D, g->raw_tex[idx][t]);
         g->gl.DrawArrays(GL_TRIANGLES, 0, 3);
     }
@@ -832,20 +856,33 @@ int gpu_debayer_kick(gpu_debayer_t *g, int idx, int slot)
         !g->dst[slot].attached || g->fence[slot])
         return -1;
 
-    /* FORGECTRL_GPU_PASSES limits the draws (1 = Y only, 2 = +U): a
-     * bench diagnostic for attributing render time, never for serving
+    /* FORGECTRL_GPU_PASSES=1 draws the luma pass alone: a bench
+     * diagnostic for attributing render time, never for serving
      * pictures. */
     static int npass = -1;
     if (npass < 0) {
         const char *v = getenv("FORGECTRL_GPU_PASSES");
-        npass = v ? atoi(v) : 3;
-        if (npass < 1 || npass > 3)
-            npass = 3;
+        npass = v ? atoi(v) : 2;
+        if (npass < 1 || npass > 2)
+            npass = 2;
     }
     g->gl.ActiveTexture(GL_TEXTURE0);
     for (int pass = 0; pass < npass; pass++)
         draw_pass(g, idx, &g->dst[slot], pass);
-    if (g->fences_ok) {
+    if (g->native_ok) {
+        /* The native fence's file descriptor exists once the commands
+         * are flushed; a stack that then refuses it still has the
+         * fence to wait on. */
+        static const EGLint none[] = { EGL_NONE };
+        g->fence[slot] = g->egl.CreateSyncKHR(g->dpy,
+                                              EGL_SYNC_NATIVE_FENCE_ANDROID,
+                                              none);
+        g->gl.Flush();
+        if (g->fence[slot]) {
+            int fd = g->egl.DupNativeFenceFDANDROID(g->dpy, g->fence[slot]);
+            g->fence_fd[slot] = fd >= 0 ? fd : -1;
+        }
+    } else if (g->fences_ok) {
         g->fence[slot] = g->egl.CreateSyncKHR(g->dpy, EGL_SYNC_FENCE_KHR,
                                               NULL);
         g->gl.Flush();
@@ -857,10 +894,21 @@ int gpu_debayer_kick(gpu_debayer_t *g, int idx, int slot)
     return 0;
 }
 
+int gpu_debayer_fence_fd(gpu_debayer_t *g, int slot)
+{
+    if (slot < 0 || slot >= MAX_DST_SLOTS)
+        return -1;
+    return g->fence_fd[slot];
+}
+
 int gpu_debayer_wait(gpu_debayer_t *g, int slot)
 {
     if (g->dead || slot < 0 || slot >= MAX_DST_SLOTS)
         return -1;
+    if (g->fence_fd[slot] >= 0) {
+        close(g->fence_fd[slot]);
+        g->fence_fd[slot] = -1;
+    }
     if (g->fence[slot]) {
         /* A render that has not signaled in five seconds is a hung GPU:
          * the instance is dead and the caller falls back to the CPU

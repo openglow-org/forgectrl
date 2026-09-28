@@ -238,18 +238,41 @@ static int read_position(double *x, double *y, double *z, int *homed,
  * regulatory 2-pin lockout loop) reads ACTIVE only when the loop is
  * open. Basic/Plus machines ship it factory-jumpered, so the bit stays
  * inactive there = satisfied; Pro brings the connector out for an
- * external lockout chain. */
+ * external lockout chain.
+ *
+ * One fd serves every caller. EVIOCGSW copies the device's switch
+ * state, not the client's, and every close of an evdev client waits out
+ * an RCU grace period (evdev_detach_client() -> synchronize_rcu(), about
+ * 30 ms on the board), which a per-call open paid on every read: the
+ * camera worker's lid check once a frame, the events stream every tick.
+ * The fd is kept only after a read succeeds. A failed read on it drops
+ * it and reads once more through a fresh open, so every answer is the
+ * one a per-call open gave: 0 bits on any failure. */
+static pthread_mutex_t sw_mu = PTHREAD_MUTEX_INITIALIZER;
+static int sw_fd = -1;
+
 static unsigned long read_switches(void)
 {
-    unsigned long bits = 0;
-    int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK);
-    if (fd < 0)
-        return 0;
     uint8_t buf[2] = {0};
-    if (ioctl(fd, EVIOCGSW(sizeof(buf)), buf) >= 0)
-        bits = buf[0] | ((unsigned long)buf[1] << 8);
-    close(fd);
-    return bits;
+    pthread_mutex_lock(&sw_mu);
+    int ok = sw_fd >= 0 && ioctl(sw_fd, EVIOCGSW(sizeof(buf)), buf) >= 0;
+    if (!ok) {
+        if (sw_fd >= 0) {
+            close(sw_fd);
+            sw_fd = -1;
+        }
+        memset(buf, 0, sizeof(buf));
+        int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) {
+            ok = ioctl(fd, EVIOCGSW(sizeof(buf)), buf) >= 0;
+            if (ok)
+                sw_fd = fd;
+            else
+                close(fd);
+        }
+    }
+    pthread_mutex_unlock(&sw_mu);
+    return ok ? (buf[0] | ((unsigned long)buf[1] << 8)) : 0;
 }
 
 unsigned long machine_switch_bits(void)

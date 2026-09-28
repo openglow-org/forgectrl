@@ -1597,7 +1597,10 @@ class Mock:
                 'stream': {'width': 1296, 'height': 972},
                 'snapshot': {'width': 2592, 'height': 1944},
                 'h264': {'active': False, 'clients': 0},
-                'health': {'captured': 0, 'corrupt': 0, 'restarts': 0},
+                'health': {'captured': 0, 'corrupt': 0, 'restarts': 0,
+                           'withheld': 0},
+                'timing': {'latency_ms': 0.0, 'convert_ms': 0.0,
+                           'copy_ms': 0.0, 'encode_ms': 0.0, 'skipped': 0},
                 'capture_allowed': self.status['switches']['lid'],
                 'stopped_by_lid': False}
 

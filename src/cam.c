@@ -49,6 +49,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/videodev2.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -263,6 +264,11 @@ static struct {
     uint64_t        frames;         /* dequeued */
     uint64_t        corrupt;        /* of those, flagged errored */
     unsigned        recoveries;     /* stream restarts */
+    uint64_t        withheld;       /* unpublished: a neighbor was flagged */
+    uint64_t        skipped;        /* passed over for a newer frame */
+
+    /* Per-stage means for /cam/status, refreshed with the fps window. */
+    double          t_latency, t_convert, t_copy, t_encode;
 
     /* config */
     int             stream_quality;
@@ -317,18 +323,132 @@ static ipu_copy_t *ipu;
 static int gpu_disabled;
 static int hw_skip_disabled;
 
-/* The GPU pipeline's in-flight frame (worker thread only): the IPU
- * source slot being rendered, the capture buffer held out of the queue
- * for it, and its timestamp. Reset wherever the GPU is torn down - the
- * buffers it refers to go back to the queue through STREAMOFF or the
- * teardown paths, never through a stale delivery. */
-static int pend_slot = -1;
-static unsigned pend_idx;
-static uint64_t pend_pts;
+/* Consecutive hard failures of each encoder in this engine run; three
+ * drop that encoder until the next engine start. */
+static int vpu_hard_fails, h264_hard_fails;
+
+/* The FORGECTRL_NO_VPU / _NO_H264 / _NO_GPU switches. Every engine start
+ * probes the hardware paths again from these, not from zero, so a
+ * switch holds for the daemon's lifetime. */
+static int env_no_vpu, env_no_h264, env_no_gpu;
+
+/* The FORGECTRL_GPU_CHECK / _NEON_CHECK one-shot bench comparisons. */
+static int gpu_check, neon_check;
+
+/* FORGECTRL_FLAG_EVERY=N flags every Nth dequeued frame the way the
+ * receiver flags a torn one: a bench drill for the frame gate and the
+ * health ladder, never for serving pictures. */
+static unsigned flag_every, flag_count;
 
 /* FORGECTRL_NO_CACHED_BUFS: never request non-coherent capture buffers
  * (forces the uncached-mmap + bounce-copy path). */
 static int cached_disabled;
+
+/* Whether the next engine start expects the GPU to demosaic the stream;
+ * the capture buffers follow it. When the GPU reads a frame over its
+ * dmabuf nothing on the CPU does, so the buffers are requested
+ * coherent: a non-coherent buffer is cache-maintained over its whole
+ * 5 MB at every queue and dequeue, and the dequeue side runs in the
+ * receiver's end-of-frame interrupt, with every other interrupt held
+ * off for its duration (4.5 ms a frame on the bench reference). When the
+ * CPU demosaics instead, the cached mapping is what makes its reads
+ * fast, so a GPU that failed or never came up makes the next start ask
+ * for cached buffers. A snapshot on coherent buffers takes the bounce
+ * copy (prepare_raw8), tens of milliseconds against a still's seconds.
+ * Per-buffer cache hints are no alternative: this kernel's vb2 keeps a
+ * hint for good once it is set on a buffer, so a buffer the stream
+ * hinted would hand a later snapshot stale cache lines. */
+static int gpu_expect = 1;
+
+/* ------------------------------------------------ stream frame pipeline */
+
+/* A stream frame goes: dequeued -> produced into the encoders' OUTPUT
+ * buffers (the GPU render then the IPU crop, or the NEON demosaic) ->
+ * JPEG encoded -> published, but only once the frame dequeued after it
+ * came back clean. The receiver flags the next buffer to complete after
+ * it reports lost sync (imx-media-csi's NFB4EOF), which need not be the
+ * buffer holding the torn frame. So a flagged frame withholds both its
+ * neighbors, and waiting for the next frame's verdict costs only the
+ * part of a frame period the pipeline does not already spend. H.264
+ * encodes at publication, because a frame it has encoded cannot be
+ * taken back.
+ *
+ * On the GPU path the render's completion is a file descriptor the
+ * worker polls beside the capture queue. A frame goes into the GPU the
+ * moment it arrives and the GPU is free; the finished render is then
+ * cropped and encoded while the worker waits, after any frame that came
+ * in meanwhile has gone into the GPU. The render, the crop and the
+ * encode together fit in a frame period. The two IPU source slots
+ * alternate.
+ *
+ * Capture buffers out of the queue at once: the one in the GPU render,
+ * the newest one waiting for the encoders (an older one goes straight
+ * back, so a frame is never served stale), and a snapshot candidate
+ * waiting for its own verdict. Worker thread only; teardowns reset it,
+ * because STREAMOFF takes every buffer back. */
+struct pframe {
+    int      valid;
+    unsigned idx;       /* capture buffer */
+    uint64_t ts_ns;     /* end of its capture, CLOCK_MONOTONIC */
+};
+
+static struct {
+    struct pframe nxt;          /* dequeued, waiting for the encoders */
+    struct pframe rnd;          /* in the GPU render */
+    int      rnd_slot;          /* the IPU source slot it renders into */
+    int      rnd_vetoed;        /* a neighbor came back flagged */
+    int      rnd_confirmed;     /* a clean frame came back after it */
+    uint64_t rnd_kick_ns;
+    int      slot_next;
+    /* rendered, waiting in its IPU source slot for the crop */
+    struct {
+        int      valid;
+        int      slot;
+        uint64_t ts_ns;
+        int      vetoed;
+        int      confirmed;
+        int      raw_held;      /* the one-shot GPU check still reads it */
+        unsigned raw_idx;
+    } done;
+    struct pframe snap;         /* snapshot candidate awaiting its verdict */
+    int      taint;             /* the next clean frame follows a flagged one */
+    /* produced and encoded, waiting for the next frame's verdict */
+    int      held;
+    uint64_t held_ts;
+    uint8_t *held_jpg;
+    size_t   held_len;
+    int      held_vpu;          /* the JPEG came from the VPU */
+    int      held_gpu;          /* the picture came from the GPU */
+    int      held_h264;         /* the picture waits in the H.264 encoder */
+    int      held_ok;           /* a clean frame came back after it */
+    int      qbuf_failed;
+    /* the fps and per-stage window */
+    struct timespec win_t0;
+    unsigned win_frames;
+    unsigned warm;              /* frames still left out of the stage means */
+    double   s_lat, s_conv, s_copy, s_enc;
+    unsigned n_lat, n_conv, n_copy, n_enc;
+} strm;
+
+static void strm_drop_held(void)
+{
+    free(strm.held_jpg);
+    strm.held_jpg = NULL;
+    strm.held = 0;
+    strm.held_h264 = 0;
+    strm.held_ok = 0;
+}
+
+/* Forget the frames in flight without queueing them: the caller is about
+ * to STREAMOFF, which takes every buffer back, and has closed or settled
+ * the GPU. */
+static void strm_reset(void)
+{
+    strm.done.valid = 0;
+    strm_drop_held();
+    strm.nxt.valid = strm.rnd.valid = strm.snap.valid = 0;
+    strm.taint = 0;
+}
 
 /* ------------------------------------------------------------------ util */
 
@@ -811,7 +931,7 @@ static void release_capture(void)
         gpu_debayer_close(gpu);
         gpu = NULL;
     }
-    pend_slot = -1;
+    strm_reset();
     if (eng.streaming) {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         xioctl(eng.fd, VIDIOC_STREAMOFF, &type);
@@ -960,26 +1080,30 @@ static int start_capture(cam_id_t cam, int head_open, char *err, size_t errlen)
     req.count = N_BUFS;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
-    /* Ask for non-coherent = CPU-cached mappings: the CSI DMA-writes the
-     * frames either way, but a cached mapping lets the demosaic read them
-     * at cached speed (vb2 invalidates the CPU cache during DQBUF). A
-     * capture queue without cache-hint support ignores the flag and omits
-     * the MMAP_CACHE_HINTS capability; the bounce-copy path covers that. */
-    if (!cached_disabled)
+    /* Non-coherent = CPU-cached mappings when the CPU is to demosaic the
+     * stream: the CSI DMA-writes the frames either way, but a cached
+     * mapping lets the demosaic read them at cached speed (vb2
+     * invalidates the CPU cache as each frame completes). Coherent ones
+     * when the GPU is (see gpu_expect). A capture queue without
+     * cache-hint support ignores the flag and omits the
+     * MMAP_CACHE_HINTS capability; the bounce-copy path covers that. */
+    int want_cached = !cached_disabled && !(gpu_expect && !env_no_gpu);
+    if (want_cached)
         req.flags = V4L2_MEMORY_FLAG_NON_COHERENT;
     if (xioctl(eng.fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
         snprintf(err, errlen, "REQBUFS: %s (device busy?)", strerror(errno));
         release_capture();
         return -1;
     }
-    int cached = !cached_disabled &&
+    int cached = want_cached &&
         (req.capabilities & V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS) != 0;
     pthread_mutex_lock(&eng.lock);
     eng.cached_bufs = cached;
     pthread_mutex_unlock(&eng.lock);
     fflog(LOG_INFO, "cam: %s on %s, %dx%d %s, capture buffers %s",
           p->model, c->name, p->w, p->h, p->mbus,
-          cached ? "cached (non-coherent)" : "uncached (bounce copy)");
+          cached ? "cached (non-coherent)" :
+          want_cached ? "uncached (bounce copy)" : "coherent (GPU path)");
 
     for (eng.n_bufs = 0; eng.n_bufs < (int)req.count; eng.n_bufs++) {
         struct v4l2_buffer buf = {0};
@@ -1134,17 +1258,23 @@ static cam_frame_action_t classify(const struct v4l2_buffer *buf)
  * deliver_snap. Used by the borrow path. The first `skip` dequeued frames
  * are requeued unused (frames already in flight predate a just-changed lamp
  * level), as are the stream's warm-up frames and any frame the queue flags
- * errored. A borrow that cannot get a clean frame fails the snapshot rather
- * than restarting anything: the caller tears the borrowed pipeline down
- * either way. */
+ * errored. The chosen frame is delivered only once the frame after it
+ * comes back clean, and a flagged frame sends back the candidate before
+ * it and the frame after it (see the stream pipeline note). A borrow that
+ * cannot get a clean frame fails the snapshot rather than restarting
+ * anything: the caller tears the borrowed pipeline down either way. */
 static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
                          uint8_t **prgb_full, size_t *prgb_full_cap,
                          int skip)
 {
-    /* Enough iterations for the lamp drain, the warm-up drain and the bad
-     * frames the ladder tolerates, plus MAX_DQ_TIMEOUTS empty waits. */
-    int budget = skip + CAM_WARMUP_FRAMES + CAM_MAX_BAD_FRAMES +
+    /* Enough iterations for the lamp drain, the warm-up drain, the bad
+     * frames the ladder tolerates and the frames that vouch for a
+     * candidate, plus MAX_DQ_TIMEOUTS empty waits. */
+    int budget = skip + CAM_WARMUP_FRAMES + 2 * CAM_MAX_BAD_FRAMES + 2 +
                  MAX_DQ_TIMEOUTS;
+    int cand = -1;      /* the chosen frame, awaiting the next one's verdict */
+    int taint = 0;
+    int rc = -1;
 
     for (int tries = 0; tries < MAX_DQ_TIMEOUTS && budget-- > 0; tries++) {
         fd_set fds;
@@ -1164,37 +1294,75 @@ static int grab_one_snap(uint8_t *raw_cached, uint8_t *rgb_half,
         if (xioctl(eng.fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN || errno == EIO)
                 continue;
-            return -1;
+            break;
         }
         cam_frame_action_t act = classify(&buf);
         if (act == CAM_FRAME_RESTART || act == CAM_FRAME_ABORT) {
             xioctl(eng.fd, VIDIOC_QBUF, &buf);
-            return -1;
+            break;
         }
-        if (act != CAM_FRAME_USE) {     /* WARMUP or DROP */
-            tries--;
+        tries--;
+        if (act == CAM_FRAME_DROP) {
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            if (cand >= 0) {
+                struct v4l2_buffer cb = {0};
+                cb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                cb.memory = V4L2_MEMORY_MMAP;
+                cb.index = (unsigned)cand;
+                xioctl(eng.fd, VIDIOC_QBUF, &cb);
+                cand = -1;
+            }
+            taint = 1;
+            continue;
+        }
+        /* A clean frame: a warm-up one, or the one after a flagged
+         * frame, goes back unused. */
+        if (act == CAM_FRAME_WARMUP || taint) {
+            taint = 0;
             xioctl(eng.fd, VIDIOC_QBUF, &buf);
             continue;
+        }
+        if (cand >= 0) {
+            /* This clean frame vouches for the candidate. */
+            deliver_snap(prepare_raw8(eng.bufs[cand].start, raw_cached,
+                                      eng.prof),
+                         rgb_half, prgb_full, prgb_full_cap);
+            xioctl(eng.fd, VIDIOC_QBUF, &buf);
+            rc = 0;
+            break;
         }
         if (skip > 0) {
             skip--;
-            tries--;
             xioctl(eng.fd, VIDIOC_QBUF, &buf);
             continue;
         }
-        deliver_snap(prepare_raw8(eng.bufs[buf.index].start, raw_cached,
-                                  eng.prof),
-                     rgb_half, prgb_full, prgb_full_cap);
-        xioctl(eng.fd, VIDIOC_QBUF, &buf);
-        return 0;
+        cand = (int)buf.index;
     }
-    return -1;
+    if (cand >= 0) {
+        struct v4l2_buffer cb = {0};
+        cb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        cb.memory = V4L2_MEMORY_MMAP;
+        cb.index = (unsigned)cand;
+        xioctl(eng.fd, VIDIOC_QBUF, &cb);
+    }
+    return rc;
 }
 
 /* ---------------------------------------------- stream encoder plumbing */
 
 /* Geometry the encoder set (worker thread only). */
 static int enc_w, enc_h;
+
+/* Drop the H.264 path for this engine run. Its viewers read the flag
+ * under the engine lock and end their streams. */
+static void h264_off(void)
+{
+    pthread_mutex_lock(&eng.lock);
+    h264_disabled = 1;
+    eng.h264_up = 0;
+    pthread_cond_broadcast(&eng.h264_cv);
+    pthread_mutex_unlock(&eng.lock);
+}
 
 /* Open (or re-open, on a geometry change) whichever encoders the current
  * clients need, and the GPU demosaic that feeds them. Every piece fails
@@ -1220,7 +1388,6 @@ static void ensure_encoders(int jpeg_want, int h264_want,
             ipu_copy_close(ipu);
             ipu = NULL;
         }
-        pend_slot = -1;
         pthread_mutex_lock(&h264_params_mx);
         mp4mux_free(h264_params);
         h264_params = NULL;
@@ -1231,6 +1398,7 @@ static void ensure_encoders(int jpeg_want, int h264_want,
 
     if (jpeg_want && !vpu_disabled && !vpu) {
         vpu = vpu_jpeg_open(half_w, half_h, eng.stream_quality);
+        strm.warm = 2;
         if (!vpu) {
             vpu_disabled = 1;
             fflog(LOG_WARNING, "cam: no VPU JPEG encoder, "
@@ -1240,10 +1408,11 @@ static void ensure_encoders(int jpeg_want, int h264_want,
     if (h264_want && !h264_disabled && !h264) {
         int fps = eng.fps_cap >= 1.0 ? (int)(eng.fps_cap + 0.5)
                                      : eng.prof->fps;
+        strm.warm = 2;
         h264 = vpu_h264_open(half_w, half_h, fps, eng.h264_kbps * 1000,
                              eng.h264_gop);
         if (!h264) {
-            h264_disabled = 1;
+            h264_off();
             fflog(LOG_WARNING, "cam: no H.264 encoder, the stream "
                   "stays MJPEG only");
         } else {
@@ -1256,17 +1425,20 @@ static void ensure_encoders(int jpeg_want, int h264_want,
 
     if (!gpu_disabled && !gpu && (vpu || h264)) {
         if (!ipu)
-            ipu = ipu_copy_open(ipu_copy_src_width(half_w), half_w,
-                                half_h);
+            ipu = ipu_copy_open(ipu_copy_src_width(half_w),
+                                ipu_copy_src_height(half_h), half_w, half_h);
         if (!ipu) {
             gpu_disabled = 1;
+            gpu_expect = 0;
             fflog(LOG_INFO, "cam: no IPU stride-fix crop, using the "
                   "NEON path");
             return;
         }
         gpu = gpu_debayer_open(eng.prof->w, eng.prof->h, hflip);
+        strm.warm = 2;
         if (!gpu) {
             gpu_disabled = 1;
+            gpu_expect = 0;
             fflog(LOG_INFO, "cam: no GPU demosaic, using the NEON path");
             return;
         }
@@ -1290,16 +1462,20 @@ static void ensure_encoders(int jpeg_want, int h264_want,
         }
         for (int i = 0; ok && i < IPU_COPY_SRCS; i++) {
             int stride;
-            size_t len;
-            int fd = ipu_copy_src_dmabuf(ipu, i, &stride, &len);
+            size_t uv_off, len;
+            int fd = ipu_copy_src_dmabuf(ipu, i, &stride, &uv_off, &len);
             ok = fd >= 0 &&
-                 gpu_debayer_attach_dst(gpu, i, fd, stride, len) == 0;
+                 gpu_debayer_attach_dst(gpu, i, fd, stride, uv_off,
+                                        len) == 0;
         }
         if (!ok) {
             gpu_debayer_close(gpu);
             gpu = NULL;
             gpu_disabled = 1;
+            gpu_expect = 0;
             fflog(LOG_INFO, "cam: GPU import failed, using the NEON path");
+        } else {
+            gpu_expect = 1;
         }
     }
 }
@@ -1310,13 +1486,12 @@ static void ensure_encoders(int jpeg_want, int h264_want,
  * anything beyond a couple of counts means the shader indexing is wrong
  * on this GPU. Reads the write-combine encoder buffer, so it is slow and
  * runs once. */
+static int gpu_checked;
+
 static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
                            int hflip, vpu_jpeg_t *v, int slot)
 {
-    static int done;
-    if (done || !getenv("FORGECTRL_GPU_CHECK"))
-        return;
-    done = 1;
+    gpu_checked = 1;
 
     uint8_t *gy, *gu, *gv;
     int ys, uvs;
@@ -1362,8 +1537,8 @@ static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
         const uint8_t *src = ipu ? ipu_copy_src_map(ipu, slot) : NULL;
         if (src) {
             int sstride;
-            size_t slen;
-            ipu_copy_src_dmabuf(ipu, slot, &sstride, &slen);
+            size_t suv, slen;
+            ipu_copy_src_dmabuf(ipu, slot, &sstride, &suv, &slen);
             const uint8_t *pre = src + (size_t)(oh - 1) * sstride;
             const uint8_t *post = gy + (size_t)(oh - 1) * ys;
             const uint8_t *ref = ry + (size_t)(oh - 1) * ys;
@@ -1385,9 +1560,476 @@ static void gpu_check_once(const uint8_t *raw, int raw_w, int raw_h,
     free(rv);
 }
 
+static uint64_t mono_ns(void)
+{
+    struct timespec t;
+    now_ts(&t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* The end of a frame's capture: the receiver stamps it at the frame's
+ * end-of-frame interrupt, on CLOCK_MONOTONIC. */
+static uint64_t buf_ts_ns(const struct v4l2_buffer *b)
+{
+    return (uint64_t)b->timestamp.tv_sec * 1000000000ull +
+           (uint64_t)b->timestamp.tv_usec * 1000ull;
+}
+
+static void requeue(unsigned idx)
+{
+    struct v4l2_buffer b = {0};
+    b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    b.memory = V4L2_MEMORY_MMAP;
+    b.index = idx;
+    if (xioctl(eng.fd, VIDIOC_QBUF, &b) < 0) {
+        fflog(LOG_ERR, "cam: QBUF: %s", strerror(errno));
+        strm.qbuf_failed = 1;
+    }
+}
+
+static void count_up(uint64_t *ctr)
+{
+    pthread_mutex_lock(&eng.lock);
+    (*ctr)++;
+    pthread_mutex_unlock(&eng.lock);
+}
+
+/* One stage time into the window's mean. The first frames after the
+ * worker starts or an encoder or the GPU opens are left out (strm.warm):
+ * their times include the bring-up, not the pipeline's steady state. */
+static void stat_add(double *sum, unsigned *n, uint64_t t0, uint64_t t1)
+{
+    if (!strm.warm && t1 >= t0) {
+        *sum += (double)(t1 - t0) / 1e6;
+        (*n)++;
+    }
+}
+
+/* The GPU path failed: close it, give back the capture buffer it held,
+ * and have the next engine start ask for cached buffers again. */
+static void gpu_fail(const char *why)
+{
+    if (strm.done.valid && strm.done.raw_held)
+        requeue(strm.done.raw_idx);
+    strm.done.valid = 0;
+    gpu_debayer_close(gpu);     /* waits any pending fence */
+    gpu = NULL;
+    ipu_copy_close(ipu);
+    ipu = NULL;
+    gpu_disabled = 1;
+    gpu_expect = 0;
+    if (strm.rnd.valid) {
+        requeue(strm.rnd.idx);
+        strm.rnd.valid = 0;
+    }
+    fflog(LOG_WARNING, "cam: GPU pipeline failed (%s), falling back to "
+          "the NEON path", why);
+}
+
+/* Encode the picture in the VPU JPEG encoder. NULL for a frame it
+ * flagged (a single bad frame keeps the VPU) or a hard failure; three of
+ * those in a row fall back to software for this engine run. */
+static uint8_t *vpu_encode_jpeg(size_t *len)
+{
+    uint8_t *jpg = NULL;
+    int rc = vpu_jpeg_encode(vpu, &jpg, len);
+    if (rc >= 0) {
+        vpu_hard_fails = 0;
+        return rc == 0 ? jpg : NULL;
+    }
+    if (++vpu_hard_fails >= 3) {
+        fflog(LOG_WARNING, "cam: repeated VPU encode failures, falling "
+              "back to software");
+        vpu_jpeg_close(vpu);
+        vpu = NULL;
+        vpu_disabled = 1;
+    }
+    return NULL;
+}
+
+/* Encode the picture waiting in the H.264 encoder and publish it. */
+static void h264_emit(uint64_t ts_ns)
+{
+    pthread_mutex_lock(&eng.lock);
+    int want_key = eng.h264_key_req;
+    eng.h264_key_req = 0;
+    pthread_mutex_unlock(&eng.lock);
+    if (want_key)
+        vpu_h264_force_key(h264);
+
+    uint8_t *au = NULL;
+    size_t aulen = 0;
+    int key = 0;
+    int rc = vpu_h264_encode(h264, &au, &aulen, &key);
+    if (rc == 0) {
+        h264_hard_fails = 0;
+        pthread_mutex_lock(&h264_params_mx);
+        if (h264_params)
+            mp4mux_feed_params(h264_params, au, aulen);
+        pthread_mutex_unlock(&h264_params_mx);
+        pthread_mutex_lock(&eng.lock);
+        free(eng.h264_au);
+        eng.h264_au = au;
+        eng.h264_len = aulen;
+        eng.h264_key = key;
+        eng.h264_pts = ts_ns * 9u / 100000u;    /* 90 kHz */
+        eng.h264_seq++;
+        eng.h264_up = 1;
+        pthread_cond_broadcast(&eng.h264_cv);
+        pthread_mutex_unlock(&eng.lock);
+    } else if (rc < 0) {
+        if (want_key) {
+            pthread_mutex_lock(&eng.lock);
+            eng.h264_key_req = 1;   /* not consumed */
+            pthread_mutex_unlock(&eng.lock);
+        }
+        if (++h264_hard_fails >= 3) {
+            fflog(LOG_WARNING, "cam: repeated H.264 encode failures, "
+                  "dropping the H.264 stream");
+            vpu_h264_close(h264);
+            h264 = NULL;
+            h264_off();
+        }
+    }
+}
+
+/* Publish a produced frame: the JPEG (ownership passes) to the MJPEG
+ * viewers, and the picture waiting in the H.264 encoder, encoded now, to
+ * the H.264 ones. */
+static void publish(uint8_t *jpg, size_t len, int via_vpu, int gpu_made,
+                    int h264_pending, uint64_t ts_ns)
+{
+    if (h264_pending && h264)
+        h264_emit(ts_ns);
+    if (!jpg && !h264_pending) {
+        pthread_mutex_lock(&eng.lock);
+        eng.gpu_active = gpu_made;
+        pthread_mutex_unlock(&eng.lock);
+        return;
+    }
+    stat_add(&strm.s_lat, &strm.n_lat, ts_ns, mono_ns());
+    if (strm.warm)
+        strm.warm--;
+    strm.win_frames++;
+    struct timespec t;
+    now_ts(&t);
+    double dt = ts_diff(&t, &strm.win_t0);
+
+    pthread_mutex_lock(&eng.lock);
+    if (jpg) {
+        free(eng.stream_jpg);
+        eng.stream_jpg = jpg;
+        eng.stream_len = len;
+        eng.vpu_active = via_vpu;
+        eng.seq++;
+        pthread_cond_broadcast(&eng.frame_cv);
+    }
+    eng.gpu_active = gpu_made;
+    if (dt >= 2.0) {
+        eng.fps = (double)strm.win_frames / dt;
+        eng.t_latency = strm.n_lat ? strm.s_lat / strm.n_lat : 0;
+        eng.t_convert = strm.n_conv ? strm.s_conv / strm.n_conv : 0;
+        eng.t_copy = strm.n_copy ? strm.s_copy / strm.n_copy : 0;
+        eng.t_encode = strm.n_enc ? strm.s_enc / strm.n_enc : 0;
+        strm.win_frames = 0;
+        strm.s_lat = strm.s_conv = strm.s_copy = strm.s_enc = 0;
+        strm.n_lat = strm.n_conv = strm.n_copy = strm.n_enc = 0;
+        strm.win_t0 = t;
+    }
+    pthread_mutex_unlock(&eng.lock);
+}
+
+/* Publish the held frame (a clean frame vouched for it). */
+static void publish_held(void)
+{
+    uint8_t *jpg = strm.held_jpg;
+    strm.held_jpg = NULL;
+    strm.held = 0;
+    strm.held_ok = 0;
+    publish(jpg, strm.held_len, strm.held_vpu, strm.held_gpu,
+            strm.held_h264, strm.held_ts);
+    strm.held_h264 = 0;
+}
+
+/* Publish the held frame if a clean frame has vouched for it. This must
+ * come before the next frame is written into the encoders' buffers: the
+ * held frame's picture still waits in the H.264 encoder. */
+static void publish_vouched(void)
+{
+    if (strm.held && strm.held_ok)
+        publish_held();
+}
+
+/* Publish a produced frame now if the frame after it already came back
+ * clean, or hold it for that verdict. */
+static void hold_or_publish(uint8_t *jpg, size_t len, int via_vpu,
+                            int gpu_made, int h264_pending, uint64_t ts_ns,
+                            int confirmed)
+{
+    publish_vouched();
+    if (confirmed) {
+        publish(jpg, len, via_vpu, gpu_made, h264_pending, ts_ns);
+        return;
+    }
+    strm_drop_held();
+    strm.held = 1;
+    strm.held_ok = 0;
+    strm.held_ts = ts_ns;
+    strm.held_jpg = jpg;
+    strm.held_len = len;
+    strm.held_vpu = via_vpu;
+    strm.held_gpu = gpu_made;
+    strm.held_h264 = h264_pending;
+}
+
+/* A clean frame came back: the frames before it are whole. The held one
+ * is published by publish_vouched(), after a kick (so the H.264 encode
+ * that goes with a publication never delays a render) or before the
+ * encoders' buffers take the next picture, whichever comes first. */
+static void vouch_for_older(void)
+{
+    if (strm.held)
+        strm.held_ok = 1;
+    if (strm.done.valid && !strm.done.vetoed)
+        strm.done.confirmed = 1;
+    if (strm.rnd.valid && !strm.rnd_vetoed)
+        strm.rnd_confirmed = 1;
+}
+
+/* A flagged frame came back: nothing next to it is trusted. The held
+ * frame and the one waiting are dropped, the render in flight is dropped
+ * when it lands unless a clean frame already vouched for it, a snapshot
+ * candidate goes back, and the next clean frame is dropped too. */
+static void withhold_neighbors(void)
+{
+    if (strm.held && !strm.held_ok) {
+        strm_drop_held();
+        count_up(&eng.withheld);
+    }
+    if (strm.nxt.valid) {
+        requeue(strm.nxt.idx);
+        strm.nxt.valid = 0;
+        count_up(&eng.withheld);
+    }
+    if (strm.done.valid && !strm.done.confirmed)
+        strm.done.vetoed = 1;
+    if (strm.rnd.valid && !strm.rnd_confirmed)
+        strm.rnd_vetoed = 1;
+    if (strm.snap.valid) {
+        requeue(strm.snap.idx);
+        strm.snap.valid = 0;
+    }
+    strm.taint = 1;
+}
+
+/* The render in flight landed: its capture buffer goes back to the
+ * queue (after the one-shot GPU check has read it, when that is still
+ * to run), and the picture waits in its IPU source slot for the crop. */
+static void finish_render(void)
+{
+    struct pframe f = strm.rnd;
+    strm.rnd.valid = 0;
+    int rc = gpu_debayer_wait(gpu, strm.rnd_slot);
+    uint64_t t1 = mono_ns();
+    if (rc) {
+        gpu_fail("the render did not finish");
+        requeue(f.idx);
+        return;
+    }
+    stat_add(&strm.s_conv, &strm.n_conv, strm.rnd_kick_ns, t1);
+    strm.done.valid = 1;
+    strm.done.slot = strm.rnd_slot;
+    strm.done.ts_ns = f.ts_ns;
+    strm.done.vetoed = strm.rnd_vetoed;
+    strm.done.confirmed = strm.rnd_confirmed;
+    strm.done.raw_held = gpu_check && !gpu_checked;
+    strm.done.raw_idx = f.idx;
+    if (!strm.done.raw_held)
+        requeue(f.idx);
+}
+
+/* Crop the rendered picture into the wanted encoders, encode the JPEG,
+ * and publish the frame or hold it for the next frame's verdict; a
+ * render whose neighbor came back flagged is dropped instead. */
+static void deliver_render(int jpeg_want, int h264_want, uint8_t *raw_cached)
+{
+    int slot = strm.done.slot;
+    int confirmed = strm.done.confirmed;
+    int raw_held = strm.done.raw_held;
+    unsigned raw_idx = strm.done.raw_idx;
+    uint64_t ts_ns = strm.done.ts_ns;
+    int vetoed = strm.done.vetoed;
+    strm.done.valid = 0;
+    if (vetoed)
+        count_up(&eng.withheld);
+    if (vetoed || !(jpeg_want || h264_want) || !ipu) {
+        if (raw_held)
+            requeue(raw_idx);
+        return;
+    }
+
+    uint64_t t1 = mono_ns();
+    int jpeg_ok = 0, h264_ok = 0;
+    if (jpeg_want && vpu) {
+        int stride;
+        size_t len;
+        int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
+        jpeg_ok = fd >= 0 && ipu_copy_run(ipu, slot, fd, len) == 0;
+    }
+    if (h264_want && h264) {
+        int stride;
+        size_t len;
+        int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
+        h264_ok = fd >= 0 && ipu_copy_run(ipu, slot, fd, len) == 0;
+    }
+    uint64_t t2 = mono_ns();
+    if ((jpeg_want && vpu && !jpeg_ok) || (h264_want && h264 && !h264_ok)) {
+        if (raw_held)
+            requeue(raw_idx);
+        gpu_fail("the IPU crop failed");
+        return;
+    }
+    stat_add(&strm.s_copy, &strm.n_copy, t1, t2);
+    if (raw_held) {
+        if (jpeg_ok)
+            gpu_check_once(prepare_raw8(eng.bufs[raw_idx].start, raw_cached,
+                                        eng.prof),
+                           eng.prof->w, eng.prof->h, HFLIP, vpu, slot);
+        requeue(raw_idx);
+    }
+
+    uint8_t *jpg = NULL;
+    size_t len = 0;
+    if (jpeg_ok) {
+        jpg = vpu_encode_jpeg(&len);
+        if (jpg)
+            stat_add(&strm.s_enc, &strm.n_enc, t2, mono_ns());
+    }
+    hold_or_publish(jpg, len, jpg != NULL, 1, h264_ok, ts_ns, confirmed);
+}
+
+/* Finish the render in flight and, with no pollable fence (nothing then
+ * overlaps anyway), deliver it at once. */
+static void land_render(int jpeg_want, int h264_want, uint8_t *raw_cached,
+                        int deliver)
+{
+    if (strm.done.valid)
+        deliver_render(jpeg_want, h264_want, raw_cached);
+    finish_render();
+    if (deliver && strm.done.valid)
+        deliver_render(jpeg_want, h264_want, raw_cached);
+}
+
+/* Produce a frame on the CPU: demosaic into each wanted encoder (twice
+ * with both wanted - the GPU path is how that cost is meant to be paid),
+ * encode the JPEG, and hold the frame for the next one's verdict. H.264
+ * has no software fallback (the MJPEG stream is the fallback). */
+static void produce_cpu(struct pframe *f, int jpeg_want, int h264_want,
+                        uint8_t *raw_cached, uint8_t *rgb_half)
+{
+    const struct sensor_profile *p = eng.prof;
+    const int raw_w = p->w, raw_h = p->h;
+    const int half_w = raw_w / 2, half_h = raw_h / 2;
+    uint64_t t0 = mono_ns();
+    const uint8_t *raw = prepare_raw8(eng.bufs[f->idx].start, raw_cached, p);
+    uint8_t *jpg = NULL;
+    size_t len = 0;
+    int via_vpu = 0, h264_pending = 0;
+    uint64_t t1 = 0;
+
+    if (jpeg_want && vpu) {
+        uint8_t *yp, *up, *vp;
+        int ys, uvs;
+        vpu_jpeg_planes(vpu, &yp, &up, &vp, &ys, &uvs);
+        debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
+                                 yp, ys, up, vp, uvs);
+#ifdef __ARM_NEON
+        /* One-shot NEON-vs-scalar equivalence check on a live frame (the
+         * paths are constructed to be bit-identical; this proves it on
+         * real data). Stride == width here. */
+        static int neon_checked;
+        if (neon_check && !neon_checked) {
+            neon_checked = 1;
+            size_t ysz = (size_t)ys * half_h;
+            size_t usz = (size_t)uvs * (half_h / 2);
+            uint8_t *ry = malloc(ysz), *ru = malloc(usz), *rv = malloc(usz);
+            if (ry && ru && rv) {
+                debayer_bggr_half_yuv420_scalar(raw, raw_w, raw_h, HFLIP,
+                                                ry, ys, ru, rv, uvs);
+                fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
+                      (!memcmp(ry, yp, ysz) && !memcmp(ru, up, usz) &&
+                       !memcmp(rv, vp, usz)) ? "IDENTICAL" : "MISMATCH");
+            }
+            free(ry);
+            free(ru);
+            free(rv);
+        }
+#endif
+        t1 = mono_ns();
+        jpg = vpu_encode_jpeg(&len);
+        via_vpu = jpg != NULL;
+    }
+    if (jpeg_want && !vpu) {
+        debayer_bggr_half(raw, rgb_half, raw_w, raw_h, HFLIP);
+        t1 = mono_ns();
+        if (jpeg_encode_rgb(rgb_half, half_w, half_h, eng.stream_quality, 1,
+                            &jpg, &len))
+            jpg = NULL;
+    }
+    if (jpg) {
+        stat_add(&strm.s_conv, &strm.n_conv, t0, t1);
+        stat_add(&strm.s_enc, &strm.n_enc, t1, mono_ns());
+    }
+    if (h264_want && h264) {
+        uint8_t *yp, *up, *vp;
+        int ys, uvs;
+        vpu_h264_planes(h264, &yp, &up, &vp, &ys, &uvs);
+        debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
+                                 yp, ys, up, vp, uvs);
+        h264_pending = 1;
+    }
+    requeue(f->idx);
+    f->valid = 0;
+    hold_or_publish(jpg, len, via_vpu, 0, h264_pending, f->ts_ns, 0);
+}
+
+/* Feed the newest clean frame to the encoders: into the GPU when every
+ * wanted output has its hardware encoder (the render is finished when
+ * its fence signals), else through the CPU. A held frame a clean one
+ * vouched for is published first wherever the new frame reaches the
+ * encoders' buffers now; after a kick it is published once the render
+ * is under way (the caller), so the render never waits on it. */
+static void feed_frame(int jpeg_want, int h264_want, uint8_t *raw_cached,
+                       uint8_t *rgb_half)
+{
+    const struct sensor_profile *p = eng.prof;
+    ensure_encoders(jpeg_want, h264_want, p->w / 2, p->h / 2, HFLIP);
+    if (gpu && ipu && (!jpeg_want || vpu) && (!h264_want || h264)) {
+        int slot = strm.slot_next;
+        if (gpu_debayer_kick(gpu, (int)strm.nxt.idx, slot) == 0) {
+            strm.slot_next ^= 1;
+            strm.rnd = strm.nxt;
+            strm.nxt.valid = 0;
+            strm.rnd_slot = slot;
+            strm.rnd_vetoed = strm.rnd_confirmed = 0;
+            strm.rnd_kick_ns = mono_ns();
+            /* Without a pollable fence the render is finished now. */
+            if (gpu_debayer_fence_fd(gpu, slot) < 0) {
+                publish_vouched();
+                land_render(jpeg_want, h264_want, raw_cached, 1);
+            }
+            return;
+        }
+        gpu_fail("the render was refused");
+    }
+    publish_vouched();
+    produce_cpu(&strm.nxt, jpeg_want, h264_want, raw_cached, rgb_half);
+}
+
 static void *worker(void *arg)
 {
     (void)arg;
+    pthread_setname_np(pthread_self(), "cam-engine");
     /* Sized for the largest profile so a snapshot borrow of a
      * differently-modeled camera reuses them. */
     uint8_t *rgb_half = malloc(max_half_rgb_bytes());
@@ -1397,9 +2039,6 @@ static void *worker(void *arg)
      * for a 10-bit sensor and the bounce buffer for an 8-bit one on
      * uncached capture buffers (see prepare_raw8). */
     uint8_t *raw_cached = malloc(max_raw8_bytes());
-    double stat_dq_ms = 0, stat_copy_ms = 0, stat_conv_ms = 0,
-           stat_enc_ms = 0, stat_wait_ms = 0;
-    unsigned stat_n = 0;
     int dq_timeouts = 0;
     int lamp_skip = 0;      /* frames left to drain after a lamp override */
     int lamp_restore = -1;  /* engine lamp level to restore, -1 = none */
@@ -1407,9 +2046,10 @@ static void *worker(void *arg)
     /* FPS cap pacing (eng.fps_cap is set once at init) */
     double cap_period = eng.fps_cap > 0 ? 1.0 / eng.fps_cap : 0;
     double next_due = 0;
-    struct timespec fps_t0;
-    now_ts(&fps_t0);
-    uint64_t fps_frames = 0;
+    now_ts(&strm.win_t0);
+    strm.win_frames = 0;
+    strm.warm = 2;
+    strm.qbuf_failed = 0;
 
     if (!rgb_half || !raw_cached) {
         fflog(LOG_ERR, "cam: worker OOM");
@@ -1429,14 +2069,22 @@ static void *worker(void *arg)
         int snap_local = eng.snap_local;
         int open_ok = eng.cam == CAM_HEAD && eng.head_open_ok;
         int want_lamp = eng.stream_lamp >= 0 ? eng.stream_lamp : eng.lamp_level;
+        int h264_off_now = h264_disabled;
         cam_id_t borrow_cam = eng.snap_cam;
         cam_id_t orig_cam = eng.home_cam;
         int idle = clients == 0 && h264c == 0 && !snap && !borrow &&
                    ts_diff(&now, &eng.last_activity) > IDLE_STOP_S;
         pthread_mutex_unlock(&eng.lock);
 
-        if (stop || idle)
+        if (stop || idle || strm.qbuf_failed)
             break;
+
+        /* A snapshot candidate outlives no request: one given up or
+         * answered elsewhere goes back. */
+        if (!snap && strm.snap.valid) {
+            requeue(strm.snap.idx);
+            strm.snap.valid = 0;
+        }
 
         /* Privacy gate, re-checked every frame: a lid opened mid-capture
          * tears the pipeline down within one frame time, so streams end
@@ -1469,8 +2117,9 @@ static void *worker(void *arg)
         }
 
         /* Same-camera snapshot with a lamp override: relight, then let
-         * the in-flight frames drain before delivering; the engine level
-         * is restored after delivery (or if the requester gives up). */
+         * the in-flight frames drain before choosing one; the engine
+         * level is restored after delivery (or if the requester gives
+         * up). */
         if (snap && snap_lamp >= 0 && lamp_restore < 0) {
             sysfs_write_int(camdefs[orig_cam].lamp, snap_lamp);
             lamp_restore = lamp_applied;
@@ -1509,464 +2158,189 @@ static void *worker(void *arg)
             continue;
         }
 
-        /* Wait for a frame */
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(eng.fd, &fds);
-        struct timeval tv = { .tv_sec = DQ_TIMEOUT_S };
-        int r = select(eng.fd + 1, &fds, NULL, NULL, &tv);
-        if (r == -1 && errno == EINTR)
-            continue;
-        if (r <= 0) {
-            if (r == 0 && ++dq_timeouts >= MAX_DQ_TIMEOUTS) {
+        int jpeg_want = clients > 0;
+        int h264_want = h264c > 0 && !h264_off_now;
+
+        /* A render that has not landed in seconds is a hung GPU: the
+         * wait gives up on it and the path falls back. */
+        if (strm.rnd.valid && mono_ns() - strm.rnd_kick_ns > 3000000000ull)
+            land_render(jpeg_want, h264_want, raw_cached, 0);
+
+        /* Wait for a frame from the receiver or the render in flight. */
+        struct pollfd pf[2] = {
+            { .fd = eng.fd, .events = POLLIN },
+            { .fd = -1, .events = POLLIN },
+        };
+        if (strm.rnd.valid)
+            pf[1].fd = gpu_debayer_fence_fd(gpu, strm.rnd_slot);
+        int r = poll(pf, pf[1].fd >= 0 ? 2 : 1, DQ_TIMEOUT_S * 1000);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            fflog(LOG_ERR, "cam: poll: %s", strerror(errno));
+            break;
+        }
+        if (r == 0) {
+            if (++dq_timeouts >= MAX_DQ_TIMEOUTS) {
                 fflog(LOG_WARNING, "cam: %d consecutive frame timeouts, "
                       "stopping engine", dq_timeouts);
                 break;
             }
-            if (r == -1) {
-                fflog(LOG_ERR, "cam: select: %s", strerror(errno));
-                break;
-            }
             continue;
         }
 
-        struct v4l2_buffer buf = {0};
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        struct timespec c0, c1, c2;
-        now_ts(&c0);    /* select() said readable: DQBUF time is not frame
-                         * wait but the cache invalidate on cached buffers */
-        if (xioctl(eng.fd, VIDIOC_DQBUF, &buf) < 0) {
-            if (errno == EAGAIN || errno == EIO)
-                continue;
-            fflog(LOG_ERR, "cam: DQBUF: %s", strerror(errno));
-            break;
-        }
-        now_ts(&c1);
-        dq_timeouts = 0;
+        /* The render landed: finish it, so its capture buffer is back
+         * before the drain and the GPU is free for the next frame. */
+        if (pf[1].fd >= 0 && pf[1].revents && strm.rnd.valid)
+            land_render(jpeg_want, h264_want, raw_cached, 0);
 
-        /* An errored frame is short, torn or off-sync; demosaicing it would
-         * publish a corrupt image. The ladder drops it, cycles the queue if
-         * they keep coming, and gives up if cycling stops helping. */
-        cam_frame_action_t act = classify(&buf);
-        if (act != CAM_FRAME_USE) {
-            xioctl(eng.fd, VIDIOC_QBUF, &buf);
-            if (act == CAM_FRAME_WARMUP || act == CAM_FRAME_DROP)
-                continue;
-            if (act == CAM_FRAME_ABORT) {
-                fflog(LOG_ERR, "cam: corrupt frames persist after %d stream "
-                      "restarts, stopping engine", CAM_MAX_RECOVERIES);
+        /* Drain every finished frame, oldest first. */
+        int stop_engine = 0;
+        while (pf[0].revents) {
+            struct v4l2_buffer buf = {0};
+            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buf.memory = V4L2_MEMORY_MMAP;
+            if (xioctl(eng.fd, VIDIOC_DQBUF, &buf) < 0) {
+                if (errno == EAGAIN)
+                    break;
+                /* EIO: the queue is in error (an end-of-frame timeout);
+                 * only a fresh engine start clears that. */
+                if (errno == EIO && ++dq_timeouts < MAX_DQ_TIMEOUTS)
+                    break;
+                fflog(LOG_ERR, "cam: DQBUF: %s", strerror(errno));
+                stop_engine = 1;
                 break;
             }
-            /* A queue cycle requeues every buffer, including one held
-             * for an in-flight render: settle the render first so the
-             * pipeline restarts from empty. */
-            if (gpu && pend_slot >= 0) {
-                gpu_debayer_wait(gpu, pend_slot);
-                pend_slot = -1;
-            }
-            if (restream()) {
-                fflog(LOG_ERR, "cam: stream restart failed: %s",
-                      strerror(errno));
-                break;
-            }
-            pthread_mutex_lock(&eng.lock);
-            unsigned n = eng.recoveries;
-            uint64_t nbad = eng.corrupt, nall = eng.frames;
-            pthread_mutex_unlock(&eng.lock);
-            fflog(LOG_WARNING, "cam: corrupt frames, restarted the stream "
-                  "(%u restarts, %llu of %llu frames bad)", n,
-                  (unsigned long long)nbad, (unsigned long long)nall);
-            continue;
-        }
+            dq_timeouts = 0;
+            if (flag_every && ++flag_count % flag_every == 0)
+                buf.flags |= V4L2_BUF_FLAG_ERROR;
 
-        /* FPS cap: a frame arriving before the next due time is requeued
-         * without demosaic/encode (a pending snapshot still rides on it;
-         * the sensor keeps its own pace). When the CSI hardware skip is
-         * active the sensor-side rate already matches and this pacing
-         * passes everything through. */
-        int jpeg_want = clients > 0;
-        int h264_want = h264c > 0 && !h264_disabled;
-        int encode = jpeg_want || h264_want;
-        if (encode && cap_period > 0) {
-            double t = (double)c1.tv_sec + (double)c1.tv_nsec / 1e9;
-            if (t < next_due) {
-                encode = 0;
-            } else {
-                next_due += cap_period;
-                if (next_due <= t)      /* first frame or fell behind */
-                    next_due = t + cap_period;
+            /* An errored frame is short, torn or off-sync; demosaicing
+             * it would publish a corrupt image. The ladder drops it,
+             * cycles the queue if they keep coming, and gives up if
+             * cycling stops helping. */
+            cam_frame_action_t act = classify(&buf);
+            if (act == CAM_FRAME_WARMUP) {
+                strm.taint = 0;
+                requeue(buf.index);
+                continue;
             }
-        }
-
-        const struct sensor_profile *p = eng.prof;
-        const int raw_w = p->w, raw_h = p->h;
-        const int half_w = raw_w / 2, half_h = raw_h / 2;
-        /* The CPU-side raw view is produced only for consumers that read
-         * it (a snapshot, or a CPU demosaic); a GPU-converted stream
-         * frame reads the capture buffer over its dmabuf instead. */
-        const uint8_t *raw = NULL;
-        if (snap)
-            raw = prepare_raw8(eng.bufs[buf.index].start, raw_cached, p);
-        now_ts(&c2);
-
-        /* Snapshot request rides on the same raw frame (after any
-         * lamp-change drain) */
-        if (snap) {
-            if (lamp_skip > 0) {
-                lamp_skip--;
-            } else {
-                deliver_snap(raw, rgb_half, &rgb_full, &rgb_full_cap);
-                if (lamp_restore >= 0) {
-                    sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
-                    lamp_restore = -1;
+            if (act != CAM_FRAME_USE) {
+                withhold_neighbors();
+                requeue(buf.index);
+                if (act == CAM_FRAME_DROP)
+                    continue;
+                if (act == CAM_FRAME_ABORT) {
+                    fflog(LOG_ERR, "cam: corrupt frames persist after %d "
+                          "stream restarts, stopping engine",
+                          CAM_MAX_RECOVERIES);
+                    stop_engine = 1;
+                    break;
                 }
-            }
-        }
-
-        /* Stream frame: demosaic + encode. On the GPU path the two are
-         * pipelined: this frame's render is kicked behind a fence, and
-         * the PREVIOUS frame's finished render is copied to the
-         * encoders and published while the new one runs - the render
-         * overlaps the copies, the encodes and the next frame wait, so
-         * it alone paces the stream. The rendering frame's capture
-         * buffer is held out of the queue until its fence signals. On
-         * the CPU (NEON) path everything stays synchronous, and H.264
-         * has no software fallback (the MJPEG stream is the fallback).
-         * The pend_* state lives at file scope so teardowns reset it. */
-        int hold_buf = 0;
-        int want = jpeg_want || h264_want;
-
-        if (want || pend_slot >= 0) {
-            struct timespec e0, e1, e2;
-            now_ts(&e0);
-            if (want)
-                ensure_encoders(jpeg_want, h264_want, half_w, half_h,
-                                HFLIP);
-
-            int gpu_mode = gpu && ipu;
-            if (!gpu_mode)
-                pend_slot = -1;     /* a teardown recycled the buffers */
-
-            /* Collect the in-flight render: deliver it below, or drop
-             * it if its viewers are gone. The held capture buffer goes
-             * back to the queue as soon as the fence clears (drop) or
-             * after the encoders and diagnostics are done with the
-             * frame (deliver). */
-            int deliver_slot = -1;
-            unsigned deliver_raw = 0;
-            uint64_t deliver_pts = 0;
-            struct timespec g0, g1, g2;
-            now_ts(&g0);
-            if (gpu_mode && pend_slot >= 0) {
-                int wrc = gpu_debayer_wait(gpu, pend_slot);
-                if (wrc == 0 && want) {
-                    deliver_slot = pend_slot;
-                    deliver_raw = pend_idx;
-                    deliver_pts = pend_pts;
-                } else {
-                    struct v4l2_buffer rb = {0};
-                    rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    rb.memory = V4L2_MEMORY_MMAP;
-                    rb.index = pend_idx;
-                    xioctl(eng.fd, VIDIOC_QBUF, &rb);
-                    if (wrc != 0)
-                        gpu_mode = 0;
-                }
-                pend_slot = -1;
-            }
-            now_ts(&g1);
-
-            /* Kick this frame's render (`encode` carries the fps cap;
-             * a capped frame still delivered the previous one above). */
-            if (gpu_mode && encode) {
-                int slot = deliver_slot == 0 ? 1 : 0;
-                if (gpu_debayer_kick(gpu, (int)buf.index, slot) == 0) {
-                    pend_slot = slot;
-                    pend_idx = buf.index;
-                    pend_pts = (uint64_t)c1.tv_sec * 90000u +
-                               (uint64_t)c1.tv_nsec / 11111u;
-                    hold_buf = 1;
-                } else {
-                    gpu_mode = 0;
-                }
-            }
-
-            /* Copy the delivered render into each wanted encoder. */
-            int gpu_jpeg = 0, gpu_h264 = 0;
-            if (gpu_mode && deliver_slot >= 0) {
-                if (jpeg_want && vpu) {
-                    int stride;
-                    size_t len;
-                    int fd = vpu_jpeg_out_dmabuf(vpu, &stride, &len);
-                    gpu_jpeg = fd >= 0 &&
-                               ipu_copy_run(ipu, deliver_slot, fd,
-                                            len) == 0;
-                }
-                if (h264_want && h264) {
-                    int stride;
-                    size_t len;
-                    int fd = vpu_h264_out_dmabuf(h264, &stride, &len);
-                    gpu_h264 = fd >= 0 &&
-                               ipu_copy_run(ipu, deliver_slot, fd,
-                                            len) == 0;
-                }
-            }
-            now_ts(&g2);
-            if (gpu_mode) {
-                /* Fence-stall-versus-copy split: a stall near zero
-                 * means the render fully overlapped the rest. */
-                static double sms, cms;
-                static unsigned gn;
-                sms += ts_diff(&g1, &g0) * 1e3;
-                cms += ts_diff(&g2, &g1) * 1e3;
-                if (++gn >= 30) {
-                    if (getenv("FORGECTRL_GPU_CHECK"))
-                        fflog(LOG_DEBUG, "cam: gpu split: stall %.0f ms, "
-                              "kick+copy %.0f ms avg", sms / gn, cms / gn);
-                    sms = cms = 0;
-                    gn = 0;
-                }
-            }
-            int gpu_on = gpu_mode;
-            if ((gpu || ipu) &&
-                (!gpu_mode ||
-                 (deliver_slot >= 0 && ((jpeg_want && vpu && !gpu_jpeg) ||
-                                        (h264_want && h264 &&
-                                         !gpu_h264))))) {
-                gpu_debayer_close(gpu);     /* waits any pending fence */
-                gpu = NULL;
-                ipu_copy_close(ipu);
-                ipu = NULL;
-                gpu_disabled = 1;
-                gpu_jpeg = gpu_h264 = 0;
-                gpu_on = 0;
-                if (hold_buf) {
-                    struct v4l2_buffer rb = {0};
-                    rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                    rb.memory = V4L2_MEMORY_MMAP;
-                    rb.index = pend_idx;
-                    xioctl(eng.fd, VIDIOC_QBUF, &rb);
-                    hold_buf = 0;
-                    pend_slot = -1;
-                }
-                fflog(LOG_WARNING, "cam: GPU pipeline failed, "
-                      "falling back to the NEON path");
-            }
-            /* On the GPU path with nothing delivered (the pipeline's
-             * first frame), the encoders have no input this iteration. */
-            int feed_encoders = !gpu_on || deliver_slot >= 0;
-
-            /* ---- JPEG ---- */
-            uint8_t *jpg = NULL;
-            size_t len = 0;
-            int via_vpu = 0;
-            static int vpu_hard_fails;
-            int vpu_rc = -1;
-            if (feed_encoders && jpeg_want && vpu) {
-                if (!gpu_jpeg) {
-                    uint8_t *yp, *up, *vp;
-                    int ys, uvs;
-                    vpu_jpeg_planes(vpu, &yp, &up, &vp, &ys, &uvs);
-                    if (!raw)
-                        raw = prepare_raw8(eng.bufs[buf.index].start,
-                                           raw_cached, p);
-                    debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
-                                             yp, ys, up, vp, uvs);
-#ifdef __ARM_NEON
-                    /* One-shot NEON-vs-scalar equivalence check on a live
-                     * frame (the paths are constructed to be bit-identical;
-                     * this proves it on real data). Stride == width here. */
-                    static int neon_checked;
-                    if (!neon_checked && getenv("FORGECTRL_NEON_CHECK")) {
-                        neon_checked = 1;
-                        size_t ysz = (size_t)ys * half_h;
-                        size_t usz = (size_t)uvs * (half_h / 2);
-                        uint8_t *ry = malloc(ysz);
-                        uint8_t *ru = malloc(usz);
-                        uint8_t *rv = malloc(usz);
-                        if (ry && ru && rv) {
-                            debayer_bggr_half_yuv420_scalar(raw, raw_w,
-                                                            raw_h, HFLIP,
-                                                            ry, ys,
-                                                            ru, rv, uvs);
-                            fflog(LOG_DEBUG, "cam: NEON/scalar compare: %s",
-                                  (!memcmp(ry, yp, ysz) &&
-                                     !memcmp(ru, up, usz) &&
-                                     !memcmp(rv, vp, usz))
-                                  ? "IDENTICAL" : "MISMATCH");
-                        }
-                        free(ry);
-                        free(ru);
-                        free(rv);
-                    }
-#endif
-                } else if (getenv("FORGECTRL_GPU_CHECK")) {
-                    /* The encoder holds the DELIVERED frame; compare it
-                     * against that frame's raw (still held). */
-                    gpu_check_once(prepare_raw8(eng.bufs[deliver_raw].start,
-                                                raw_cached, p),
-                                   raw_w, raw_h, HFLIP, vpu, deliver_slot);
-                }
-                now_ts(&e1);
-                vpu_rc = vpu_jpeg_encode(vpu, &jpg, &len);
-                if (vpu_rc == 0) {
-                    via_vpu = 1;
-                    vpu_hard_fails = 0;
-                } else if (vpu_rc > 0) {
-                    /* transient errored frame (e.g. bitstream overflow
-                     * on a noise frame): drop it, keep the VPU */
-                    vpu_hard_fails = 0;
-                } else if (++vpu_hard_fails >= 3) {
-                    fflog(LOG_WARNING, "cam: repeated VPU encode failures, "
-                          "falling back to software");
-                    vpu_jpeg_close(vpu);
-                    vpu = NULL;
-                    vpu_disabled = 1;
-                }
-            }
-            if (feed_encoders && jpeg_want && !via_vpu && vpu_rc < 0) {
-                if (!raw)
-                    raw = prepare_raw8(eng.bufs[buf.index].start,
-                                       raw_cached, p);
-                debayer_bggr_half(raw, rgb_half, raw_w, raw_h, HFLIP);
-                now_ts(&e1);
-                if (jpeg_encode_rgb(rgb_half, half_w, half_h,
-                                    eng.stream_quality, 1, &jpg, &len))
-                    jpg = NULL;
-            }
-            now_ts(&e2);
-
-            /* ---- H.264 ---- */
-            if (feed_encoders && h264_want && h264) {
-                if (!gpu_h264) {
-                    uint8_t *yp, *up, *vp;
-                    int ys, uvs;
-                    vpu_h264_planes(h264, &yp, &up, &vp, &ys, &uvs);
-                    if (!raw)
-                        raw = prepare_raw8(eng.bufs[buf.index].start,
-                                           raw_cached, p);
-                    /* With both stream types on the CPU path this is a
-                     * second demosaic of the same frame; the GPU path is
-                     * how that cost is meant to be paid. */
-                    debayer_bggr_half_yuv420(raw, raw_w, raw_h, HFLIP,
-                                             yp, ys, up, vp, uvs);
-                }
-                pthread_mutex_lock(&eng.lock);
-                int want_key = eng.h264_key_req;
-                eng.h264_key_req = 0;
-                pthread_mutex_unlock(&eng.lock);
-                if (want_key)
-                    vpu_h264_force_key(h264);
-
-                uint8_t *au = NULL;
-                size_t aulen = 0;
-                int key = 0;
-                static int h264_hard_fails;
-                int rc = vpu_h264_encode(h264, &au, &aulen, &key);
-                if (rc == 0) {
-                    h264_hard_fails = 0;
-                    pthread_mutex_lock(&h264_params_mx);
-                    if (h264_params)
-                        mp4mux_feed_params(h264_params, au, aulen);
-                    pthread_mutex_unlock(&h264_params_mx);
-                    pthread_mutex_lock(&eng.lock);
-                    free(eng.h264_au);
-                    eng.h264_au = au;
-                    eng.h264_len = aulen;
-                    eng.h264_key = key;
-                    eng.h264_pts = gpu_h264 ? deliver_pts
-                                            : (uint64_t)c1.tv_sec * 90000u +
-                                              (uint64_t)c1.tv_nsec / 11111u;
-                    eng.h264_seq++;
-                    eng.h264_up = 1;
-                    eng.gpu_active = gpu_jpeg || gpu_h264;
-                    pthread_cond_broadcast(&eng.h264_cv);
-                    pthread_mutex_unlock(&eng.lock);
-                } else if (rc < 0) {
-                    if (want_key) {
-                        pthread_mutex_lock(&eng.lock);
-                        eng.h264_key_req = 1;   /* not consumed */
-                        pthread_mutex_unlock(&eng.lock);
-                    }
-                    if (++h264_hard_fails >= 3) {
-                        fflog(LOG_WARNING, "cam: repeated H.264 encode "
-                              "failures, dropping the H.264 stream");
-                        vpu_h264_close(h264);
-                        h264 = NULL;
-                        h264_disabled = 1;
-                        pthread_mutex_lock(&eng.lock);
-                        eng.h264_up = 0;
-                        pthread_cond_broadcast(&eng.h264_cv);
-                        pthread_mutex_unlock(&eng.lock);
-                    }
-                }
-            }
-
-            /* The delivered frame's capture buffer goes back now: the
-             * encoders and the diagnostics are done reading it. */
-            if (deliver_slot >= 0) {
-                struct v4l2_buffer rb = {0};
-                rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                rb.memory = V4L2_MEMORY_MMAP;
-                rb.index = deliver_raw;
-                if (xioctl(eng.fd, VIDIOC_QBUF, &rb) < 0)
-                    fflog(LOG_ERR, "cam: delivered-frame QBUF: %s",
+                /* A queue cycle requeues every buffer, including one
+                 * held for a render or the GPU check: settle the render
+                 * first so the pipeline restarts from empty. */
+                if (strm.rnd.valid)
+                    gpu_debayer_wait(gpu, strm.rnd_slot);
+                strm_reset();
+                if (restream()) {
+                    fflog(LOG_ERR, "cam: stream restart failed: %s",
                           strerror(errno));
-            }
-
-            if (jpg) {
-                stat_wait_ms += ts_diff(&c0, &now) * 1e3;
-                stat_dq_ms += ts_diff(&c1, &c0) * 1e3;
-                stat_copy_ms += ts_diff(&c2, &c1) * 1e3;
-                stat_conv_ms += ts_diff(&e1, &e0) * 1e3;
-                stat_enc_ms += ts_diff(&e2, &e1) * 1e3;
-                /* ~every 11 min of streaming, not every ~7 s: LightBurn
-                 * keeps a stream open for whole sessions, and /data is
-                 * the persistent partition settings and updates live on.
-                 * Under the GPU diagnostic env the cadence tightens so a
-                 * bench drill sees the split without waiting. */
-                if (++stat_n >= (getenv("FORGECTRL_GPU_CHECK") ? 30u
-                                                               : 10000u)) {
-                    fflog(LOG_DEBUG, "cam: stream stats: wait %.0f ms, "
-                          "dqbuf %.0f ms, copy %.0f ms, convert %.0f ms, "
-                          "encode %.0f ms avg (%s, %s)",
-                          stat_wait_ms / stat_n,
-                          stat_dq_ms / stat_n, stat_copy_ms / stat_n,
-                          stat_conv_ms / stat_n, stat_enc_ms / stat_n,
-                          via_vpu ? "vpu" : "software",
-                          eng.cached_bufs ? "cached" : "uncached");
-                    stat_dq_ms = stat_copy_ms = stat_conv_ms = 0;
-                    stat_enc_ms = stat_wait_ms = 0;
-                    stat_n = 0;
+                    stop_engine = 1;
+                    break;
                 }
                 pthread_mutex_lock(&eng.lock);
-                free(eng.stream_jpg);
-                eng.stream_jpg = jpg;
-                eng.stream_len = len;
-                eng.vpu_active = via_vpu;
-                eng.gpu_active = gpu_jpeg || gpu_h264;
-                eng.seq++;
-                fps_frames++;
-                struct timespec t;
-                now_ts(&t);
-                double dt = ts_diff(&t, &fps_t0);
-                if (dt >= 2.0) {
-                    eng.fps = (double)fps_frames / dt;
-                    fps_frames = 0;
-                    fps_t0 = t;
-                }
-                pthread_cond_broadcast(&eng.frame_cv);
+                unsigned n = eng.recoveries;
+                uint64_t nbad = eng.corrupt, nall = eng.frames;
                 pthread_mutex_unlock(&eng.lock);
+                fflog(LOG_WARNING, "cam: corrupt frames, restarted the "
+                      "stream (%u restarts, %llu of %llu frames bad)", n,
+                      (unsigned long long)nbad, (unsigned long long)nall);
+                break;
+            }
+
+            /* A clean frame. The one right after a flagged frame is not
+             * trusted either; any other vouches for the frames before
+             * it. */
+            if (strm.taint) {
+                strm.taint = 0;
+                requeue(buf.index);
+                count_up(&eng.withheld);
+                continue;
+            }
+            vouch_for_older();
+            struct pframe f = { 1, buf.index, buf_ts_ns(&buf) };
+
+            /* A same-camera snapshot rides on the stream's frames: after
+             * any lamp drain a frame becomes the candidate, and the next
+             * clean frame vouches for it. */
+            if (snap) {
+                if (strm.snap.valid) {
+                    deliver_snap(prepare_raw8(eng.bufs[strm.snap.idx].start,
+                                              raw_cached, eng.prof),
+                                 rgb_half, &rgb_full, &rgb_full_cap);
+                    requeue(strm.snap.idx);
+                    strm.snap.valid = 0;
+                    snap = 0;
+                    if (lamp_restore >= 0) {
+                        sysfs_write_int(camdefs[orig_cam].lamp,
+                                        lamp_restore);
+                        lamp_restore = -1;
+                    }
+                } else if (lamp_skip > 0) {
+                    lamp_skip--;
+                } else {
+                    strm.snap = f;
+                    if (strm.nxt.valid) {
+                        requeue(strm.nxt.idx);
+                        strm.nxt.valid = 0;
+                    }
+                    continue;
+                }
+            }
+
+            /* The newest clean frame is the stream's next one; an older
+             * one still waiting goes back, so no frame is served stale. */
+            if (strm.nxt.valid) {
+                requeue(strm.nxt.idx);
+                count_up(&eng.skipped);
+            }
+            strm.nxt = f;
+        }
+        if (stop_engine)
+            break;
+
+        /* Feed the newest frame to the encoders once the GPU is free.
+         * The fps cap passes over a frame that arrives before its due
+         * time (the sensor keeps its own pace); with the CSI hardware
+         * skip active the rates already match and nothing is passed
+         * over. */
+        if (strm.nxt.valid && !strm.rnd.valid) {
+            double t = (double)strm.nxt.ts_ns / 1e9;
+            int due = 1;
+            if (cap_period > 0) {
+                if (t < next_due) {
+                    due = 0;
+                } else {
+                    next_due += cap_period;
+                    if (next_due <= t)      /* first frame or fell behind */
+                        next_due = t + cap_period;
+                }
+            }
+            if (due && (jpeg_want || h264_want)) {
+                feed_frame(jpeg_want, h264_want, raw_cached, rgb_half);
+            } else {
+                requeue(strm.nxt.idx);
+                strm.nxt.valid = 0;
             }
         }
 
-        /* A frame whose render is in flight stays out of the queue; it
-         * goes back when its fence clears on a later iteration. */
-        if (!hold_buf && xioctl(eng.fd, VIDIOC_QBUF, &buf) < 0) {
-            fflog(LOG_ERR, "cam: QBUF: %s", strerror(errno));
-            break;
-        }
+        /* Crop and encode the render the GPU finished (after the feed,
+         * so a frame that came in meanwhile is already rendering), and
+         * publish a held frame a clean one vouched for. */
+        if (strm.done.valid)
+            deliver_render(jpeg_want, h264_want, raw_cached);
+        publish_vouched();
     }
 
 out:
@@ -2066,7 +2440,12 @@ static int ensure_engine(cam_id_t cam, int local, char *err, size_t errlen)
         /* Every engine start probes the hardware paths again: one
          * transient VPU, H.264 or GPU failure must not demote the stream
          * to the CPU paths for the daemon's lifetime. */
-        vpu_disabled = h264_disabled = gpu_disabled = 0;
+        pthread_mutex_lock(&eng.lock);
+        vpu_disabled = env_no_vpu;
+        h264_disabled = env_no_h264;
+        gpu_disabled = env_no_gpu;
+        pthread_mutex_unlock(&eng.lock);
+        vpu_hard_fails = h264_hard_fails = 0;
         if (start_capture(cam, local, err, errlen))
             return -1;
         pthread_mutex_lock(&eng.lock);
@@ -2126,12 +2505,13 @@ void cam_engine_init(void)
         if (gp >= 1 && gp <= 300)
             eng.h264_gop = gp;
     }
-    if (getenv("FORGECTRL_NO_VPU"))
-        vpu_disabled = 1;
-    if (getenv("FORGECTRL_NO_H264"))
-        h264_disabled = 1;
-    if (getenv("FORGECTRL_NO_GPU"))
-        gpu_disabled = 1;
+    vpu_disabled = env_no_vpu = getenv("FORGECTRL_NO_VPU") != NULL;
+    h264_disabled = env_no_h264 = getenv("FORGECTRL_NO_H264") != NULL;
+    gpu_disabled = env_no_gpu = getenv("FORGECTRL_NO_GPU") != NULL;
+    gpu_check = getenv("FORGECTRL_GPU_CHECK") != NULL;
+    neon_check = getenv("FORGECTRL_NEON_CHECK") != NULL;
+    if ((v = getenv("FORGECTRL_FLAG_EVERY")) != NULL && atoi(v) >= 2)
+        flag_every = (unsigned)atoi(v);
     if (getenv("FORGECTRL_NO_HW_SKIP"))
         hw_skip_disabled = 1;
     if (getenv("FORGECTRL_NO_CACHED_BUFS"))
@@ -2523,6 +2903,13 @@ void cam_get_status(struct cam_status *st)
     st->frames = eng.frames;
     st->corrupt = eng.corrupt;
     st->recoveries = eng.recoveries;
+    st->withheld = eng.withheld;
+    st->skipped = eng.skipped;
+    int live = eng.running && (eng.clients + eng.h264_clients) > 0;
+    st->latency_ms = live ? eng.t_latency : 0;
+    st->convert_ms = live ? eng.t_convert : 0;
+    st->copy_ms = live ? eng.t_copy : 0;
+    st->encode_ms = live ? eng.t_encode : 0;
     pthread_mutex_unlock(&eng.lock);
     /* Read outside the lock: it opens a device, and nothing else here
      * depends on it being sampled at the same instant as the counters. */

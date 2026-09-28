@@ -5,11 +5,12 @@
  * SPDX-License-Identifier: MIT
  *
  * V4L2 mem2mem against the mainline imx-csc-scaler (the IPU IC's
- * post-processing task): one MMAP buffer on the OUTPUT (source) queue,
- * exported as the GPU's render target, and a caller dmabuf on the
- * CAPTURE queue each run. Both sides are YUV420 at the same height and
- * colorimetry, so the IC copies rather than converts; the source crop
- * rectangle drops the GPU's alignment columns. The node is found by
+ * post-processing task): MMAP buffers on the OUTPUT (source) queue,
+ * exported as the GPU's render targets, and a caller dmabuf on the
+ * CAPTURE queue each run. The source is NV12 and the destination planar
+ * YUV420, at the same geometry and colorimetry, so the IC repacks the
+ * chroma rather than converting anything; the source crop rectangle
+ * drops the GPU's alignment columns and rows. The node is found by
  * driver name, never by number.
  */
 #include "ipu_copy.h"
@@ -30,7 +31,7 @@
 
 struct ipu_copy {
     int      fd;
-    int      src_w, w, h;
+    int      src_w, src_h, w, h;
     int      n_src;
     int      src_dmabuf[IPU_COPY_SRCS];
     size_t   src_len;
@@ -69,16 +70,18 @@ static int find_scaler(void)
     return -1;
 }
 
-static int set_fmt(int fd, enum v4l2_buf_type type, int w, int h)
+static int set_fmt(int fd, enum v4l2_buf_type type, int w, int h,
+                   uint32_t fourcc)
 {
     struct v4l2_format f = { .type = type };
     f.fmt.pix.width = (unsigned)w;
     f.fmt.pix.height = (unsigned)h;
-    f.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+    f.fmt.pix.pixelformat = fourcc;
     f.fmt.pix.field = V4L2_FIELD_NONE;
     f.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
     if (xioctl(fd, VIDIOC_S_FMT, &f) < 0 ||
         f.fmt.pix.width != (unsigned)w || f.fmt.pix.height != (unsigned)h ||
+        f.fmt.pix.pixelformat != fourcc ||
         f.fmt.pix.bytesperline != (unsigned)w) {
         fflog(LOG_INFO, "ipu: S_FMT %dx%d refused (got %ux%u stride %u)",
               w, h, f.fmt.pix.width, f.fmt.pix.height,
@@ -88,7 +91,7 @@ static int set_fmt(int fd, enum v4l2_buf_type type, int w, int h)
     return 0;
 }
 
-ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
+ipu_copy_t *ipu_copy_open(int src_w, int src_h, int w, int h)
 {
     ipu_copy_t *c = calloc(1, sizeof(*c));
     if (!c)
@@ -96,6 +99,7 @@ ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
     for (int i = 0; i < IPU_COPY_SRCS; i++)
         c->src_dmabuf[i] = -1;
     c->src_w = src_w;
+    c->src_h = src_h;
     c->w = w;
     c->h = h;
     c->fd = find_scaler();
@@ -104,8 +108,9 @@ ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
         goto fail;
     }
 
-    if (set_fmt(c->fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, src_w, h) ||
-        set_fmt(c->fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, w, h))
+    if (set_fmt(c->fd, V4L2_BUF_TYPE_VIDEO_OUTPUT, src_w, src_h,
+                V4L2_PIX_FMT_NV12) ||
+        set_fmt(c->fd, V4L2_BUF_TYPE_VIDEO_CAPTURE, w, h, V4L2_PIX_FMT_YUV420))
         goto fail;
 
     struct v4l2_selection sel = {
@@ -172,8 +177,8 @@ ipu_copy_t *ipu_copy_open(int src_w, int w, int h)
     if (xioctl(c->fd, VIDIOC_STREAMON, &t) < 0)
         goto fail;
 
-    fflog(LOG_INFO, "ipu: stride-fix crop up, %dx%d -> %dx%d",
-          src_w, h, w, h);
+    fflog(LOG_INFO, "ipu: stride-fix crop up, NV12 %dx%d -> YUV420 %dx%d",
+          src_w, src_h, w, h);
     return c;
 
 fail:
@@ -181,11 +186,13 @@ fail:
     return NULL;
 }
 
-int ipu_copy_src_dmabuf(ipu_copy_t *c, int i, int *stride, size_t *len)
+int ipu_copy_src_dmabuf(ipu_copy_t *c, int i, int *stride,
+                        size_t *uv_offset, size_t *len)
 {
     if (i < 0 || i >= c->n_src)
         return -1;
     *stride = c->src_w;
+    *uv_offset = (size_t)c->src_w * c->src_h;
     *len = c->src_len;
     return c->src_dmabuf[i];
 }

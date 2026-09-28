@@ -4,9 +4,9 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * Renders the superpixel half-resolution BGGR -> YUV420 conversion (the
- * same semantics as debayer_bggr_half_yuv420) as GLES2 fragment-shader
- * passes, reading the raw frame and writing the encoder's planar YUV420
+ * Renders the superpixel half-resolution BGGR -> YUV 4:2:0 conversion
+ * (the same semantics as debayer_bggr_half_yuv420) as GLES2
+ * fragment-shader passes, reading the raw frame and writing an NV12
  * buffer through dmabufs, so the CPU never touches frame data.
  *
  * The GL stack is loaded with dlopen at runtime (libEGL.so.1 /
@@ -40,28 +40,34 @@ void gpu_debayer_close(gpu_debayer_t *g);
  * copy. Returns 0, or -1 with the reason logged. */
 int gpu_debayer_attach_raw(gpu_debayer_t *g, int idx, int fd);
 
-/* Import a planar YUV420 destination (dmabuf) under slot `slot` (0..1):
- * a buffer of the half-resolution geometry, Y plane of y_stride bytes
- * per row at offset 0, then U and V planes of y_stride / 2 bytes per
- * row. The GPU writes rows padded to 64 bytes, so y_stride must be a
- * multiple of 128 (ipu_copy_src_width) and the encoders are fed through
- * the IPU crop (ipu_copy.h) rather than directly. Returns 0, or -1 with
- * the reason logged. */
+/* Import an NV12 destination (dmabuf) under slot `slot` (0..1): a luma
+ * plane of the half-resolution geometry, `stride` bytes per row at
+ * offset 0, and the interleaved CbCr plane (half the rows, the same
+ * stride) at `uv_offset`. The GPU writes rows padded to 64 bytes and may
+ * land whole groups of 8 rows, so `stride` must be a multiple of 64 and
+ * each plane needs room for its rows rounded up to 8; the encoders' own
+ * stride never meets that, so they are fed through the IPU crop
+ * (ipu_copy.h). Returns 0, or -1 with the reason logged. */
 int gpu_debayer_attach_dst(gpu_debayer_t *g, int slot, int fd,
-                           int y_stride, size_t buf_len);
+                           int stride, size_t uv_offset, size_t buf_len);
 
 /* Start converting raw slot `idx` into destination slot `slot` and
  * return without waiting: the draws are submitted behind a fence, so
- * the caller can overlap the render with other work (the previous
- * frame's copies and encodes) and collect it with gpu_debayer_wait.
- * The raw buffer must stay untouched until the wait returns. Returns
- * 0, or -1 with the reason logged; after a failure the instance is
- * dead and the caller falls back to the CPU path. */
+ * the caller can overlap the render with other work and collect it with
+ * gpu_debayer_wait. The raw buffer must stay untouched until the wait
+ * returns. Returns 0, or -1 with the reason logged; after a failure the
+ * instance is dead and the caller falls back to the CPU path. */
 int gpu_debayer_kick(gpu_debayer_t *g, int idx, int slot);
 
+/* A file descriptor that polls readable once the render kicked into
+ * `slot` has landed, or -1 when the stack offers none (then only the
+ * wait says so). Owned by this module and valid until the wait. */
+int gpu_debayer_fence_fd(gpu_debayer_t *g, int slot);
+
 /* Block until the render kicked into `slot` has fully landed in its
- * destination buffer. Without the fence extension this is a full
- * pipeline drain (correct, just unoverlapped). Returns 0 or -1. */
+ * destination buffer, and release its fence. Without the fence
+ * extension this is a full pipeline drain (correct, just unoverlapped).
+ * Returns 0 or -1. */
 int gpu_debayer_wait(gpu_debayer_t *g, int slot);
 
 #endif
