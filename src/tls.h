@@ -14,6 +14,9 @@ int tls_init(void);
 /* The PEM texts for the listener; NULL until tls_init() succeeded. */
 const char *tls_key_pem(void);
 const char *tls_cert_pem(void);
+/* The GnuTLS priority string for the listener: the server's cipher
+ * order wins, and the cipher that costs the board least comes first. */
+const char *tls_priorities(void);
 /* The certificate's SHA-256 fingerprint, colon-separated uppercase hex,
  * for the welcome screen and the System tab; "" when unavailable. */
 const char *tls_fingerprint(void);

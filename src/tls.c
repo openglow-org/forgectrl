@@ -23,6 +23,18 @@
  * attacker who presents a certificate of their own; the fingerprint
  * on the panel's Setup card and the /cert page is the check
  * for that.
+ *
+ * The cipher is the server's choice, not the client's: a browser on a
+ * CPU with AES instructions lists AES-GCM first, and the board's
+ * Cortex-A9 has none. ChaCha20-Poly1305 comes first because it costs the
+ * board least. The image seals the records in the kernel (kernel TLS:
+ * GnuTLS hands each connection's keys to the socket after the
+ * handshake), where ChaCha20 runs in NEON and AES-GCM runs its AES on
+ * the CAAM crypto engine with the GHASH in NEON; on the bench reference
+ * ChaCha20-Poly1305 cost the least there, and in GnuTLS alone as well.
+ * AES-GCM follows for the clients that lack ChaCha20, then the rest of
+ * GnuTLS's NORMAL set, so every client that connected before still
+ * connects.
  */
 #define _GNU_SOURCE
 #include "tls.h"
@@ -41,6 +53,12 @@
 #include <unistd.h>
 
 #define VALID_DAYS 820              /* under the 825-day leaf limit */
+
+/* NORMAL's protocols, key exchanges, and signatures; its ciphers,
+ * reordered, with the server's order deciding. */
+#define PRIORITIES "NORMAL:%SERVER_PRECEDENCE:-CIPHER-ALL:+CHACHA20-POLY1305:" \
+                   "+AES-128-GCM:+AES-256-GCM:+AES-256-CCM:+AES-128-CCM:"      \
+                   "+AES-256-CBC:+AES-128-CBC"
 
 static char *key_pem, *cert_pem;
 static char fingerprint[3 * 32];
@@ -324,6 +342,11 @@ const char *tls_key_pem(void)
 const char *tls_cert_pem(void)
 {
     return cert_pem;
+}
+
+const char *tls_priorities(void)
+{
+    return PRIORITIES;
 }
 
 const char *tls_fingerprint(void)

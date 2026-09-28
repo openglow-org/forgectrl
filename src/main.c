@@ -3629,8 +3629,9 @@ int main(int argc, char **argv)
     }
     fflog(LOG_NOTICE, "listening on port %u", port);
     if (have_tls) {
-        /* The same options plus the key and the certificate; TLS is
-         * libmicrohttpd's, whatever ulfius was built with. */
+        /* The same options plus the key, the certificate, and the
+         * cipher order (tls.c); TLS is libmicrohttpd's, whatever ulfius
+         * was built with. */
         struct MHD_OptionItem tls_ops[] = {
             { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
             { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
@@ -3639,6 +3640,7 @@ int main(int argc, char **argv)
             { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
             { MHD_OPTION_HTTPS_MEM_KEY, 0, (void *)tls_key_pem() },
             { MHD_OPTION_HTTPS_MEM_CERT, 0, (void *)tls_cert_pem() },
+            { MHD_OPTION_HTTPS_PRIORITIES, 0, (void *)tls_priorities() },
             { MHD_OPTION_END, 0, NULL },
         };
         if (ulfius_start_framework_with_mhd_options(&tls, mhd_flags | MHD_USE_TLS,
