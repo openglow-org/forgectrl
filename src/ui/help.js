@@ -174,7 +174,8 @@ var HELP = {
     d: 'usage/cooling-and-fans/',
     p: [
       'While a job runs, each fan is held to its floor (the exhaust, the intakes and the air assist by tachometer, the purge fan by its current) once the spin-up grace has passed; three seconds under a floor is a fault that holds the job with no resume.',
-      'The floors were measured at the cut fan profile, so a fan is judged while the laser is armed or whenever it is commanded at that profile; a cloud hunt, which runs with its extraction fans off, is measured but not judged.'
+      'The floors were measured at the cut fan profile, so a fan is judged while the laser is armed or whenever it is commanded at that profile; a cloud hunt, which runs with its extraction fans off, is measured but not judged.',
+      'Some machines are built with one intake fan. The setup finds it and sets Intake fans to One; the second intake is then not checked.'
     ]
   },
   identity: {

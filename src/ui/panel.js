@@ -86,6 +86,7 @@ var CK = [
   'cool_cooldown_max_s',
   'cool_tach_exhaust_min_rpm',
   'cool_tach_intake_min_rpm',
+  'cool_intake_fans',
   'cool_tach_air_assist_min_rpm',
   'cool_purge_min_current',
   'cool_fan_grace_s'
@@ -1316,7 +1317,9 @@ function renderCooling() {
     g += txt('Air assist', rpm(M.fans.air_assist));
     g += txt('Exhaust', rpm(M.fans.exhaust));
     g += txt('Intake 1', rpm(M.fans.intake_1));
-    g += txt('Intake 2', rpm(M.fans.intake_2));
+    g += S.cool_intake_fans === '1'
+      ? txt('Intake 2', 'not fitted', 'b-dim')
+      : txt('Intake 2', rpm(M.fans.intake_2));
   }
   $('cooling').innerHTML = g;
 }
@@ -1458,6 +1461,7 @@ function fill(force) {
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('cool_tec_present', S.cool_tec_present || '0');
+  setF('cool_intake_fans', S.cool_intake_fans || '2');
   setF('lid_policy', S.lid_policy || 'cancel');
   setF('xy_microsteps', S.xy_microsteps || '8');
   setF('rail_settle_s', S.rail_settle_s);

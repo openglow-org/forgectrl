@@ -44,6 +44,24 @@ int main(void)
 
     CHECK(wizcalc_fan_analyze(rpm, 40, 8.0, 1000.0, &f) == -1, "a 5 s trace is too short");
 
+    /* One intake fan: the second intake tach never reads a pulse. */
+    wizcalc_fan_t in1, in2;
+    n = fan_trace(rpm, 4150.0, 6.0, 8.0, 35.0);
+    wizcalc_fan_analyze(rpm, n, 8.0, 1000.0, &in1);
+    CHECK(!wizcalc_fan_silent(rpm, n), "a turning fan is not silent");
+    double none[280] = {0};
+    wizcalc_fan_analyze(none, 280, 8.0, 1000.0, &in2);
+    CHECK(wizcalc_fan_silent(none, 280) && !in2.ok, "a tach with no pulse is silent and fails the minimum");
+    CHECK(wizcalc_intake_fans(&in1, 1) == 1, "intake 1 passing and intake 2 silent is one intake fan");
+    CHECK(wizcalc_intake_fans(&in1, 0) == 2, "both intakes reading is two intake fans");
+    none[200] = 450.0;
+    CHECK(!wizcalc_fan_silent(none, 280), "one reading anywhere in the run is a fan, not silence");
+    n = fan_trace(rpm, 600.0, 2.0, 8.0, 35.0);
+    CHECK(!wizcalc_fan_silent(rpm, n), "a slow fan is not silent: it fails the minimum as a fan");
+    CHECK(wizcalc_intake_fans(&in2, 1) == 2, "intake 1 failing is never one intake fan");
+    CHECK(wizcalc_fan_silent(none, 0) == 0 && wizcalc_fan_silent(NULL, 280) == 0,
+          "an empty trace is not silent");
+
     CHECK(fabs(wizcalc_floor(12000.0, 0.55, 1000.0, 20000.0) - 6600.0) < 1e-9,
           "the floor is 55 percent of steady");
     CHECK(wizcalc_floor(12000.0, 0.55, 8000.0, 20000.0) == 8000.0, "the floor clamps to the low end");

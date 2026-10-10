@@ -89,6 +89,8 @@ jobs:
         run: ./build/wizpkg_test
       - name: Verified fan writes (readback, retry, the duty a device lost put back)
         run: ./build/cool_fanwrite_test
+      - name: Intake fans fitted (one intake fan, the second tach not judged)
+        run: ./build/cool_intake_test
       - name: Airflow gate
         run: ./build/airflow_test
       - name: Crash-watch tiers

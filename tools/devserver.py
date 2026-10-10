@@ -424,6 +424,7 @@ SETTINGS_KEYS = (
     'cool_accel_x_alert', 'cool_accel_y_alert', 'cool_accel_abort',
     'cool_cooldown_s', 'cool_cooldown_max_s',
     'cool_tach_exhaust_min_rpm', 'cool_tach_intake_min_rpm',
+    'cool_intake_fans',
     'cool_tach_air_assist_min_rpm', 'cool_purge_min_current',
     'cool_fan_grace_s',
     'laser_button_timeout_s', 'laser_disarm_s', 'laser_floor_density',
@@ -453,6 +454,7 @@ SETTING_CHOICES = {
     'homing_mode': ('none', 'gfcloud', 'manual', 'switches'),
     'ui_units': ('metric', 'imperial'),
     'cool_tec_present': ('0', '1'),
+    'cool_intake_fans': ('1', '2'),
     'lid_policy': ('cancel', 'hold'),
     'xy_microsteps': ('8', '16', '32'),
     'cloud_enabled': ('0', '1'),
@@ -660,6 +662,7 @@ DARK_RESULTS = {
                          'intake 1': {'steady_rpm': 4200, 'spinup_s': 2.1, 'ok': True},
                          'intake 2': {'steady_rpm': 4180, 'spinup_s': 2.2, 'ok': True},
                          'air assist': {'steady_rpm': 11000, 'spinup_s': 1.4, 'ok': True}},
+                'intake_fans': 2,
                 'purge_current_on': 628, 'purge_current_off': 1,
                 'floors': {'cool_tach_exhaust_min_rpm': '6600', 'cool_tach_intake_min_rpm': '2299',
                            'cool_tach_air_assist_min_rpm': '6050', 'cool_purge_min_current': '345',
@@ -1561,10 +1564,14 @@ class Mock:
                   'intake_2': self.gate('cool_tach_intake_min_rpm'),
                   'air_assist': self.gate('cool_tach_air_assist_min_rpm'),
                   'purge': self.gate('cool_purge_min_current')}
+        one_intake = self.settings.get('cool_intake_fans') == '1'
+        if one_intake:
+            floors['intake_2'] = 0
         fan_gates = {}
         for n in FAN_NAMES:
             fan_gates[n] = {'reading': readings[n], 'floor': num(floors[n]),
-                            'state': 'off' if floors[n] <= 0 else 'idle'}
+                            'state': 'not fitted' if n == 'intake_2' and one_intake
+                            else 'off' if floors[n] <= 0 else 'idle'}
         age = -1 if self.report_at is None else \
             round(time.time() - self.report_at, 1)
         watching = any(self.gate(k) > 0 for k in FIRE_GATES)

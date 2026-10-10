@@ -240,6 +240,14 @@ add_executable(cool_fanwrite_test tests/cool_fanwrite_test.c src/gates.c src/air
 target_compile_options(cool_fanwrite_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_fanwrite_test m pthread jansson)
 
+# Host unit test for the intake fans fitted: on a machine built with one
+# intake fan (cool_intake_fans 1) the silent second tach is not judged,
+# intake 1 still is, and any other value keeps both. Includes the engine
+# source against a fake sysfs tree; CI runs it after the build.
+add_executable(cool_intake_test tests/cool_intake_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
+target_compile_options(cool_intake_test PRIVATE -Wall -Wextra)
+target_link_libraries(cool_intake_test m pthread jansson)
+
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs
 # it after the build.

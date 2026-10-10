@@ -53,6 +53,21 @@ int wizcalc_fan_analyze(const double *rpm, int n, double hz, double min_rpm,
     return 0;
 }
 
+int wizcalc_fan_silent(const double *rpm, int n)
+{
+    if (!rpm || n <= 0)
+        return 0;
+    for (int i = 0; i < n; i++)
+        if (rpm[i] > 0.0)
+            return 0;
+    return 1;
+}
+
+int wizcalc_intake_fans(const wizcalc_fan_t *intake1, int intake2_silent)
+{
+    return intake1 && intake1->ok && intake2_silent ? 1 : 2;
+}
+
 double wizcalc_floor(double steady, double frac, double lo, double hi)
 {
     double f = steady * frac;

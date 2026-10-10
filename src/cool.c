@@ -90,7 +90,10 @@
  *   three consecutive ticks under the floor trip a fault for the
  *   rest of the run session (verdict AIRFLOW: hold, fire blocked, no
  *   resume), the fans held at run duty. A header's tach window can
- *   raise a floor for a job, never lower it.
+ *   raise a floor for a job, never lower it. A machine built with one
+ *   intake fan (cool_intake_fans 1, which the setup's airflow check
+ *   writes) has nothing on the second intake tach, and that tach is
+ *   not judged.
  * - Physical-evidence witnesses (1 Hz, alongside the loop): the
  *   kernel's sampled LASER_ON count is the ground truth of emission
  *   (the gated output of the hardware AND-gate, not a commanded
@@ -403,6 +406,9 @@ static int tec_written = -1;        /* last value written; -1 = write next */
 static double tec_switched_at = 0;
 static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
 static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
+/* The intake fans fitted: 2, or 1 on a machine built with one. Only 1
+ * takes the second intake out of the judging; any other value keeps it. */
+static uint32_t intake_fans = 2;
 static float tach_air_assist_min_rpm = TACH_AIR_ASSIST_MIN_RPM;
 static float purge_min_current = PURGE_MIN_CURRENT;
 static float fan_grace_s = FAN_GRACE_S;
@@ -1001,7 +1007,9 @@ static struct {
       TACH_EXHAUST_MIN_RPM,   &tach_exhaust_min_rpm, NULL, 0 },
     { "GFCOOL_TACH_INTAKE_MIN",  "cool_tach_intake_min_rpm",
       TACH_INTAKE_MIN_RPM,    &tach_intake_min_rpm, NULL, 0 },
-    { "GFCOOL_TACH_AIR_MIN",     "cool_tach_air_assist_min_rpm",
+    { "GFCOOL_INTAKE_FANS",      "cool_intake_fans",
+      2.0f,                   NULL,             &intake_fans, 0 },
+    { "GFCOOL_TACH_AIR_MIN",    "cool_tach_air_assist_min_rpm",
       TACH_AIR_ASSIST_MIN_RPM, &tach_air_assist_min_rpm, NULL, 0 },
     { "GFCOOL_PURGE_MIN",        "cool_purge_min_current",
       PURGE_MIN_CURRENT,      &purge_min_current, NULL, 0 },
@@ -1214,6 +1222,10 @@ static void conf_reload(void)
      * only model a machine runs. */
     laser_model_density = rep_model >= 0 ? rep_model : 1;
     gates_apply();
+    /* Named at every run start, as an off gate is. */
+    if (intake_fans == 1)
+        fflog(LOG_INFO, "cool: one intake fan fitted (cool_intake_fans 1): "
+              "intake_2 is not judged");
 }
 
 /* ---------------------------------------------- diagnostic ownership */
@@ -2057,7 +2069,9 @@ static void engine_tick(void)
      * fault for the rest of the session: hold, fire blocked, no resume;
      * the fans stay at run duty, which is what a stalled extraction fan
      * needs around it. An off gate (floor 0) still measures and names
-     * the first reading that would have tripped the shipped default. */
+     * the first reading that would have tripped the shipped default.
+     * The second intake on a machine built with one intake fan is
+     * measured and published as not fitted, never judged. */
     {
         fans_verify(now);
         fan_reading[Fan_Exhaust] = airflow_rpm(rd_long("thermal/tach_exhaust"), 1e9, 2);
@@ -2068,7 +2082,7 @@ static void engine_tick(void)
         fan_reading[Fan_Purge] = purge > 0 ? (double)purge : 0.0;
         fan_floor[Fan_Exhaust] = eff_lim.exhaust_min_rpm;
         fan_floor[Fan_Intake1] = eff_lim.intake_min_rpm;
-        fan_floor[Fan_Intake2] = eff_lim.intake_min_rpm;
+        fan_floor[Fan_Intake2] = intake_fans == 1 ? 0.0 : eff_lim.intake_min_rpm;
         fan_floor[Fan_AirAssist] = eff_lim.air_assist_min_rpm;
         fan_floor[Fan_Purge] = purge_min_current;
         static const double fan_default[Fan_N] = {
@@ -2083,7 +2097,10 @@ static void engine_tick(void)
         for (int i = 0; i < Fan_N; i++) {
             airflow_state_t st;
             int dx = fan_duty_ix[i];
-            int judged = dx < 0 ? airflow_judged(run, armed, 1, 1)
+            /* A fan the machine was built without is never judged. */
+            int fitted = i != Fan_Intake2 || intake_fans != 1;
+            int judged = !fitted ? 0
+                       : dx < 0 ? airflow_judged(run, armed, 1, 1)
                        : airflow_judged(run, armed, cmd_duty[dx], fan_local[dx]);
             if (judged && fan_floor[i] > 0.0 && fan_reading[i] < fan_floor[i])
                 up_now = 0;
@@ -2129,7 +2146,8 @@ static void engine_tick(void)
             rows[i].name = fan_name[i];
             rows[i].reading = fan_reading[i];
             rows[i].floor = fan_floor[i];
-            rows[i].state = judged ? airflow_state_name(st)
+            rows[i].state = !fitted ? "not fitted"
+                          : judged ? airflow_state_name(st)
                           : st == Air_Tripped ? "TRIPPED"
                           : st == Air_Off ? "off"
                           : run ? "unjudged" : "idle";

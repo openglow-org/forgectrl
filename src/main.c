@@ -662,6 +662,8 @@ static int valid_temp_start(const char *v) { return valid_gate("cool_temp_start"
 static int valid_tec_on(const char *v)     { return valid_gate("cool_tec_on_c", v); }
 static int valid_tec_off(const char *v)    { return valid_gate("cool_tec_off_c", v); }
 static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v, "1"); }
+/* The intake fans fitted: the setup's airflow check writes it. */
+static int valid_intake_fans(const char *v){ return !strcmp(v, "1") || !strcmp(v, "2"); }
 /* The coolant sensors' per-machine correction, a settings-file value
  * within 5 C either way; no setup step writes it. */
 static int valid_temp_offset(const char *v)
@@ -825,6 +827,7 @@ static const struct {
     { "cool_cooldown_max_s",    valid_cool_s,      0 },
     { "cool_tach_exhaust_min_rpm",    valid_exhaust_rpm, 0 },
     { "cool_tach_intake_min_rpm",     valid_intake_rpm,  0 },
+    { "cool_intake_fans",             valid_intake_fans, 0 },
     { "cool_tach_air_assist_min_rpm", valid_air_rpm,     0 },
     { "cool_purge_min_current",       valid_purge_cur,   0 },
     { "cool_fan_grace_s",             valid_grace_s,     0 },

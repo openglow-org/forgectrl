@@ -693,17 +693,31 @@ static void run_airflow(void)
     cool_diag_purge(0);
     msleep(3000);
     double purge_off = (double)rd_long("head/purge_air_current", 0);
-    /* Judge each fan. */
+    /* Judge each fan. A machine built with one intake fan has nothing on
+     * the second intake tach: when intake 1 passes and intake 2 never
+     * read a pulse, the machine has one intake fan, and intake 2 is not
+     * judged here or by the airflow gate. */
     wizcalc_fan_t f[F_N];
+    int silent[F_N];
     double col[400];
+    int m = n < 400 ? n : 400;
+    for (int k = 0; k < F_N; k++) {
+        for (int i = 0; i < m; i++)
+            col[i] = trace[i * F_N + k];
+        wizcalc_fan_analyze(col, m, hz, 1000.0, &f[k]);
+        silent[k] = wizcalc_fan_silent(col, m);
+    }
+    int intake_fans = wizcalc_intake_fans(&f[F_INTAKE1], silent[F_INTAKE2]);
     int fail = 0;
     double spin_max = 0.0;
     r = json_object();
     json_t *fans = json_object();
     for (int k = 0; k < F_N; k++) {
-        for (int i = 0; i < n && i < 400; i++)
-            col[i] = trace[i * F_N + k];
-        wizcalc_fan_analyze(col, n < 400 ? n : 400, hz, 1000.0, &f[k]);
+        if (k == F_INTAKE2 && intake_fans == 1) {
+            json_object_set_new(fans, fan_names[k], json_pack("{s:b}", "fitted", 0));
+            wlog("%s: no tach pulse in %d s; one intake fan fitted", fan_names[k], secs);
+            continue;
+        }
         json_t *o = json_object();
         json_object_set_new(o, "steady_rpm", json_real(round(f[k].steady_rpm)));
         json_object_set_new(o, "spinup_s", json_real(round(f[k].spinup_s * 10) / 10));
@@ -717,9 +731,14 @@ static void run_airflow(void)
             spin_max = f[k].spinup_s;
     }
     json_object_set_new(r, "fans", fans);
+    json_object_set_new(r, "intake_fans", json_integer(intake_fans));
+    if (intake_fans == 1)
+        json_object_set_new(r, "summary", json_string(
+            "Only one intake fan was detected. Its speed sets the intake floor; "
+            "the second intake is not checked."));
     wizcalc_fan_t p;
     double purge_on = 0.0;
-    if (wizcalc_fan_analyze(purge, n < 400 ? n : 400, hz, 0.0, &p) == 0)
+    if (wizcalc_fan_analyze(purge, m, hz, 0.0, &p) == 0)
         purge_on = p.steady_rpm;
     json_object_set_new(r, "purge_current_on", json_real(round(purge_on)));
     json_object_set_new(r, "purge_current_off", json_real(round(purge_off)));
@@ -738,7 +757,8 @@ static void run_airflow(void)
     const gate_setting_t *ga = gate_setting_find("cool_tach_air_assist_min_rpm");
     const gate_setting_t *gp = gate_setting_find("cool_purge_min_current");
     const gate_setting_t *gg = gate_setting_find("cool_fan_grace_s");
-    double intake_steady = fmin(f[F_INTAKE1].steady_rpm, f[F_INTAKE2].steady_rpm);
+    double intake_steady = intake_fans == 1 ? f[F_INTAKE1].steady_rpm
+                         : fmin(f[F_INTAKE1].steady_rpm, f[F_INTAKE2].steady_rpm);
     double fl_ex = wizcalc_floor(f[F_EXHAUST].steady_rpm, 0.55, ge ? ge->band_lo : 0, ge ? ge->band_hi : 1e9);
     double fl_in = wizcalc_floor(intake_steady, 0.55, gi ? gi->band_lo : 0, gi ? gi->band_hi : 1e9);
     double fl_aa = wizcalc_floor(f[F_AIR].steady_rpm, 0.55, ga ? ga->band_lo : 0, ga ? ga->band_hi : 1e9);
@@ -750,10 +770,12 @@ static void run_airflow(void)
     snprintf(v_aa, sizeof(v_aa), "%.0f", fl_aa);
     snprintf(v_pg, sizeof(v_pg), "%.0f", fl_pg);
     snprintf(v_gr, sizeof(v_gr), "%.0f", grace);
+    /* The five floors, then the intake fan count: written every run, so
+     * a run on a machine with both intakes turning sets it back to 2. */
     const char *keys[] = { "cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm",
                            "cool_tach_air_assist_min_rpm", "cool_purge_min_current",
-                           "cool_fan_grace_s" };
-    const char *vals[] = { v_ex, v_in, v_aa, v_pg, v_gr };
+                           "cool_fan_grace_s", "cool_intake_fans" };
+    const char *vals[] = { v_ex, v_in, v_aa, v_pg, v_gr, intake_fans == 1 ? "1" : "2" };
     json_t *floors = json_object();
     for (int i = 0; i < 5; i++)
         json_object_set_new(floors, keys[i], json_string(vals[i]));
@@ -768,7 +790,7 @@ static void run_airflow(void)
     stopped = 0;
     applied = json_object();
     char err[96];
-    if (write_settings(keys, vals, 5, applied, err, sizeof(err)) != 0) {
+    if (write_settings(keys, vals, 6, applied, err, sizeof(err)) != 0) {
         finish_err("%s", err);
         goto out;
     }
