@@ -206,9 +206,19 @@ int main(void)
     CHECK(setup_gate_open(why, sizeof(why)) && rec_reason("machine"),
           "a flag on a done required step recommends it and leaves the gate open");
     setup_flag("machine", NULL);
+    st = status();
+    CHECK(st && json_is_array(json_object_get(st, "missing")) &&
+          json_array_size(json_object_get(st, "missing")) == 0,
+          "the status lists no missing step while the required ones are done");
+    json_decref(st);
     setup_set_steps(steps_req2, 4);
     CHECK(!setup_gate_open(why, sizeof(why)) && strstr(why, "machine"),
           "a required step bumped by the image holds the gate again");
+    st = status();
+    json_t *miss = st ? json_object_get(st, "missing") : NULL;
+    CHECK(json_array_size(miss) == 1 && !strcmp(json_string_value(json_array_get(miss, 0)), "machine"),
+          "the status names the bumped required step as missing, so the page opens it");
+    json_decref(st);
     setup_wizard_done("machine", 2, NULL, NULL);
     CHECK(setup_gate_open(why, sizeof(why)), "run at the new version: open");
     setup_set_steps(steps, 3);

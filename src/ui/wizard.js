@@ -15,10 +15,11 @@
  *
  * Steps: welcome, advisories (the four documents, then the press),
  * account, preferences, machine, cloud, the intake fans (counted), the
- * choice (continue the setup, or start using the machine), the checks
- * (the dark wizards), the burns (Focus, and the optional Laser floor:
- * one press each, on a scrap of their own), done. Every step up to the
- * intake fans holds the machine (REQUIRED); every one after them is
+ * coolant flow (calibrated), the choice (continue the setup, or start
+ * using the machine), the checks (the dark wizards), the burns (Focus,
+ * and the optional Laser floor: one press each, on a scrap of their
+ * own), done. Every step up to the coolant flow holds the machine
+ * (REQUIRED); every one after them is
  * recommended, and the footer's Finish later ends the guided run from
  * any of them. The footer's exit runs the factory return and shows its
  * progress.
@@ -42,13 +43,14 @@ var LIVE_IDS = ['laser.focus', 'laser.floor'];
 var CHECK_IDS = DARK_IDS.concat(LIVE_IDS);
 /* The steps that hold the machine: the guided run cannot end before
  * every one of them is done. */
-var REQUIRED = ['advisories', 'account', 'preferences', 'machine', 'cloud', 'airflow.intakes'];
+var REQUIRED = ['advisories', 'account', 'preferences', 'machine', 'cloud', 'airflow.intakes',
+  'cooling.flow'];
 /* The checks a machine may not need: the cloud header with cloud mode
  * off. They show only while required or done. */
 var CONDITIONAL = ['cloud.header'];
 var ORDER = ['welcome', 'advisories', 'account', 'preferences', 'machine', 'cloud',
-  'airflow.intakes', 'choice',
-  'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset', 'cooling.flow',
+  'airflow.intakes', 'cooling.flow', 'choice',
+  'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
   'cloud.header', 'lens.travel', 'laser.focus', 'laser.floor', 'motion.envelope', 'done'];
 var TITLES = {
   welcome: 'Welcome',
@@ -291,6 +293,10 @@ function stepDone(id) {
   if (id === 'airflow.intakes') return !!W.fans_counted;
   /* The choice is made once: by continuing, or by ending the run. */
   if (id === 'choice') return !!(W.completed || CHOSE);
+  /* A required step the gate waits for is open whatever the record says:
+   * a release that asks for it again holds the machine, and the page
+   * sends the operator back to it. */
+  if ((W.missing || []).indexOf(id) >= 0) return false;
   if (CHECK_IDS.indexOf(id) >= 0 && !darkApplicable(id)) return true;
   if (W.versions && W.versions[id] && recIds().indexOf(id) >= 0) return false;
   return !!(W.versions && W.versions[id]);

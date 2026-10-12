@@ -16,9 +16,11 @@
  *
  * The gate is the advisories (accepted, and the press), the account,
  * the table's required steps (preferences, the machine facts, the cloud
- * decision), and the intake fan count (a machine built with one intake
- * fan faults every job on the second intake until the airflow gate
- * knows): it is evaluated on every change and reported to the
+ * decision, the coolant flow calibration: a loop whose coolant rises
+ * past the default threshold with flow faults every job's flow check
+ * until it is calibrated), and the intake fan count (a machine built
+ * with one intake fan faults every job on the second intake until the
+ * airflow gate knows): it is evaluated on every change and reported to the
  * supervisor, which spawns no controller for a sender while it is
  * closed. Everything else is recommended, never required:
  * the image's step table (a step not run, or run at an older version)
@@ -46,21 +48,24 @@
 /* The image's table: every step of the setup, at the version this
  * build wants. The required ones hold the gate until they are done (a
  * bump holds it again on every machine that updates to this build); a
- * bump of any other recommends the step again. The form steps of the
- * initial run are listed first. The laser floor and the bed size are
- * not here: they are offered, never recommended. */
+ * bump of any other recommends the step again. The required steps of
+ * the initial run are listed first. The laser floor and the bed size
+ * are not here: they are offered, never recommended. */
 static const setup_step_t image_steps[] = {
     { "advisories",        1, NULL, 0 },
     { "account",           1, NULL, 0 },
     { "preferences",       1, NULL, 1 },
     { "machine",           1, NULL, 1 },
     { "cloud",             1, NULL, 1 },
+    /* The coolant flow bands differ from loop to loop: the default
+     * threshold sits under the flowing rise of some (an early Pro rose
+     * 16 C with flow), so the calibration holds the gate. */
+    { "cooling.flow",      1, NULL, 1 },
     /* The dark validation: the machine checked with the laser locked. */
     { "switches",          1, NULL, 0 },
     { "sensors",           1, NULL, 0 },
     { "airflow",           1, NULL, 0 },
     { "cooling.aa-offset", 1, NULL, 0 },
-    { "cooling.flow",      1, NULL, 0 },
     { "motion",            1, NULL, 0 },
     { "cameras",           1, NULL, 0 },
     { "cloud.header",      1, "cloud_enabled", 0 },
@@ -239,6 +244,26 @@ static int step_applies_locked(size_t i)
     return setup_fact_hook ? setup_fact_hook(steps[i].when) : 0;
 }
 
+/* A required step the gate waits for: not run, or run at an older
+ * version than the table's. Called with mu held. */
+static int required_missing_locked(size_t i)
+{
+    return steps[i].required && step_applies_locked(i) &&
+           wizard_version_locked(steps[i].id) < steps[i].version;
+}
+
+/* The required steps the gate waits for, in the table's order: the page
+ * opens them, done once or not, so a release that asks for one again
+ * sends the operator back to it. Called with mu held. */
+static json_t *missing_locked(void)
+{
+    json_t *m = json_array();
+    for (size_t i = 0; i < nsteps; i++)
+        if (required_missing_locked(i))
+            json_array_append_new(m, json_string(steps[i].id));
+    return m;
+}
+
 /* Recompute the gate: the advisories, the account, the required steps,
  * and the intake fan count. Called with mu held. */
 static void evaluate_locked(void)
@@ -248,8 +273,7 @@ static void evaluate_locked(void)
     int account = account_set_locked();
     char missing[160] = "";
     for (size_t i = 0; i < nsteps; i++) {
-        if (!steps[i].required || !step_applies_locked(i) ||
-            wizard_version_locked(steps[i].id) >= steps[i].version)
+        if (!required_missing_locked(i))
             continue;
         if (missing[0])
             strncat(missing, ", ", sizeof(missing) - strlen(missing) - 1);
@@ -727,6 +751,7 @@ int setup_status_json(char *buf, size_t len)
                         json_is_string(sid) ? json_incref(sid) : json_string(""));
 
     json_object_set_new(st, "recommended", recommended_locked());
+    json_object_set_new(st, "missing", missing_locked());
     const char *k;
     json_t *f;
 

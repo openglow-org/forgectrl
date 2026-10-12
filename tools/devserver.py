@@ -514,9 +514,10 @@ ADVISORY_META = {
 WIZARDS = (('advisories', 'Advisories'), ('account', 'Your account'),
            ('preferences', 'Preferences'), ('machine', 'Your machine'),
            ('cloud', 'Cloud mode'), ('airflow.intakes', 'Intake fans'),
+           ('cooling.flow', 'Coolant flow'),
            ('switches', 'Switches'), ('sensors', 'Sensors'), ('airflow', 'Airflow'),
            ('motion', 'Motion'), ('cameras', 'Cameras'),
-           ('cooling.aa-offset', 'Coolant offset'), ('cooling.flow', 'Coolant flow'),
+           ('cooling.aa-offset', 'Coolant offset'),
            ('cooling.flow-verify', 'Flow check'),
            ('cloud.header', 'Cloud header'), ('motion.envelope', 'Bed size'),
            ('lens.travel', 'Lens travel'),
@@ -530,8 +531,8 @@ LIVE = ('laser.focus', 'laser.floor')
 # The image's step table (setup.c): the required steps hold the gate;
 # the others are recommended until they have run. The cloud header joins
 # only with cloud mode on.
-REQUIRED_STEPS = ('preferences', 'machine', 'cloud')
-STEPS = ('switches', 'sensors', 'airflow', 'cooling.aa-offset', 'cooling.flow', 'motion',
+REQUIRED_STEPS = ('preferences', 'machine', 'cloud', 'cooling.flow')
+STEPS = ('switches', 'sensors', 'airflow', 'cooling.aa-offset', 'motion',
          'cameras', 'lens.travel', 'laser.focus')
 # The what-changed menu (setup.c): a change, its title, its reason, and
 # the steps it recommends again.
@@ -818,7 +819,7 @@ class Mock:
         ('cool_accel_abort', 'crash_abort', 133.0, 0.0, 255.0, 100.0, 170.0, 'low'),
         ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
         ('cool_recheck_s', 'recheck', 150.0, 0.0, 3600.0, 60.0, 600.0, 'low'),
-        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 8.0, 16.0, 'none'),
+        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 1.0, 40.0, 'none'),
         ('cool_tach_exhaust_min_rpm', 'exhaust', 6400.0, 0.0, 20000.0, 5800.0, 7000.0, 'low'),
         ('cool_tach_intake_min_rpm', 'intake', 2290.0, 0.0, 20000.0, 2100.0, 2500.0, 'low'),
         ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 5500.0, 6600.0, 'low'),
@@ -1321,9 +1322,16 @@ class Mock:
     def wiz_fans_counted(self):
         return self.settings.get('cool_intake_fans', '') != ''
 
+    def wiz_step_version(self, k):
+        """The version the image's table wants: 2 for a required step
+        GF_MOCK_REQUIRED_AGAIN names (a release that asks for it again),
+        else 1."""
+        return 2 if k in os.environ.get('GF_MOCK_REQUIRED_AGAIN', '').split(',') else 1
+
     def wiz_missing(self):
-        """The required steps not done."""
-        return [k for k in REQUIRED_STEPS if not self.wiz['versions'].get(k)]
+        """The required steps not done at the table's version."""
+        return [k for k in REQUIRED_STEPS
+                if self.wiz['versions'].get(k, 0) < self.wiz_step_version(k)]
 
     def wiz_gate_open(self):
         w = self.wiz
@@ -1418,6 +1426,7 @@ class Mock:
             'acceptance_done': w['pressed'], 'account': bool(w['account']),
             'completed': w['completed'], 'sheet_id': MOCK_SHEET_ID,
             'recommended': self.wiz_recommended(),
+            'missing': self.wiz_missing(),
             'versions': dict(w['versions']),
             'changes': [{'id': c, 'title': t, 'wizards': [{'id': i} for i in wz]}
                         for c, t, _, wz in CHANGES],
@@ -2375,7 +2384,7 @@ class Mock:
             elif (not spec and el >= DARK_PROMPT_AT + DARK_DONE_AFTER) or \
                     (spec and d['answer'] is not None and now - d['answered'] >= DARK_DONE_AFTER):
                 d['running'] = False
-                self.wiz['versions'][d['id']] = 1
+                self.wiz['versions'][d['id']] = self.wiz_step_version(d['id'])
                 self.wiz['flags'].pop(d['id'], None)
                 # The intake fan count, as the daemon's check writes it.
                 if d['id'] in ('airflow.intakes', 'airflow') and not self.settings.get('cool_intake_fans'):
@@ -2505,7 +2514,7 @@ class Mock:
                     if not self.setting_valid(k, form[k]):
                         return J(400, {'error': 'invalid value for ' + k})
                     self.settings[k] = form[k]
-            w['versions']['preferences'] = 1
+            w['versions']['preferences'] = self.wiz_step_version('preferences')
             return J(200, self.wiz_reply())
         if path == '/wiz/machine':
             if form.get('model') not in ('basic', 'plus', 'pro'):
@@ -2515,7 +2524,7 @@ class Mock:
                 return J(400, {'error': 'only a Pro has a thermoelectric cooler'})
             w['machine'] = {'model': form['model'], 'tec': tec}
             self.settings['cool_tec_present'] = '1' if tec else '0'
-            w['versions']['machine'] = 1
+            w['versions']['machine'] = self.wiz_step_version('machine')
             return J(200, self.wiz_reply())
         if path == '/wiz/cloud':
             if form.get('enabled') == '1':
@@ -2533,7 +2542,7 @@ class Mock:
                 if self.settings['controller_mode'] == 'cloud':
                     self.settings['controller_mode'] = 'grbl'
                     self.mode = 'grbl'
-            w['versions']['cloud'] = 1
+            w['versions']['cloud'] = self.wiz_step_version('cloud')
             return J(200, self.wiz_reply())
         if path == '/wiz/complete':
             if not self.wiz_gate_open():

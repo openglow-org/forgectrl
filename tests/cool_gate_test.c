@@ -68,6 +68,9 @@ int main(void)
           "the flow window is the flow gate, off at zero");
     CHECK(!tres->gate && tres->off_end == 0, "the resume gate is not a gate of its own");
     CHECK(!rise->gate && rise->off_end == 0, "the flow rise is not a gate of its own");
+    CHECK(gate_state(rise, 18.4) == Gate_Ok && gate_state(rise, 1.0) == Gate_Ok &&
+          gate_state(rise, 40.0) == Gate_Ok,
+          "a calibrated flow rise is never warned (the bands differ from loop to loop)");
     CHECK(tres->hi < tmax->hi, "the resume range tops out under the ceiling range");
     CHECK(tmax->band_hi == 38.0, "the ceiling band tops out at the former hard cap");
     const gate_setting_t *exh = gate_setting_find("cool_tach_exhaust_min_rpm");
@@ -158,7 +161,7 @@ int main(void)
     CHECK(gate_state(fcs, 300.0) == Gate_Warn, "flow window at its top: warn (the off end is low)");
     CHECK(gate_state(tres, 5.0) == Gate_Warn, "resume at its bottom: warn, never off");
     CHECK(gate_state(tres, 59.0) == Gate_Warn, "resume at its top: warn, never off");
-    CHECK(gate_state(rise, 40.0) == Gate_Warn, "rise at its top: warn, never off");
+    CHECK(gate_state(rise, 40.0) == Gate_Ok, "rise at its top: neither warned nor off");
     CHECK(!strcmp(gate_state_name(Gate_Ok), "ok") &&
           !strcmp(gate_state_name(Gate_Warn), "warn") &&
           !strcmp(gate_state_name(Gate_Off), "off"), "state names");

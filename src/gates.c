@@ -73,9 +73,12 @@
  *   interrogation at all, the one off-by-value the engine has always
  *   had; the band is the window the characterization found useful.
  * cool_flow_rise: the downstream rise that means stagnant coolant. Set
- *   from flow calibrate; the bench's no-flow rise is about 16 C, so a
- *   value above the band can never fault and is warned as such. Not a
- *   gate of its own (flow is), so no off end.
+ *   from flow calibrate, which the setup requires: the bands differ from
+ *   loop to loop (the bench's no-flow rise is about 16 C; an early Pro's
+ *   flowing rise was 16 C and its no-flow rise 20.5 C at the same heater
+ *   duty), so no band of one machine's judges another's value and the
+ *   recommended band is the whole range. Not a gate of its own (flow
+ *   is), so no off end.
  * cool_tach_*_min_rpm: the airflow floors, in rpm at run duty, 55
  *   percent of the steady speed the bench machine's fans reach at the
  *   run profile (exhaust 11640, the intakes 4160, the air assist
@@ -107,7 +110,7 @@ static const gate_setting_t table[] = {
     { "cool_accel_abort",           "crash_abort",   133.0, 0.0, 255.0, 100.0, 170.0, -1 },
     { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
     { "cool_recheck_s",             "recheck",    150.0,  0.0,  3600.0, 60.0, 600.0, -1 },
-    { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  8.0,  16.0,  0 },
+    { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  1.0,  40.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },
     { "cool_tach_intake_min_rpm",   "intake",    2290.0,  0.0, 20000.0, 2100.0, 2500.0, -1 },
     { "cool_tach_air_assist_min_rpm", "air_assist", 6000.0, 0.0, 30000.0, 5500.0, 6600.0, -1 },

@@ -176,6 +176,22 @@ class MockTest(unittest.TestCase):
         self.assertIn('flow', self.get_json(m, '/cool/status')['gates_off'])
 
     # -- the settings key set
+    def test_wiz_missing_names_a_required_step_asked_for_again(self):
+        # setup.c's status names the required steps the gate waits for, a
+        # release's version bump among them, so the page opens them.
+        self.assertIn('json_object_set_new(st, "missing", missing_locked())', read('src/setup.c'))
+        os.environ['GF_MOCK_REQUIRED_AGAIN'] = 'machine'
+        try:
+            m = self.mock()
+            w = self.get_json(m, '/wiz')
+            self.assertEqual(w['missing'], ['machine'])
+            self.assertEqual(w['gate'], 'closed')
+            self.assertEqual(w['why'], 'setup required: machine')
+            self.assertEqual(w['versions'].get('machine'), 1)
+        finally:
+            del os.environ['GF_MOCK_REQUIRED_AGAIN']
+        self.assertEqual(self.get_json(self.mock(), '/wiz')['missing'], [])
+
     def test_settings_keys_match_main_c(self):
         table = settings_table()
         self.assertGreater(len(table), 0, 'main.c setting_defs parsed')
