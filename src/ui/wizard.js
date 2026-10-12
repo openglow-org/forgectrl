@@ -26,7 +26,7 @@ var W = null,
   pressTimer = null,
   returnTimer = null;
 var DARK_IDS = ['switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
-  'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header', 'motion.envelope'];
+  'cooling.flow', 'cooling.flow-verify', 'cloud.header', 'motion.envelope'];
 /* The checks the setup never asks for: they are listed and run from the
  * rail, and never opened as the next step. */
 var OPTIONAL = ['motion.envelope'];
@@ -35,12 +35,12 @@ var OPTIONAL = ['motion.envelope'];
 var LIVE_IDS = ['sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
   'laser.corner', 'cooling.flow-load'];
 var CHECK_IDS = DARK_IDS.concat(LIVE_IDS);
-/* The checks a machine may not need: the TEC without one, the cloud
- * header with cloud mode off. They show only while required or done. */
-var CONDITIONAL = ['cooling.tec', 'cloud.header'];
+/* The checks a machine may not need: the cloud header with cloud mode
+ * off. They show only while required or done. */
+var CONDITIONAL = ['cloud.header'];
 var ORDER = ['welcome', 'advisories', 'account', 'preferences', 'machine', 'cloud',
   'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset', 'cooling.flow',
-  'cooling.tec', 'cloud.header', 'motion.envelope', 'sheet.place', 'sheet.frame', 'laser.focus',
+  'cloud.header', 'motion.envelope', 'sheet.place', 'sheet.frame', 'laser.focus',
   'laser.floor', 'laser.dose-curve', 'laser.corner', 'cooling.flow-load', 'done'];
 var TITLES = {
   welcome: 'Welcome',
@@ -57,7 +57,6 @@ var TITLES = {
   'motion.envelope': 'Bed size',
   'cooling.aa-offset': 'Coolant offset',
   'cooling.flow': 'Coolant flow',
-  'cooling.tec': 'TEC',
   'cooling.flow-verify': 'Flow check',
   'cloud.header': 'Cloud header',
   'sheet.place': 'Place the sheet',
@@ -95,8 +94,6 @@ var DARK_TEXT = {
   'cooling.flow': 'Three heater windows with the pump on and three with it off give the flow ' +
     'bands; the threshold sits between them. If the bands are too close, the heater duty ' +
     'steps up and the trial repeats. Fifteen to twenty-five minutes.',
-  'cooling.tec': 'Sixty seconds of TEC drive with the fans on. The cold side must fall by one ' +
-    'degree relative to the coolant. About two minutes.',
   'cooling.flow-verify': 'One heater window with the pump on and one with it off: the ' +
     'threshold must separate them. About three minutes.',
   'cloud.header': 'The machine starts in cloud mode. You place any small design in the ' +
@@ -267,8 +264,8 @@ function cycleTheme() {
 applyTheme();
 
 /* ---- State and navigation ------------------------------------------- */
-/* A dark check that this machine does not need (the TEC on a machine
- * without one) is neither required nor listed. */
+/* A dark check that this machine does not need (the cloud header with
+ * cloud mode off) is neither required nor listed. */
 function darkApplicable(id) {
   if (CONDITIONAL.indexOf(id) < 0 || !W) return true;
   return (W.required || []).indexOf(id) >= 0 || !!(W.versions && W.versions[id]);

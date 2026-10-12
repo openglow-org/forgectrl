@@ -160,19 +160,19 @@ int main(void)
     CHECK(strstr(why, "preferences") != NULL, "why names the outdated wizard");
 
     /* 5b. A conditional requirement stands only on a machine with the
-     * fact: the TEC wizard on a machine with a TEC. */
+     * fact: a check that needs the machine block's tec fact. */
     static const setup_req_t reqs3[] = {
         { "advisories", 1, NULL }, { "account", 1, NULL }, { "preferences", 1, NULL },
-        { "cooling.tec", 1, "tec" },
+        { "example.tec", 1, "tec" },
     };
     setup_set_required(reqs3, 4);
     setup_set_machine(json_pack("{s:b,s:s,s:{s:s}}", "tec", 0, "model", "basic",
                                      "head", "serial_hash", "ABCDE-FGHIJ"));
-    CHECK(setup_gate_open(why, sizeof(why)), "no TEC: the TEC wizard is not required");
+    CHECK(setup_gate_open(why, sizeof(why)), "tec false: the check is not required");
     {
         json_t *st = status();
         char *reqtext = json_dumps(json_object_get(st, "required"), JSON_COMPACT);
-        CHECK(reqtext && !strstr(reqtext, "cooling.tec"), "the status lists no TEC requirement without a TEC");
+        CHECK(reqtext && !strstr(reqtext, "example.tec"), "the status lists no requirement while the fact is false");
         free(reqtext);
         json_decref(st);
     }
@@ -183,8 +183,8 @@ int main(void)
     setup_head_hash(hh, sizeof(hh));
     CHECK(!strcmp(hh, "ABCDE-FGHIJ"), "the head hash reads back");
     setup_set_machine(json_pack("{s:b,s:s}", "tec", 1, "model", "pro"));
-    CHECK(!setup_gate_open(why, sizeof(why)) && strstr(why, "cooling.tec"),
-          "with a TEC the TEC wizard is required");
+    CHECK(!setup_gate_open(why, sizeof(why)) && strstr(why, "example.tec"),
+          "tec true: the check is required");
     /* 5c. A fact outside the machine block comes from the hook. */
     static const setup_req_t reqs4[] = {
         { "advisories", 1, NULL }, { "account", 1, NULL }, { "preferences", 1, NULL },

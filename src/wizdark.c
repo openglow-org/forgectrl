@@ -996,85 +996,6 @@ static void run_cooling_flow_verify(void)
     json_decref(res);
 }
 
-static void run_cooling_tec(void)
-{
-    int stopped = 0, took = 0;
-    json_t *r = NULL, *applied = NULL;
-    if (!setup_machine_bool("tec")) {
-        r = json_object();
-        json_object_set_new(r, "tec", json_false());
-        json_object_set_new(r, "skipped", json_string("no TEC on this machine"));
-        finish_ok(1, r, NULL);
-        json_decref(r);
-        return;
-    }
-    phase("stopping the motion controller");
-    if (wiz_controller_stop() != 0) {
-        finish_err("could not stop the motion controller");
-        goto out;
-    }
-    stopped = 1;
-    if (cool_diag_take() != 0) {
-        finish_err("the cooling engine is busy");
-        goto out;
-    }
-    took = 1;
-    cool_diag_fans_run();
-    msleep(3000);
-    double tec0 = coolant_degc(rd_long("pic/tec_temp", 0));
-    double up0 = coolant_degc(rd_long("pic/water_temp_2", 0));
-    wlog("TEC %.1f C, upstream %.1f C before the drive", tec0, up0);
-    phase("driving the TEC for 60 s");
-    cool_diag_tec(1);
-    double tec1 = tec0, up1 = up0;
-    for (int i = 0; i < 30; i++) {
-        if (aborted())
-            goto out;
-        msleep(2000);
-        tec1 = coolant_degc(rd_long("pic/tec_temp", 0));
-        up1 = coolant_degc(rd_long("pic/water_temp_2", 0));
-        progress(10 + i * 3);
-    }
-    cool_diag_tec(0);
-    double fall = (tec0 - up0) - (tec1 - up1);
-    wlog("TEC %.1f C, upstream %.1f C after 60 s: %.1f C of relative fall", tec1, up1, fall);
-    r = json_object();
-    json_object_set_new(r, "tec_before_c", json_real(round(tec0 * 10) / 10));
-    json_object_set_new(r, "tec_after_c", json_real(round(tec1 * 10) / 10));
-    json_object_set_new(r, "relative_fall_c", json_real(round(fall * 10) / 10));
-    int drives = fall >= 1.0;
-    json_object_set_new(r, "tec", json_boolean(drives));
-    const char *keys[] = { "cool_tec_present" };
-    const char *vals[] = { drives ? "1" : "0" };
-    applied = json_object();
-    char err[96];
-    cool_diag_fans_idle();
-    cool_diag_release();
-    took = 0;
-    wiz_controller_start();
-    stopped = 0;
-    if (write_settings(keys, vals, 1, applied, err, sizeof(err)) != 0) {
-        finish_err("%s", err);
-        goto out;
-    }
-    if (!drives)
-        wlog("WARNING: the TEC did not cool by 1 C in 60 s; cool_tec_present cleared");
-    progress(100);
-    finish_ok(1, r, applied);
-out:
-    if (took) {
-        cool_diag_tec(0);
-        cool_diag_fans_idle();
-        cool_diag_release();
-    }
-    if (stopped)
-        wiz_controller_start();
-    if (r)
-        json_decref(r);
-    if (applied)
-        json_decref(applied);
-}
-
 /* ---------------------------------------------------------- the motion */
 
 /* The Grbl socket in loopback posture: one line, its answer. */
@@ -1960,7 +1881,6 @@ static const wiz_entry_t wizards[] = {
     { "cooling.aa-offset",   run_cooling_aa,          1 },
     { "cooling.flow",        run_cooling_flow,        1 },
     { "cooling.flow-verify", run_cooling_flow_verify, 1 },
-    { "cooling.tec",         run_cooling_tec,         1 },
     { "motion",              run_motion,              1 },
     { "cameras",             run_cameras,             1 },
     { "motion.envelope",     run_envelope,            1 },
@@ -2164,7 +2084,7 @@ const char *wiz_lease_owner(void)
 int wizdark_lease_owner(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
-    int r = S.running && !strncmp(S.id, "cooling.", 8) && strcmp(S.id, "cooling.tec");
+    int r = S.running && !strncmp(S.id, "cooling.", 8);
     if (r)
         snprintf(buf, len, "%s", lease_owner);
     pthread_mutex_unlock(&mu);
@@ -2174,7 +2094,7 @@ int wizdark_lease_owner(char *buf, size_t len)
 int wizdark_wraps_diag(void)
 {
     pthread_mutex_lock(&mu);
-    int r = S.running && !strncmp(S.id, "cooling.", 8) && strcmp(S.id, "cooling.tec");
+    int r = S.running && !strncmp(S.id, "cooling.", 8);
     pthread_mutex_unlock(&mu);
     return r;
 }

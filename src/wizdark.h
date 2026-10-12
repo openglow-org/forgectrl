@@ -13,7 +13,7 @@
  * and none runs beside a diagnostic or the dose recorder.
  *
  * Ids: switches, sensors, airflow, cooling.aa-offset, cooling.flow,
- * cooling.flow-verify, cooling.tec, motion, cameras.
+ * cooling.flow-verify, motion, cameras.
  */
 #ifndef FORGECTRL_WIZDARK_H
 #define FORGECTRL_WIZDARK_H

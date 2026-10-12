@@ -30,7 +30,6 @@ void cool_diag_fans_run(void);
 void cool_diag_fans_idle(void);
 void cool_diag_aa(long duty);
 void cool_diag_purge(int on);       /* the head's purge fan */
-void cool_diag_tec(int on);         /* the TEC drive (cooling.tec wizard) */
 /* Hold the flow check: a pending check does not start while held (the
  * setup sheet's flow-load card measures the tube's own heat,
  * which the check's heater would swamp). The hold clears itself when the

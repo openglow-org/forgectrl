@@ -75,7 +75,6 @@ static const wiz_def_t catalog[] = {
     { "motion.envelope",     "Bed size",            1, "dark" },
     { "cooling.aa-offset",   "Coolant offset",      1, "dark" },
     { "cooling.flow",        "Coolant flow",        1, "dark" },
-    { "cooling.tec",         "TEC",                 1, "dark" },
     { "cooling.flow-verify", "Flow check",          1, "dark" },
     { "cloud.header",        "Cloud header",        1, "dark" },
     { "sheet.place",         "Place the sheet",     1, "live" },

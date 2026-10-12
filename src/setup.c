@@ -53,7 +53,6 @@ static const setup_req_t image_required[] = {
     { "airflow",           1, NULL },
     { "cooling.aa-offset", 1, NULL },
     { "cooling.flow",      1, NULL },
-    { "cooling.tec",       1, "tec" },
     { "motion",            1, NULL },
     { "cameras",           1, NULL },
     { "cloud.header",      1, "cloud_enabled" },

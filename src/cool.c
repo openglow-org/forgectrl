@@ -1413,14 +1413,6 @@ void cool_diag_purge(int on)
         wr_attr("head/purge_air", on ? "1" : "0");
 }
 
-void cool_diag_tec(int on)
-{
-    if (diag_guard("diag TEC write") == 0) {
-        wr_attr("thermal/tec_on", on ? "1" : "0");
-        tec_written = -1;           /* the release lets the tick rewrite it */
-    }
-}
-
 /* Engine-raised setup flags: a flow fault twice in a row makes
  * the flow calibration required; a fan that starts a job within 10
  * percent of its floor recommends the airflow wizard. Each is raised
