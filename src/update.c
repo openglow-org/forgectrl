@@ -92,6 +92,7 @@ static char   job_phase[96];
 static time_t job_started;
 static char   job_result[768];      /* JSON object, or "" */
 static char   progress_file[64];    /* file whose growth is progress */
+static int    job_probe;            /* the job is a probe download */
 
 static pthread_mutex_t up_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE  *up_fp;
@@ -210,6 +211,19 @@ static const struct slot_target targets[] = {
     { "legacy", "/dev/mmcblk2p4", "-e4", NULL },
 };
 #define N_TARGETS (sizeof(targets) / sizeof(*targets))
+
+/* The slot the running root is on, by device number; "" when it is on
+ * none of them. For the log only: the write guard is is_booted_root. */
+static const char *booted_slot(void)
+{
+    struct stat r, d;
+    if (stat("/", &r) != 0)
+        return "";
+    for (size_t i = 0; i < N_TARGETS; i++)
+        if (stat(targets[i].dev, &d) == 0 && S_ISBLK(d.st_mode) && d.st_rdev == r.st_dev)
+            return targets[i].name;
+    return "";
+}
 
 static const struct slot_target *find_target(const char *name)
 {
@@ -333,17 +347,67 @@ static void job_set_phase(const char *phase)
     pthread_mutex_unlock(&mu);
 }
 
+/* A job's outcome in the forgectrl log, from its result: the record of
+ * every download, write, restore, and factory return, whatever the
+ * panel showed. A probe's refusal is its expected end, not a warning. */
+static void log_outcome(const char *kind, int probe, const char *result)
+{
+    const char *what = probe ? "probe download"
+                     : !strcmp(kind, "factory-return") ? "factory return" : kind;
+    json_t *o = json_loads(result, 0, NULL);
+    if (!json_is_object(o)) {
+        fflog(LOG_WARNING, "update: the %s ended: %s", what, result);
+        json_decref(o);
+        return;
+    }
+    if (json_is_true(json_object_get(o, "ok"))) {
+        char facts[512] = "";
+        const char *k;
+        json_t *v;
+        json_object_foreach(o, k, v) {
+            char one[160];
+            if (!strcmp(k, "ok"))
+                continue;
+            if (json_is_string(v))
+                snprintf(one, sizeof(one), "%s %s", k, json_string_value(v));
+            else if (json_is_boolean(v))
+                snprintf(one, sizeof(one), "%s %s", k, json_is_true(v) ? "yes" : "no");
+            else if (json_is_integer(v))
+                snprintf(one, sizeof(one), "%s %lld", k, (long long)json_integer_value(v));
+            else
+                continue;
+            if (facts[0])
+                strncat(facts, ", ", sizeof(facts) - strlen(facts) - 1);
+            strncat(facts, one, sizeof(facts) - strlen(facts) - 1);
+        }
+        fflog(LOG_NOTICE, "update: the %s finished: %s", what, facts);
+    } else {
+        const char *err = json_string_value(json_object_get(o, "error"));
+        const char *detail = json_string_value(json_object_get(o, "detail"));
+        int has_detail = detail && *detail;
+        fflog(probe ? LOG_NOTICE : LOG_WARNING, "update: the %s failed: %s%s%s%s", what,
+              err ? err : "no reason given", has_detail ? " (" : "",
+              has_detail ? detail : "", has_detail ? ")" : "");
+    }
+    json_decref(o);
+}
+
 static void job_finish(const char *fmt, ...)
 {
+    char kind[sizeof(job_kind)], result[sizeof(job_result)];
     va_list ap;
     va_start(ap, fmt);
     pthread_mutex_lock(&mu);
     vsnprintf(job_result, sizeof(job_result), fmt, ap);
+    snprintf(kind, sizeof(kind), "%s", job_kind);
+    snprintf(result, sizeof(result), "%s", job_result);
+    int probe = job_probe;
     job_running = 0;
     job_phase[0] = '\0';
     progress_file[0] = '\0';
     pthread_mutex_unlock(&mu);
     va_end(ap);
+    log_outcome(kind, probe, result);
     lease_release(job_owner);
 }
 
@@ -379,6 +443,7 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg, char 
     job_phase[0] = '\0';
     job_result[0] = '\0';
     progress_file[0] = '\0';
+    job_probe = 0;
     job_started = time(NULL);
     pthread_mutex_unlock(&mu);
 
@@ -682,12 +747,15 @@ int cb_boot_select(const struct _u_request *req, struct _u_response *res,
              (force && !strcmp(force, "1")) ? " -f" : "");
     int rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
+        fflog(LOG_WARNING, "update: selecting slot %s for the next boot failed: %s",
+              t->name, out);
         char body[640];
         snprintf(body, sizeof(body),
                  "{\"error\":\"boot selection failed\",\"detail\":\"%s\"}",
                  out);
         return reply_json(res, 409, body);
     }
+    fflog(LOG_NOTICE, "update: the next boot is slot %s", t->name);
     char body[640];
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"target\":\"%s\",\"detail\":\"%s\"}",
@@ -709,6 +777,7 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
     const char *c = param(req, "confirm");
     if (!c || strcmp(c, "1"))
         return reply_err(res, 400, "confirm=1 required");
+    fflog(LOG_NOTICE, "update: rebooting on request");
     sync();
     if (system("(sleep 1; reboot) >/dev/null 2>&1 &") != 0)
         return reply_err(res, 500, "cannot schedule reboot");
@@ -899,6 +968,9 @@ static void *dl_worker(void *arg)
 {
     int probe = arg == &dl_probe_mark;
     const char *path = probe ? DL_PROBE : DL_FW;
+    pthread_mutex_lock(&mu);
+    job_probe = probe;
+    pthread_mutex_unlock(&mu);
     /* The file of the release the last check found; a download before
      * any check runs the check first. The tag was whitelisted by the
      * check, so it is safe on the command line. */
@@ -927,6 +999,8 @@ static void *dl_worker(void *arg)
     }
     if (probe)
         fflog(LOG_NOTICE, "update: a probe download of %s", url);
+    else
+        fflog(LOG_NOTICE, "update: downloading release %s", tag);
 
     job_set_phase("downloading");
     pthread_mutex_lock(&mu);
@@ -1004,6 +1078,9 @@ static void *apply_worker(void *argp)
     struct apply_args *a = argp;
     char out[512], cmd[512];
 
+    fflog(LOG_NOTICE, "update: writing the %s archive into slot %s%s",
+          strcmp(a->file, DL_FW) ? "uploaded" : "downloaded", a->slot->name,
+          a->allow_unsigned ? " (unsigned allowed: the button was held)" : "");
     job_set_phase("taking update lock");
     if (take_lock() != 0) {
         job_finish("{\"ok\":false,\"error\":\"update lock is held "
@@ -1238,21 +1315,27 @@ int cb_update_upload(const struct _u_request *req, struct _u_response *res,
 
     if (err || bytes == 0) {
         unlink(UP_FW);
+        fflog(LOG_NOTICE, "update: an upload was refused: %s", why);
         return reply_err(res, 400, why);
     }
 
     int cls = fw_classify(UP_FW);
     if (cls < 0) {
         unlink(UP_FW);
+        fflog(LOG_NOTICE, "update: an upload was refused: not a usable fwup archive");
         return reply_err(res, 400, "not a usable fwup archive");
     }
     const char *not_fw = fwproduct_gate(UP_FW, cls);
     if (not_fw) {
         unlink(UP_FW);
+        fflog(LOG_NOTICE, "update: an upload was refused: %s", not_fw);
         return reply_err(res, 400, not_fw);
     }
     char ver[48];
     fw_meta_version(UP_FW, ver, sizeof(ver));
+    fflog(LOG_NOTICE, "update: an upload staged version %s (%llu bytes, signature %s)",
+          ver[0] ? ver : "unknown", (unsigned long long)bytes,
+          cls == 2 ? "forgefirm" : cls == 1 ? "glowforge" : "none");
     char body[320];
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"file\":\"upload\",\"bytes\":%llu,"
@@ -1351,6 +1434,8 @@ static void *restore_worker(void *argp)
 {
     struct restore_args *a = argp;
     char version[512];
+    fflog(LOG_NOTICE, "update: restoring the factory archive %s into slot %s",
+          a->file, a->slot->name);
     if (restore_run(a->slot, a->file, version, sizeof(version)) == 0)
         job_finish("{\"ok\":true,\"slot\":\"%s\",\"factory_version\":\"%s\"}",
                    a->slot->name, version);
@@ -1377,6 +1462,12 @@ static void *factory_return_worker(void *argp)
     struct return_args *a = argp;
     char version[512] = "", out[512], cmd[160];
 
+    if (a->file[0])
+        fflog(LOG_NOTICE, "update: returning to the factory firmware: restoring %s into "
+              "slot %s, then booting it", a->file, a->slot->name);
+    else
+        fflog(LOG_NOTICE, "update: returning to the factory firmware in slot %s",
+              a->slot->name);
     if (a->file[0] &&
         restore_run(a->slot, a->file, version, sizeof(version)) != 0) {
         free(a);
@@ -1604,6 +1695,13 @@ void update_init(void)
             jsan(rel_current, sizeof(rel_current), line);
         fclose(f);
     }
+    /* Every start records what runs, so the log shows each change of
+     * firmware, by whatever route it came (the panel, or fwup and ffboot
+     * at the console). */
+    const char *slot = booted_slot();
+    fflog(LOG_NOTICE, "update: running %s from slot %s (root=%s)",
+          rel_current[0] ? rel_current : "an unknown version",
+          slot[0] ? slot : "unknown", booted_root());
 
     pthread_t th;
     pthread_attr_t at;
