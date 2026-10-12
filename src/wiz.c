@@ -213,7 +213,8 @@ static void head_info(char *hw_id, size_t hl, char *serial, size_t sl,
         if (!eq)
             continue;
         *eq++ = '\0';
-        if (!strcmp(line, "hw_id"))
+        /* The head's hardware id is the module's "id" line (head_api.c). */
+        if (!strcmp(line, "id"))
             snprintf(hw_id, hl, "%s", eq);
         else if (!strcmp(line, "serial"))
             snprintf(serial, sl, "%s", eq);
