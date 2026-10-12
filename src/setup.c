@@ -505,6 +505,12 @@ int setup_wizard_done(const char *id, int version, json_t *result,
     char ts[32];
     now_iso(ts, sizeof(ts));
     pthread_mutex_lock(&mu);
+    /* A run is done at the version this build's table wants: the gate
+     * and the recommended list compare the record with the table, so a
+     * caller's own number never leaves a step that ran looking undone. */
+    for (size_t i = 0; i < nsteps; i++)
+        if (!strcmp(steps[i].id, id) && steps[i].version > version)
+            version = steps[i].version;
     json_t *w = json_object();
     json_object_set_new(w, "version", json_integer(version));
     json_object_set_new(w, "completed", json_string(ts));
@@ -516,6 +522,14 @@ int setup_wizard_done(const char *id, int version, json_t *result,
     int rc = commit_locked();
     pthread_mutex_unlock(&mu);
     return rc;
+}
+
+int setup_flagged(const char *id)
+{
+    pthread_mutex_lock(&mu);
+    int f = id && json_object_get(json_object_get(rec, "flags"), id) != NULL;
+    pthread_mutex_unlock(&mu);
+    return f;
 }
 
 int setup_flag(const char *id, const char *reason)
@@ -644,6 +658,25 @@ int setup_machine_bool(const char *key)
     int v = json_is_true(json_object_get(json_object_get(rec, "machine"), key));
     pthread_mutex_unlock(&mu);
     return v;
+}
+
+int setup_set_head(json_t *head)
+{
+    if (!json_is_object(head)) {
+        if (head)
+            json_decref(head);
+        return -1;
+    }
+    pthread_mutex_lock(&mu);
+    json_t *machine = json_object_get(rec, "machine");
+    int rc = -1;
+    if (json_is_object(machine)) {
+        json_object_set_new(machine, "head", head);
+        rc = commit_locked();
+    } else
+        json_decref(head);
+    pthread_mutex_unlock(&mu);
+    return rc;
 }
 
 void setup_head_hash(char *buf, size_t len)

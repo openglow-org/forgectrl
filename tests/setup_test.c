@@ -219,8 +219,11 @@ int main(void)
     CHECK(json_array_size(miss) == 1 && !strcmp(json_string_value(json_array_get(miss, 0)), "machine"),
           "the status names the bumped required step as missing, so the page opens it");
     json_decref(st);
-    setup_wizard_done("machine", 2, NULL, NULL);
-    CHECK(setup_gate_open(why, sizeof(why)), "run at the new version: open");
+    /* A wizard records its own version 1; the record takes the table's. */
+    setup_wizard_done("machine", 1, NULL, NULL);
+    CHECK(setup_wizard_version("machine") == 2,
+          "a run of a bumped step is recorded at the table's version");
+    CHECK(setup_gate_open(why, sizeof(why)), "run again after the bump: open");
     setup_set_steps(steps, 3);
 
     /* 5. A version bump on the image recommends the step again and
@@ -291,8 +294,9 @@ int main(void)
     setup_known_hook = NULL;
     setup_flag("sheet.place", NULL);
 
-    /* 6c. Nothing but the advisories and the account closes the gate:
-     * without the account it closes, with it back it opens. */
+    /* 6c. With no required step in this table, nothing but the
+     * advisories and the account closes the gate: without the account
+     * it closes, with it back it opens. */
     setup_flag("preferences", "fault twice");
     setup_clear_account();
     CHECK(!setup_gate_open(why, sizeof(why)) && strstr(why, "account"),
@@ -423,6 +427,44 @@ int main(void)
     CHECK(access(old, F_OK) == 0 && setup_acceptance_done(),
           "an earlier record never replaces a current one");
     unlink(old);
+
+    /* 10b. The image's own table: the required steps after the account
+     * are preferences, the machine facts, the cloud decision, and the
+     * coolant flow calibration, named in that order. */
+    {
+        FILE *fr = fopen(path, "w");
+        if (fr) {
+            fputs("{\"schema\":1}", fr);
+            fclose(fr);
+        }
+        setup_init();
+        setup_set_steps(NULL, 0);
+        json_t *ist = status();
+        json_t *im = ist ? json_object_get(ist, "missing") : NULL;
+        static const char *const want[] = { "preferences", "machine", "cloud", "cooling.flow" };
+        int same = json_array_size(im) == 4;
+        for (size_t i = 0; same && i < 4; i++)
+            same = !strcmp(json_string_value(json_array_get(im, i)) ? json_string_value(json_array_get(im, i)) : "",
+                           want[i]);
+        CHECK(same, "the image requires preferences, machine, cloud, cooling.flow, in that order");
+        json_decref(ist);
+        setup_set_steps(steps, 3);
+    }
+
+    /* 10c. The head facts can be replaced, and only on a record with
+     * machine facts. */
+    {
+        json_t *m = json_pack("{s:s,s:{s:s}}", "model", "basic", "head", "serial_hash", "OLD-HASH");
+        CHECK(setup_set_machine(m) == 0, "machine facts recorded");
+        CHECK(setup_set_head(json_pack("{s:b,s:s}", "present", 1, "serial_hash", "NEW-HASH")) == 0,
+              "the head facts are replaced");
+        char hh[32];
+        setup_head_hash(hh, sizeof(hh));
+        CHECK(!strcmp(hh, "NEW-HASH"), "the record carries the new head's hash");
+        char model[16];
+        setup_machine_str("model", model, sizeof(model));
+        CHECK(!strcmp(model, "basic"), "the other machine facts stay");
+    }
 
     /* 11. The cloud step's homing choices: the camera home, a home by
      * hand, none; nothing else. */

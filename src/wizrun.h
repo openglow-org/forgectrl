@@ -72,6 +72,7 @@ double wiz_setting_num(const char *key, double def);
  * ("2.8 mm" or "0.110 in"), and the user's number read back as mm. */
 int wiz_imperial(void);
 const char *wiz_len(double mm, char *buf, size_t n);
+/* -1 when the text is not a plain decimal number. */
 double wiz_len_mm(const char *text);
 
 /* The controller, through the supervisor, with the button LED: while a
@@ -88,6 +89,14 @@ void wiz_led_attention(int on);
 long wiz_rd_long(const char *attr, long fallback);
 int wiz_wr_attr(const char *attr, const char *val);
 int wiz_kernel_wait_idle(double timeout_s);
+/* The pulse engine idle whatever an abort says: an exit path waits for
+ * the tail it must not cut. 0 idle, -1 not within the time. */
+int wiz_kernel_settle(double timeout_s);
+/* The lens back on its hall edge and the reference marker the next
+ * controller takes its Z frame from written (lenshome.c), with the
+ * controller stopped and the engine idle; a hunt that fails leaves no
+ * marker, so the next controller holds Z unreferenced. 0 on the edge. */
+int wiz_lens_rehome(void);
 int wiz_grbl_up(void *ctx);
 int wiz_grbl_connect(void);
 int wiz_grbl_send(int fd, const char *line);

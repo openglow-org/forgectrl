@@ -2515,6 +2515,7 @@ class Mock:
                         return J(400, {'error': 'invalid value for ' + k})
                     self.settings[k] = form[k]
             w['versions']['preferences'] = self.wiz_step_version('preferences')
+            w['flags'].pop('preferences', None)      # a completed run clears its flag
             return J(200, self.wiz_reply())
         if path == '/wiz/machine':
             if form.get('model') not in ('basic', 'plus', 'pro'):
@@ -2525,6 +2526,7 @@ class Mock:
             w['machine'] = {'model': form['model'], 'tec': tec}
             self.settings['cool_tec_present'] = '1' if tec else '0'
             w['versions']['machine'] = self.wiz_step_version('machine')
+            w['flags'].pop('machine', None)      # a completed run clears its flag
             return J(200, self.wiz_reply())
         if path == '/wiz/cloud':
             if form.get('enabled') == '1':
@@ -2543,6 +2545,7 @@ class Mock:
                     self.settings['controller_mode'] = 'grbl'
                     self.mode = 'grbl'
             w['versions']['cloud'] = self.wiz_step_version('cloud')
+            w['flags'].pop('cloud', None)      # a completed run clears its flag
             return J(200, self.wiz_reply())
         if path == '/wiz/complete':
             if not self.wiz_gate_open():

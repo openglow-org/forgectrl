@@ -201,6 +201,19 @@ static double z_of_k(double k)
     return lens_z_of_k(edge_z(), z_spm, k);
 }
 
+/* The window the settings hold, and whether it was measured on this
+ * head's stops: the Lens travel check found them. A check that could not
+ * keeps the reduced window, and a head change clears the window. */
+static int window_measured(int *down, int *up)
+{
+    if (!lens_window(down, up))
+        return 0;
+    json_t *r = setup_wizard_result("lens.travel");
+    int found = !json_is_false(json_object_get(json_object_get(r, "window"), "found"));
+    json_decref(r);
+    return found;
+}
+
 /* ------------------------------------------------------- the session */
 
 typedef struct {
@@ -208,6 +221,9 @@ typedef struct {
     double spmx, spmy, spmz;
     double thickness;           /* the scrap's, as the operator gave it */
     int z_taken;                /* the lens unlocked for the session */
+    int g92;                    /* the program's head handed out its G92 origin */
+    int clean;                  /* the program played to its tail: the lens is back on its
+                                   reference and the G92 origin cleared */
 } live_t;
 
 /* The cooling engine holds the new controller's report and allows fire:
@@ -245,6 +261,14 @@ static int live_begin(live_t *L, json_t *r)
         wiz_finish_err(rc == -2 ? "the lens never reached the hall sensor in 200 steps"
                        : rc == -3 ? "the lens reference passes disagree"
                                   : "the lens reference could not run");
+        return -1;
+    }
+    /* The controller takes its Z frame from the reference marker: write
+     * it here, so the controller below holds the reference just taken
+     * whatever the broker's own hunt did (it skips the hunt while the
+     * motors are released). */
+    if (wiz_lens_rehome() != 0) {
+        wiz_finish_err("the lens reference could not be handed to the controller");
         return -1;
     }
     super_set_local(1);
@@ -291,39 +315,71 @@ static int live_begin(live_t *L, json_t *r)
     return 0;
 }
 
+/* G92.1 to the running controller after an unlock: a program stopped
+ * before its tail leaves the origin it declared, which the controller
+ * stores and would restore at its next start. 0 when it was taken. */
+static int clear_g92(void)
+{
+    int fd = wiz_grbl_connect();
+    if (fd < 0)
+        return -1;
+    char line[160];
+    wiz_grbl_expect(fd, "Grbl", line, sizeof(line), 5);
+    wiz_grbl_send(fd, "$X");
+    wiz_grbl_expect(fd, "ok", line, sizeof(line), 5);
+    wiz_grbl_send(fd, "G92.1");
+    int rc = wiz_grbl_expect(fd, "ok", line, sizeof(line), 5);
+    close(fd);
+    return rc;
+}
+
 static void live_end(live_t *L)
 {
     /* Whatever the exit, the pulse engine finishes before the controller
-     * is stopped; a stop at Idle would discard the tail. */
+     * is stopped (a stop at Idle would discard the tail) and before the
+     * lens is stepped. */
     wiz_phase("the machine goes back to its normal posture");
-    wiz_kernel_wait_idle(600.0);
+    wiz_kernel_settle(600.0);
+    if (L->local && L->g92 && !L->clean && clear_g92() != 0)
+        wiz_log("the burn's G92 origin could not be cleared: send G92.1 before a job");
+    if (L->local)
+        wiz_controller_stop();
+    /* A session that did not play to its tail may leave the lens off its
+     * reference, and the next controller takes its Z frame from the
+     * reference marker: the lens goes back on its hall edge, or, when it
+     * cannot, the marker goes and the controller holds Z unreferenced. */
+    if (!L->clean && (L->local || L->stopped) && wiz_lens_rehome() != 0)
+        wiz_log("the lens could not find its reference: Z stays unreferenced until it does");
     if (L->z_taken) {
         wiz_wr_attr("cnc/motor_lock", "8");
         wiz_wr_attr("head/z_current", "1");
     }
-    if (L->local) {
-        wiz_controller_stop();
+    if (L->local)
         super_set_local(0);
-        wiz_controller_start();
-    } else if (L->stopped)
+    if (L->local || L->stopped)
         wiz_controller_start();
 }
 
 /* The tail every program ends with: the lens back on the reference the
- * G92 declared, the head back home, then the program end, which
- * the controller acknowledges once the stream is produced. The lens
- * reference is a height in this head's window, so it is read from the
- * head and never written as a literal. 0 past the last line. */
-static int tail_line(int i, char *buf, size_t len)
+ * G92 declared (edge, the height the program's head declared it at), the
+ * head back home, the G92 origin cleared (the controller stores a G92
+ * offset and restores it at its next start, where it would shift a
+ * sender's own work offsets), then the program end, which the
+ * controller acknowledges once the stream is produced. 0 past the last
+ * line. */
+static int tail_line(int i, double edge, char *buf, size_t len)
 {
     switch (i) {
     case 0:
-        snprintf(buf, len, "G0 Z%.2f", edge_z());
+        snprintf(buf, len, "G0 Z%.2f", edge);
         return 1;
     case 1:
         snprintf(buf, len, "G0 X0 Y0");
         return 1;
     case 2:
+        snprintf(buf, len, "G92.1");
+        return 1;
+    case 3:
         snprintf(buf, len, "M2");
         return 1;
     default:
@@ -379,11 +435,26 @@ static int burn_setup(live_t *L, const char *id, json_t *r)
         if (wiz_ask("number", "thickness", text, th, 1, a, sizeof(a)) != 0)
             return -1;
         double t = wiz_len_mm(a);
-        if (t > 0 && t <= 30) {
-            L->thickness = t;
-            break;
+        if (!(t > 0 && t <= 30)) {
+            wiz_log("the thickness is a decimal number, more than 0 and at most %s",
+                    wiz_len(30, u1, sizeof(u1)));
+            continue;
         }
-        wiz_log("the thickness must be more than 0 and at most 30 mm");
+        /* The floor burns at the focus on the scrap's surface: a surface
+         * the lens cannot focus on would measure a defocused ladder and
+         * write a floor that is too high. */
+        if (!strcmp(id, "laser.floor")) {
+            int down, up;
+            lens_window(&down, &up);
+            double lo = z_of_k(-down), hi = z_of_k(up);
+            if (t < lo || t > hi) {
+                wiz_log("the lens focuses %s to %s above the tray: use a scrap in that range",
+                        wiz_len(lo, u1, sizeof(u1)), wiz_len(hi, u2, sizeof(u2)));
+                continue;
+            }
+        }
+        L->thickness = t;
+        break;
     }
     json_object_set_new(r, "thickness_mm", json_real(L->thickness));
     return 0;
@@ -391,12 +462,15 @@ static int burn_setup(live_t *L, const char *id, json_t *r)
 
 /* ------------------------------------------------ the program generator */
 
+#define G92_LINE 3              /* gen_init: $X, G21, G90, then the G92 line */
+
 typedef struct {
     char head[6][80];
     int nhead, ihead;
     const char *body;
     size_t off;
-    int tail;               /* the lines after the body: Z up, home, M2 */
+    int tail;               /* the lines after the body: Z up, home, G92.1, M2 */
+    double edge;            /* the reference height the head declared */
     int lit;                    /* the tube has been seen lit: the phase said so */
     int lit_now, ended;         /* the tube's state now; the program streamed to its end */
     double t_lit0, t_lit_last, last_phase;
@@ -412,12 +486,13 @@ typedef struct {
 static void gen_init(gen_t *g, double z, const char *body)
 {
     memset(g, 0, sizeof(*g));
+    g->edge = edge_z();
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "$X");
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G21");
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G90");
     /* The lens is referenced on the hall edge at the controller's start,
      * so the Z envelope is already open: set the origin. */
-    snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G92 X0 Y0 Z%.2f", edge_z());
+    snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G92 X0 Y0 Z%.2f", g->edge);
     snprintf(g->head[g->nhead++], sizeof(g->head[0]), "G0 Z%.2f", z);
     g->body = body;
 }
@@ -434,7 +509,7 @@ static int gen_next(void *ctx, char *buf, size_t len)
         while (*p == '\n' || *p == '\r')
             p++;
         if (!*p) {
-            if (!tail_line(g->tail, buf, len)) {
+            if (!tail_line(g->tail, g->edge, buf, len)) {
                 g->ended = 1;
                 return 0;
             }
@@ -549,8 +624,8 @@ static int witnessed(const jobstream_run_t *run, json_t *r)
     json_object_set_new(e, "lit_s", json_real(run->lit ? run->t_last_lit - run->t_first_lit : 0));
     json_object_set_new(r, "emission", e);
     if (run->lit && tp_delta < TP_SEEN_MIN)
-        wiz_log("the head's beam sensor gave no output (rose %ld); the burn counts on the tube "
-                "current and LASER_ON", tp_delta);
+        wiz_log("the beam sensor gave no output (rose %ld); the tube current and LASER_ON count",
+                tp_delta);
     return run->lit && run->lon_max > 0;
 }
 
@@ -655,7 +730,7 @@ int wizlive_program(const char *id, sheet_text_t *out)
     /* The tail the wizard streams after the body, as it streams it. */
     for (int i = 0; rc == 0; i++) {
         char line[80];
-        if (!tail_line(i, line, sizeof(line)))
+        if (!tail_line(i, edge_z(), line, sizeof(line)))
             break;
         sheet_text_line(out, "%s", line);
     }
@@ -689,7 +764,7 @@ static int program_fits(const gen_t *g, const char *body, char *why, size_t wlen
     int down, up, n = 0;
     lens_window(&down, &up);
     double lo, hi;
-    lens_reach(edge_z(), z_spm, down, up, &lo, &hi);
+    lens_reach(g->edge, z_spm, down, up, &lo, &hi);
     for (int i = 0; i < g->nhead; i++)
         if (z_off_reach(g->head[i], ++n, lo, hi, why, wlen))
             return -1;
@@ -707,7 +782,7 @@ static int program_fits(const gen_t *g, const char *body, char *why, size_t wlen
     }
     for (int i = 0;; i++) {
         char line[80];
-        if (!tail_line(i, line, sizeof(line)))
+        if (!tail_line(i, g->edge, line, sizeof(line)))
             break;
         if (z_off_reach(line, ++n, lo, hi, why, wlen))
             return -1;
@@ -747,6 +822,7 @@ static int burn(live_t *L, build_t *b, const char *id, gen_t *g, jobstream_run_t
      * controller. */
     g->tail_s = 2.0;
     rc = stream(g, run, g->tail_s, err, sizeof(err));
+    L->g92 = g->ihead > G92_LINE;
     sheet_text_free(&pg);
     g->body = NULL;
     if (g->press_open) {
@@ -762,6 +838,9 @@ static int burn(live_t *L, build_t *b, const char *id, gen_t *g, jobstream_run_t
         wiz_finish_err("the pulse engine did not finish the program");
         return -1;
     }
+    /* The tail played: the lens is on its reference, the head home, and
+     * the G92 origin cleared. */
+    L->clean = g->ended;
     wiz_log("streamed %d lines; tube current peak %ld, LASER_ON samples %ld, thermopile +%ld",
             run->sent, run->hv_max, run->lon_max,
             run->tp_base >= 0 ? run->tp_max - run->tp_base : 0);
@@ -790,7 +869,7 @@ static void run_focus(void)
      * Lens travel check's, else the fallback); build_defaults placed
      * them. Nothing here can reach a stop. */
     int down, up;
-    int found = lens_window(&down, &up);
+    int found = window_measured(&down, &up);
     char text[640], u1[32], u2[32], u3[32], u4[32];
     snprintf(text, sizeof(text),
              "The lens is on its hall reference. Twelve %s lines burn heavy, the lens stepped "
@@ -822,10 +901,10 @@ static void run_focus(void)
     }
     char picks[40];
     if (wiz_ask_t("multichoice", "focus-pick",
-                  "Every line is dark. Which is the narrowest dark line, with the crispest edges? "
-                  "Count from the top, 1 to 12. Several adjacent lines can look the same, since "
-                  "the depth of focus spans a few of them: choose every one that does, and the "
-                  "middle of the run is taken. Then Done. " STILL,
+                  "Which dark line is the narrowest, with the crispest edges? Count from the "
+                  "top, 1 to 12. Neighbors can look the same, since the depth of focus spans a "
+                  "few lines: choose every one that does, and the middle is taken. Then Done. "
+                  STILL,
                   opts, SHEET_FOCUS_N, PICK_TIMEOUT_S, picks, sizeof(picks)) != 0)
         goto out;
     /* The picks: one line, or a run of adjacent lines, its middle the
@@ -910,6 +989,12 @@ static void run_floor(void)
         wiz_finish_err("out of memory");
         goto out;
     }
+    /* The floor burns at the focus Focus measured on this head: a Focus
+     * flagged again (a head change) measured another one. */
+    if (setup_wizard_version("laser.focus") < 1 || setup_flagged("laser.focus")) {
+        wiz_finish_err("run Focus first: the floor burns at the focus it measures");
+        goto out;
+    }
     if (burn_setup(&L, "laser.floor", r) != 0)
         goto out;
     build_defaults(b);
@@ -940,6 +1025,13 @@ static void run_floor(void)
     if (!strcmp(a, "None")) {
         wiz_finish_err("no rung marked a continuous line up to 24 percent: the tube or the "
                        "supply needs attention before the floor can be set");
+        goto out;
+    }
+    int offered = 0;
+    for (int i = 0; i < SHEET_FLOOR_N; i++)
+        offered |= !strcmp(a, names[i]);
+    if (!offered) {
+        wiz_finish_err("the answer is not one of the rungs");
         goto out;
     }
     double faint = atof(a), floor = faint + FLOOR_STEP;

@@ -63,11 +63,6 @@ int wizcalc_fan_silent(const double *rpm, int n)
     return 1;
 }
 
-int wizcalc_intake_fans(const wizcalc_fan_t *intake1, int intake2_silent)
-{
-    return intake1 && intake1->ok && intake2_silent ? 1 : 2;
-}
-
 double wizcalc_floor(double steady, double frac, double lo, double hi)
 {
     double f = steady * frac;

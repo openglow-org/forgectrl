@@ -26,6 +26,7 @@
 #include "led.h"
 #include "lens.h"
 #include "lensfind.h"
+#include "lenshome.h"
 #include "liveness.h"
 #include "paths.h"
 #include "session.h"
@@ -696,9 +697,11 @@ static void run_airflow(void)
     msleep(3000);
     double purge_off = (double)rd_long("head/purge_air_current", 0);
     /* Judge each fan. A machine built with one intake fan has nothing on
-     * the second intake tach: when intake 1 passes and intake 2 never
-     * read a pulse, the machine has one intake fan, and intake 2 is not
-     * judged here or by the airflow gate. */
+     * the second intake tach, and so has one whose second fan stopped or
+     * came unplugged: the count is the machine's (the Intake fans step's,
+     * where the operator settles a silent intake 2). Intake 2 turning
+     * proves two fans; silent, it is one fan on a machine counted with
+     * one, and a fault on a machine counted with two or not counted. */
     wizcalc_fan_t f[F_N];
     int silent[F_N];
     double col[400];
@@ -709,15 +712,26 @@ static void run_airflow(void)
         wizcalc_fan_analyze(col, m, hz, 1000.0, &f[k]);
         silent[k] = wizcalc_fan_silent(col, m);
     }
-    int intake_fans = wizcalc_intake_fans(&f[F_INTAKE1], silent[F_INTAKE2]);
+    char counted[8] = "";
+    if (settings_get("cool_intake_fans", counted, sizeof(counted)) != 0)
+        counted[0] = '\0';
     int fail = 0;
+    int intake_fans = !silent[F_INTAKE2] ? 2 : strcmp(counted, "1") ? 2 : 1;
+    if (silent[F_INTAKE2] && intake_fans == 2) {
+        wlog(counted[0] ? "intake 2: no tach pulse in %d s on a machine with two intake fans"
+                        : "intake 2: no tach pulse in %d s, and the intake fans are not counted",
+             secs);
+        fail = 1;
+    }
     double spin_max = 0.0;
     r = json_object();
     json_t *fans = json_object();
     for (int k = 0; k < F_N; k++) {
-        if (k == F_INTAKE2 && intake_fans == 1) {
-            json_object_set_new(fans, fan_names[k], json_pack("{s:b}", "fitted", 0));
-            wlog("%s: no tach pulse in %d s; one intake fan fitted", fan_names[k], secs);
+        if (k == F_INTAKE2 && silent[k]) {
+            json_object_set_new(fans, fan_names[k], json_pack("{s:b,s:b}", "fitted", intake_fans == 2,
+                                                              "turning", 0));
+            if (intake_fans == 1)
+                wlog("%s: no tach pulse in %d s; one intake fan fitted", fan_names[k], secs);
             continue;
         }
         json_t *o = json_object();
@@ -736,8 +750,8 @@ static void run_airflow(void)
     json_object_set_new(r, "intake_fans", json_integer(intake_fans));
     if (intake_fans == 1)
         json_object_set_new(r, "summary", json_string(
-            "Only one intake fan was detected. Its speed sets the intake floor; "
-            "the second intake is not checked."));
+            "One intake fan, as the machine is counted. Its speed sets the intake "
+            "floor; the second intake is not checked."));
     wizcalc_fan_t p;
     double purge_on = 0.0;
     if (wizcalc_fan_analyze(purge, m, hz, 0.0, &p) == 0)
@@ -772,8 +786,9 @@ static void run_airflow(void)
     snprintf(v_aa, sizeof(v_aa), "%.0f", fl_aa);
     snprintf(v_pg, sizeof(v_pg), "%.0f", fl_pg);
     snprintf(v_gr, sizeof(v_gr), "%.0f", grace);
-    /* The five floors, then the intake fan count: written every run, so
-     * a run on a machine with both intakes turning sets it back to 2. */
+    /* The five floors, then the intake fan count when intake 2 turned:
+     * that proves two fans, so a run on a machine with both intakes
+     * turning sets it to 2. A silent intake 2 never writes the count. */
     const char *keys[] = { "cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm",
                            "cool_tach_air_assist_min_rpm", "cool_purge_min_current",
                            "cool_fan_grace_s", "cool_intake_fans" };
@@ -792,7 +807,7 @@ static void run_airflow(void)
     stopped = 0;
     applied = json_object();
     char err[96];
-    if (write_settings(keys, vals, 6, applied, err, sizeof(err)) != 0) {
+    if (write_settings(keys, vals, silent[F_INTAKE2] ? 5 : 6, applied, err, sizeof(err)) != 0) {
         finish_err("%s", err);
         goto out;
     }
@@ -820,12 +835,13 @@ out:
  * and the airflow gate judges the second only when it is fitted
  * (cool_intake_fans): without the count, a machine with one intake fan
  * stops every cut on the second intake. The setup's gate holds the
- * controllers until the count is known, so this step runs right after
- * the account and cannot be skipped. Every fan to the run profile for
- * INTAKE_S seconds: intake 1 turning and intake 2 never reading a pulse
- * is one fan, anything else two (wizcalc_intake_fans, the airflow
- * check's own rule). When intake 1 does not come up, the tachs cannot
- * tell, and the operator gives the count. */
+ * controllers until the count is known, so this step runs among the
+ * required ones and cannot be skipped. Every fan to the run profile for
+ * INTAKE_S seconds: both intakes turning is two fans. Intake 2 never
+ * reading a pulse is one fan, or a second fan that stopped or came
+ * unplugged, which the tachs cannot tell apart; and when intake 1 does
+ * not come up the tachs cannot count at all. In both cases the operator
+ * looks and gives the count. */
 #define INTAKE_S 20
 static void run_intakes(void)
 {
@@ -880,9 +896,21 @@ static void run_intakes(void)
     json_object_set_new(r, "intake_2_silent", json_boolean(silent2));
     wlog("intake 1: %.0f rpm steady; intake 2: %s", f1.steady_rpm,
          silent2 ? "no tach pulse" : "turning");
-    if (f1.ok) {
-        count = wizcalc_intake_fans(&f1, silent2);
+    if (f1.ok && !silent2) {
+        count = 2;                  /* both intakes turn: two fans */
         json_object_set_new(r, "counted_by", json_string("tachs"));
+    } else if (f1.ok) {
+        /* A machine built with one intake fan reads exactly as one whose
+         * second fan has stopped or come unplugged: the operator looks. */
+        static const char *const opts[] = { "One", "Two" };
+        char a[8];
+        if (ask("choice", "intake-count",
+                "Intake 1 turns; intake 2 gives no reading. Look at the back of the machine: "
+                "how many intake fans does it have? If it has two, the second one needs "
+                "attention before the machine cuts.", opts, 2, a, sizeof(a)) != 0)
+            goto out;
+        count = !strcmp(a, "One") ? 1 : 2;
+        json_object_set_new(r, "counted_by", json_string("operator"));
     } else {
         wlog("intake 1 did not come up to speed (%.0f rpm): the tachs cannot count the fans",
              f1.steady_rpm);
@@ -899,6 +927,8 @@ static void run_intakes(void)
     json_object_set_new(r, "intake_fans", json_integer(count));
     json_object_set_new(r, "summary", json_string(
         count == 1 ? "One intake fan. The airflow gate judges intake 1 alone."
+        : silent2  ? "Two intake fans, and intake 2 gives no reading: the airflow gate stops "
+                     "a cut until it turns."
                    : "Two intake fans. The airflow gate judges both."));
     const char *keys[] = { "cool_intake_fans" };
     const char *vals[] = { count == 1 ? "1" : "2" };
@@ -1645,8 +1675,16 @@ static void run_lens_travel(void)
     progress(100);
     finish_ok(1, r, applied);
 out:
-    if (stopped)
+    /* The next controller takes its Z frame from the reference marker,
+     * and an abort stops the finder wherever the lens is: whatever the
+     * exit, the lens goes back on its hall edge first, or the marker
+     * goes and the controller holds Z unreferenced. */
+    if (stopped) {
+        wiz_kernel_settle(30.0);
+        if (wiz_lens_rehome() != 0)
+            wlog("the lens could not find its reference: Z stays unreferenced until it does");
         wiz_controller_start();
+    }
     json_decref(r);
     if (applied)
         json_decref(applied);
@@ -2443,12 +2481,35 @@ const char *wiz_len(double mm, char *buf, size_t n)
 }
 double wiz_len_mm(const char *text)
 {
-    double v = strtod(text, NULL);
+    char *end;
+    double v = strtod(text ? text : "", &end);
+    while (end && (*end == ' ' || *end == '\t'))
+        end++;
+    if (!text || end == text || *end)
+        return -1;          /* "1/8" or "3 mm": not a plain number */
     return wiz_imperial() ? v * 25.4 : v;
 }
 long wiz_rd_long(const char *attr, long fallback) { return rd_long(attr, fallback); }
 int wiz_wr_attr(const char *attr, const char *val) { return wr_attr(attr, val); }
 int wiz_kernel_wait_idle(double timeout_s) { return kernel_wait_idle(timeout_s, NULL); }
+int wiz_kernel_settle(double timeout_s)
+{
+    double deadline = wall_s() + timeout_s;
+    while (wall_s() < deadline) {
+        int idle = kernel_idle();
+        if (idle)
+            return idle > 0 ? 0 : -1;
+        msleep(20);
+    }
+    return -1;
+}
+int wiz_lens_rehome(void)
+{
+    char detail[96];
+    int rc = lenshome_run(detail, sizeof(detail));
+    wlog("lens: %s", detail);
+    return rc == 1 ? 0 : -1;
+}
 int wiz_grbl_up(void *ctx) { return grbl_up(ctx); }
 int wiz_grbl_connect(void) { return grbl_connect(); }
 int wiz_grbl_send(int fd, const char *line) { return grbl_send(fd, line); }

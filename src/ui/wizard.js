@@ -297,6 +297,10 @@ function stepDone(id) {
    * a release that asks for it again holds the machine, and the page
    * sends the operator back to it. */
   if ((W.missing || []).indexOf(id) >= 0) return false;
+  /* Otherwise a required step that ran is done: a flag on it (a part
+   * change, a fault) only recommends it again, as the daemon has it, and
+   * never holds the guided run. */
+  if (REQUIRED.indexOf(id) >= 0) return !!(W.versions && W.versions[id]);
   if (CHECK_IDS.indexOf(id) >= 0 && !darkApplicable(id)) return true;
   if (W.versions && W.versions[id] && recIds().indexOf(id) >= 0) return false;
   return !!(W.versions && W.versions[id]);

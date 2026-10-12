@@ -57,6 +57,9 @@ void setup_machine_str(const char *key, char *buf, size_t len);
 int setup_machine_bool(const char *key);
 /* The head serial hash the record carries (empty when none). */
 void setup_head_hash(char *buf, size_t len);
+/* Replace the record's head facts (machine.head), when the record has
+ * machine facts. Takes the reference. */
+int setup_set_head(json_t *head);
 
 /* Load the record and evaluate the gate. Idempotent; call once at
  * startup after sheetid_init() and users_init(). */
@@ -87,12 +90,17 @@ int setup_set_account(const char *name, long uid);
 int setup_clear_account(void);
 int setup_set_machine(json_t *machine);   /* takes a reference */
 /* A wizard completed at a version, with its result and the settings
- * it applied ({key: {from, to}}); both may be NULL. Takes references. */
+ * it applied ({key: {from, to}}); both may be NULL. Takes references.
+ * A step of the table is recorded at the table's version when that is
+ * higher. */
 int setup_wizard_done(const char *id, int version, json_t *result,
                            json_t *applied);
 /* Recommend a step again, with the reason; a NULL reason clears the
  * flag. A completed run of the step clears it too. */
 int setup_flag(const char *id, const char *reason);
+/* 1 when the step carries a flag (a part change or a fault recommends it
+ * again). */
+int setup_flagged(const char *id);
 /* The guided run ended: finished, or set aside to use the machine. */
 int setup_complete(void);
 /* The record as JSON text for GET /wiz/record (the account hash is not

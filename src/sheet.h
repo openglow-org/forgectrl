@@ -125,14 +125,14 @@ int sheet_svg(const sheet_paths_t *s, float w, float h, sheet_text_t *out);
  * use under the job's laser keys (the mark S, or its density under an
  * override), `feed` the mark feed. */
 
-/* The focus ladder: n lines, one per Z, each 20 mm at the focus dose
+/* The focus ladder: n lines, one per Z, each sheet_ladder_len() long at the focus dose
  * (SHEET_FOCUS_S, SHEET_FOCUS_FEED), spread over the lens's measured
  * travel. The box and the labels are burned at z_text at the mark dose. */
 #define SHEET_FOCUS_N 12
 void sheet_build_focus(sheet_paths_t *pv, sheet_text_t *pg, const sheet_card_t *c,
                        const double *z, int n, double z_text, int text_s, int feed);
-/* The floor ladder: n rungs at the given densities (percent), 25 mm
- * each at the ladder feed, under a floor of 0 and the curve off. */
+/* The floor ladder: n rungs at the given densities (percent), each
+ * sheet_ladder_len() long at the ladder feed, under a floor of 0 and the curve off. */
 #define SHEET_FLOOR_N 12
 void sheet_build_floor(sheet_paths_t *pv, sheet_text_t *pg, const sheet_card_t *c,
                        const double *density, int n, int text_s, int feed);

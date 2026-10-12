@@ -3413,6 +3413,10 @@ int main(int argc, char **argv)
         snprintf(sp, sizeof(sp), "%s/sessions", ff_run_dir());
         session_set_store(sp);
     }
+    /* The gate's hooks before its first evaluation (setup_init), and
+     * before any thread reads them: an unset hook reads as satisfied. */
+    setup_fact_hook = setup_fact;
+    setup_fans_hook = setup_fans_counted;
     /* The account reset: the button held through the daemon's start,
      * for ten seconds, with the LED blinking amber while it counts.
      * The old password stops working at once; the wizard's account
@@ -3437,8 +3441,6 @@ int main(int argc, char **argv)
     super_init();
     diag_init();            /* its marker recovery drives the supervisor: after it */
     wizdark_init();
-    setup_fact_hook = setup_fact;
-    setup_fans_hook = setup_fans_counted;
     update_init();
     lease_sender_connected = jobstream_sender_blocks;
     lease_motors_released = motors_released_now;

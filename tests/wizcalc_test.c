@@ -52,13 +52,10 @@ int main(void)
     double none[280] = {0};
     wizcalc_fan_analyze(none, 280, 8.0, 1000.0, &in2);
     CHECK(wizcalc_fan_silent(none, 280) && !in2.ok, "a tach with no pulse is silent and fails the minimum");
-    CHECK(wizcalc_intake_fans(&in1, 1) == 1, "intake 1 passing and intake 2 silent is one intake fan");
-    CHECK(wizcalc_intake_fans(&in1, 0) == 2, "both intakes reading is two intake fans");
     none[200] = 450.0;
     CHECK(!wizcalc_fan_silent(none, 280), "one reading anywhere in the run is a fan, not silence");
     n = fan_trace(rpm, 600.0, 2.0, 8.0, 35.0);
     CHECK(!wizcalc_fan_silent(rpm, n), "a slow fan is not silent: it fails the minimum as a fan");
-    CHECK(wizcalc_intake_fans(&in2, 1) == 2, "intake 1 failing is never one intake fan");
     CHECK(wizcalc_fan_silent(none, 0) == 0 && wizcalc_fan_silent(NULL, 280) == 0,
           "an empty trace is not silent");
 

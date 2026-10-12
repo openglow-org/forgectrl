@@ -900,8 +900,9 @@ static void pass_locked(void)
             }
         }
 
-        /* The setup gate (the advisories, the account, and the intake
-         * fan count): no controller for a sender while it is closed. A
+        /* The setup gate (the advisories, the account, the required
+         * steps, and the intake fan count): no controller for a sender
+         * while it is closed. A
          * wizard's own controller (local posture, loopback only) passes.
          * A gate that closes on a running controller (an advisory changed
          * by an update) stops it once the machine is idle, never

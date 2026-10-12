@@ -32,12 +32,6 @@ int wizcalc_fan_analyze(const double *rpm, int n, double hz, double min_rpm,
  * fans). 0 for an empty trace. */
 int wizcalc_fan_silent(const double *rpm, int n);
 
-/* The intake fans fitted: 1 when intake 1 passed and intake 2 was
- * silent, else 2. A machine built with one intake fan has nothing on
- * the second tach; a fan stopped dead reads the same, and is taken as
- * not fitted. Anything else is two fans, judged as two. */
-int wizcalc_intake_fans(const wizcalc_fan_t *intake1, int intake2_silent);
-
 /* The floor a fan gets: `frac` of its steady speed, inside [lo, hi]. */
 double wizcalc_floor(double steady, double frac, double lo, double hi);
 

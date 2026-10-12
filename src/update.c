@@ -349,7 +349,8 @@ static void job_set_phase(const char *phase)
 
 /* A job's outcome in the forgectrl log, from its result: the record of
  * every download, write, restore, and factory return, whatever the
- * panel showed. A probe's refusal is its expected end, not a warning. */
+ * panel showed. A probe's own refusal is its expected end, not a
+ * warning. */
 static void log_outcome(const char *kind, int probe, const char *result)
 {
     const char *what = probe ? "probe download"
@@ -385,7 +386,13 @@ static void log_outcome(const char *kind, int probe, const char *result)
         const char *err = json_string_value(json_object_get(o, "error"));
         const char *detail = json_string_value(json_object_get(o, "detail"));
         int has_detail = detail && *detail;
-        fflog(probe ? LOG_NOTICE : LOG_WARNING, "update: the %s failed: %s%s%s%s", what,
+        /* A probe ends refused by design: what it fetches is the
+         * release's acceptance record, which the verification discards
+         * (or, signed, the probe does). A probe that ends any other way,
+         * a failed fetch among them, is a failure like a download's. */
+        int expected = probe && err && (strstr(err, "signature verification failed") ||
+                                        strstr(err, "a probe keeps nothing"));
+        fflog(expected ? LOG_NOTICE : LOG_WARNING, "update: the %s failed: %s%s%s%s", what,
               err ? err : "no reason given", has_detail ? " (" : "",
               has_detail ? detail : "", has_detail ? ")" : "");
     }

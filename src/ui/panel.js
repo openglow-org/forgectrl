@@ -876,7 +876,7 @@ function renderGate() {
     b.className = 'banner banner-bad';
     b.innerHTML =
       '⚠ The machine is waiting for setup: ' +
-      esc(MD.why || 'the advisories or the account') +
+      esc(MD.why || 'a required step of the setup') +
       '. Controllers stay off until it is done. ' +
       "<a href='/setup'>Continue the setup</a>";
     b.style.display = '';
@@ -1218,11 +1218,14 @@ function loadWizards() {
 }
 /* Above every tab once the guided run has ended: the steps the setup
  * still recommends, and the way back to it. A dismissal is kept in this
- * browser as the steps it covered; the banner comes back only when a step
- * that was not among them is recommended (a part change, a fault the
- * machine saw, a release that wants a step again). */
+ * browser as the recommendations it covered, each a step with its reason;
+ * one that is no longer recommended drops out of it. So the banner comes
+ * back for a step recommended anew, or for a new reason (a part change, a
+ * fault the machine saw, a release that wants a step again), even when
+ * the same step was dismissed before. */
 var SETUP_DISMISS_KEY = 'ff_setup_banner_dismissed';
-var SETUP_REC = [];
+var SETUP_REC = [];             /* the recommended step ids */
+var SETUP_REC_KEYS = [];        /* the same, each with its reason */
 function setupDismissed() {
   try {
     var v = JSON.parse(localStorage.getItem(SETUP_DISMISS_KEY) || '[]');
@@ -1231,17 +1234,24 @@ function setupDismissed() {
     return [];
   }
 }
+function setupDismissSave(keys) {
+  try {
+    localStorage.setItem(SETUP_DISMISS_KEY, JSON.stringify(keys));
+  } catch (e) {}
+}
 function renderSetupBanner(w) {
-  SETUP_REC = w.completed ? (w.recommended || []).map(function (x) { return x.id; }) : [];
-  var gone = setupDismissed();
-  var fresh = SETUP_REC.filter(function (id) { return gone.indexOf(id) < 0; });
+  var rec = w.completed ? w.recommended || [] : [];
+  SETUP_REC = rec.map(function (x) { return x.id; });
+  SETUP_REC_KEYS = rec.map(function (x) { return x.id + '\n' + (x.reason || ''); });
+  var stored = setupDismissed();
+  var gone = stored.filter(function (k) { return SETUP_REC_KEYS.indexOf(k) >= 0; });
+  if (gone.length !== stored.length) setupDismissSave(gone);
+  var fresh = SETUP_REC_KEYS.filter(function (k) { return gone.indexOf(k) < 0; });
   $('setup-banner-list').textContent = SETUP_REC.map(function (id) { return W_TITLES[id] || id; }).join(', ');
   $('setup-banner').style.display = fresh.length ? '' : 'none';
 }
 function dismissSetupBanner() {
-  try {
-    localStorage.setItem(SETUP_DISMISS_KEY, JSON.stringify(SETUP_REC));
-  } catch (e) {}
+  setupDismissSave(SETUP_REC_KEYS);
   $('setup-banner').style.display = 'none';
 }
 /* The what-changed menu: the daemon's table of changes, each mapped to
@@ -1477,7 +1487,9 @@ function fill(force) {
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
   setF('cool_tec_present', S.cool_tec_present || '0');
-  setF('cool_intake_fans', S.cool_intake_fans || '2');
+  /* Unset reads as Not counted, so choosing either count is a change
+   * to save: the setup's gate waits for it. */
+  setF('cool_intake_fans', S.cool_intake_fans || '');
   setF('lid_policy', S.lid_policy || 'cancel');
   setF('xy_microsteps', S.xy_microsteps || '8');
   setF('rail_settle_s', S.rail_settle_s);

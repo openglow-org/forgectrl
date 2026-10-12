@@ -86,10 +86,26 @@ static const wiz_def_t catalog[] = {
 
 static void head_info(char *hw_id, size_t hl, char *serial, size_t sl,
                       char *version, size_t vl);
+static json_t *head_facts(void);
+
+/* A replaced head: its lens window was measured on the old head's
+ * stops, so it goes, and the lens keeps the reduced window that clears
+ * the stops on any head until Lens travel runs. */
+static void head_window_clear(void)
+{
+    static const char *const keys[] = { "lens_stop_below_steps", "lens_stop_above_steps" };
+    static const char *const vals[] = { "", "" };
+    if (settings_set_many(keys, vals, 2) != 0)
+        fflog(LOG_WARNING, "wiz: the lens window of the old head could not be cleared");
+}
 
 /* The head-change trigger: a record made with one head, booted with
  * another, recommends what a replaced head does: the machine facts, the
- * lens travel and the focus, motion and the cameras. */
+ * lens travel and the focus, motion and the cameras. The lens window was
+ * measured on the old head's stops, so it goes (the lens keeps the
+ * reduced window that clears the stops on any head until Lens travel
+ * runs), and the record takes the new head's facts, so the change is
+ * applied once. */
 static void check_head_change(void)
 {
     char recorded[32], hw[24], ser[24], ver[24], now[32] = "";
@@ -103,6 +119,8 @@ static void check_head_change(void)
     if (strcmp(recorded, now)) {
         fflog(LOG_NOTICE, "wiz: the head changed since the record was made");
         setup_change_apply("head");
+        head_window_clear();
+        setup_set_head(head_facts());
     }
 }
 
@@ -238,6 +256,14 @@ static json_t *detected_facts(void)
     json_object_set_new(m, "camera",
                         json_string(st.sensor && st.sensor[0] ? st.sensor : "unknown"));
 
+    json_object_set_new(m, "head", head_facts());
+    return m;
+}
+
+/* The head's facts: present, the hardware id and the firmware, and the
+ * serial's hash (the record never carries the serial). New object. */
+static json_t *head_facts(void)
+{
     char hw[24], ser[24], ver[24];
     head_info(hw, sizeof(hw), ser, sizeof(ser), ver, sizeof(ver));
     json_t *head = json_object();
@@ -248,8 +274,7 @@ static json_t *detected_facts(void)
     if (ser[0])
         sheetid_derive(ser, sh, sizeof(sh));
     json_object_set_new(head, "serial_hash", json_string(sh));
-    json_object_set_new(m, "head", head);
-    return m;
+    return head;
 }
 
 /* The model choice and the TEC flag the machine wizard asks for. */
@@ -425,6 +450,8 @@ int cb_wiz_changed(const struct _u_request *req, struct _u_response *res, void *
     const char *what = param(req, "what");
     if (setup_change_apply(what) != 0)
         return reply_error(res, 400, "what must name a change from the menu");
+    if (!strcmp(what, "head"))
+        head_window_clear();
     return cb_wiz_status(req, res, NULL);
 }
 
@@ -880,11 +907,12 @@ int cb_wiz_complete(const struct _u_request *req, struct _u_response *res, void 
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     /* The guided run ends here, finished or set aside ("Start using the
-     * machine", "Finish later"): it needs the advisories and the account
-     * and nothing else. The button lights green only for a finished one. */
+     * machine", "Finish later"): it needs the gate open (the advisories,
+     * the account, the required steps, the intake fan count) and nothing
+     * else. The button lights green only for a finished one. */
     char why[256];
     if (!setup_gate_open(why, sizeof(why)))
-        return reply_error(res, 409, why[0] ? why : "the advisories or the account are not done");
+        return reply_error(res, 409, why[0] ? why : "the setup's required steps are not done");
     if (setup_complete() != 0)
         return reply_error(res, 500, "cannot write the record");
     int left = setup_recommended_count();
