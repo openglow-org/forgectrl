@@ -53,7 +53,7 @@
 
 /* The catalog: every wizard the page can show, in first-run order. The
  * version is the schema version the record stores on completion; the
- * required table in setup.c names the versions this image needs. */
+ * step table in setup.c names the versions this image recommends. */
 typedef struct {
     const char *id;
     const char *title;
@@ -67,6 +67,7 @@ static const wiz_def_t catalog[] = {
     { "preferences",         "Preferences",         1, "form" },
     { "machine",             "Your machine",        1, "form" },
     { "cloud",               "Cloud mode",          1, "form" },
+    { "airflow.intakes",     "Intake fans",         1, "dark" },
     { "switches",            "Switches",            1, "dark" },
     { "sensors",             "Sensors",             1, "dark" },
     { "airflow",             "Airflow",             1, "dark" },
@@ -77,13 +78,9 @@ static const wiz_def_t catalog[] = {
     { "cooling.flow",        "Coolant flow",        1, "dark" },
     { "cooling.flow-verify", "Flow check",          1, "dark" },
     { "cloud.header",        "Cloud header",        1, "dark" },
-    { "sheet.place",         "Place the sheet",     1, "live" },
-    { "sheet.frame",         "First fire",          1, "live" },
+    { "lens.travel",         "Lens travel",         1, "dark" },
     { "laser.focus",         "Focus",               1, "live" },
     { "laser.floor",         "Laser floor",         1, "live" },
-    { "laser.dose-curve",    "Dose curve",          1, "live" },
-    { "laser.corner",        "Corner rolloff",      1, "live" },
-    { "cooling.flow-load",   "Flow under load",     1, "live" },
 };
 #define NCATALOG (sizeof(catalog) / sizeof(*catalog))
 
@@ -91,8 +88,8 @@ static void head_info(char *hw_id, size_t hl, char *serial, size_t sl,
                       char *version, size_t vl);
 
 /* The head-change trigger: a record made with one head, booted with
- * another, requires the machine facts again (and, later, the wizards
- * that depend on the head). */
+ * another, recommends what a replaced head does: the machine facts, the
+ * lens travel and the focus, motion and the cameras. */
 static void check_head_change(void)
 {
     char recorded[32], hw[24], ser[24], ver[24], now[32] = "";
@@ -105,12 +102,22 @@ static void check_head_change(void)
     sheetid_derive(ser, now, sizeof(now));
     if (strcmp(recorded, now)) {
         fflog(LOG_NOTICE, "wiz: the head changed since the record was made");
-        setup_flag("machine", "required", "the head changed");
+        setup_change_apply("head");
     }
+}
+
+/* The setup's recommended list names only steps this build has. */
+static int catalog_known(const char *id)
+{
+    for (size_t i = 0; i < NCATALOG; i++)
+        if (!strcmp(catalog[i].id, id))
+            return 1;
+    return 0;
 }
 
 void wiz_init(void)
 {
+    setup_known_hook = catalog_known;
     check_head_change();
 }
 
@@ -871,15 +878,20 @@ int cb_wiz_complete(const struct _u_request *req, struct _u_response *res, void 
     (void)ud;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    /* The guided run ends here, finished or set aside ("Start using the
+     * machine", "Finish later"): it needs the advisories and the account
+     * and nothing else. The button lights green only for a finished one. */
     char why[256];
-    if (!setup_gate_open(why, sizeof(why)) || setup_override_active()) {
-        if (!setup_gate_open(why, sizeof(why)))
-            return reply_error(res, 409, why[0] ? why : "not every step is complete");
-    }
+    if (!setup_gate_open(why, sizeof(why)))
+        return reply_error(res, 409, why[0] ? why : "the advisories or the account are not done");
     if (setup_complete() != 0)
         return reply_error(res, 500, "cannot write the record");
-    led_set(LED_SOLID_GREEN);
-    finish_lit = 1;
-    fflog(LOG_NOTICE, "wiz: setup complete");
+    int left = setup_recommended_count();
+    if (left == 0) {
+        led_set(LED_SOLID_GREEN);
+        finish_lit = 1;
+        fflog(LOG_NOTICE, "wiz: setup complete");
+    } else
+        fflog(LOG_NOTICE, "wiz: setup set aside with %d step%s recommended", left, left == 1 ? "" : "s");
     return cb_wiz_status(req, res, NULL);
 }

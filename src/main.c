@@ -3311,6 +3311,14 @@ static int setup_fact(const char *fact)
     return 0;
 }
 
+/* The setup gate's machine fact: the intake fan count has a value. */
+static int setup_fans_counted(void)
+{
+    char v[8] = "";
+    settings_get("cool_intake_fans", v, sizeof(v));
+    return v[0] != '\0';
+}
+
 /* libmicrohttpd's own messages (MHD_USE_ERROR_LOG): a client that drops
  * a stream, a TLS handshake a browser probes and abandons. Through fflog
  * at debug, not to stderr, where the service log took them as warnings. */
@@ -3430,6 +3438,7 @@ int main(int argc, char **argv)
     diag_init();            /* its marker recovery drives the supervisor: after it */
     wizdark_init();
     setup_fact_hook = setup_fact;
+    setup_fans_hook = setup_fans_counted;
     update_init();
     lease_sender_connected = jobstream_sender_blocks;
     lease_motors_released = motors_released_now;

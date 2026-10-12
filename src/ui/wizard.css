@@ -550,20 +550,6 @@ body {
   font-size: 12.5px;
   margin: 0 0 10px;
 }
-.wz-jog {
-  display: grid;
-  grid-template-columns: repeat(3, 64px);
-  gap: 6px;
-  margin: 0 0 10px;
-}
-.wz-jog .btn {
-  min-width: 64px;
-}
-.wz-chart {
-  display: block;
-  color: var(--og-title);
-  max-width: 100%;
-}
 .wz-log {
   margin: 10px 0 0;
   padding: 8px 10px;

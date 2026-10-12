@@ -24,6 +24,8 @@
 #include "hooks.h"
 #include "lease.h"
 #include "led.h"
+#include "lens.h"
+#include "lensfind.h"
 #include "liveness.h"
 #include "paths.h"
 #include "session.h"
@@ -814,6 +816,114 @@ out:
     free(purge);
 }
 
+/* The intake fans counted. A machine is built with one intake fan or two,
+ * and the airflow gate judges the second only when it is fitted
+ * (cool_intake_fans): without the count, a machine with one intake fan
+ * stops every cut on the second intake. The setup's gate holds the
+ * controllers until the count is known, so this step runs right after
+ * the account and cannot be skipped. Every fan to the run profile for
+ * INTAKE_S seconds: intake 1 turning and intake 2 never reading a pulse
+ * is one fan, anything else two (wizcalc_intake_fans, the airflow
+ * check's own rule). When intake 1 does not come up, the tachs cannot
+ * tell, and the operator gives the count. */
+#define INTAKE_S 20
+static void run_intakes(void)
+{
+    const double hz = 8.0;
+    int n = (int)(hz * INTAKE_S);
+    double *in1 = calloc((size_t)n, sizeof(double)), *in2 = calloc((size_t)n, sizeof(double));
+    int took = 0, stopped = 0;
+    json_t *r = json_object(), *applied = NULL;
+    if (!in1 || !in2) {
+        finish_err("out of memory");
+        goto out;
+    }
+    phase("stopping the motion controller");
+    if (wiz_controller_stop() != 0) {
+        finish_err("could not stop the motion controller");
+        goto out;
+    }
+    stopped = 1;
+    if (cool_diag_take() != 0) {
+        finish_err("the cooling engine is busy (a session, its cooldown, or another takeover)");
+        goto out;
+    }
+    took = 1;
+    phase("the fans to the run profile for %d s", INTAKE_S);
+    wlog("fans to run duty");
+    cool_diag_fans_run();
+    double t0 = wall_s();
+    for (int i = 0; i < n; i++) {
+        if (aborted())
+            goto out;
+        in1[i] = airflow_rpm(rd_long("thermal/tach_intake_1", 0), 1e9, 2);
+        in2[i] = airflow_rpm(rd_long("thermal/tach_intake_2", 0), 1e9, 2);
+        progress(5 + i * 80 / n);
+        double next = t0 + (i + 1) / hz;
+        double now = wall_s();
+        if (next > now)
+            msleep((int)((next - now) * 1000.0));
+    }
+    phase("standing the fans down");
+    cool_diag_fans_idle();
+    cool_diag_release();
+    took = 0;
+    wiz_controller_start();
+    stopped = 0;
+    wizcalc_fan_t f1, f2;
+    wizcalc_fan_analyze(in1, n, hz, 1000.0, &f1);
+    wizcalc_fan_analyze(in2, n, hz, 1000.0, &f2);
+    int silent2 = wizcalc_fan_silent(in2, n);
+    int count;
+    json_object_set_new(r, "intake_1_rpm", json_real(round(f1.steady_rpm)));
+    json_object_set_new(r, "intake_2_rpm", json_real(round(f2.steady_rpm)));
+    json_object_set_new(r, "intake_2_silent", json_boolean(silent2));
+    wlog("intake 1: %.0f rpm steady; intake 2: %s", f1.steady_rpm,
+         silent2 ? "no tach pulse" : "turning");
+    if (f1.ok) {
+        count = wizcalc_intake_fans(&f1, silent2);
+        json_object_set_new(r, "counted_by", json_string("tachs"));
+    } else {
+        wlog("intake 1 did not come up to speed (%.0f rpm): the tachs cannot count the fans",
+             f1.steady_rpm);
+        static const char *const opts[] = { "One", "Two" };
+        char a[8];
+        if (ask("choice", "intake-count",
+                "The intake fans could not be counted: intake 1 did not come up to speed. Look "
+                "at the back of the machine: how many intake fans does it have? A fan that does "
+                "not turn needs attention before the machine cuts.", opts, 2, a, sizeof(a)) != 0)
+            goto out;
+        count = !strcmp(a, "One") ? 1 : 2;
+        json_object_set_new(r, "counted_by", json_string("operator"));
+    }
+    json_object_set_new(r, "intake_fans", json_integer(count));
+    json_object_set_new(r, "summary", json_string(
+        count == 1 ? "One intake fan. The airflow gate judges intake 1 alone."
+                   : "Two intake fans. The airflow gate judges both."));
+    const char *keys[] = { "cool_intake_fans" };
+    const char *vals[] = { count == 1 ? "1" : "2" };
+    applied = json_object();
+    char err[96];
+    if (write_settings(keys, vals, 1, applied, err, sizeof(err)) != 0) {
+        finish_err("%s", err);
+        goto out;
+    }
+    progress(100);
+    finish_ok(1, r, applied);
+out:
+    if (took) {
+        cool_diag_fans_idle();
+        cool_diag_release();
+    }
+    if (stopped)
+        wiz_controller_start();
+    json_decref(r);
+    if (applied)
+        json_decref(applied);
+    free(in1);
+    free(in2);
+}
+
 /* ------------------------------------------- the cooling diagnostics */
 
 /* Run one of diag.c's tools to its end; the parsed result object, or
@@ -983,13 +1093,13 @@ static void run_cooling_flow_verify(void)
     if (!pass) {
         finish_err("the flow check does not separate flow from no-flow at the threshold: run the "
                    "calibration");
-        setup_flag("cooling.flow", "required", "the flow check failed to separate the bands");
+        setup_flag("cooling.flow", "the flow check failed to separate the bands");
         json_decref(res);
         return;
     }
     if (thin) {
         wlog("the margin is thin: a calibration is recommended");
-        setup_flag("cooling.flow", "recommended", "the flow check margin is thin");
+        setup_flag("cooling.flow", "the flow check margin is thin");
     }
     progress(100);
     finish_ok(1, res, NULL);
@@ -1475,6 +1585,73 @@ static int shot(cam_id_t cam, const char *name)
     return 0;
 }
 
+/* The lens's free travel: the lens referenced on its hall edge, then
+ * its two stops found by the head accelerometer (lensfind.c), with the
+ * controller stopped and no laser. The window is written as the free
+ * half-steps each way, or as the fallback that clears the stops on any
+ * head when they cannot be found on this one; the controller opens its
+ * Z limit from the same two keys at its next start, and the focus burn
+ * steps its ladder inside them. */
+static void run_lens_travel(void)
+{
+    int stopped = 0;
+    json_t *r = json_object(), *applied = NULL;
+    phase("stopping the motion controller");
+    if (wiz_controller_stop() != 0) {
+        finish_err("could not stop the motion controller");
+        goto out;
+    }
+    stopped = 1;
+    phase("the lens finds its reference on the hall sensor");
+    int rc = z_reference(r, 2);
+    if (rc != 0) {
+        finish_err(rc == -2 ? "the lens never reached the hall sensor in 200 steps"
+                   : rc == -3 ? "the lens reference passes disagree"
+                              : "the lens reference could not run");
+        goto out;
+    }
+    progress(30);
+    lensfind_t st;
+    lensfind_run(&st, r);
+    if (aborted())
+        goto out;
+    progress(90);
+    int down = st.found ? st.below : LENS_WINDOW_DOWN;
+    int up = st.found ? st.above : LENS_WINDOW_UP;
+    char vd[8], vu[8], err[96];
+    snprintf(vd, sizeof(vd), "%d", down);
+    snprintf(vu, sizeof(vu), "%d", up);
+    const char *keys[] = { "lens_stop_below_steps", "lens_stop_above_steps" };
+    const char *vals[] = { vd, vu };
+    applied = json_object();
+    if (write_settings(keys, vals, 2, applied, err, sizeof(err)) != 0) {
+        finish_err("%s", err);
+        goto out;
+    }
+    json_object_set_new(r, "window", json_pack("{s:i,s:i,s:b}", "below", down, "above", up,
+                                               "found", st.found));
+    char sum[480];
+    if (st.found)
+        snprintf(sum, sizeof(sum), "The lens moves freely %d half-steps below its reference and %d "
+                 "above. The controller and the focus burn keep inside that.", down, up);
+    else
+        snprintf(sum, sizeof(sum), "The stops could not be found on this head (%s). The lens keeps "
+                 "a reduced travel that clears the stops on any head. Please open an issue at "
+                 "github.com/openglow-org/forgefirm or post on community.openglow.org so the head "
+                 "can be looked at.", st.why);
+    json_object_set_new(r, "summary", json_string(sum));
+    wlog("the lens window: %d half-steps below the reference, %d above (%s)", down, up,
+         st.found ? "the stops found" : "the fallback");
+    progress(100);
+    finish_ok(1, r, applied);
+out:
+    if (stopped)
+        wiz_controller_start();
+    json_decref(r);
+    if (applied)
+        json_decref(applied);
+}
+
 static void run_cameras(void)
 {
     json_t *r = json_object();
@@ -1884,6 +2061,8 @@ static const wiz_entry_t wizards[] = {
     { "motion",              run_motion,              1 },
     { "cameras",             run_cameras,             1 },
     { "motion.envelope",     run_envelope,            1 },
+    { "lens.travel",         run_lens_travel,         1 },
+    { "airflow.intakes",     run_intakes,             1 },
 };
 #define NWIZ (sizeof(wizards) / sizeof(*wizards))
 

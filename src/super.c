@@ -900,11 +900,12 @@ static void pass_locked(void)
             }
         }
 
-        /* The setup gate: no controller for a sender while it
-         * is closed. A wizard's own controller (local posture, loopback
-         * only) passes. A gate that closes on a running controller (a
-         * required re-run raised mid-life) stops it once the machine
-         * is idle, never mid-job. */
+        /* The setup gate (the advisories, the account, and the intake
+         * fan count): no controller for a sender while it is closed. A
+         * wizard's own controller (local posture, loopback only) passes.
+         * A gate that closes on a running controller (an advisory changed
+         * by an update) stops it once the machine is idle, never
+         * mid-job. */
         {
             char why[256];
             pthread_mutex_unlock(&mu);

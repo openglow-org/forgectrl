@@ -102,6 +102,7 @@ add_executable(forgectrl
   src/events.c
   src/lease.c
   src/sheet.c
+  src/lensfind.c
   src/wizlive.c
   src/super.c
   src/relcheck.c

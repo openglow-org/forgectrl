@@ -1413,17 +1413,16 @@ void cool_diag_purge(int on)
         wr_attr("head/purge_air", on ? "1" : "0");
 }
 
-/* Engine-raised setup flags: a flow fault twice in a row makes
- * the flow calibration required; a fan that starts a job within 10
- * percent of its floor recommends the airflow wizard. Each is raised
- * once. */
+/* Engine-raised setup flags: a flow fault twice in a row recommends
+ * the flow calibration; a fan that starts a job within 10 percent of
+ * its floor recommends the airflow check. Each is raised once. */
 static int flow_fault_streak;
 static int fan_margin_noted[Fan_N];
 
 static void flow_fault_noted(void)
 {
     if (++flow_fault_streak == 2)
-        setup_flag("cooling.flow", "required", "a coolant flow fault twice in a row");
+        setup_flag("cooling.flow", "a coolant flow fault twice in a row");
 }
 
 static void flow_fault_cleared(void)
@@ -2105,7 +2104,7 @@ static void engine_tick(void)
                     char why[96];
                     snprintf(why, sizeof(why), "%s ran within 10 percent of its floor (%.0f of %.0f)",
                              fan_name[i], fan_reading[i], fan_floor[i]);
-                    setup_flag("airflow", "recommended", why);
+                    setup_flag("airflow", why);
                 }
                 if (st == Air_Tripped && !airflow_alarm) {
                     airflow_alarm = 1;

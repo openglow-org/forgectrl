@@ -1,13 +1,13 @@
 /*
- * sheet_test.c - host unit test for the setup sheet renderer
+ * sheet_test.c - host unit test for the setup burns' renderer
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The font table is whole; text draws, measures, and clips; the cards
- * tile the frame; every card's drawing stays inside its box, on the
- * sheet and alone; every program line is one the controller takes or a
- * directive; the SVG is one document; the curve inverse interpolates.
+ * The font table is whole; text draws, measures, and clips; each card
+ * sits the margin from the head's home and its scrap fits a 4 x 3 in
+ * piece; every card's drawing stays inside its box; every program line
+ * is one the controller takes or a directive; the SVG is one document.
  */
 #include "../src/sheet.h"
 #include "../src/font_hershey.h"
@@ -70,36 +70,32 @@ static void test_text(void)
 static void test_layout(void)
 {
     size_t n = sheet_ncards();
-    CHECK(n == 5, "%zu cards", n);
-    /* The sheet fits a 10 x 8 in piece with room to spare. */
-    CHECK(SHEET_W <= 254.0f && SHEET_H <= 203.2f, "the sheet is %.0f x %.0f", (double)SHEET_W, (double)SHEET_H);
-    CHECK(SHEET_FRAME_X + SHEET_FRAME_W <= SHEET_W && SHEET_FRAME_Y + SHEET_FRAME_H <= SHEET_H,
-          "the frame leaves the sheet");
+    CHECK(n == 2, "%zu cards", n);
     /* The focus and floor ladders span their cards: from the label
      * column to the right margin, and the wizards name that length. */
     CHECK(fabsf(sheet_ladder_len(sheet_card("laser.focus")) - 45.0f) < 0.01f, "the focus ladder is %.1f mm",
           (double)sheet_ladder_len(sheet_card("laser.focus")));
     CHECK(fabsf(sheet_ladder_len(sheet_card("laser.floor")) - 53.0f) < 0.01f, "the floor ladder is %.1f mm",
           (double)sheet_ladder_len(sheet_card("laser.floor")));
-    /* Every card title fits its box at the card cap. */
     for (size_t i = 0; i < n; i++) {
         const sheet_card_t *c = sheet_card_at(i);
+        /* Every card title fits its box at the card cap. */
         CHECK(sheet_text_width(SHEET_CAP_CARD, c->title) <= c->w - 4, "%s: the title is wider than the card",
               c->id);
-        CHECK(c->x >= SHEET_FRAME_X && c->x + c->w <= SHEET_FRAME_X + SHEET_FRAME_W + 0.01f,
-              "%s runs outside the frame in x", c->id);
-        CHECK(c->y >= SHEET_FRAME_Y + 32 && c->y + c->h <= SHEET_FRAME_Y + SHEET_FRAME_H + 0.01f,
-              "%s runs into the header or out of the frame", c->id);
-        for (size_t k = 0; k < n; k++) {
-            const sheet_card_t *d = sheet_card_at(k);
-            if (k == i)
-                continue;
-            int apart = c->x + c->w + SHEET_GUTTER <= d->x + 0.01f || d->x + d->w + SHEET_GUTTER <= c->x + 0.01f ||
-                        c->y + c->h + SHEET_GUTTER <= d->y + 0.01f || d->y + d->h + SHEET_GUTTER <= c->y + 0.01f;
-            CHECK(apart, "%s and %s overlap or touch", c->id, d->id);
-        }
+        /* Each card's box sits the margin from the head's home, and its
+         * scrap is the box with the margin on every side. */
+        CHECK(c->x == SHEET_MARGIN && c->y == SHEET_MARGIN, "%s: the box is at %.0f, %.0f", c->id,
+              (double)c->x, (double)c->y);
+        float w, h;
+        sheet_scrap_size(c, &w, &h);
+        CHECK(w == c->w + 2 * SHEET_MARGIN && h == c->h + 2 * SHEET_MARGIN, "%s: the scrap is %.0f x %.0f",
+              c->id, (double)w, (double)h);
+        /* A scrap fits a 4 x 3 in piece. */
+        CHECK(w <= 101.6f && h <= 76.2f, "%s: the scrap %.0f x %.0f is larger than 4 x 3 in", c->id,
+              (double)w, (double)h);
     }
-    CHECK(sheet_card("laser.focus") != NULL && sheet_card("nope") == NULL, "lookup");
+    CHECK(sheet_card("laser.focus") != NULL && sheet_card("laser.floor") != NULL &&
+          sheet_card("laser.dose-curve") == NULL && sheet_card("nope") == NULL, "lookup");
 }
 
 static int program_ok(const sheet_text_t *pg, const char *what)
@@ -138,7 +134,7 @@ static void bounds_inside(const sheet_paths_t *pv, float x, float y, float w, fl
 static void build(const char *id, sheet_paths_t *pv, sheet_text_t *pg)
 {
     const sheet_card_t *c = sheet_card(id);
-    double z[SHEET_FOCUS_N], d[SHEET_FLOOR_N], g[SHEET_CORNER_N] = { 1.0, 1.25, 1.5, 1.75, 2.0 };
+    double z[SHEET_FOCUS_N], d[SHEET_FLOOR_N];
     for (int i = 0; i < SHEET_FOCUS_N; i++)
         z[i] = 10.6 - 1.4 * i;
     for (int i = 0; i < SHEET_FLOOR_N; i++)
@@ -147,18 +143,11 @@ static void build(const char *id, sheet_paths_t *pv, sheet_text_t *pg)
         sheet_build_focus(pv, pg, c, z, SHEET_FOCUS_N, 5.3, 400, 3000);
     else if (!strcmp(id, "laser.floor"))
         sheet_build_floor(pv, pg, c, d, SHEET_FLOOR_N, 600, 3000);
-    else if (!strcmp(id, "laser.dose-curve"))
-        sheet_build_dose(pv, pg, c, 600, 3000);
-    else if (!strcmp(id, "laser.corner"))
-        sheet_build_corner(pv, pg, c, g, SHEET_CORNER_N, 300, 2000, 400, 3000);
-    else if (!strcmp(id, "cooling.flow-load"))
-        sheet_build_flowload(pv, pg, c, 600, 1500, 400, 3000);
 }
 
 static void test_cards(void)
 {
-    static const char *const ids[] = { "laser.focus", "laser.floor", "laser.dose-curve",
-                                       "laser.corner", "cooling.flow-load" };
+    static const char *const ids[] = { "laser.focus", "laser.floor" };
     for (size_t i = 0; i < sizeof(ids) / sizeof(*ids); i++) {
         const sheet_card_t *c = sheet_card(ids[i]);
         sheet_paths_t pv;
@@ -169,99 +158,35 @@ static void test_cards(void)
         bounds_inside(&pv, c->x, c->y, c->w, c->h, ids[i]);
         program_ok(&pg, ids[i]);
         CHECK(strstr(pg.buf, "M5") != NULL, "%s: no M5", ids[i]);
-        sheet_paths_free(&pv);
-        sheet_text_free(&pg);
-        /* Alone: the same card offset to the margin of its own sheet. */
-        sheet_paths_init(&pv);
-        sheet_text_init(&pg);
-        float dx, dy, w, h;
-        sheet_alone_offset(c, &dx, &dy);
-        sheet_alone_size(c, &w, &h);
-        sheet_offset(&pv, dx, dy);
-        build(ids[i], &pv, &pg);
-        bounds_inside(&pv, SHEET_ALONE_MARGIN, SHEET_ALONE_MARGIN, c->w, c->h, "alone");
-        /* The program's coordinates moved with the drawing. */
-        char want[32];
-        snprintf(want, sizeof(want), "X%.0f", (double)(c->x + dx + 2));
-        CHECK(strstr(pg.buf, "G0 X") != NULL, "%s alone: no rapid", ids[i]);
+        CHECK(strstr(pg.buf, "G0 X") != NULL, "%s: no rapid", ids[i]);
+        /* Nothing the program draws comes nearer home than the margin. */
+        float x0, y0, x1, y1;
+        sheet_bounds(&pv, &x0, &y0, &x1, &y1);
+        CHECK(x0 >= SHEET_MARGIN - 0.01f && y0 >= SHEET_MARGIN - 0.01f, "%s: drawing at %.1f, %.1f", ids[i],
+              (double)x0, (double)y0);
         sheet_paths_free(&pv);
         sheet_text_free(&pg);
     }
     /* The focus ladder runs at its own heavy dose, not the mark's. */
-    {
-        sheet_paths_t fv;
-        sheet_text_t fg;
-        sheet_paths_init(&fv);
-        sheet_text_init(&fg);
-        build("laser.focus", &fv, &fg);
-        char want[32];
-        snprintf(want, sizeof(want), "M3 S%d\n", SHEET_FOCUS_S);
-        CHECK(strstr(fg.buf, want) != NULL, "the focus ladder lacks its S line");
-        snprintf(want, sizeof(want), "F%d\n", SHEET_FOCUS_FEED);
-        CHECK(strstr(fg.buf, want) != NULL, "the focus ladder lacks its feed");
-        sheet_paths_free(&fv);
-        sheet_text_free(&fg);
-    }
-    /* The corner card carries one directive per gamma. */
-    sheet_paths_t pv;
-    sheet_text_t pg;
-    sheet_paths_init(&pv);
-    sheet_text_init(&pg);
-    build("laser.corner", &pv, &pg);
-    int n = 0;
-    for (const char *p = pg.buf; (p = strstr(p, ";gamma=")); p++)
-        n++;
-    CHECK(n == SHEET_CORNER_N, "%d gamma directives", n);
-    CHECK(strstr(pg.buf, "M4 S300") != NULL, "no M4 in the corner card");
-    sheet_paths_free(&pv);
-    sheet_text_free(&pg);
-    sheet_paths_init(&pv);
-    sheet_text_init(&pg);
-    build("cooling.flow-load", &pv, &pg);
-    CHECK(strstr(pg.buf, ";settle") == NULL, "the flow-load card settles inside the job");
-    CHECK(strstr(pg.buf, "M3 S") != NULL, "no patch in the flow-load card");
-    sheet_paths_free(&pv);
-    sheet_text_free(&pg);
-}
-
-static void test_frame(void)
-{
-    sheet_paths_t pv;
-    sheet_text_t pg;
-    sheet_paths_init(&pv);
-    sheet_text_init(&pg);
-    /* A long version and a long camera name: the facts stay in the band. */
-    sheet_header_t h = { "0.0.99-rc1+g1234abcd", "release", "Pro", "OV8856", "ABCDE-FGHIJ",
-                         "2026-09-05 20:00Z" };
-    sheet_build_frame(&pv, &pg, &h, 400, 3000);
-    bounds_inside(&pv, SHEET_FRAME_X, SHEET_FRAME_Y, SHEET_FRAME_W, SHEET_FRAME_H, "frame");
-    program_ok(&pg, "frame");
-    CHECK(pv.n > 500, "the header has %d points", pv.n);
-    /* Nothing but the frame's own edges reaches under the header band. */
-    for (int i = 0; i < pv.n; i++)
-        if (pv.p[i].x != SHEET_PEN_UP && pv.p[i].x > SHEET_FRAME_X + 0.5f &&
-            pv.p[i].x < SHEET_FRAME_X + SHEET_FRAME_W - 0.5f)
-            CHECK(pv.p[i].y <= SHEET_FRAME_Y + 32 - 1.5f || pv.p[i].y >= SHEET_FRAME_Y + SHEET_FRAME_H - 0.5f,
-                  "header text at y %.1f runs into the cards", (double)pv.p[i].y);
-    sheet_paths_free(&pv);
-    sheet_text_free(&pg);
-    /* The corner card's four-character labels are drawn whole. */
-    sheet_paths_init(&pv);
-    sheet_text_init(&pg);
-    build("laser.corner", &pv, &pg);
-    const sheet_card_t *c = sheet_card("laser.corner");
-    float label_w = sheet_text_width(SHEET_CAP_BODY, "1.25");
-    int right_of_label = 0;
-    /* The first label, "1.00", sits at baseline y + 13; its last glyph
-     * runs past x + 2 + (the width less one glyph). The pattern starts
-     * at x + 14, outside the window. */
-    for (int i = 0; i < pv.n; i++)
-        if (pv.p[i].x != SHEET_PEN_UP && pv.p[i].x > c->x + 2 + label_w - 2.0f && pv.p[i].x < c->x + 13 &&
-            pv.p[i].y > c->y + 10 && pv.p[i].y < c->y + 13.5f)
-            right_of_label++;
-    CHECK(right_of_label > 0, "the corner label's last digit is clipped");
-    sheet_paths_free(&pv);
-    sheet_text_free(&pg);
+    sheet_paths_t fv;
+    sheet_text_t fg;
+    sheet_paths_init(&fv);
+    sheet_text_init(&fg);
+    build("laser.focus", &fv, &fg);
+    char want[32];
+    snprintf(want, sizeof(want), "M3 S%d\n", SHEET_FOCUS_S);
+    CHECK(strstr(fg.buf, want) != NULL, "the focus ladder lacks its S line");
+    snprintf(want, sizeof(want), "F%d\n", SHEET_FOCUS_FEED);
+    CHECK(strstr(fg.buf, want) != NULL, "the focus ladder lacks its feed");
+    sheet_paths_free(&fv);
+    sheet_text_free(&fg);
+    /* The floor rungs run with the floor and the dose curve off. */
+    sheet_paths_init(&fv);
+    sheet_text_init(&fg);
+    build("laser.floor", &fv, &fg);
+    CHECK(strstr(fg.buf, ";keys=floor-off\n") != NULL, "the floor card lacks its keys directive");
+    sheet_paths_free(&fv);
+    sheet_text_free(&fg);
 }
 
 /* A whole program body goes through the raw append, not the line
@@ -273,9 +198,8 @@ static void test_text_append(void)
     sheet_paths_init(&pv);
     sheet_text_init(&pg);
     sheet_text_init(&out);
-    sheet_header_t h = { "0.0.1", "dev", "pro", "OV5648", "ABCDE-FGHIJ", "2026-09-05 20:00Z" };
-    sheet_build_frame(&pv, &pg, &h, 400, 3000);
-    CHECK(pg.len > 2000, "the frame body is only %zu bytes", pg.len);
+    build("laser.focus", &pv, &pg);
+    CHECK(pg.len > 2000, "the focus body is only %zu bytes", pg.len);
     sheet_text_line(&out, "; a comment line");
     CHECK(sheet_text_append(&out, pg.buf, pg.len) == 0, "append failed");
     CHECK(out.len == pg.len + strlen("; a comment line\n"), "append lost bytes: %zu vs %zu", out.len, pg.len);
@@ -304,29 +228,14 @@ static void test_svg(void)
     sheet_text_free(&out);
 }
 
-static void test_curve(void)
-{
-    const char *curve = "10:0.5,20:2,30:7,45:21,60:37,80:50,100:100";
-    CHECK(fabs(sheet_density_for_light(curve, 100) - 100) < 1e-9, "top");
-    CHECK(fabs(sheet_density_for_light(curve, 50) - 80) < 1e-9, "50 light is 80 density");
-    double d = sheet_density_for_light(curve, 40);
-    CHECK(d > 60 && d < 80, "40 light interpolates to %.1f", d);
-    CHECK(fabs(sheet_density_for_light("off", 40) - 40) < 1e-9, "off is the identity");
-    CHECK(fabs(sheet_density_for_light("", 40) - 40) < 1e-9, "empty is the identity");
-    CHECK(fabs(sheet_density_for_light("garbage", 40) - 40) < 1e-9, "bad text is the identity");
-    CHECK(sheet_density_for_light(curve, 0.25) > 0 && sheet_density_for_light(curve, 0.25) <= 10, "below the first point");
-}
-
 int main(void)
 {
     test_font();
     test_text();
     test_layout();
     test_cards();
-    test_frame();
     test_text_append();
     test_svg();
-    test_curve();
     if (fails) {
         printf("sheet_test: %d failures\n", fails);
         return 1;

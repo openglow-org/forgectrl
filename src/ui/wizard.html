@@ -4,8 +4,8 @@
   Written by Scott Wiederhold
   SPDX-License-Identifier: MIT
 
-  Served at "/" while the first run is incomplete and at "/setup" on
-  demand. One task per screen, a progress rail on the left; the steps
+  Served at "/" until the guided run ends (finished, or set aside once
+  the account exists) and at "/setup" on demand. One task per screen, a progress rail on the left; the steps
   are sections that wizard.js shows one at a time from the state in
   GET /wiz. Bundled by src/ui/embed.cmake like the panel: the styles and
   scripts linked below are inlined in order.
@@ -166,6 +166,22 @@
           </p>
         </section>
 
+        <!-- After the account: the rest of the setup, or the machine -->
+        <section class="wz-step" id="st-choice">
+          <h1>Continue the setup, or start using the machine</h1>
+          <p class="lead">
+            The machine is yours to use now. The rest of the setup checks the machine and
+            measures its own numbers: its switches, sensors, airflow, coolant, motion, cameras,
+            the lens, and the focus. We recommend you finish it, but nothing waits for it. You can
+            come back to it at any time from the control panel.
+          </p>
+          <div class="wz-actions">
+            <button class="btn btn-primary" id="c-go" onclick="choiceContinue()">Continue the setup</button>
+            <button class="btn btn-outline-secondary" id="c-later" onclick="finish()">Start using the machine</button>
+            <span class="msg" id="ch-msg"></span>
+          </div>
+        </section>
+
         <!-- 4. Preferences -->
         <section class="wz-step" id="st-preferences">
           <h1>Preferences</h1>
@@ -235,9 +251,9 @@
             <h2>Sheet id</h2>
             <p>
               <span class="mono" id="m-sheet">…</span><br />
-              This code identifies your machine on the setup sheet it will burn later. It is
-              made from the serial number with a secret kept on the machine, so it does not reveal
-              the serial number. You can share a photo of the sheet.
+              This code identifies your machine in its setup record. It is made from the serial
+              number with a secret kept on the machine, so it does not reveal the serial number.
+              You can share the record.
             </p>
           </div>
           <div class="wz-actions">
@@ -349,8 +365,8 @@
           <h1>Your machine is ready</h1>
           <p class="lead">
             The account exists, the machine knows what it is, its switches, sensors, airflow,
-            coolant loop, motion, and cameras are checked, the sheet is burned, and the record
-            holds its numbers. The control panel is yours. Keep the sheet with the machine.
+            coolant loop, motion, cameras, and lens are checked, the focus is measured, and the
+            record holds its numbers. The control panel is yours.
           </p>
           <div class="wz-card">
             <div class="wz-facts" id="d-facts"></div>
@@ -359,7 +375,7 @@
             <h2>The record</h2>
             <p>
               Everything the setup found and wrote is in the setup record on the machine.
-              Print it, or save it beside the sheet. The log export carries it too.
+              Print it, or save it. The log export carries it too.
             </p>
             <div class="wz-actions" style="margin-top: 6px">
               <a class="btn btn-sm btn-outline-secondary" href="/wiz/record.html" target="_blank" rel="noopener">Printable summary</a>
@@ -385,6 +401,7 @@
 
     <div class="wz-foot">
       <span>ForgeFIRM is an <a href="https://community.openglow.org">OpenGlow</a> project &middot; <a href="/licenses">Licenses</a></span>
+      <a href="#" class="exit" id="laterlink" onclick="finish(); return false;" style="display: none">Finish later</a>
       <a href="#" class="exit" id="exitlink" onclick="askReturn(); return false;">Go back to the factory firmware</a>
     </div>
 

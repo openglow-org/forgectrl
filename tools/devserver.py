@@ -513,85 +513,67 @@ ADVISORY_META = {
 }
 WIZARDS = (('advisories', 'Advisories'), ('account', 'Your account'),
            ('preferences', 'Preferences'), ('machine', 'Your machine'),
-           ('cloud', 'Cloud mode'),
+           ('cloud', 'Cloud mode'), ('airflow.intakes', 'Intake fans'),
            ('switches', 'Switches'), ('sensors', 'Sensors'), ('airflow', 'Airflow'),
            ('motion', 'Motion'), ('cameras', 'Cameras'),
            ('cooling.aa-offset', 'Coolant offset'), ('cooling.flow', 'Coolant flow'),
-           ('cooling.tec', 'TEC'), ('cooling.flow-verify', 'Flow check'),
+           ('cooling.flow-verify', 'Flow check'),
            ('cloud.header', 'Cloud header'), ('motion.envelope', 'Bed size'),
-           ('sheet.place', 'Place the sheet'), ('sheet.frame', 'First fire'),
-           ('laser.focus', 'Focus'), ('laser.floor', 'Laser floor'),
-           ('laser.dose-curve', 'Dose curve'), ('laser.corner', 'Corner rolloff'),
-           ('cooling.flow-load', 'Flow under load'))
-DARK = ('switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
-        'cooling.flow', 'cooling.tec', 'cooling.flow-verify', 'cloud.header', 'motion.envelope')
-# The sheet wizards run on the same mock runner; the daemon's previews
-# are stood in for by a drawing of the card's box.
-LIVE = ('sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
-        'laser.corner', 'cooling.flow-load')
-# The what-changed menu (setup.c): a change, its title, its reason,
-# and the wizards it flags with their levels.
+           ('lens.travel', 'Lens travel'),
+           ('laser.focus', 'Focus'), ('laser.floor', 'Laser floor'))
+DARK = ('airflow.intakes', 'switches', 'sensors', 'airflow', 'motion', 'cameras',
+        'cooling.aa-offset', 'cooling.flow', 'cooling.flow-verify', 'cloud.header',
+        'motion.envelope', 'lens.travel')
+# The burns run on the same mock runner; the daemon's previews are stood
+# in for by a drawing of the card's box on its scrap.
+LIVE = ('laser.focus', 'laser.floor')
+# The image's step table (setup.c): the required steps hold the gate;
+# the others are recommended until they have run. The cloud header joins
+# only with cloud mode on.
+REQUIRED_STEPS = ('preferences', 'machine', 'cloud')
+STEPS = ('switches', 'sensors', 'airflow', 'cooling.aa-offset', 'cooling.flow', 'motion',
+         'cameras', 'lens.travel', 'laser.focus')
+# The what-changed menu (setup.c): a change, its title, its reason, and
+# the steps it recommends again.
 CHANGES = (
-    ('tube', 'The laser tube was replaced', 'the tube was replaced',
-     (('laser.floor', 'required'), ('laser.dose-curve', 'required'),
-      ('cooling.flow-load', 'required'), ('laser.corner', 'recommended'))),
-    ('pump', 'The coolant pump was replaced', 'the pump was replaced',
-     (('cooling.flow', 'required'),)),
-    ('coolant', 'The coolant was changed', 'the coolant was changed',
-     (('cooling.flow', 'required'),)),
-    ('fan', 'A fan was replaced', 'a fan was replaced', (('airflow', 'required'),)),
+    ('tube', 'The laser tube was replaced', 'the tube was replaced', ('laser.floor',)),
+    ('pump', 'The coolant pump was replaced', 'the pump was replaced', ('cooling.flow',)),
+    ('coolant', 'The coolant was changed', 'the coolant was changed', ('cooling.flow',)),
+    ('fan', 'A fan was replaced', 'a fan was replaced', ('airflow',)),
     ('head', 'The head was replaced', 'the head was replaced',
-     (('machine', 'required'), ('laser.focus', 'required'), ('motion', 'recommended'),
-      ('cameras', 'recommended'))),
-    ('tray', 'The tray was replaced', 'the tray was replaced',
-     (('laser.focus', 'recommended'),)),
+     ('machine', 'lens.travel', 'laser.focus', 'motion', 'cameras')),
+    ('tray', 'The tray was replaced', 'the tray was replaced', ('laser.focus',)),
     ('service', 'A cover was off: belts, drivers, wiring, or switches were serviced',
-     'the machine was serviced', (('switches', 'recommended'), ('motion', 'recommended'))),
+     'the machine was serviced', ('switches', 'motion')),
 )
-# The daemon's layout (sheet.c): a 200 x 150 sheet, the frame 180 x 130
-# at (10, 10), the header band, and the five cards in two rows.
+# The daemon's layout (sheet.c): each card's box 10 mm from the head's
+# home, on a scrap the box plus 10 mm on every side.
 SHEET_CARDS = {
-    'laser.focus': ('Focus', 10, 46, 58, 48), 'laser.floor': ('Laser floor', 72, 46, 66, 48),
-    'laser.corner': ('Corner rolloff', 142, 46, 48, 48),
-    'laser.dose-curve': ('Dose curve', 10, 98, 112, 38),
-    'cooling.flow-load': ('Flow under load', 126, 98, 64, 38),
+    'laser.focus': ('Focus', 10, 10, 58, 48), 'laser.floor': ('Laser floor', 10, 10, 66, 48),
 }
 
 
 def sheet_svg(card):
-    """A stand-in for GET /wiz/sheet.svg: the sheet with the frame, the
-    card's box (every box for the frame), and the header line."""
-    out = ["<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 150' width='200mm' height='150mm'>",
-           "<rect width='200' height='150' fill='#e7d3ac' stroke='#9c8a66' stroke-width='0.4'/>",
-           "<rect x='10' y='10' width='180' height='130' fill='none' stroke='#3a2a12' stroke-width='0.3'/>",
-           "<text x='58' y='20' font-size='6' fill='#3a2a12'>OpenGlow ForgeFIRM</text>",
-           "<text x='58' y='27' font-size='4' fill='#3a2a12'>Hardware Setup (mock)</text>"]
-    boxes = list(SHEET_CARDS) if card in ('sheet.place', 'sheet.frame') else \
-        [card] if card in SHEET_CARDS else []
-    for k in boxes:
-        t, x, y, w, h = SHEET_CARDS[k]
-        out.append("<rect x='%d' y='%d' width='%d' height='%d' fill='none' stroke='#3a2a12' "
-                   "stroke-width='0.3'/><text x='%d' y='%d' font-size='4' fill='#3a2a12'>%s</text>"
-                   % (x, y, w, h, x + 2, y + 6, t))
-    out.append('</svg>')
+    """A stand-in for GET /wiz/sheet.svg: the card's box on its scrap."""
+    t, x, y, w, h = SHEET_CARDS.get(card, ('', 10, 10, 58, 48))
+    sw, sh = w + 20, h + 20
+    out = ["<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 %d %d' width='%dmm' height='%dmm'>"
+           % (sw, sh, sw, sh),
+           "<rect width='%d' height='%d' fill='#e7d3ac' stroke='#9c8a66' stroke-width='0.4'/>" % (sw, sh),
+           "<rect x='%d' y='%d' width='%d' height='%d' fill='none' stroke='#3a2a12' "
+           "stroke-width='0.3'/><text x='%d' y='%d' font-size='4' fill='#3a2a12'>%s (mock)</text>"
+           % (x, y, w, h, x + 2, y + 6, t), '</svg>']
     return '\n'.join(out)
 # The mock dark wizard: a prompt after PROMPT_AT seconds, done DONE_AFTER
 # seconds after the answer, with a result shaped like the daemon's.
 DARK_PROMPT_AT = 1.0
 DARK_DONE_AFTER = 2.0
 DARK_PROMPTS = {
-    'sheet.place': ('jog', 'place', 'Put the head at the back-left, place the sheet, close the lid, '
-                    'and set the origin.', ['X-10', 'X+10', 'Y-10', 'Y+10', 'X-1', 'X+1', 'Y-1', 'Y+1',
-                                            'Set origin']),
-    'sheet.frame': ('choice', 'frame-ok', 'Is the frame on the sheet, square, and visible?',
-                    ['Yes', 'Again, lighter', 'Again, darker']),
     'laser.focus': ('multichoice', 'focus-pick', 'Which line is the narrowest and sharpest? Choose '
                     'every adjacent line that looks the same; the middle of the run is taken. Then Done.',
                     [str(i) for i in range(1, 13)]),
     'laser.floor': ('choice', 'floor-pick', 'Which is the faintest rung with a continuous line?',
                     [str(d) for d in range(2, 25, 2)] + ['None']),
-    'laser.corner': ('choice', 'corner-pick', 'Which pattern has the most even corners?',
-                     ['1.00', '1.25', '1.50', '1.75', '2.00']),
     'switches': ('wait', 'lid-open', 'Open the lid.', []),
     'cameras': ('confirm', 'lid-view', 'This is the lid camera. Can you see the bed?', ['Yes', 'No']),
     'motion': ('continue', 'jogs', 'The head moves 50 mm each way on X, then on Y.', ['Continue']),
@@ -603,56 +585,27 @@ DARK_PROMPTS = {
                      'Print. Do not press the machine button.', ['Continue']),
 }
 DARK_RESULTS = {
-    'sheet.place': {'origin_x': 0, 'origin_y': 229, 'origin_z': 0, 'alone': False, 'thickness_mm': 3.2,
-                    'steps_per_mm': {'x': 53.333, 'y': 53.333, 'z': 2.832}, 'z_referenced': True,
-                    'summary': "The origin is set at the head's position. The full sheet, 3.2 mm thick. "
-                               'Every card is drawn from this point: do not move the sheet until the '
-                               'last card is done.'},
-    'sheet.frame': {'mark_s': 400, 'mark_feed': 3000, 'started': '2026-09-05 20:00Z',
-                    'emission': {'hv_max': 412, 'laser_on_samples': 1800, 'thermopile_delta': 380, 'lit_s': 62.0},
-                    'summary': 'The frame and the header are on the sheet. The mark dose is S400 at '
-                               "3000 mm/min; every card's box and labels burn at it. All three witnesses "
-                               "saw the beam: the tube current, the kernel's LASER_ON samples, and the "
-                               'head thermopile.'},
-    'laser.focus': {'pick': 11.5, 'picked_lines': [11, 12], 'thickness_mm': 2.8, 'pick_half_steps': -12.5,
+    'laser.focus': {'pick': 10.5, 'picked_lines': [10, 11], 'thickness_mm': 2.8, 'pick_half_steps': -12.5,
                     'edge_z_mm': 7.08, 'steps_per_mm': 2.922, 'max_height_mm': 13.92,
                     'focus_range_mm': {'min': 2.29, 'max': 13.92},
-                    'stops': {'found': True, 'below': 14, 'above': 20, 'contact_below': 16,
-                              'contact_above': 22, 'why': ''},
+                    'window': {'below': 14, 'above': 20, 'reach_min': 2.29, 'reach_max': 13.92},
                     'emission': {'hv_max': 402, 'laser_on_samples': 300, 'thermopile_delta': 350, 'lit_s': 9.0},
-                    'summary': 'Line 11.5 on 2.8 mm: with the lens on its hall reference the focus is '
+                    'summary': 'Line 10.5 on 2.8 mm: with the lens on its hall reference the focus is '
                                '7.08 mm above the tray. A home puts the lens there, sets Z to that '
                                'height, and parks the focus at the park height; Z counts the focus '
-                               'height above the bed. The stops were found 14 half-steps below the '
-                               'reference and 20 above, so the lens reaches 2.29 mm to 13.92 mm. Every '
-                               'later card runs at the focus for this sheet.'},
+                               'height above the bed. The lens reaches 2.29 mm to 13.92 mm.'},
     'laser.floor': {'faintest_density': 8.0, 'floor_density': 10.0,
                     'emission': {'hv_max': 610, 'laser_on_samples': 900, 'thermopile_delta': 600, 'lit_s': 30.0},
                     'summary': 'The faintest rung with a continuous line is 8 percent density. The laser '
                                'floor is set at 10 percent, two above it: no job asks the tube for less, '
                                'so the lightest engraving still marks this wood.'},
-    'laser.dose-curve': {'curve': '10:0.5,20:2,30:7,45:21,60:37,80:50,100:100',
-                         'points': [{'density': 10, 'light': 0.5}, {'density': 20, 'light': 2},
-                                    {'density': 30, 'light': 7}, {'density': 45, 'light': 21},
-                                    {'density': 60, 'light': 37}, {'density': 80, 'light': 50},
-                                    {'density': 100, 'light': 100}],
-                         'emission': {'hv_max': 1010, 'laser_on_samples': 1200, 'thermopile_delta': 900, 'lit_s': 70.0},
-                         'summary': 'The curve rose rung by rung and is written. It maps the density a job '
-                                    'asks for to the light the tube gives: 10 percent density gives 0.5 '
-                                    'percent of the light, 45 gives 21, and 100 gives 100. The chart shows '
-                                    'the fit.'},
-    'laser.corner': {'gamma': 1.5,
-                     'emission': {'hv_max': 350, 'laser_on_samples': 400, 'thermopile_delta': 300, 'lit_s': 20.0},
-                     'summary': 'Pattern 1.50 has the most even corners: the corner rolloff is set to 1.50. '
-                                'Under velocity-scaled power the machine eases the power into every corner '
-                                'by that exponent, so corners burn like the straights.'},
-    'cooling.flow-load': {'lit_s': 88.0, 'dose_raw_s': 52000.0, 'hv_mean': 590.0, 'base_c': 22.4, 'peak_c': 1.6,
-                          't_peak_s': 95.0, 'lag_s': 15.0, 'k_density': 3.1e-05, 'k_cw': 4.0e-05,
-                          'emission': {'hv_max': 620, 'laser_on_samples': 2000, 'thermopile_delta': 500, 'lit_s': 88.0},
-                          'summary': 'The tube was lit for 88 s and warmed the coolant by 1.60 C, peaking 95 s '
-                                     "after the fire began. That is the tube's own share of a flow check's "
-                                     'rise on this machine. It is written, and the flow check allows for it '
-                                     'from now on.'},
+    'lens.travel': {'z_passes': [0, 0], 'stops': {'found': True, 'below': 14, 'above': 20,
+                                                  'contact_below': 16, 'contact_above': 22, 'why': ''},
+                    'window': {'below': 14, 'above': 20, 'found': True},
+                    'summary': 'The lens moves freely 14 half-steps below its reference and 20 above. '
+                               'The controller and the focus burn keep inside that.'},
+    'airflow.intakes': {'intake_fans': 2, 'intake_1_rpm': 4200.0, 'intake_2_rpm': 4180.0,
+                        'summary': 'Two intake fans: both turn at the run profile.'},
     'switches': {'lid': True, 'button': True, 'interlock': 'satisfied',
                  'hv_enable_follows_lid': True, 'head_present': True},
     'sensors': {'coolant_down_c': 22.4, 'coolant_up_c': 21.9, 'chassis_c': 28.0, 'soc_c': 45.2,
@@ -677,7 +630,6 @@ DARK_RESULTS = {
     'cooling.aa-offset': {'offset_counts': 16.0, 'spread_counts': 1.2, 'recommend': 16.0},
     'cooling.flow': {'flow_max': 6.1, 'noflow_min': 18.9, 'gap': 12.8, 'recommend': 12.5,
                      'heater_pct': 40, 'threshold': 12.5},
-    'cooling.tec': {'tec': False, 'skipped': 'no TEC on this machine'},
     'cooling.flow-verify': {'pass': True, 'threshold': 12.5, 'flow_rise': 6.0, 'noflow_rise': 18.8,
                             'thin_margin': False},
     'cloud.header': {'captured': '2026-01-01T00:00:00Z', 'job_id': 'mock', 'tag_count': 548,
@@ -687,14 +639,11 @@ DARK_RESULTS = {
                      'machine': {'cool_tach_exhaust_min_rpm': {'local': '6600', 'default': 6400}}},
 }
 DARK_APPLIED = {
-    'laser.focus': {'lens_hall_edge_z_mm': {'from': '3.35', 'to': '7.08'},
-                    'lens_stop_below_steps': {'from': '', 'to': '14'},
+    'lens.travel': {'lens_stop_below_steps': {'from': '', 'to': '14'},
                     'lens_stop_above_steps': {'from': '', 'to': '20'}},
+    'laser.focus': {'lens_hall_edge_z_mm': {'from': '3.35', 'to': '7.08'}},
     'laser.floor': {'laser_floor_density': {'from': '12', 'to': '10'}},
-    'laser.dose-curve': {'laser_dose_curve': {'from': 'off', 'to': '10:0.5,20:2,30:7,45:21,60:37,80:50,100:100'}},
-    'laser.corner': {'laser_corner_gamma': {'from': '2', 'to': '1.50'}},
-    'cooling.flow-load': {'cool_laser_heat_density': {'from': '2.7e-05', 'to': '3.1e-05'},
-                          'cool_laser_heat_cw': {'from': '3.5e-05', 'to': '4e-05'}},
+    'airflow.intakes': {'cool_intake_fans': {'from': '', 'to': '2'}},
 }
 PRESS_S = 3                     # seconds until the mock button 'presses'
 JOB_S = 8                       # seconds a mock update job runs
@@ -907,6 +856,10 @@ class Mock:
         # unless GF_MOCK_FIRST_RUN=1, so the panel is what the dev server
         # shows by default and the wizard on request.
         first = os.environ.get('GF_MOCK_FIRST_RUN') == '1'
+        # A machine past its first run has its intake fans counted (the
+        # setup's gate holds without it).
+        if not first:
+            self.settings['cool_intake_fans'] = '2'
         self.docs = {}
         for d in ADVISORY_DOCS + ON_DEMAND_DOCS:
             try:
@@ -925,7 +878,7 @@ class Mock:
             'account': None if first else 'owner',
             'reset': False,
             'versions': {} if first else {w: 1 for w, _ in WIZARDS},
-            'flags': {},            # wizard id -> (level, reason), the what-changed menu
+            'flags': {},            # step id -> reason, the what-changed menu and the engine
             'completed': not first,
             'button': 'idle', 'press_at': None,
             'machine': {'model': None, 'tec': False},
@@ -1355,16 +1308,28 @@ class Mock:
                 'snapshot': 'http://%s/cam/snapshot?cam=lid&key=%s' % (host, k),
                 'stream_https': 'https://%s/cam/stream?cam=lid&key=%s' % (host, k)}
 
-    def wiz_missing(self):
-        """The wizards the gate waits for: never run, or flagged required."""
+    def wiz_recommended(self):
+        """The steps the setup recommends (setup.c): every flag, then the
+        table's steps not run."""
         w = self.wiz
-        return [k for k, _ in WIZARDS if not w['versions'].get(k)
-                or w['flags'].get(k, ('',))[0] == 'required']
+        out = [{'id': k, 'reason': rs} for k, rs in w['flags'].items()]
+        steps = STEPS + (('cloud.header',) if self.settings.get('cloud_enabled') == '1' else ())
+        out += [{'id': k, 'reason': 'not run yet'} for k in steps
+                if not w['versions'].get(k) and k not in w['flags']]
+        return out
+
+    def wiz_fans_counted(self):
+        return self.settings.get('cool_intake_fans', '') != ''
+
+    def wiz_missing(self):
+        """The required steps not done."""
+        return [k for k in REQUIRED_STEPS if not self.wiz['versions'].get(k)]
 
     def wiz_gate_open(self):
         w = self.wiz
         return (len(w['accepted']) == len(ADVISORY_DOCS) and w['pressed']
-                and w['account'] and not w['reset'] and not self.wiz_missing())
+                and w['account'] and not w['reset'] and not self.wiz_missing()
+                and self.wiz_fans_counted())
 
     def wiz_why(self):
         w = self.wiz
@@ -1372,8 +1337,11 @@ class Mock:
             return 'the advisories are not accepted'
         if not w['account'] or w['reset']:
             return 'no account exists'
-        missing = self.wiz_missing()
-        return 'setup required: ' + ', '.join(missing) if missing else ''
+        if self.wiz_missing():
+            return 'setup required: ' + ', '.join(self.wiz_missing())
+        if not self.wiz_fans_counted():
+            return 'the intake fans are not counted'
+        return ''
 
     def wiz_record(self):
         w = self.wiz
@@ -1392,7 +1360,7 @@ class Mock:
                                 'result': DARK_RESULTS.get(k, {}),
                                 'applied': DARK_APPLIED.get(k, {})}
                             for k, v in w['versions'].items()},
-                'flags': {k: {'level': lv, 'reason': rs} for k, (lv, rs) in w['flags'].items()},
+                'flags': {k: {'reason': rs} for k, rs in w['flags'].items()},
                 **({'on_demand': {d: {'hash': h, 'accepted': '2026-09-06T19:10:00Z', 'method': 'typed'}
                                   for d, h in w['on_demand'].items()}} if w['on_demand'] else {})}
 
@@ -1419,7 +1387,7 @@ class Mock:
             h.append('<h3>%s <small>v%d, %s</small></h3>' % (titles[k], e['version'], e['completed']))
             f = rec['flags'].get(k)
             if f:
-                h.append('<p style="color:#a33">Asked for again (%s): %s</p>' % (f['level'], f['reason']))
+                h.append('<p style="color:#a33">Recommended again: %s</p>' % f['reason'])
             r = e['result'] or {}
             if r.get('summary'):
                 h.append('<p>%s</p>' % r['summary'])
@@ -1444,18 +1412,14 @@ class Mock:
         gate = self.wiz_gate_open()
         return {
             'first_run': not w['completed'],
-            'gate': 'open' if gate else 'closed', 'override': False,
+            'gate': 'open' if gate else 'closed', 'fans_counted': self.wiz_fans_counted(),
             'why': '' if gate else self.wiz_why(),
             'advisories_complete': len(w['accepted']) == len(ADVISORY_DOCS),
             'acceptance_done': w['pressed'], 'account': bool(w['account']),
             'completed': w['completed'], 'sheet_id': MOCK_SHEET_ID,
-            'required': [k for k, _ in WIZARDS if not w['versions'].get(k)] +
-                        [{'id': k, 'reason': rs} for k, (lv, rs) in w['flags'].items()
-                         if lv == 'required'],
-            'recommended': [{'id': k, 'reason': rs} for k, (lv, rs) in w['flags'].items()
-                            if lv == 'recommended'],
+            'recommended': self.wiz_recommended(),
             'versions': dict(w['versions']),
-            'changes': [{'id': c, 'title': t, 'wizards': [{'id': i, 'level': l} for i, l in wz]}
+            'changes': [{'id': c, 'title': t, 'wizards': [{'id': i} for i in wz]}
                         for c, t, _, wz in CHANGES],
             'documents': docs,
             'wizards': [{'id': k, 'title': t, 'version': 1,
@@ -2412,6 +2376,10 @@ class Mock:
                     (spec and d['answer'] is not None and now - d['answered'] >= DARK_DONE_AFTER):
                 d['running'] = False
                 self.wiz['versions'][d['id']] = 1
+                self.wiz['flags'].pop(d['id'], None)
+                # The intake fan count, as the daemon's check writes it.
+                if d['id'] in ('airflow.intakes', 'airflow') and not self.settings.get('cool_intake_fans'):
+                    self.settings['cool_intake_fans'] = '2'
                 self._log('wiz %s: complete' % d['id'])
             elif spec and d['answer'] is not None:
                 phase = 'finishing'
@@ -2575,11 +2543,9 @@ class Mock:
         if path == '/wiz/changed':
             for c, _, reason, wz in CHANGES:
                 if c == form.get('what'):
-                    for wid, level in wz:
-                        if w['flags'].get(wid, ('',))[0] == 'required' and level != 'required':
-                            continue
-                        w['flags'][wid] = (level, reason)
-                    self._log('setup: %s: the wizards it needs are flagged' % reason)
+                    for wid in wz:
+                        w['flags'][wid] = reason
+                    self._log('setup: %s: the steps it recommends are flagged' % reason)
                     return J(200, self.wiz_reply())
             return J(400, {'error': 'what must name a change from the menu'})
         if path == '/system/ssh':

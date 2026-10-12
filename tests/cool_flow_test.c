@@ -146,9 +146,9 @@ static void fake_stop(const char *why)
 }
 int machine_is_idle(void) { return 1; }
 static char last_flag[160];
-int setup_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *reason)
 {
-    snprintf(last_flag, sizeof(last_flag), "%s:%s:%s", id, level, reason);
+    snprintf(last_flag, sizeof(last_flag), "%s:%s", id, reason);
     return 0;
 }
 double chassis_degc(void) { return 25.0; }

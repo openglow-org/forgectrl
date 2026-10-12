@@ -867,16 +867,16 @@ function renderMode() {
   $('ctl-retry').style.display = fault ? '' : 'none';
   renderGate();
 }
-/* The banner under the mode selector: the setup gate (no
- * controller for a sender while it is closed, and where to go), or the
- * motion check waiting for the lid or the interlock to close. */
+/* The banner under the mode selector: the setup gate (the advisories
+ * or the account missing: no controller for a sender, and where to go),
+ * or the motion check waiting for the lid or the interlock to close. */
 function renderGate() {
   var b = $('gate-banner');
   if (MD && MD.gated) {
     b.className = 'banner banner-bad';
     b.innerHTML =
       '⚠ The machine is waiting for setup: ' +
-      esc(MD.why || 'a required step is not complete') +
+      esc(MD.why || 'the advisories or the account') +
       '. Controllers stay off until it is done. ' +
       "<a href='/setup'>Continue the setup</a>";
     b.style.display = '';
@@ -1179,25 +1179,16 @@ function loadSetup() {
     })
     .then(function (w) {
       var g = '';
-      g += txt('State', w.completed ? 'complete' : 'in progress');
-      if (w.required && w.required.length)
-        g += txt(
-          'Required',
-          w.required
-            .map(function (x) {
-              return typeof x === 'string' ? x : x.id + (x.reason ? ' (' + x.reason + ')' : '');
-            })
-            .join(', ')
-        );
-      if (w.override) g += txt('Override', 'active until the next reboot');
+      var left = (w.recommended || []).length;
+      g += txt('State', w.completed ? (left ? 'set aside, ' + left + ' recommended' : 'complete') : 'in progress');
       g += kv('Sheet id', "<span class='mono'>" + esc(w.sheet_id || '') + '</span>');
       g += kv('Certificate', "<span class='mono brk'>" + esc(w.tls_fingerprint || '') + '</span>');
       $('setupinfo').innerHTML = g;
     })
     .catch(function () {});
 }
-/* The Setup tab's list: every wizard the setup knows, the version
- * it completed at, and what the machine asks for again. */
+/* The Setup tab's list: every step the setup knows, the version it
+ * completed at, and what the machine recommends (with the reason). */
 function loadWizards() {
   fetch('/wiz')
     .then(function (r) {
@@ -1205,32 +1196,57 @@ function loadWizards() {
     })
     .then(function (w) {
       var flags = {};
-      (w.required || []).forEach(function (x) {
-        if (typeof x === 'string') flags[x] = 'required';
-        else flags[x.id] = 'required' + (x.reason ? ': ' + x.reason : '');
-      });
       (w.recommended || []).forEach(function (x) {
-        if (typeof x === 'string') flags[x] = flags[x] || 'recommended';
-        else flags[x.id] = flags[x.id] || 'recommended' + (x.reason ? ': ' + x.reason : '');
+        flags[x.id] = 'recommended' + (x.reason ? ': ' + x.reason : '');
       });
       var g = '';
       (w.wizards || []).forEach(function (z) {
         W_TITLES[z.id] = z.title;
         var state = z.done ? 'done (v' + z.done + ')' : 'not run';
         var f = flags[z.id];
-        var cls = f && /^required/.test(f) ? 'b-bad' : f ? 'b-warn' : z.done ? 'b-ok' : '';
-        var again = w.completed && z.id !== 'advisories' && z.id !== 'account'
-          ? " <a href='/setup?step=" + esc(z.id) + "' data-nolock='1'>run again</a>" : '';
-        g += kv(esc(z.title), "<span class='" + cls + "'>" + esc(f ? state + ', ' + f : state) + '</span>' + again);
+        var cls = f ? 'b-warn' : z.done ? 'b-ok' : '';
+        var run = w.completed && z.id !== 'advisories' && z.id !== 'account'
+          ? " <a href='/setup?step=" + esc(z.id) + "' data-nolock='1'>" + (z.done ? 'run again' : 'run') + '</a>'
+          : '';
+        g += kv(esc(z.title), "<span class='" + cls + "'>" + esc(f ? state + ', ' + f : state) + '</span>' + run);
       });
-      if (w.override) g += txt('Override', 'active until the next reboot: the checks are not enforced', 'b-warn');
       $('wizlist').innerHTML = g;
       renderChanges(w.changes || []);
+      renderSetupBanner(w);
     })
     .catch(function () {});
 }
+/* Above every tab once the guided run has ended: the steps the setup
+ * still recommends, and the way back to it. A dismissal is kept in this
+ * browser as the steps it covered; the banner comes back only when a step
+ * that was not among them is recommended (a part change, a fault the
+ * machine saw, a release that wants a step again). */
+var SETUP_DISMISS_KEY = 'ff_setup_banner_dismissed';
+var SETUP_REC = [];
+function setupDismissed() {
+  try {
+    var v = JSON.parse(localStorage.getItem(SETUP_DISMISS_KEY) || '[]');
+    return Array.isArray(v) ? v : [];
+  } catch (e) {
+    return [];
+  }
+}
+function renderSetupBanner(w) {
+  SETUP_REC = w.completed ? (w.recommended || []).map(function (x) { return x.id; }) : [];
+  var gone = setupDismissed();
+  var fresh = SETUP_REC.filter(function (id) { return gone.indexOf(id) < 0; });
+  $('setup-banner-list').textContent = SETUP_REC.map(function (id) { return W_TITLES[id] || id; }).join(', ');
+  $('setup-banner').style.display = fresh.length ? '' : 'none';
+}
+function dismissSetupBanner() {
+  try {
+    localStorage.setItem(SETUP_DISMISS_KEY, JSON.stringify(SETUP_REC));
+  } catch (e) {}
+  $('setup-banner').style.display = 'none';
+}
 /* The what-changed menu: the daemon's table of changes, each mapped to
- * the checks to run again. Drawn once; a redraw would reset the choice. */
+ * the steps it recommends again. Drawn once; a redraw would reset the
+ * choice. */
 var CHANGES = [];
 function renderChanges(list) {
   var sel = $('changed-what');
@@ -1268,9 +1284,9 @@ function applyChanged() {
     })
     .then(function () {
       var names = (c ? c.wizards : []).map(function (x) {
-        return (W_TITLES[x.id] || x.id) + ' (' + x.level + ')';
+        return W_TITLES[x.id] || x.id;
       });
-      changedMsg('asked for again: ' + names.join(', '), 'b-ok');
+      changedMsg('recommended again: ' + names.join(', '), 'b-ok');
       $('changed-what').value = '';
       loadWizards();
       loadMode();

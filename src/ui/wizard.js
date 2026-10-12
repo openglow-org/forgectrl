@@ -14,9 +14,14 @@
  * step set.
  *
  * Steps: welcome, advisories (the four documents, then the press),
- * account, preferences, machine, cloud, the checks (the dark wizards),
- * the sheet (the live wizards: one press per card), done. The footer's
- * exit runs the factory return and shows its progress.
+ * account, preferences, machine, cloud, the intake fans (counted), the
+ * choice (continue the setup, or start using the machine), the checks
+ * (the dark wizards), the burns (Focus, and the optional Laser floor:
+ * one press each, on a scrap of their own), done. Every step up to the
+ * intake fans holds the machine (REQUIRED); every one after them is
+ * recommended, and the footer's Finish later ends the guided run from
+ * any of them. The footer's exit runs the factory return and shows its
+ * progress.
  */
 var TOK = '__FFTOKEN__';
 var W = null,
@@ -25,27 +30,32 @@ var W = null,
   curDoc = null,
   pressTimer = null,
   returnTimer = null;
-var DARK_IDS = ['switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
-  'cooling.flow', 'cooling.flow-verify', 'cloud.header', 'motion.envelope'];
-/* The checks the setup never asks for: they are listed and run from the
+var DARK_IDS = ['airflow.intakes', 'switches', 'sensors', 'airflow', 'motion', 'cameras',
+  'cooling.aa-offset', 'cooling.flow', 'cooling.flow-verify', 'cloud.header', 'lens.travel',
+  'motion.envelope'];
+/* The steps the setup never asks for: they are listed and run from the
  * rail, and never opened as the next step. */
-var OPTIONAL = ['motion.envelope'];
-/* The sheet: the live wizards, one press per card, run on the same
+var OPTIONAL = ['laser.floor', 'motion.envelope'];
+/* The burns: one press each, on a scrap of their own, run on the same
  * check section with a preview of the burn. */
-var LIVE_IDS = ['sheet.place', 'sheet.frame', 'laser.focus', 'laser.floor', 'laser.dose-curve',
-  'laser.corner', 'cooling.flow-load'];
+var LIVE_IDS = ['laser.focus', 'laser.floor'];
 var CHECK_IDS = DARK_IDS.concat(LIVE_IDS);
+/* The steps that hold the machine: the guided run cannot end before
+ * every one of them is done. */
+var REQUIRED = ['advisories', 'account', 'preferences', 'machine', 'cloud', 'airflow.intakes'];
 /* The checks a machine may not need: the cloud header with cloud mode
  * off. They show only while required or done. */
 var CONDITIONAL = ['cloud.header'];
 var ORDER = ['welcome', 'advisories', 'account', 'preferences', 'machine', 'cloud',
+  'airflow.intakes', 'choice',
   'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset', 'cooling.flow',
-  'cloud.header', 'motion.envelope', 'sheet.place', 'sheet.frame', 'laser.focus',
-  'laser.floor', 'laser.dose-curve', 'laser.corner', 'cooling.flow-load', 'done'];
+  'cloud.header', 'lens.travel', 'laser.focus', 'laser.floor', 'motion.envelope', 'done'];
 var TITLES = {
   welcome: 'Welcome',
   advisories: 'Advisories',
   account: 'Your account',
+  'airflow.intakes': 'Intake fans',
+  choice: 'Continue or start',
   preferences: 'Preferences',
   machine: 'Your machine',
   cloud: 'Cloud mode',
@@ -59,13 +69,9 @@ var TITLES = {
   'cooling.flow': 'Coolant flow',
   'cooling.flow-verify': 'Flow check',
   'cloud.header': 'Cloud header',
-  'sheet.place': 'Place the sheet',
-  'sheet.frame': 'First fire',
+  'lens.travel': 'Lens travel',
   'laser.focus': 'Focus',
   'laser.floor': 'Laser floor',
-  'laser.dose-curve': 'Dose curve',
-  'laser.corner': 'Corner rolloff',
-  'cooling.flow-load': 'Flow under load',
   done: 'Ready'
 };
 /* What each dark check does, in a sentence or two. The machine stays
@@ -100,38 +106,27 @@ var DARK_TEXT = {
     'Glowforge app and press Print there. The wizard takes the numbers the service sends ' +
     'for this machine, cancels the print before it arms, and returns to GRBL mode. Nothing ' +
     'is written to the settings. About five minutes.',
-  'sheet.place': 'The datum for the sheet. The lens finds its reference, then the arrows ' +
-    'move the head to the back-left where the machine normally homes. Open the lid, push ' +
-    'the sheet as far left as it goes with its top edge on the top of the cut area, close ' +
-    'the lid, and set the origin. Wood, 200 x 150 mm (8 x 6 in) or larger, any thickness ' +
-    'you can measure. Nothing fires. About three minutes.',
-  'sheet.frame': 'The first emission. Eye protection on, exhaust hose connected and vented, ' +
-    'extinguisher in reach, the area clear. The frame (180 x 130 mm) and the header burn ' +
-    'at the mark dose after your press; the tube current, the head thermopile, and the ' +
-    'kernel must all see the beam. You confirm the frame sits on the sheet, square, and ' +
-    'visible, or ask for it lighter or darker. About three minutes.',
-  'laser.focus': 'The lens finds its reference on the edge of its hall sensor, then its two ' +
-    'stops by the head accelerometer, one half-step at a time and without a slip (when they ' +
-    'cannot be found, a reduced travel is kept and the page says so). Then twelve lines ' +
-    'burn heavy, the lens stepped from the top of its travel to the bottom, numbered 1 to ' +
-    '12. Every line marks; you pick the narrowest dark one by its number (every adjacent ' +
-    'line that looks the same, and the middle of the run is taken) and confirm the sheet ' +
-    'thickness; the focus height with the lens on its reference and the stops are ' +
+  'airflow.intakes': 'The fans run as they do in a cut, for twenty seconds, while the machine counts its ' +
+    'intake fans: some machines are built with one, some with two, and without the count a ' +
+    'machine with one stops every cut on an airflow fault. If the count cannot be read, you ' +
+    'give it. Nothing moves and the laser stays locked. The machine waits for this step. ' +
+    'About half a minute.',
+  'lens.travel': 'The lens finds its reference on the edge of its hall sensor, then its two ' +
+    'stops by the head accelerometer, one half-step at a time and without a slip, with every ' +
+    'fan off and no laser. Its free travel each way is written; when the stops cannot be ' +
+    'found, a reduced travel that clears them on any head is kept and the page says so. ' +
+    'About three minutes.',
+  'laser.focus': 'On a scrap of its own: the gantry stops installed, the head at its home ' +
+    'against them (or the motors released so you can push it there), a flat scrap at least ' +
+    '78 x 68 mm (3.1 x 2.7 in) in the back-left corner, and its thickness. Then twelve lines ' +
+    'burn heavy, the lens stepped over its travel, numbered 1 to 12. Every line marks; you ' +
+    'pick the narrowest dark one by its number (every adjacent line that looks the same, and ' +
+    'the middle of the run is taken); the focus height with the lens on its reference is ' +
     'written. One press. About four minutes.',
-  'laser.floor': 'Twelve rungs across the card from 2 to 24 percent pulse density with the ' +
-    'floor and the dose curve off for this one job. You pick the faintest rung that shows a ' +
-    'continuous line; the floor is written two percent above it. One press. About three ' +
-    'minutes.',
-  'laser.dose-curve': 'Seven 100 mm rungs from 10 to 100 percent density with the curve off. ' +
-    'The head thermopile reads each rung and the curve fits itself; a monotonic fit is ' +
-    'written. One press. About three minutes.',
-  'laser.corner': 'The same corner-heavy pattern five times at rolloff exponents 1.0 to 2.0 ' +
-    'under velocity-scaled power at 30 percent. You pick the most even one by eye. One ' +
-    'press. About four minutes.',
-  'cooling.flow-load': 'The coolant loop settles first, the page counting. Then one press: ' +
-    'the box and a 60 x 15 mm patch at 60 percent keep the tube lit for about a minute ' +
-    'while both coolant sensors are read. The tube\'s heat coefficient is written. ' +
-    'About six minutes.'
+  'laser.floor': 'On a scrap of its own, as Focus asks (at least 86 x 68 mm, 3.4 x 2.7 in): ' +
+    'twelve rungs from 2 to 24 percent pulse density with the floor and the dose curve off ' +
+    'for this one job. You pick the faintest rung that shows a continuous line; the floor is ' +
+    'written two percent above it. Optional. One press. About three minutes.'
 };
 
 function $(id) {
@@ -174,10 +169,10 @@ function post(u, params) {
       });
   });
 }
-/* The log bundle, from inside the setup. The panel's Logs tab lives
- * behind a completed setup, so an operator whose setup stops on
- * something the page cannot explain has no way to get the logs off the
- * machine without a serial console. This is that way: sanitized by
+/* The log bundle, from inside the setup. The panel's Logs tab is not
+ * reachable until the guided run ends, so an operator whose setup stops
+ * on something the page cannot explain has no way to get the logs off
+ * the machine without a serial console. This is that way: sanitized by
  * default, the same bundle the Logs tab builds. */
 function exportSetupLogs() {
   var m = $('msg-setup-logs'),
@@ -264,11 +259,18 @@ function cycleTheme() {
 applyTheme();
 
 /* ---- State and navigation ------------------------------------------- */
+/* The steps the machine recommends now (a step not run, one a release
+ * wants again, a flag), by id. */
+function recIds() {
+  return ((W && W.recommended) || []).map(function (e) { return e.id; });
+}
+/* The operator chose to continue the setup after the account. */
+var CHOSE = false;
 /* A dark check that this machine does not need (the cloud header with
- * cloud mode off) is neither required nor listed. */
+ * cloud mode off) is neither recommended nor listed. */
 function darkApplicable(id) {
   if (CONDITIONAL.indexOf(id) < 0 || !W) return true;
-  return (W.required || []).indexOf(id) >= 0 || !!(W.versions && W.versions[id]);
+  return recIds().indexOf(id) >= 0 || !!(W.versions && W.versions[id]);
 }
 function stepDone(id) {
   if (!W) return false;
@@ -283,8 +285,14 @@ function stepDone(id) {
   if (id === 'advisories') return !!(W.advisories_complete && W.acceptance_done && W.versions && W.versions.advisories);
   if (id === 'account') return !!(W.users && W.users.exists && !W.users.reset_pending);
   if (id === 'done') return !!W.completed;
+  /* The intake fan count holds the machine like the account does: done
+   * while the count is known (the setting, which this step, the airflow
+   * check, or the operator writes), whatever the record says. */
+  if (id === 'airflow.intakes') return !!W.fans_counted;
+  /* The choice is made once: by continuing, or by ending the run. */
+  if (id === 'choice') return !!(W.completed || CHOSE);
   if (CHECK_IDS.indexOf(id) >= 0 && !darkApplicable(id)) return true;
-  if (W.versions && W.versions[id] && (W.required || []).indexOf(id) >= 0) return false;
+  if (W.versions && W.versions[id] && recIds().indexOf(id) >= 0) return false;
   return !!(W.versions && W.versions[id]);
 }
 /* A check a package adds is never the next open step: nothing of the
@@ -329,17 +337,14 @@ function renderRail(active) {
   var h = '';
   var done = !!(W && W.completed);
   ORDER.forEach(function (id) {
-    if (CHECK_IDS.indexOf(id) >= 0 && !darkApplicable(id)) return;
+    if (id === 'choice' || (CHECK_IDS.indexOf(id) >= 0 && !darkApplicable(id))) return;
     var cls = stepDone(id) ? 'done' : '';
     if (id === active || (active === 'press' && id === 'advisories')) cls += ' on';
     /* On a completed setup the rail is the navigation: a re-runnable
      * step, and any step the record has opened again (the advisories
      * after a document changed, the account after a reset), is a link.
      * The last step is always a link there, because it carries the way
-     * out: an update that adds a required check opens that check again
-     * on a machine that finished its setup long ago, and without this
-     * the page lands on it with no way to the control panel but the
-     * address bar. */
+     * out to the control panel. */
     var again = done && (RERUN.indexOf(id) >= 0 || !stepDone(id) || id === 'done');
     if (again) cls += ' link';
     h += '<li class="' + cls + '"' + (again ? ' onclick="go(\'' + id + '\')"' : '') + '>' + esc(TITLES[id]);
@@ -348,7 +353,7 @@ function renderRail(active) {
     h += '</li>';
   });
   $('rail').innerHTML = h;
-  $('estimate').textContent = done ? 'Choose a step to run it again.' : 'About ninety minutes.';
+  $('estimate').textContent = done ? 'Choose a step to run it again.' : 'About forty-five minutes.';
 }
 function show(id) {
   var steps = document.querySelectorAll('.wz-step');
@@ -366,6 +371,12 @@ function show(id) {
   if (id === 'cloud') initCloud();
   if (id === 'done') initDone();
   $('exitlink').style.display = W && W.completed ? 'none' : '';
+  /* Once every required step is done, the guided run can end from any
+   * later step: every one of them is recommended, none is required. */
+  var later = W && !W.completed && REQUIRED.every(stepDone) &&
+    ['welcome', 'advisories', 'press', 'choice', 'done', 'return'].indexOf(id) < 0 &&
+    REQUIRED.indexOf(id) < 0;
+  $('laterlink').style.display = later ? '' : 'none';
   /* The address follows the step, so a reload comes back to it (and to
    * nothing else): ?step= names a re-runnable step of a completed setup. */
   var rerun = W && W.completed && RERUN.indexOf(id) >= 0;
@@ -832,6 +843,14 @@ function initDone() {
     $('d-go').textContent = 'Open the control panel';
   }
 }
+/* The choice after the account: the rest of the setup, step by step. */
+function choiceContinue() {
+  CHOSE = true;
+  show(firstOpen());
+}
+/* The guided run ends here: finished from the last step, or set aside
+ * from the choice or a step's Finish later. The control panel opens, and
+ * lists what the setup still recommends. */
 function finish() {
   if (W.completed) {
     location.replace('/');
@@ -844,6 +863,7 @@ function finish() {
     })
     .catch(function (e) {
       setMsg('d-msg', String(e), 'bad');
+      toast('The setup could not end here', String(e), false);
     });
 }
 
@@ -918,14 +938,13 @@ function initDark(id) {
   K.timer = null;
   $('k-title').textContent = TITLES[id] || id;
   $('k-lead').textContent = DARK_TEXT[id] || '';
-  /* A live wizard shows what it burns: the preview from the record's
-   * facts, the same drawing the daemon streams. The placement shows the
-   * whole sheet with every card; it burns nothing, so no program. */
-  var live = LIVE_IDS.indexOf(id) >= 0, burns = live && id !== 'sheet.place';
+  /* A burn shows what it burns: its card on the scrap, the same drawing
+   * the daemon streams, and the program. */
+  var live = LIVE_IDS.indexOf(id) >= 0;
   $('k-preview').style.display = live ? '' : 'none';
   if (live) $('k-preview').src = '/wiz/sheet.svg?card=' + encodeURIComponent(id) + '&t=' + Date.now();
-  $('k-gcode').style.display = burns ? '' : 'none';
-  if (burns) $('k-gcode').href = '/wiz/sheet.gcode?card=' + encodeURIComponent(id);
+  $('k-gcode').style.display = live ? '' : 'none';
+  if (live) $('k-gcode').href = '/wiz/sheet.gcode?card=' + encodeURIComponent(id);
   $('k-fill').style.width = '0';
   $('k-phase').textContent = 'Ready to start.';
   $('k-phase').className = 'wz-phase';
@@ -1109,12 +1128,11 @@ function darkRender(d) {
   }
 }
 /* The result: the wizard's own sentence first, when it wrote one; the
- * dose chart; the settings it wrote, each with the value before; and
- * the facts of the result under a fold, lengths in the user's units. */
+ * settings it wrote, each with the value before; and the facts of the
+ * result under a fold, lengths in the user's units. */
 function darkResult(result, applied) {
   var g = '';
   if (result.summary) g += '<p class="wz-summary">' + esc(result.summary) + '</p>';
-  if (result.points) g += '<div class="wz-facts">' + doseChart(result.points) + '</div>';
   var keys = Object.keys(applied || {});
   if (keys.length) {
     g += '<div class="wz-written"><b>Written to the settings</b>';
@@ -1127,7 +1145,7 @@ function darkResult(result, applied) {
   }
   var facts = '';
   Object.keys(result).forEach(function (k) {
-    if (k === 'points' || k === 'summary') return;
+    if (k === 'summary') return;
     facts += '<span>' + esc(k.replace(/_mm$/, '').replace(/_/g, ' ')) + '</span><span>' + esc(darkFact(result[k], k)) + '</span>';
   });
   if (facts) {
@@ -1136,9 +1154,10 @@ function darkResult(result, applied) {
   }
   return g;
 }
-/* The placement's jog pad: the arrows (10 mm, and 1 mm on the inner
- * ring), the lid view refreshed after each move, and Set origin. The
- * head moves only with the lid closed; the wizard says so in its log. */
+/* The bed check's jog row: one axis, from the home outward, the fine
+ * steps in the middle, and the lid view refreshed after each move. +Y
+ * runs toward the front, down the page. The head moves only with the
+ * lid closed; the wizard says so in its log. */
 function jogButtons(p) {
   var opts = p.options || [];
   function btn(label, val, cls) {
@@ -1148,25 +1167,13 @@ function jogButtons(p) {
   }
   var jogs = opts.filter(function (o) { return /^[XY][-+][\d.]+$/.test(o); });
   var g = '';
-  if (jogs.some(function (o) { return o[0] === 'X'; }) && jogs.some(function (o) { return o[0] === 'Y'; })) {
-    /* Both axes: the pad, the head's four ways. */
-    g = '<div class="wz-jog">';
-    g += '<span></span>' + btn('▲ 10', 'Y-10') + '<span></span>';
-    g += btn('◀ 10', 'X-10') + btn('▲ 1', 'Y-1') + btn('▶ 10', 'X+10');
-    g += btn('◀ 1', 'X-1') + btn('▼ 1', 'Y+1') + btn('▶ 1', 'X+1');
-    g += '<span></span>' + btn('▼ 10', 'Y+10') + '<span></span>';
-    g += '</div>';
-  } else {
-    /* One axis (the bed check's): one row, from the home outward, the
-     * fine steps in the middle. +Y runs toward the front, down the page. */
-    var arrow = { 'X-': '◀', 'X+': '▶', 'Y-': '▲', 'Y+': '▼' };
-    jogs.slice().sort(function (a, b) {
-      return parseFloat(a.slice(1)) - parseFloat(b.slice(1));
-    }).forEach(function (o) {
-      g += btn(arrow[o.slice(0, 2)] + ' ' + o.slice(2), o);
-    });
-  }
-  /* Every other option is the step's own way on (Set origin, This is the end). */
+  var arrow = { 'X-': '◀', 'X+': '▶', 'Y-': '▲', 'Y+': '▼' };
+  jogs.slice().sort(function (a, b) {
+    return parseFloat(a.slice(1)) - parseFloat(b.slice(1));
+  }).forEach(function (o) {
+    g += btn(arrow[o.slice(0, 2)] + ' ' + o.slice(2), o);
+  });
+  /* Every other option is the step's own way on (This is the end). */
   opts.forEach(function (o) {
     if (!/^[XY][-+][\d.]+$/.test(o)) g += btn(esc(o), o, 'btn-primary');
   });
@@ -1175,27 +1182,6 @@ function jogButtons(p) {
 }
 function jogRefresh() {
   $('k-shot').src = '/cam/snapshot?cam=lid&res=half&t=' + Date.now();
-}
-/* The dose curve's fitted points as a small chart: light against
- * density, both in percent, the identity as a reference line. */
-function doseChart(points) {
-  if (!points || !points.length) return '';
-  var w = 220, h = 140, m = 24;
-  var s = '<svg class="wz-chart" viewBox="0 0 ' + w + ' ' + h + '" width="' + w + '" height="' + h + '">';
-  s += '<rect x="' + m + '" y="8" width="' + (w - m - 8) + '" height="' + (h - m - 8) + '" fill="none" stroke="currentColor" opacity=".4"/>';
-  s += '<line x1="' + m + '" y1="' + (h - m) + '" x2="' + (w - 8) + '" y2="8" stroke="currentColor" opacity=".25" stroke-dasharray="3 3"/>';
-  var d = '';
-  points.forEach(function (p, i) {
-    var x = m + (p.density / 100) * (w - m - 8);
-    var y = h - m - (p.light / 100) * (h - m - 8);
-    d += (i ? ' L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
-    s += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="2.5" fill="currentColor"/>';
-  });
-  s += '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="1.5"/>';
-  s += '<text x="' + (w / 2) + '" y="' + (h - 6) + '" font-size="9" text-anchor="middle" fill="currentColor">density %</text>';
-  s += '<text x="8" y="' + (h / 2) + '" font-size="9" text-anchor="middle" fill="currentColor" transform="rotate(-90 8 ' + (h / 2) + ')">light %</text>';
-  s += '</svg>';
-  return '<span>curve</span><span>' + s + '</span>';
 }
 /* A multichoice: the options toggle, Done posts the chosen ones joined
  * by commas. */

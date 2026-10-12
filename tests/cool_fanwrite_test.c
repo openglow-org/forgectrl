@@ -128,9 +128,9 @@ static int log_has(const char *needle)
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int machine_is_idle(void) { return 1; }
-int setup_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *reason)
 {
-    (void)id; (void)level; (void)reason;
+    (void)id; (void)reason;
     return 0;
 }
 double chassis_degc(void) { return 25.0; }

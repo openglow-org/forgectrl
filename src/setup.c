@@ -12,13 +12,20 @@
  *   account:    { name, uid, created }
  *   machine:    { ... the machine wizard's facts ... }
  *   wizards:    { <id>: { version, completed, result, applied } }
- *   flags:      { <id>: { level, reason } }
+ *   flags:      { <id>: { reason } }
  *
- * The gate is evaluated from the record and the image's required
- * table on every change and reported to the supervisor, which spawns
- * no controller for a sender while it is closed. The evaluation never
- * trusts a field it cannot parse: a damaged record reads as "nothing
- * done", which closes the gate and serves the wizard.
+ * The gate is the advisories (accepted, and the press), the account,
+ * the table's required steps (preferences, the machine facts, the cloud
+ * decision), and the intake fan count (a machine built with one intake
+ * fan faults every job on the second intake until the airflow gate
+ * knows): it is evaluated on every change and reported to the
+ * supervisor, which spawns no controller for a sender while it is
+ * closed. Everything else is recommended, never required:
+ * the image's step table (a step not run, or run at an older version)
+ * and the flags (a part replaced, a fault the engine saw) only fill the
+ * recommended list the panel shows. The evaluation never trusts a field
+ * it cannot parse: a damaged record reads as "nothing done", which
+ * closes the gate and serves the wizard.
  */
 #define _GNU_SOURCE
 #include "setup.h"
@@ -36,68 +43,62 @@
 #include <time.h>
 #include <unistd.h>
 
-/* The image's table: every wizard the machine must have completed, at
- * the version this build requires. A bump makes the wizard required
- * again on every machine that updates to this build. The form wizards
- * of the initial run are listed first; the hardware wizards join as
- * they land. */
-static const setup_req_t image_required[] = {
-    { "advisories",        1, NULL },
-    { "account",           1, NULL },
-    { "preferences",       1, NULL },
-    { "machine",           1, NULL },
-    { "cloud",             1, NULL },
+/* The image's table: every step of the setup, at the version this
+ * build wants. The required ones hold the gate until they are done (a
+ * bump holds it again on every machine that updates to this build); a
+ * bump of any other recommends the step again. The form steps of the
+ * initial run are listed first. The laser floor and the bed size are
+ * not here: they are offered, never recommended. */
+static const setup_step_t image_steps[] = {
+    { "advisories",        1, NULL, 0 },
+    { "account",           1, NULL, 0 },
+    { "preferences",       1, NULL, 1 },
+    { "machine",           1, NULL, 1 },
+    { "cloud",             1, NULL, 1 },
     /* The dark validation: the machine checked with the laser locked. */
-    { "switches",          1, NULL },
-    { "sensors",           1, NULL },
-    { "airflow",           1, NULL },
-    { "cooling.aa-offset", 1, NULL },
-    { "cooling.flow",      1, NULL },
-    { "motion",            1, NULL },
-    { "cameras",           1, NULL },
-    { "cloud.header",      1, "cloud_enabled" },
-    /* Phase 3: the sheet. */
-    { "sheet.place",       1, NULL },
-    { "sheet.frame",       1, NULL },
-    { "laser.focus",       1, NULL },
-    { "laser.floor",       1, NULL },
-    { "laser.dose-curve",  1, NULL },
-    { "laser.corner",      1, NULL },
-    { "cooling.flow-load", 1, NULL },
+    { "switches",          1, NULL, 0 },
+    { "sensors",           1, NULL, 0 },
+    { "airflow",           1, NULL, 0 },
+    { "cooling.aa-offset", 1, NULL, 0 },
+    { "cooling.flow",      1, NULL, 0 },
+    { "motion",            1, NULL, 0 },
+    { "cameras",           1, NULL, 0 },
+    { "cloud.header",      1, "cloud_enabled", 0 },
+    /* The lens: its free travel (dark), then the focus burn. */
+    { "lens.travel",       1, NULL, 0 },
+    { "laser.focus",       1, NULL, 0 },
 };
 
 int (*setup_fact_hook)(const char *fact);
+int (*setup_known_hook)(const char *id);
+int (*setup_fans_hook)(void);
 
-/* The what-changed menu (the panel's Setup tab). The settings a
- * card measured belong to the part it measured them on: a new tube has
- * its own floor, dose curve, and heat coefficient; a new pump or
- * coolant its own flow bands; a new fan its own floor; a new head its
- * own focus height and free travel (and the record's head facts, which
- * the boot check also flags). Those are required, so the gate holds
- * until the numbers are the new part's. The checks that only prove a
- * part are recommended. */
+/* The what-changed menu (the panel's Setup tab). The settings a step
+ * measured belong to the part it measured them on: a new tube has its
+ * own floor; a new pump or coolant its own flow bands; a new fan its
+ * own floor; a new head its own free travel and focus height (and the
+ * record's head facts, which the boot check also flags). Each change
+ * recommends the steps that measure or prove the new part. */
 static const setup_change_t changes[] = {
     { "tube", "The laser tube was replaced", "the tube was replaced",
-      { { "laser.floor", "required" }, { "laser.dose-curve", "required" },
-        { "cooling.flow-load", "required" }, { "laser.corner", "recommended" } } },
+      { "laser.floor" } },
     { "pump", "The coolant pump was replaced", "the pump was replaced",
-      { { "cooling.flow", "required" } } },
+      { "cooling.flow" } },
     { "coolant", "The coolant was changed", "the coolant was changed",
-      { { "cooling.flow", "required" } } },
+      { "cooling.flow" } },
     { "fan", "A fan was replaced", "a fan was replaced",
-      { { "airflow", "required" } } },
+      { "airflow" } },
     { "head", "The head was replaced", "the head was replaced",
-      { { "machine", "required" }, { "laser.focus", "required" },
-        { "motion", "recommended" }, { "cameras", "recommended" } } },
+      { "machine", "lens.travel", "laser.focus", "motion", "cameras" } },
     { "tray", "The tray was replaced", "the tray was replaced",
-      { { "laser.focus", "recommended" } } },
+      { "laser.focus" } },
     { "service", "A cover was off: belts, drivers, wiring, or switches were serviced",
       "the machine was serviced",
-      { { "switches", "recommended" }, { "motion", "recommended" } } },
+      { "switches", "motion" } },
 };
 
-static const setup_req_t *required = image_required;
-static size_t nrequired = sizeof(image_required) / sizeof(*image_required);
+static const setup_step_t *steps = image_steps;
+static size_t nsteps = sizeof(image_steps) / sizeof(*image_steps);
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static json_t *rec;                 /* the record, owned here */
@@ -105,17 +106,11 @@ static json_t *rec;                 /* the record, owned here */
 /* The evaluated gate, refreshed by evaluate_locked(). */
 static int g_first_run = 1;
 static int g_gate = 0;
-static int g_override = 0;
 static char g_why[256];
 
 static void record_path(char *buf, size_t len)
 {
     snprintf(buf, len, "%s/setup.json", ff_data_dir());
-}
-
-static void override_path(char *buf, size_t len)
-{
-    snprintf(buf, len, "%s/setup-override", ff_run_dir());
 }
 
 static void now_iso(char *buf, size_t len)
@@ -230,68 +225,48 @@ static int wizard_version_locked(const char *id)
     return json_is_integer(v) ? (int)json_integer_value(v) : 0;
 }
 
-/* Recompute the gate. Called with mu held. */
-/* Does requirement i apply to this machine? Unconditional ones always;
- * a conditional one when its fact holds, in the machine block or by the
+/* Does step i apply to this machine? Unconditional ones always; a
+ * conditional one when its fact holds, in the machine block or by the
  * hook. Called with mu held. */
-static int req_applies_locked(size_t i)
+static int step_applies_locked(size_t i)
 {
-    if (!required[i].when)
+    if (!steps[i].when)
         return 1;
     json_t *m = json_object_get(rec, "machine");
-    json_t *f = json_object_get(m, required[i].when);
+    json_t *f = json_object_get(m, steps[i].when);
     if (f)
         return json_is_true(f);
-    return setup_fact_hook ? setup_fact_hook(required[i].when) : 0;
+    return setup_fact_hook ? setup_fact_hook(steps[i].when) : 0;
 }
 
+/* Recompute the gate: the advisories, the account, the required steps,
+ * and the intake fan count. Called with mu held. */
 static void evaluate_locked(void)
 {
-    char path[256];
-    override_path(path, sizeof(path));
-    g_override = access(path, F_OK) == 0;
     g_first_run = !json_is_string(json_object_get(rec, "completed"));
-
     int consent = advisories_complete_locked() && acceptance_done_locked();
     int account = account_set_locked();
-    int wizards = 1;
     char missing[160] = "";
-    for (size_t i = 0; i < nrequired; i++) {
-        if (!req_applies_locked(i))
-            continue;               /* a fact this machine lacks: not required */
-        if (wizard_version_locked(required[i].id) < required[i].version) {
-            wizards = 0;
-            if (missing[0])
-                strncat(missing, ", ", sizeof(missing) - strlen(missing) - 1);
-            strncat(missing, required[i].id, sizeof(missing) - strlen(missing) - 1);
-        }
+    for (size_t i = 0; i < nsteps; i++) {
+        if (!steps[i].required || !step_applies_locked(i) ||
+            wizard_version_locked(steps[i].id) >= steps[i].version)
+            continue;
+        if (missing[0])
+            strncat(missing, ", ", sizeof(missing) - strlen(missing) - 1);
+        strncat(missing, steps[i].id, sizeof(missing) - strlen(missing) - 1);
     }
-    /* Engine-raised required flags close the gate too. */
-    const char *k;
-    json_t *f;
-    json_object_foreach(json_object_get(rec, "flags"), k, f) {
-        const char *lvl = json_string_value(json_object_get(f, "level"));
-        if (lvl && !strcmp(lvl, "required") &&
-            wizard_version_locked(k) > 0) {
-            /* A completed wizard flagged required must run again. */
-            wizards = 0;
-            if (missing[0])
-                strncat(missing, ", ", sizeof(missing) - strlen(missing) - 1);
-            strncat(missing, k, sizeof(missing) - strlen(missing) - 1);
-        }
-    }
-
+    int fans = setup_fans_hook ? setup_fans_hook() : 1;
     if (!consent)
         snprintf(g_why, sizeof(g_why), "the advisories are not accepted");
     else if (!account)
         snprintf(g_why, sizeof(g_why), "no account exists");
-    else if (!wizards && !g_override)
+    else if (missing[0])
         snprintf(g_why, sizeof(g_why), "setup required: %s", missing);
-    else if (!wizards && g_override)
-        snprintf(g_why, sizeof(g_why), "override active (required: %s)", missing);
+    else if (!fans)
+        snprintf(g_why, sizeof(g_why), "the intake fans are not counted");
     else
         g_why[0] = '\0';
-    g_gate = consent && account && (wizards || g_override);
+    g_gate = consent && account && !missing[0] && fans;
 }
 
 /* A record written under the file's earlier name (commissioning.json)
@@ -351,17 +326,17 @@ void setup_init(void)
         json_decref(rec);
     load_locked();
     evaluate_locked();
-    fflog(LOG_INFO, "setup: first_run=%d gate=%s override=%d%s%s",
-          g_first_run, g_gate ? "open" : "closed", g_override,
+    fflog(LOG_INFO, "setup: first_run=%d gate=%s%s%s",
+          g_first_run, g_gate ? "open" : "closed",
           g_why[0] ? " why=" : "", g_why);
     pthread_mutex_unlock(&mu);
 }
 
-void setup_set_required(const setup_req_t *reqs, size_t n)
+void setup_set_steps(const setup_step_t *s, size_t n)
 {
     pthread_mutex_lock(&mu);
-    required = reqs ? reqs : image_required;
-    nrequired = reqs ? n : sizeof(image_required) / sizeof(*image_required);
+    steps = s ? s : image_steps;
+    nsteps = s ? n : sizeof(image_steps) / sizeof(*image_steps);
     if (rec)
         evaluate_locked();
     pthread_mutex_unlock(&mu);
@@ -387,13 +362,6 @@ int setup_gate_open(char *why, size_t len)
         snprintf(why, len, "%s", g_why);
     pthread_mutex_unlock(&mu);
     return v;
-}
-
-int setup_override_active(void)
-{
-    char path[256];
-    override_path(path, sizeof(path));
-    return access(path, F_OK) == 0;
 }
 
 static int commit_locked(void)
@@ -526,22 +494,16 @@ int setup_wizard_done(const char *id, int version, json_t *result,
     return rc;
 }
 
-int setup_flag(const char *id, const char *level, const char *reason)
+int setup_flag(const char *id, const char *reason)
 {
     if (!id)
         return -1;
-    if (level && strcmp(level, "required") && strcmp(level, "recommended"))
-        return -1;
     pthread_mutex_lock(&mu);
     json_t *flags = obj_get_or_make(rec, "flags");
-    if (!level)
+    if (!reason)
         json_object_del(flags, id);
-    else {
-        json_t *f = json_object();
-        json_object_set_new(f, "level", json_string(level));
-        json_object_set_new(f, "reason", json_string(reason ? reason : ""));
-        json_object_set_new(flags, id, f);
-    }
+    else
+        json_object_set_new(flags, id, json_pack("{s:s}", "reason", reason));
     int rc = commit_locked();
     pthread_mutex_unlock(&mu);
     return rc;
@@ -603,21 +565,12 @@ int setup_change_apply(const char *what)
         return -1;
     pthread_mutex_lock(&mu);
     json_t *flags = obj_get_or_make(rec, "flags");
-    for (size_t i = 0; i < SETUP_CHANGE_WIZ && c->wizards[i].id; i++) {
-        /* A required flag never drops to recommended. */
-        json_t *old = json_object_get(flags, c->wizards[i].id);
-        const char *ol = json_string_value(json_object_get(old, "level"));
-        if (ol && !strcmp(ol, "required") && strcmp(c->wizards[i].level, "required"))
-            continue;
-        json_t *f = json_object();
-        json_object_set_new(f, "level", json_string(c->wizards[i].level));
-        json_object_set_new(f, "reason", json_string(c->reason));
-        json_object_set_new(flags, c->wizards[i].id, f);
-    }
+    for (size_t i = 0; i < SETUP_CHANGE_WIZ && c->wizards[i]; i++)
+        json_object_set_new(flags, c->wizards[i], json_pack("{s:s}", "reason", c->reason));
     int rc = commit_locked();
     pthread_mutex_unlock(&mu);
     if (rc == 0)
-        fflog(LOG_NOTICE, "setup: %s: the wizards it needs are flagged", c->reason);
+        fflog(LOG_NOTICE, "setup: %s: the steps it recommends are flagged", c->reason);
     return rc;
 }
 
@@ -629,9 +582,8 @@ json_t *setup_changes_json(void)
         json_object_set_new(c, "id", json_string(changes[i].id));
         json_object_set_new(c, "title", json_string(changes[i].title));
         json_t *w = json_array();
-        for (size_t k = 0; k < SETUP_CHANGE_WIZ && changes[i].wizards[k].id; k++)
-            json_array_append_new(w, json_pack("{s:s,s:s}", "id", changes[i].wizards[k].id,
-                                               "level", changes[i].wizards[k].level));
+        for (size_t k = 0; k < SETUP_CHANGE_WIZ && changes[i].wizards[k]; k++)
+            json_array_append_new(w, json_pack("{s:s}", "id", changes[i].wizards[k]));
         json_object_set_new(c, "wizards", w);
         json_array_append_new(out, c);
     }
@@ -713,6 +665,47 @@ int setup_cloud_homing_ok(const char *mode)
                     !strcmp(mode, "none"));
 }
 
+/* Recommended: every flag with its reason, then the table's steps not
+ * run, or run at an older version, that no flag already names. The
+ * account, the advisories, and the required steps are the gate, never
+ * listed here as not run (a flag on a required step is: a run done once
+ * still holds the gate open), and a flag on a step this build no longer
+ * has is left out. A new array. Called with mu held. */
+static json_t *recommended_locked(void)
+{
+    json_t *recm = json_array();
+    json_t *flags = json_object_get(rec, "flags");
+    const char *k;
+    json_t *f;
+    json_object_foreach(flags, k, f) {
+        if (setup_known_hook && !setup_known_hook(k))
+            continue;
+        const char *why = json_string_value(json_object_get(f, "reason"));
+        json_array_append_new(recm, json_pack("{s:s,s:s}", "id", k, "reason", why ? why : ""));
+    }
+    for (size_t i = 0; i < nsteps; i++) {
+        if (!strcmp(steps[i].id, "advisories") || !strcmp(steps[i].id, "account") ||
+            steps[i].required || !step_applies_locked(i) || json_object_get(flags, steps[i].id))
+            continue;
+        int v = wizard_version_locked(steps[i].id);
+        if (v < steps[i].version)
+            json_array_append_new(recm, json_pack("{s:s,s:s}", "id", steps[i].id, "reason",
+                                                  v ? "this release asks for it again"
+                                                    : "not run yet"));
+    }
+    return recm;
+}
+
+int setup_recommended_count(void)
+{
+    pthread_mutex_lock(&mu);
+    json_t *r = recommended_locked();
+    int n = (int)json_array_size(r);
+    json_decref(r);
+    pthread_mutex_unlock(&mu);
+    return n;
+}
+
 int setup_status_json(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);
@@ -720,38 +713,22 @@ int setup_status_json(char *buf, size_t len)
     json_t *st = json_object();
     json_object_set_new(st, "first_run", json_boolean(g_first_run));
     json_object_set_new(st, "gate", json_string(g_gate ? "open" : "closed"));
-    json_object_set_new(st, "override", json_boolean(g_override));
     json_object_set_new(st, "why", json_string(g_why));
     json_object_set_new(st, "advisories_complete",
                         json_boolean(advisories_complete_locked()));
     json_object_set_new(st, "acceptance_done",
                         json_boolean(acceptance_done_locked()));
     json_object_set_new(st, "account", json_boolean(account_set_locked()));
+    json_object_set_new(st, "fans_counted", json_boolean(setup_fans_hook ? setup_fans_hook() : 1));
     json_object_set_new(st, "completed",
                         json_boolean(!g_first_run));
     json_t *sid = json_object_get(rec, "sheet_id");
     json_object_set_new(st, "sheet_id",
                         json_is_string(sid) ? json_incref(sid) : json_string(""));
 
-    /* Required: the table entries not satisfied, plus flagged ones. */
-    json_t *req = json_array(), *recm = json_array();
-    for (size_t i = 0; i < nrequired; i++)
-        if (req_applies_locked(i) && wizard_version_locked(required[i].id) < required[i].version)
-            json_array_append_new(req, json_string(required[i].id));
+    json_object_set_new(st, "recommended", recommended_locked());
     const char *k;
     json_t *f;
-    json_object_foreach(json_object_get(rec, "flags"), k, f) {
-        const char *lvl = json_string_value(json_object_get(f, "level"));
-        json_t *e = json_object();
-        json_object_set_new(e, "id", json_string(k));
-        json_object_set(e, "reason", json_object_get(f, "reason"));
-        if (lvl && !strcmp(lvl, "required"))
-            json_array_append_new(req, e);
-        else
-            json_array_append_new(recm, e);
-    }
-    json_object_set_new(st, "required", req);
-    json_object_set_new(st, "recommended", recm);
 
     /* Per-wizard completed versions, for the page's progress rail. */
     json_t *done = json_object();

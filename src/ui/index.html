@@ -82,6 +82,11 @@
         <a href="#" onclick="openRelease(); return false;" data-nolock="1">See what is new and install</a>
         &middot; <a href="#" onclick="dismissRelease(); return false;" data-nolock="1">Dismiss this release</a>
       </div>
+      <div id="setup-banner" class="banner" style="display: none">
+        <b>Setup not finished.</b> Recommended: <span id="setup-banner-list"></span>.
+        <a href="/setup" data-nolock="1">Continue the setup</a>
+        &middot; <a href="#" onclick="dismissSetupBanner(); return false;" data-nolock="1">Dismiss</a>
+      </div>
       <section id="s-status">
         <div id="gate-banner" class="banner banner-bad" style="display: none"></div>
         <div id="gfsvc-banner" class="banner" style="display: none"></div>
@@ -551,9 +556,9 @@
         <div class="card">
           <h2>Checks<button class="hlp" data-help="wizards" data-nolock="1" type="button">?</button></h2>
           <p class="hint" style="margin-top: 0">
-            Every check the setup ran, with what it found. A check runs again from the setup:
-            open it and choose the check in the rail. A check the machine asks for again is
-            marked required or recommended, with the reason.
+            Every check the setup knows, with what it found. A check runs from the setup: open
+            it and choose the check in the rail. A check the machine recommends is marked, with
+            the reason.
           </p>
           <div id="wizlist"></div>
           <div class="btns" style="margin-top: 8px">
@@ -567,7 +572,7 @@
           </div>
           <p class="hint">
             A replaced part makes the numbers measured on the old one wrong. Name the change and
-            the checks that measure it are asked for again; the setup runs them.
+            the checks that measure it are recommended again; the setup runs them.
           </p>
         </div>
         <div class="card">
