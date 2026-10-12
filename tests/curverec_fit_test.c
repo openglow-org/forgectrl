@@ -117,6 +117,31 @@ int main(void)
     got = curverec_fit(hv, tp, n, HZ, pts, 8, err, sizeof(err));
     CHECK(got == -1, "an all-dark trace is refused");
 
+    /* A head whose beam sensor gives no output: the tube lights every
+     * rung, the sensor stays flat (or barely moves). */
+    reset();
+    dark(5.0, 1830);
+    for (int i = 0; i < 7; i++) {
+        rung(10.0, 400 + 80 * i, 1830, 0);
+        dark(4.0, 1830);
+    }
+    dark(25.0, 1830);
+    got = curverec_fit(hv, tp, n, HZ, pts, 8, err, sizeof(err));
+    CHECK(got == -1 && strstr(err, "the beam sensor gave no output"),
+          "a flat beam sensor is refused as no output");
+    CHECK(strlen(err) < sizeof(err) - 1, "the no-output notice fits the reason whole");
+
+    reset();
+    dark(5.0, 1830);
+    for (int i = 0; i < 7; i++) {
+        rung(10.0, 400 + 80 * i, 1830, 10 + 10 * i);
+        dark(4.0, 1830);
+    }
+    dark(25.0, 1830);
+    got = curverec_fit(hv, tp, n, HZ, pts, 8, err, sizeof(err));
+    CHECK(got == -1 && strstr(err, "the beam sensor gave no output"),
+          "a beam sensor that barely moves is refused as no output");
+
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the fitter segments the ladder, normalizes to full, "
                       "and refuses what is not a clean ladder\n",

@@ -120,6 +120,14 @@ static void end(int rc, const jobstream_run_t *run, const char *err)
         fflog(LOG_INFO, "jobrun: %s ran to its end", who);
     else
         fflog(LOG_WARNING, "jobrun: %s failed: %s", who, err);
+    /* The witnesses of every job that lit the tube, the head's beam
+     * sensor among them: nothing requires the sensor, so its output is
+     * kept here, where a head that reads differently shows. */
+    if (run->lit)
+        fflog(LOG_INFO, "jobrun: %s emission: tube current peak %ld, LASER_ON samples %ld, "
+              "beam sensor dark %ld, peak %ld (rise %ld)", who, run->hv_max, run->lon_max,
+              run->tp_base, run->tp_max,
+              run->tp_base >= 0 && run->tp_max > run->tp_base ? run->tp_max - run->tp_base : 0);
 }
 
 void jobrun_lease_back(void)

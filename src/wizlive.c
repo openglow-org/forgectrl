@@ -67,7 +67,7 @@ static double z_of_k(double k);
 #define WAIT_TIMEOUT_S 600.0    /* the arm and the press */
 #define PICK_TIMEOUT_S 1800     /* a look at the card after a burn: the burn is not repeated */
 #define RUN_TIMEOUT_S 1500.0
-#define TP_DELTA_MIN  100       /* the thermopile must rise this much under the mark */
+#define TP_SEEN_MIN   100       /* a beam sensor rise this size reads as the beam seen */
 
 /* A wait the page can follow: the phase names it and counts the
  * seconds, of the most it takes. 0 held, -1 aborted, -2 timed out. */
@@ -533,8 +533,11 @@ static int stream(gen_t *g, jobstream_run_t *run, double end_dark_s, char *err, 
     return jobrun_sync(&cfg, run, err, elen);
 }
 
-/* The emission witnesses into the result: all three must have seen
- * the beam for the burn to count. */
+/* The emission witnesses into the result. The tube current and the
+ * kernel's LASER_ON samples must both have seen the beam for the burn to
+ * count. The head's beam sensor is recorded and never required: a head
+ * may have none, or one that reads differently from the bench
+ * reference's. */
 static int witnessed(const jobstream_run_t *run, json_t *r)
 {
     long tp_delta = run->tp_base >= 0 ? run->tp_max - run->tp_base : 0;
@@ -542,21 +545,21 @@ static int witnessed(const jobstream_run_t *run, json_t *r)
     json_object_set_new(e, "hv_max", json_integer(run->hv_max));
     json_object_set_new(e, "laser_on_samples", json_integer(run->lon_max));
     json_object_set_new(e, "thermopile_delta", json_integer(tp_delta));
+    json_object_set_new(e, "beam_sensor_seen", json_boolean(tp_delta >= TP_SEEN_MIN));
     json_object_set_new(e, "lit_s", json_real(run->lit ? run->t_last_lit - run->t_first_lit : 0));
     json_object_set_new(r, "emission", e);
-    return run->lit && run->lon_max > 0 && tp_delta >= TP_DELTA_MIN;
+    if (run->lit && tp_delta < TP_SEEN_MIN)
+        wiz_log("the head's beam sensor gave no output (rose %ld); the burn counts on the tube "
+                "current and LASER_ON", tp_delta);
+    return run->lit && run->lon_max > 0;
 }
 
 static void not_witnessed(const jobstream_run_t *run)
 {
-    long tp_delta = run->tp_base >= 0 ? run->tp_max - run->tp_base : 0;
     if (!run->lit)
         wiz_finish_err("no discharge: the tube current never rose");
-    else if (run->lon_max <= 0)
-        wiz_finish_err("the kernel never sampled LASER_ON while the tube current rose");
     else
-        wiz_finish_err("the head thermopile did not see the beam (rose %ld, needs %d)",
-                       tp_delta, TP_DELTA_MIN);
+        wiz_finish_err("the kernel never sampled LASER_ON while the tube current rose");
 }
 
 /* -------------------------------------------------------- the builds */

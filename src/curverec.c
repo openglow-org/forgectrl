@@ -26,8 +26,8 @@
  * laser_floor_density to 0 and laser_dose_curve to "off", and every end
  * path restores them. The override keeps the originals in a marker
  * file so a daemon that dies mid-run restores them at its next start;
- * the sheet wizards use the same override for their ladders and for
- * the corner rolloff exponent. The controller re-reads the keys at
+ * the setup's laser floor burn uses the same override for its ladder.
+ * The controller re-reads the keys at
  * each arm, so the override applies to the one job and to nothing
  * after it.
  *
@@ -59,6 +59,7 @@
 #define WAIT_TIMEOUT_S 600.0           /* budget for the arm + the press */
 #define RUN_TIMEOUT_S  900.0
 #define LADDER_MAX_LINES 40
+#define TP_RISE_MIN    100             /* the full-power rung's least beam sensor rise */
 
 /* The ladder's rungs: the S each maps to with the floor at 0 and the
  * curve off is the density itself, so the fitter knows each segment's
@@ -257,8 +258,20 @@ int curverec_fit(const long *hv, const long *tp, int n, double hz,
         }
         delta[s] = lit - base;
     }
-    if (delta[LADDER_N - 1] <= 0) {
-        snprintf(err, elen, "the full-power rung shows no thermopile rise");
+    /* Each rung's beam sensor rise goes to the log whatever the fit
+     * makes of it. */
+    char rises[160] = "";
+    for (int s = 0; s < LADDER_N; s++) {
+        size_t o = strlen(rises);
+        snprintf(rises + o, sizeof(rises) - o, "%s%g%%: %.0f", s ? ", " : "", LADDER_D[s], delta[s]);
+    }
+    fflog(LOG_INFO, "curverec: beam sensor rise per rung: %s", rises);
+    /* A head whose beam sensor gives no output (none fitted, or one that
+     * reads differently) cannot measure a curve. The recording ends and
+     * says so; the curve in force stays, and the machine runs on it. */
+    if (delta[LADDER_N - 1] < TP_RISE_MIN) {
+        snprintf(err, elen, "the beam sensor gave no output; the curve in force stays "
+                 "and the machine runs on it");
         return -1;
     }
     for (int s = 1; s < LADDER_N; s++) {
