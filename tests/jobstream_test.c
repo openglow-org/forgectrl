@@ -8,9 +8,10 @@
  * line that says BAD, and it records a soft reset), and a mock sysfs
  * tree carries the witnesses the test flips. Cases: a dark program
  * streams to its end; an error stops the run at the line that drew it;
- * a lit program ends after its dark stretch with the witnesses read; an
- * abort sends the soft reset; the generator's pacing return; the sender
- * check reads the state file.
+ * a lit program ends after its dark stretch with the witnesses read; the
+ * generator's pacing return, and the abort that ends it with the soft
+ * reset; the sender check reads the state file. That a program that must
+ * light and does not fails is jobrun_test's.
  */
 #include "../src/jobstream.h"
 
@@ -224,21 +225,6 @@ static void test_lit_program(void)
     CHECK(mock.resets == 0, "a soft reset on a clean lit run");
 }
 
-static void test_dark_when_lit_expected(void)
-{
-    mock_reset_counts();
-    sysfs_write("pic/hv_current", 0);
-    jobstream_lines_t lines = { "M3 S400\nM5\nM2\n", 0 };
-    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .ctx = &lines,
-                            .wait_timeout_s = 10, .run_timeout_s = 20 };
-    jobstream_run_t run;
-    char err[160] = "";
-    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
-    mock_settle();
-    CHECK(rc == -1 && strstr(err, "without a discharge"), "a dark run passed as lit: rc %d %s", rc, err);
-    CHECK(mock.resets == 1, "no soft reset (%d)", mock.resets);
-}
-
 static volatile int abort_flag;
 static int slow_gen(void *ctx, char *buf, size_t len)
 {
@@ -324,7 +310,6 @@ int main(void)
     test_dark_program();
     test_error_stops();
     test_lit_program();
-    test_dark_when_lit_expected();
     test_abort_and_pacing();
     test_sender_check();
     mock.stop = 1;

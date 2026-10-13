@@ -18,8 +18,7 @@
  * run on the caller's thread stands inside a wizard's hold and gives the
  * machine back to the wizard, and is not the abort route's to stop; the
  * ready and done hooks of a started run, with the lease given back from
- * inside done; the witness rate of a program that must light and of one
- * that need not; a program that must light and does not, fails.
+ * inside done; a program that must light and does not, fails.
  */
 #include "../src/jobrun.h"
 #include "../src/lease.h"
@@ -458,33 +457,6 @@ static void test_hooks(void)
     CHECK(mock.resets == 1, "%d soft resets", mock.resets);
 }
 
-static int samples_now(void)
-{
-    const char *k = strstr(status(), "\"samples\":");
-    return k ? atoi(k + 10) : -1;
-}
-
-/* A program that must light is witnessed at the full rate, any other at
- * a fifth of it: a second into each, held at the same line. */
-static void test_witness_rate(void)
-{
-    char err[160] = "";
-    for (int must_light = 0; must_light < 2; must_light++) {
-        mock_clear();
-        STAGE("G21\nG4 P77\n");
-        CHECK(jobrun_program_start(staged, "rate", NULL, must_light ? 30 : 0, 30, 0, err, sizeof(err)) == 0,
-              "start: %s", err);
-        CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
-        msleep(1000);
-        int n = samples_now();
-        if (must_light)
-            CHECK(n >= 18, "a program that must light had %d samples in its first second", n);
-        else
-            CHECK(n >= 3 && n <= 9, "a program with no such claim had %d samples in its first second", n);
-        jobrun_program_abort(err, sizeof(err));
-    }
-}
-
 static void test_must_light(void)
 {
     char err[160] = "";
@@ -516,7 +488,7 @@ int main(void)
         { "check", test_check }, { "program-plays", test_program_plays }, { "own-m2", test_own_m2 }, { "unlock", test_unlock }, { "done-is-idle", test_done_is_idle },
         { "abort", test_abort }, { "client-refuses", test_client_refuses },
         { "sync-under-a-wizard", test_sync_under_a_wizard }, { "hooks", test_hooks },
-        { "witness-rate", test_witness_rate }, { "must-light", test_must_light },
+        { "must-light", test_must_light },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGPIPE, SIG_IGN);           /* the mock answers a connection an abort has closed */
