@@ -4,9 +4,13 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The mock controller of jobstream_test, with one addition: it holds the
- * ok of a line that says P77 until the test lets go, so a run can be
- * looked at while it plays. Cases: a posted program's check (what is
+ * A mock controller on a local port answers ok per line and error:9 for
+ * a line that says BAD, records a soft reset, raises the tube's current
+ * after a chosen line, and holds the ok of a line that says P77 until the
+ * test lets go, so a run can be looked at while it plays. A mock sysfs
+ * tree carries the witnesses the test flips.
+ *
+ * The runner: a posted program's check (what is
  * stripped, every offense with its line number); a program plays as
  * job:<name> with the machine lease held as a sender, refuses a second
  * program and a wizard in the holder's words, gets the runner's M2, and
@@ -19,6 +23,12 @@
  * machine back to the wizard, and is not the abort route's to stop; the
  * ready and done hooks of a started run, with the lease given back from
  * inside done; a program that must light and does not, fails.
+ *
+ * The sender underneath (jobstream): a dark program streams to its end;
+ * an error stops the run at the line that drew it; a lit program ends
+ * after its dark stretch with the witnesses read; the generator's pacing
+ * return, and the abort that ends it with the soft reset; the sender
+ * check reads the state file.
  */
 #include "../src/jobrun.h"
 #include "../src/lease.h"
@@ -46,12 +56,26 @@ static void msleep(int ms)
     nanosleep(&ts, NULL);
 }
 
+static void sysfs_write(const char *attr, long v)
+{
+    char path[256], tmp[272];
+    snprintf(path, sizeof(path), "%s/%s", root, attr);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    fprintf(f, "%ld\n", v);
+    fclose(f);
+    rename(tmp, path);
+}
+
 /* ---- the mock controller ---- */
 
 static struct {
     int listen_fd;
     volatile int lines, resets, holding, release;
     char seen[64][80];
+    int lit_after;              /* set hv after this many lines */
 } mock;
 
 static void *mock_thread(void *arg)
@@ -61,6 +85,8 @@ static void *mock_thread(void *arg)
         int c = accept(mock.listen_fd, NULL, NULL);
         if (c < 0)
             break;
+        const char *banner = "Grbl 1.1 ['$' for help]\r\n";
+        if (write(c, banner, strlen(banner)) < 0) { }
         char buf[1024];
         size_t n = 0;
         for (;;) {
@@ -95,7 +121,10 @@ static void *mock_thread(void *arg)
                     }
                     mock.holding = 0;
                 }
-                if (write(c, "ok\r\n", 4) < 0) { }
+                const char *ans = strstr(buf + i, "BAD") ? "error:9\r\n" : "ok\r\n";
+                if (mock.lit_after && mock.lines == mock.lit_after)
+                    sysfs_write("pic/hv_current", 250);
+                if (write(c, ans, strlen(ans)) < 0) { }
                 i = (size_t)(nl + 1 - buf);
             }
             memmove(buf, buf + i, n - i);
@@ -127,7 +156,7 @@ static void mock_start(void)
 static void mock_clear(void)
 {
     msleep(200);                        /* a closed connection's last bytes land first */
-    mock.lines = mock.resets = mock.holding = mock.release = 0;
+    mock.lines = mock.resets = mock.holding = mock.release = mock.lit_after = 0;
 }
 
 static int wait_for(volatile int *flag, int want, int ms)
@@ -469,6 +498,143 @@ static void test_must_light(void)
     CHECK(mock.resets == 1, "%d soft resets", mock.resets);
 }
 
+/* ---- the sender underneath ---- */
+
+static int samples_seen;
+static void on_sample(void *ctx, const jobstream_sample_t *s)
+{
+    (void)ctx;
+    (void)s;
+    samples_seen++;
+}
+
+static void test_dark_program(void)
+{
+    mock_clear();
+    jobstream_lines_t lines = { "G21\nG90\n$100=53.4\n", 0 };
+    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .sample = on_sample, .ctx = &lines,
+                            .run_timeout_s = 10 };
+    jobstream_run_t run;
+    char err[160] = "";
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    msleep(200);
+    CHECK(rc == 0, "dark program failed: %s", err);
+    CHECK(run.sent == 3 && run.acked == 3, "sent %d acked %d", run.sent, run.acked);
+    CHECK(mock.lines == 3, "the mock saw %d lines", mock.lines);
+    CHECK(!strcmp(mock.seen[2], "$100=53.4"), "line 3 was %s", mock.seen[2]);
+    CHECK(mock.resets == 0, "a soft reset on a clean run");
+    CHECK(samples_seen >= 1 && run.samples == samples_seen, "samples %d vs %d", samples_seen, run.samples);
+    CHECK(!run.lit, "a dark run read as lit");
+}
+
+static void test_error_stops(void)
+{
+    mock_clear();
+    jobstream_lines_t lines = { "G21\nBAD LINE\nG90\n", 0 };
+    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .ctx = &lines, .run_timeout_s = 10 };
+    jobstream_run_t run;
+    char err[160] = "";
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    msleep(200);
+    CHECK(rc == -1, "the error did not stop the run");
+    CHECK(!strchr(err, '\r'), "the controller's carriage return is in the reason: %s", err);
+    CHECK(strstr(err, "error:9") && strstr(err, "line 2") && strstr(err, "BAD LINE"),
+          "the error names the wrong line: %s", err);
+    CHECK(run.sent >= 2 && run.sent <= 3, "sent %d after the error", run.sent);
+    CHECK(mock.resets == 1, "no soft reset after the error (%d)", mock.resets);
+}
+
+/* The tube's witnesses from another thread's view: the thermopile
+ * and LASER_ON rise 0.4 s after the run starts, the tube goes dark
+ * 0.4 s later. */
+static void *flip(void *a)
+{
+    (void)a;
+    struct timespec ts = { 0, 400 * 1000000L };
+    nanosleep(&ts, NULL);
+    sysfs_write("head/beam_detect_analog", 900);
+    sysfs_write("cnc/laser_on_sampled", 40);
+    nanosleep(&ts, NULL);
+    sysfs_write("pic/hv_current", 0);
+    return NULL;
+}
+
+static void test_lit_program(void)
+{
+    mock_clear();
+    sysfs_write("pic/hv_current", 0);
+    sysfs_write("head/beam_detect_analog", 100);
+    sysfs_write("cnc/laser_on_sampled", 0);
+    mock.lit_after = 2;                 /* the tube lights as line 2 is taken */
+    jobstream_lines_t lines = { "M3 S400\nG1 X10 F600\nM5\nM2\n", 0 };
+    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .ctx = &lines,
+                            .wait_timeout_s = 10, .run_timeout_s = 20, .end_dark_s = 0.5 };
+    jobstream_run_t run;
+    char err[160] = "";
+    pthread_t t;
+    pthread_create(&t, NULL, flip, NULL);
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    pthread_join(t, NULL);
+    msleep(200);
+    CHECK(rc == 0, "lit program failed: %s", err);
+    CHECK(run.lit, "the discharge was not seen");
+    CHECK(run.hv_max == 250, "hv_max %ld", run.hv_max);
+    CHECK(run.lon_max == 40, "lon_max %ld", run.lon_max);
+    CHECK(run.tp_base == 100 && run.tp_max == 900, "thermopile base %ld max %ld", run.tp_base, run.tp_max);
+    CHECK(run.t_last_lit >= run.t_first_lit, "lit times");
+    CHECK(mock.resets == 0, "a soft reset on a clean lit run");
+}
+
+static volatile int abort_flag;
+static int slow_gen(void *ctx, char *buf, size_t len)
+{
+    int *n = ctx;
+    if (*n == 0) {
+        (*n)++;
+        snprintf(buf, len, "G4 P0.1");
+        return 1;
+    }
+    abort_flag = 1;
+    return 2;                       /* pacing: nothing yet */
+}
+
+static void test_abort_and_pacing(void)
+{
+    mock_clear();
+    int n = 0;
+    jobstream_cfg_t cfg = { .gen = slow_gen, .ctx = &n, .abort_flag = &abort_flag, .run_timeout_s = 10 };
+    jobstream_run_t run;
+    char err[160] = "";
+    abort_flag = 0;
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    msleep(200);
+    CHECK(rc == -1 && !strcmp(err, "aborted"), "abort: rc %d %s", rc, err);
+    CHECK(run.sent == 1, "sent %d", run.sent);
+    CHECK(mock.resets == 1, "no soft reset on abort (%d)", mock.resets);
+}
+
+static void test_sender_check(void)
+{
+    char dir[160], path[256];
+    snprintf(dir, sizeof(dir), "%s/run", root);
+    mkdir(dir, 0700);
+    setenv("GF_RUN_DIR", dir, 1);
+    snprintf(path, sizeof(path), "%s/grbl.state", dir);
+    unlink(path);
+    CHECK(jobstream_sender_connected() == -1, "no file reads as known");
+    CHECK(jobstream_sender_blocks(), "an unreadable state blocks a run (it is no license to displace a sender)");
+    FILE *f = fopen(path, "w");
+    fprintf(f, "{\"sender\":{\"connected\":true,\"generation\":3}}\n");
+    fclose(f);
+    CHECK(jobstream_sender_connected() == 1, "connected not read");
+    CHECK(jobstream_sender_blocks(), "a connected sender blocks a run");
+    f = fopen(path, "w");
+    fprintf(f, "{\"sender\":{\"connected\":false}}\n");
+    fclose(f);
+    CHECK(jobstream_sender_connected() == 0, "disconnected not read");
+    CHECK(!jobstream_sender_blocks(), "no sender: a run may go");
+}
+
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/jobrun_test.%d", (int)getpid());
@@ -480,6 +646,14 @@ int main(void)
         mkdir(sub, 0755);
     }
     setenv("GF_SYSFS_ROOT", root, 1);
+    sysfs_write("pic/hv_current", 0);
+    sysfs_write("head/beam_detect_analog", 100);
+    sysfs_write("cnc/laser_on_sampled", 0);
+    for (int i = 1; i <= 4; i++) {
+        char a[32];
+        snprintf(a, sizeof(a), "pic/lid_ir_%d", i);
+        sysfs_write(a, 100);
+    }
     snprintf(staged, sizeof(staged), "%s/job.upload", root);
     lease_sender_connected = client_connected;
     mock_start();
@@ -489,6 +663,9 @@ int main(void)
         { "abort", test_abort }, { "client-refuses", test_client_refuses },
         { "sync-under-a-wizard", test_sync_under_a_wizard }, { "hooks", test_hooks },
         { "must-light", test_must_light },
+        { "dark-program", test_dark_program }, { "error-stops", test_error_stops },
+        { "lit-program", test_lit_program }, { "abort-and-pacing", test_abort_and_pacing },
+        { "sender-check", test_sender_check },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGPIPE, SIG_IGN);           /* the mock answers a connection an abort has closed */

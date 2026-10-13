@@ -338,11 +338,6 @@ add_executable(tray_test tests/tray_test.c src/tray.c)
 target_compile_options(tray_test PRIVATE -Wall -Wextra)
 target_link_libraries(tray_test m)
 
-# The daemon's own sender against a mock controller on a local port.
-add_executable(jobstream_test tests/jobstream_test.c src/jobstream.c src/fflog.c)
-target_compile_options(jobstream_test PRIVATE -Wall -Wextra)
-target_link_libraries(jobstream_test pthread)
-
 # The daemon's client of the controller port against a mock port on a
 # Unix socket: the two operation sets, one kept connection, a controller
 # restart, a port that never answers (hence the short wait).
@@ -354,9 +349,10 @@ target_link_libraries(grblport_test pthread m)
 # The machine lease: one holder and its refusal, one owner under a holder,
 # the sender kind beside a connected client, the /status document, and
 # sixteen threads asking at once.
-# The job runner over the mock controller of jobstream_test: the lease as
-# a sender on every way in and out, a posted program's check, its M2, and
-# its abort.
+# The job runner and the daemon's own sender under it, against a mock
+# controller on a local port: the lease as a sender on every way in and
+# out, a posted program's check, its M2, and its abort; the sender's
+# errors, witnesses, pacing and abort, and its check of the state file.
 add_executable(jobrun_test tests/jobrun_test.c src/jobrun.c src/jobstream.c src/lease.c src/fflog.c)
 target_compile_options(jobrun_test PRIVATE -Wall -Wextra)
 target_link_libraries(jobrun_test pthread)

@@ -35,11 +35,9 @@ jobs:
         run: ./build/lens_test
       - name: tray_test (the crumb tray's mode, its offset, and what it refuses)
         run: ./build/tray_test
-      - name: jobstream_test (the daemon's own sender)
-        run: ./build/jobstream_test
       - name: grblport_test (the controller port's client and its two operation sets)
         run: ./build/grblport_test
-      - name: "jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort)"
+      - name: "jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort; the daemon's own sender under it)"
         run: ./build/jobrun_test
 
       - name: "tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)"
