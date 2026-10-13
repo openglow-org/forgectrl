@@ -142,13 +142,15 @@ target_link_libraries(forgectrl ulfius jansson gnutls crypt jpeg z pthread m
 
 install(TARGETS forgectrl RUNTIME DESTINATION bin)
 
-# Host unit test for the machine_is_idle() fail-closed contract (X-2):
-# a read failure - including fd exhaustion under a connection flood -
-# must report not-idle. Built everywhere, installed nowhere; CI runs it
+# Host unit test for the machine status reader: the camera privacy
+# gate's lid read and machine_is_idle() fail closed (a missing device, a
+# wrong one, fd exhaustion under a connection flood), the /status sys
+# block's CPU and memory figures inside the handler's buffer, and the
+# grbl and lens blocks. Built everywhere, installed nowhere; CI runs it
 # after the build.
-add_executable(status_idle_test tests/status_idle_test.c src/status.c src/lens.c src/lease.c src/tray.c)
-target_compile_options(status_idle_test PRIVATE -Wall -Wextra)
-target_link_libraries(status_idle_test m pthread)
+add_executable(status_test tests/status_test.c src/status.c src/lens.c src/lease.c src/tray.c)
+target_compile_options(status_test PRIVATE -Wall -Wextra)
+target_link_libraries(status_test m pthread)
 
 # Host unit test for the dose-curve fitter. CI runs it after the build.
 add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jobrun.c src/jobstream.c
@@ -156,26 +158,11 @@ add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jo
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
-add_executable(status_grbl_test tests/status_grbl_test.c src/status.c src/lens.c src/lease.c src/tray.c)
-target_compile_options(status_grbl_test PRIVATE -Wall -Wextra)
-target_link_libraries(status_grbl_test m pthread)
-
-add_executable(status_sys_test tests/status_sys_test.c src/status.c src/lens.c src/lease.c src/tray.c)
-target_compile_options(status_sys_test PRIVATE -Wall -Wextra)
-target_link_libraries(status_sys_test m pthread)
-
 # Host unit test for the log-export sanitizer: every identifying class
 # redacted, ordinary log text untouched, stable placeholders, idempotent.
 # A sanitized bundle is what gets attached to public issue reports.
 add_executable(sanitize_test tests/sanitize_test.c src/sanitize.c)
 target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
-
-# Host unit test for the camera privacy gate's lid read: every way it
-# can fail must land on "not closed", or the cameras could capture with
-# the enclosure open. CI runs it after the build.
-add_executable(lid_gate_test tests/lid_gate_test.c src/status.c src/lens.c src/lease.c src/tray.c)
-target_compile_options(lid_gate_test PRIVATE -Wall -Wextra)
-target_link_libraries(lid_gate_test m pthread)
 
 # Host unit test for the motion gate's enclosure read: the EV_SW word
 # maps to the verdict and the operator's words, and every way the read
