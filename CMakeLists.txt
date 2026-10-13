@@ -404,8 +404,8 @@ target_compile_options(auth_scoped_test PRIVATE -Wall -Wextra)
 target_link_libraries(auth_scoped_test ulfius pthread)
 
 # The table of built-in extensions over a real settings file: the cloud
-# entry, its refusals in the settings route's own words, the sweep when it
-# goes off, and the list.
+# entry, its refusals while it is off, the sweep when it goes off, and the
+# list.
 add_executable(builtin_test tests/builtin_test.c src/builtin.c src/settings.c src/fflog.c)
 target_compile_options(builtin_test PRIVATE -Wall -Wextra)
 target_link_libraries(builtin_test pthread)

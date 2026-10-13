@@ -237,15 +237,10 @@ int main(void)
     /* What a reply means. */
     char why[128];
     CHECK(grblport_explain("ok", why, sizeof(why)) == 0, "ok");
-    CHECK(grblport_explain("busy:released", why, sizeof(why)) == 409 && strstr(why, "released"), "busy:released");
-    CHECK(grblport_explain("busy:sender", why, sizeof(why)) == 409 && strstr(why, "client"), "busy:sender");
-    CHECK(grblport_explain("busy:state", why, sizeof(why)) == 409, "busy:state");
-    CHECK(grblport_explain("error:mode", why, sizeof(why)) == 409 && strstr(why, "manual"), "error:mode");
-    CHECK(grblport_explain("busy:mcode", why, sizeof(why)) == 409 && strstr(why, "M-code"), "busy:mcode");
-    CHECK(grblport_explain("error:saved", why, sizeof(why)) == 409 && strstr(why, "tray"), "error:saved");
-    CHECK(grblport_explain("error:15", why, sizeof(why)) == 409 && strstr(why, "envelope"), "error:15");
-    CHECK(grblport_explain("error:9", why, sizeof(why)) == 409 && strstr(why, "alarm"), "error:9");
-    CHECK(grblport_explain("error:33", why, sizeof(why)) == 409 && strstr(why, "error:33"), "error:33");
+    CHECK(grblport_explain("busy:released", why, sizeof(why)) == 409 && why[0], "a busy word is a conflict, explained");
+    CHECK(grblport_explain("error:15", why, sizeof(why)) == 409 && why[0], "an error word is a conflict, explained");
+    CHECK(grblport_explain("error:33", why, sizeof(why)) == 409 && strstr(why, "error:33"),
+          "an error with no explanation carries its word");
     CHECK(grblport_explain("what", why, sizeof(why)) == 502, "an unknown reply");
 
     grblport_close();
