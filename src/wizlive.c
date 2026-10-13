@@ -558,19 +558,25 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
     /* The press: the controller lights the button white for its arm
      * wait and puts it out at the press, so a lit button before the
      * first discharge is the press this job waits for. The page shows
-     * it as a prompt with the seconds; the discharge takes it down. */
-    if (g->lit && g->press_open) {
+     * it as a prompt with the seconds from the moment the button lights,
+     * and takes it down the moment the button goes out (the press taken)
+     * or the tube lights: the button is read at every sample, so the
+     * prompt never stands over a press already made, which an operator
+     * would answer with another press, and a press during the job pauses
+     * it. */
+    int led = g->lit ? 0 : led_lit();
+    if (g->press_open && (g->lit || led == 0)) {
         wiz_wait_close();
         g->press_open = 0;
     }
+    if (!g->lit && !g->press_open && led == 1) {
+        g->press_open = 1;
+        g->t_led0 = s->t;
+        wiz_wait_open("press", "The button is lit white. Press it now: the laser fires after "
+                               "your press.", (int)WAIT_TIMEOUT_S);
+    }
     if (s->t - g->last_phase >= 1.0) {
         g->last_phase = s->t;
-        if (!g->lit && !g->press_open && led_lit() == 1) {
-            g->press_open = 1;
-            g->t_led0 = s->t;
-            wiz_wait_open("press", "The button is lit white. Press it now: the laser fires after "
-                                   "your press.", (int)WAIT_TIMEOUT_S);
-        }
         if (lit_now)
             wiz_phase("burning: %.0f s lit", s->t - g->t_lit0);
         else if (g->lit && g->ended && g->tail_s > 0)
