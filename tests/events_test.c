@@ -16,7 +16,9 @@
  * what it lost, no state read while nobody listens, and every open
  * stream ending at shutdown. The extension host's stream: its own slot,
  * taken while the three are full and giving none of them up, and a
- * second host stream replacing the first.
+ * second host stream replacing the first. The button's own look: a
+ * press that begins and ends between two of the 5 Hz gathers, with the
+ * machine idle, reaches a stream as pressed and then released.
  */
 #include "../src/events.h"
 
@@ -348,12 +350,75 @@ static void test_stream(void)
     events_close(c3);
 }
 
+/* ---- the button's own look ---- */
+
+static volatile unsigned long sw_word;
+
+static unsigned long switches(void)
+{
+    return sw_word;
+}
+
+/* The state is gathered 5 times a second, 200 ms apart; the switch word
+ * is read on every 25 Hz tick, 40 ms apart. A press that begins and ends
+ * between two gathers, with the machine idle (nothing arming, armed,
+ * leased, or waiting on the button), still reaches a stream as pressed
+ * and then released: the tick sees it, not the gather. */
+static void test_short_press(void)
+{
+    char buf[512], why[128];
+    const unsigned long up = 1ul << 3, down = up | 1ul << 2;
+    pthread_mutex_lock(&smu);
+    scripted = base_snap();
+    pthread_mutex_unlock(&smu);
+    sw_word = up;
+    events_gather = gather;
+    events_switches = switches;
+    events_init();
+    events_client_t *c = events_open("10.0.0.7", why, sizeof(why));
+    CHECK(c != NULL, "the stream for the press was refused: %s", why);
+    if (!c) {
+        events_shutdown();
+        return;
+    }
+    events_next(c, buf, sizeof(buf));               /* its greeting */
+    usleep(500 * 1000);                             /* the baseline is taken */
+
+    /* A 100 ms press, started on the gather it follows: the next one is
+     * at least 200 ms off. A gather inside the press means a loaded host
+     * stretched it, so the press is placed again; every press, placed or
+     * not, is a pressed and a released event. */
+    int presses = 0, placed = 0;
+    while (presses < 5 && !placed) {
+        int g = gathers;
+        while (gathers == g)
+            usleep(1000);
+        g = gathers;
+        sw_word = down;
+        usleep(100 * 1000);
+        sw_word = up;
+        placed = gathers == g;
+        presses++;
+        usleep(150 * 1000);                         /* the release is seen */
+    }
+    CHECK(placed, "no press fit between two gathers in %d tries", presses);
+    for (int i = 0; i < presses; i++) {
+        long n = events_next(c, buf, sizeof(buf));
+        CHECK(n > 0 && strstr(buf, "event: button\ndata: {\"pressed\":true}"), "press %d: '%s'", i + 1, buf);
+        n = events_next(c, buf, sizeof(buf));
+        CHECK(n > 0 && strstr(buf, "event: button\ndata: {\"pressed\":false}"), "release %d: '%s'", i + 1, buf);
+    }
+    events_close(c);
+    events_shutdown();
+}
+
 int main(void)
 {
     test_admit();
     test_diff();
     test_button();
     test_stream();
+    test_short_press();
     printf(fails ? "events_test: %d FAILED\n" : "events_test: all passed\n", fails);
     return fails ? 1 : 0;
 }
