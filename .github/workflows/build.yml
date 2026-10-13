@@ -23,6 +23,8 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
       - name: Build
         run: cmake --build build -j"$(nproc)"
+      - name: The served pages' scripts parse (node --check on every bundled script)
+        run: python3 -B tools/check_ui_js.py build/ui
       - name: machine_is_idle fail-closed (X-2)
         run: ./build/status_idle_test
       - name: Grbl status block
