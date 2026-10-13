@@ -450,8 +450,13 @@ int cb_wiz_changed(const struct _u_request *req, struct _u_response *res, void *
     const char *what = param(req, "what");
     if (setup_change_apply(what) != 0)
         return reply_error(res, 400, "what must name a change from the menu");
-    if (!strcmp(what, "head"))
+    /* A new head, as at boot: its window goes, and the record takes its
+     * facts, so the boot check does not apply the change again (and clear
+     * a window Lens travel measured on it). */
+    if (!strcmp(what, "head")) {
         head_window_clear();
+        setup_set_head(head_facts());
+    }
     return cb_wiz_status(req, res, NULL);
 }
 

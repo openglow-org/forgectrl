@@ -39,7 +39,7 @@ var HELP = {
     d: 'usage/control-panel/#status',
     p: [
       'The controller state and the head position from the homing-anchored step counters. Position counters are not proof of physical motion; the head accelerometer is what the motion-liveness gate watches.',
-      'The laser latch is the commanded state of the kernel lock; the emission line is what the beam sensor actually sees.'
+      'The laser latch is the commanded state of the kernel lock; the emission line is whether the laser output was on in the last second (the kernel's LASER_ON samples).'
     ]
   },
   switches: {

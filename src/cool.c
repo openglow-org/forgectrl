@@ -1414,8 +1414,9 @@ void cool_diag_purge(int on)
 }
 
 /* Engine-raised setup flags: a flow fault twice in a row recommends
- * the flow calibration; a fan that starts a job within 10 percent of
- * its floor recommends the airflow check. Each is raised once. */
+ * the flow calibration; a fan judged within 10 percent of its floor at
+ * any tick of a run session, past the spin-up grace, recommends the
+ * airflow check, once per fan per session. */
 static int flow_fault_streak;
 static int fan_margin_noted[Fan_N];
 
