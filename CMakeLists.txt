@@ -458,7 +458,7 @@ target_link_libraries(lease_test pthread)
 # shutdown).
 add_executable(events_test tests/events_test.c src/events.c src/fflog.c)
 target_compile_options(events_test PRIVATE -Wall -Wextra)
-target_link_libraries(events_test pthread)
+target_link_libraries(events_test pthread jansson m)
 
 add_executable(tls_test tests/tls_test.c src/tls.c src/fflog.c)
 target_compile_options(tls_test PRIVATE -Wall -Wextra)

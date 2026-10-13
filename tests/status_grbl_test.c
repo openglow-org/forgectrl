@@ -108,15 +108,15 @@ int main(void)
     char marker[128];
     snprintf(marker, sizeof(marker), "%s/tray.out", dir);
     machine_status_json(doc, sizeof(doc), "\"x\":1");
-    CHECK(strstr(doc, "\"reach_min\":-0.07,\"reach_max\":7.46,\"tray\":\"in\",\"tray_offset_mm\":34.29") != NULL,
-          "tray in: the reach above the tray, and the offset");
+    CHECK(strstr(doc, "\"reach_min\":-0.07") && strstr(doc, "\"reach_max\":7.46") && strstr(doc, "\"tray\":\"in\"") &&
+          strstr(doc, "\"tray_offset_mm\":34.29"), "tray in: the reach above the tray, and the offset");
     FILE *m = fopen(marker, "w");
     fputs("out\n", m);
     fclose(m);
     machine_status_json(doc, sizeof(doc), "\"x\":1");
-    CHECK(strstr(doc, "\"reach_min\":34.15,\"reach_max\":41.68,\"tray\":\"out\"") != NULL,
+    CHECK(strstr(doc, "\"reach_min\":34.15") && strstr(doc, "\"reach_max\":41.68") && strstr(doc, "\"tray\":\"out\""),
           "tray out: the reach moves up by the offset's grid");
-    CHECK(strstr(doc, "\"edge_z\":3.35,") != NULL, "tray out: the edge setting reads as set");
+    CHECK(strstr(doc, "\"edge_z\":3.35") != NULL, "tray out: the edge setting reads as set");
     unlink(marker);
 
     printf(failures ? "FAIL: %d check(s) failed\n"

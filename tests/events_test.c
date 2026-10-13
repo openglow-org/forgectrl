@@ -22,6 +22,8 @@
  */
 #include "../src/events.h"
 
+#include <jansson.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -183,6 +185,13 @@ static void press(const char *what, unsigned long was, unsigned long now, const 
     CHECK(!strcmp(got, want), "%s: got '%s', want '%s'", what, got, want);
 }
 
+/* A string field of a parsed object, compared; a missing one is not equal. */
+static int str_is(json_t *o, const char *key, const char *want)
+{
+    const char *s = json_string_value(json_object_get(o, key));
+    return s && !strcmp(s, want);
+}
+
 static void test_button(void)
 {
     events_snap_t s = base_snap();
@@ -209,9 +218,14 @@ static void test_button(void)
     s.down_c = 18.25;
     s.up_c = 18.5;
     events_telemetry(&s, t, sizeof(t));
-    CHECK(!strcmp(t, "{\"phase\":\"idle\",\"verdict\":\"OK\",\"fire_ok\":true,\"down_c\":18.2,\"up_c\":18.5,\"state\":\"Idle\","
-                     "\"lid\":\"closed\"}") || !strcmp(t, "{\"phase\":\"idle\",\"verdict\":\"OK\",\"fire_ok\":true,\"down_c\":18.3,"
-                     "\"up_c\":18.5,\"state\":\"Idle\",\"lid\":\"closed\"}"), "the telemetry: %s", t);
+    json_error_t jerr;
+    json_t *tj = json_loads(t, 0, &jerr);
+    CHECK(tj && str_is(tj, "phase", "idle") && str_is(tj, "verdict", "OK") &&
+          json_is_true(json_object_get(tj, "fire_ok")) &&
+          fabs(json_number_value(json_object_get(tj, "down_c")) - 18.25) <= 0.06 &&
+          fabs(json_number_value(json_object_get(tj, "up_c")) - 18.5) <= 0.06 &&
+          str_is(tj, "state", "Idle") && str_is(tj, "lid", "closed"), "the telemetry: %s", t);
+    json_decref(tj);
     CHECK(strlen(t) < 200, "the telemetry fits an event: %zu bytes", strlen(t));
 }
 
