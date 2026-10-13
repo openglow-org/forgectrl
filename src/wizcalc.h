@@ -32,6 +32,21 @@ int wizcalc_fan_analyze(const double *rpm, int n, double hz, double min_rpm,
  * fans). 0 for an empty trace. */
 int wizcalc_fan_silent(const double *rpm, int n);
 
+/* The intake fans the airflow check judges by. Intake 2 turning proves
+ * two fans; silent, it is one fan only on a machine already counted
+ * with one ("1"), and a fault (*fail set to 1, never cleared) on one
+ * counted with two or not counted. */
+int wizcalc_airflow_intakes(int intake2_silent, const char *counted, int *fail);
+
+/* The intake step's count. Both intakes turning is two fans, and nobody
+ * is asked. Otherwise - intake 2 silent (one fan reads as a second fan
+ * stopped) or intake 1 not up to speed - the operator looks:
+ * ask(ctx, intake1_ok) returns their count, 1 or 2, or -1 when the step
+ * ends. The tachs never count one fan on their own. The count, or -1
+ * when there is no answer to take. */
+int wizcalc_intake_count(int intake1_ok, int intake2_silent,
+                         int (*ask)(void *ctx, int intake1_ok), void *ctx);
+
 /* The floor a fan gets: `frac` of its steady speed, inside [lo, hi]. */
 double wizcalc_floor(double steady, double frac, double lo, double hi);
 

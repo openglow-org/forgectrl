@@ -447,6 +447,19 @@ int main(void)
             same = !strcmp(json_string_value(json_array_get(im, i)) ? json_string_value(json_array_get(im, i)) : "",
                            want[i]);
         CHECK(same, "the image requires preferences, machine, cloud, cooling.flow, in that order");
+        /* The other half: on a record with nothing run, the image's steps
+         * after the gate are recommended, each not run yet - the dark
+         * checks, the lens, the focus burn (cloud.header only with the
+         * cloud on). */
+        json_t *ir = ist ? json_object_get(ist, "recommended") : NULL;
+        static const char *const recd[] = { "switches", "sensors", "airflow", "cooling.aa-offset",
+                                            "motion", "cameras", "lens.travel", "laser.focus" };
+        size_t nr = sizeof(recd) / sizeof(recd[0]);
+        same = json_array_size(ir) == nr;
+        for (size_t i = 0; same && i < nr; i++)
+            same = !strcmp(sget(json_array_get(ir, i), "id"), recd[i]) &&
+                   !strcmp(sget(json_array_get(ir, i), "reason"), "not run yet");
+        CHECK(same, "the image recommends the dark checks, lens.travel and laser.focus, each not run yet");
         json_decref(ist);
         setup_set_steps(steps, 3);
     }

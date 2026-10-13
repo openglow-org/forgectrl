@@ -63,6 +63,23 @@ int wizcalc_fan_silent(const double *rpm, int n)
     return 1;
 }
 
+int wizcalc_airflow_intakes(int intake2_silent, const char *counted, int *fail)
+{
+    int one = intake2_silent && counted && !strcmp(counted, "1");
+    if (intake2_silent && !one && fail)
+        *fail = 1;
+    return one ? 1 : 2;
+}
+
+int wizcalc_intake_count(int intake1_ok, int intake2_silent,
+                         int (*ask)(void *ctx, int intake1_ok), void *ctx)
+{
+    if (intake1_ok && !intake2_silent)
+        return 2;
+    int n = ask ? ask(ctx, intake1_ok) : -1;
+    return n == 1 || n == 2 ? n : -1;
+}
+
 double wizcalc_floor(double steady, double frac, double lo, double hi)
 {
     double f = steady * frac;

@@ -11,6 +11,17 @@
 #include <string.h>
 
 static int failures;
+
+/* The operator, for the intake count: answers `answer`, counts the asks. */
+static int asks, answer, asked_ok = -1;
+static int stub_ask(void *ctx, int intake1_ok)
+{
+    (void)ctx;
+    asks++;
+    asked_ok = intake1_ok;
+    return answer;
+}
+
 #define CHECK(cond, name) do { \
     if (cond) printf("ok   %s\n", name); \
     else { printf("FAIL %s\n", name); failures++; } } while (0)
@@ -58,6 +69,39 @@ int main(void)
     CHECK(!wizcalc_fan_silent(rpm, n), "a slow fan is not silent: it fails the minimum as a fan");
     CHECK(wizcalc_fan_silent(none, 0) == 0 && wizcalc_fan_silent(NULL, 280) == 0,
           "an empty trace is not silent");
+
+    /* The count the airflow check judges by: silence is one fan only on a
+       machine already counted with one. */
+    int fail = 0;
+    CHECK(wizcalc_airflow_intakes(0, "", &fail) == 2 && !fail, "intake 2 turning, not counted: two fans");
+    CHECK(wizcalc_airflow_intakes(0, "1", &fail) == 2 && !fail, "intake 2 turning proves two, whatever the count");
+    CHECK(wizcalc_airflow_intakes(1, "1", &fail) == 1 && !fail, "silent on a machine counted with one: one fan");
+    CHECK(wizcalc_airflow_intakes(1, "2", &fail) == 2 && fail, "silent on a machine counted with two: a fault");
+    fail = 0;
+    CHECK(wizcalc_airflow_intakes(1, "", &fail) == 2 && fail, "silent and not counted: a fault, never one fan");
+    fail = 0;
+    CHECK(wizcalc_airflow_intakes(1, "one", &fail) == 2 && fail
+          && wizcalc_airflow_intakes(1, NULL, &fail) == 2, "silent with a count that is not 1: a fault");
+    /* The intake step: the tachs count two, never one; every other count
+       is the operator's answer. */
+    asks = 0;
+    CHECK(wizcalc_intake_count(1, 0, stub_ask, NULL) == 2 && asks == 0,
+          "both intakes turning count two, and nobody is asked");
+    answer = 1;
+    CHECK(wizcalc_intake_count(1, 1, stub_ask, NULL) == 1 && asks == 1 && asked_ok == 1,
+          "intake 2 silent: one fan only on the operator's answer");
+    answer = 2;
+    CHECK(wizcalc_intake_count(1, 1, stub_ask, NULL) == 2 && asks == 2,
+          "intake 2 silent: two fans on the operator's answer");
+    CHECK(wizcalc_intake_count(0, 0, stub_ask, NULL) == 2 && asks == 3 && asked_ok == 0,
+          "intake 1 not up to speed: the operator counts, told the tachs could not");
+    answer = 1;
+    CHECK(wizcalc_intake_count(0, 1, stub_ask, NULL) == 1 && asks == 4, "neither turning: the operator counts");
+    answer = -1;
+    CHECK(wizcalc_intake_count(1, 1, stub_ask, NULL) == -1, "a step that ends at the question counts nothing");
+    answer = 3;
+    CHECK(wizcalc_intake_count(1, 1, stub_ask, NULL) == -1, "an answer that is not 1 or 2 counts nothing");
+    CHECK(wizcalc_intake_count(1, 1, NULL, NULL) == -1, "with no one to ask, silence is never a count of one");
 
     CHECK(fabs(wizcalc_floor(12000.0, 0.55, 1000.0, 20000.0) - 6600.0) < 1e-9,
           "the floor is 55 percent of steady");

@@ -716,8 +716,8 @@ static void run_airflow(void)
     if (settings_get("cool_intake_fans", counted, sizeof(counted)) != 0)
         counted[0] = '\0';
     int fail = 0;
-    int intake_fans = !silent[F_INTAKE2] ? 2 : strcmp(counted, "1") ? 2 : 1;
-    if (silent[F_INTAKE2] && intake_fans == 2) {
+    int intake_fans = wizcalc_airflow_intakes(silent[F_INTAKE2], counted, &fail);
+    if (fail) {
         wlog(counted[0] ? "intake 2: no tach pulse in %d s on a machine with two intake fans"
                         : "intake 2: no tach pulse in %d s, and the intake fans are not counted",
              secs);
@@ -843,6 +843,33 @@ out:
  * not come up the tachs cannot count at all. In both cases the operator
  * looks and gives the count. */
 #define INTAKE_S 20
+
+/* The operator's count when the tachs cannot give it (wizcalc_intake_count
+ * asks): 1 or 2, or -1 when the step ends. A machine built with one intake
+ * fan reads exactly as one whose second fan has stopped or come unplugged. */
+struct intake_ask {
+    double rpm1;
+    int asked;
+};
+static int ask_intake_count(void *ctx, int intake1_ok)
+{
+    struct intake_ask *q = ctx;
+    static const char *const opts[] = { "One", "Two" };
+    char a[8];
+    q->asked = 1;
+    if (!intake1_ok)
+        wlog("intake 1 did not come up to speed (%.0f rpm): the tachs cannot count the fans", q->rpm1);
+    if (ask("choice", "intake-count", intake1_ok
+            ? "Intake 1 turns; intake 2 gives no reading. Look at the back of the machine: "
+              "how many intake fans does it have? If it has two, the second one needs "
+              "attention before the machine cuts."
+            : "The intake fans could not be counted: intake 1 did not come up to speed. Look "
+              "at the back of the machine: how many intake fans does it have? A fan that does "
+              "not turn needs attention before the machine cuts.", opts, 2, a, sizeof(a)) != 0)
+        return -1;
+    return !strcmp(a, "One") ? 1 : 2;
+}
+
 static void run_intakes(void)
 {
     const double hz = 8.0;
@@ -896,34 +923,11 @@ static void run_intakes(void)
     json_object_set_new(r, "intake_2_silent", json_boolean(silent2));
     wlog("intake 1: %.0f rpm steady; intake 2: %s", f1.steady_rpm,
          silent2 ? "no tach pulse" : "turning");
-    if (f1.ok && !silent2) {
-        count = 2;                  /* both intakes turn: two fans */
-        json_object_set_new(r, "counted_by", json_string("tachs"));
-    } else if (f1.ok) {
-        /* A machine built with one intake fan reads exactly as one whose
-         * second fan has stopped or come unplugged: the operator looks. */
-        static const char *const opts[] = { "One", "Two" };
-        char a[8];
-        if (ask("choice", "intake-count",
-                "Intake 1 turns; intake 2 gives no reading. Look at the back of the machine: "
-                "how many intake fans does it have? If it has two, the second one needs "
-                "attention before the machine cuts.", opts, 2, a, sizeof(a)) != 0)
-            goto out;
-        count = !strcmp(a, "One") ? 1 : 2;
-        json_object_set_new(r, "counted_by", json_string("operator"));
-    } else {
-        wlog("intake 1 did not come up to speed (%.0f rpm): the tachs cannot count the fans",
-             f1.steady_rpm);
-        static const char *const opts[] = { "One", "Two" };
-        char a[8];
-        if (ask("choice", "intake-count",
-                "The intake fans could not be counted: intake 1 did not come up to speed. Look "
-                "at the back of the machine: how many intake fans does it have? A fan that does "
-                "not turn needs attention before the machine cuts.", opts, 2, a, sizeof(a)) != 0)
-            goto out;
-        count = !strcmp(a, "One") ? 1 : 2;
-        json_object_set_new(r, "counted_by", json_string("operator"));
-    }
+    struct intake_ask q = { f1.steady_rpm, 0 };
+    count = wizcalc_intake_count(f1.ok, silent2, ask_intake_count, &q);
+    if (count < 0)
+        goto out;
+    json_object_set_new(r, "counted_by", json_string(q.asked ? "operator" : "tachs"));
     json_object_set_new(r, "intake_fans", json_integer(count));
     json_object_set_new(r, "summary", json_string(
         count == 1 ? "One intake fan. The airflow gate judges intake 1 alone."
