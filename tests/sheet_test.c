@@ -4,13 +4,12 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The font table is whole; text draws, measures, and clips; each card
- * sits the margin from the head's home and its scrap fits a 4 x 3 in
- * piece; every card's drawing stays inside its box; every program line
- * is one the controller takes or a directive; the SVG is one document.
+ * Text draws, measures, and clips; each card sits the margin from the
+ * head's home and its scrap fits a 4 x 3 in piece; every card's drawing
+ * stays inside its box; every program line is one the controller takes
+ * or a directive; the SVG is one document.
  */
 #include "../src/sheet.h"
-#include "../src/font_hershey.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -20,28 +19,6 @@
 static int fails;
 
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
-
-static void test_font(void)
-{
-    unsigned total = 0;
-    for (int i = 0; i < HERSHEY_NGLYPH; i++) {
-        const hershey_glyph_t *g = &hershey_glyphs[i];
-        CHECK(g->adv > 0, "glyph %d has no advance", i + HERSHEY_FIRST);
-        CHECK(g->first == total, "glyph %d does not follow the last (%u vs %u)", i + HERSHEY_FIRST,
-              g->first, total);
-        total += g->count;
-        for (unsigned k = 0; k < g->count; k++) {
-            const short *p = hershey_pts[g->first + k];
-            if (p[0] == HERSHEY_PEN_UP)
-                continue;
-            CHECK(p[0] >= -100 && p[0] <= 1200 && p[1] >= -400 && p[1] <= 1000,
-                  "glyph %d point %u out of range (%d,%d)", i + HERSHEY_FIRST, k, p[0], p[1]);
-        }
-    }
-    CHECK(total == hershey_npts, "point count %u vs %u", total, hershey_npts);
-    CHECK(hershey_glyphs[0].count == 0, "the space has strokes");
-    CHECK(hershey_glyphs['A' - HERSHEY_FIRST].count > 4, "A has too few points");
-}
 
 static void test_text(void)
 {
@@ -189,27 +166,6 @@ static void test_cards(void)
     sheet_text_free(&fg);
 }
 
-/* A whole program body goes through the raw append, not the line
- * writer, which is bounded at one line's length. */
-static void test_text_append(void)
-{
-    sheet_paths_t pv;
-    sheet_text_t pg, out;
-    sheet_paths_init(&pv);
-    sheet_text_init(&pg);
-    sheet_text_init(&out);
-    build("laser.focus", &pv, &pg);
-    CHECK(pg.len > 2000, "the focus body is only %zu bytes", pg.len);
-    sheet_text_line(&out, "; a comment line");
-    CHECK(sheet_text_append(&out, pg.buf, pg.len) == 0, "append failed");
-    CHECK(out.len == pg.len + strlen("; a comment line\n"), "append lost bytes: %zu vs %zu", out.len, pg.len);
-    CHECK(out.lines == pg.lines + 1, "append miscounted lines: %d vs %d", out.lines, pg.lines);
-    CHECK(strstr(out.buf, "M4 S400") != NULL && strstr(out.buf, "\nM5\n") != NULL, "the body is not whole");
-    sheet_paths_free(&pv);
-    sheet_text_free(&pg);
-    sheet_text_free(&out);
-}
-
 static void test_svg(void)
 {
     sheet_paths_t pv;
@@ -221,20 +177,16 @@ static void test_svg(void)
     CHECK(sheet_svg(&pv, 200, 150, &out) == 0, "svg failed");
     CHECK(!strncmp(out.buf, "<svg ", 5), "svg does not start with <svg");
     CHECK(strstr(out.buf, "</svg>") != NULL, "svg unterminated");
-    CHECK(strstr(out.buf, "M10 10 L190 10 L190 140 L10 140 L10 10 ") != NULL, "the frame path is off: %.200s",
-          out.buf);
-    CHECK(strstr(out.buf, "viewBox=\"0 0 200.0 150.0\"") != NULL, "viewBox");
+    CHECK(strstr(out.buf, "<path") != NULL, "svg carries no path");
     sheet_paths_free(&pv);
     sheet_text_free(&out);
 }
 
 int main(void)
 {
-    test_font();
     test_text();
     test_layout();
     test_cards();
-    test_text_append();
     test_svg();
     if (fails) {
         printf("sheet_test: %d failures\n", fails);

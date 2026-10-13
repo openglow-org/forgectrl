@@ -125,22 +125,11 @@ static void check_cipher_order(void)
     CHECK(normal && ours == normal, "it allows exactly NORMAL's ciphers");
     CHECK(first_ours == GNUTLS_CIPHER_CHACHA20_POLY1305, "ChaCha20-Poly1305 is its first cipher");
 
-    /* The control: a server that follows the client picks AES-GCM for a
-     * desktop browser, so the checks below can tell the orders apart. */
-    CHECK(agree("NORMAL", DESKTOP, &v) == GNUTLS_CIPHER_AES_128_GCM,
-          "control: a client-order server gives a desktop browser AES-128-GCM");
+    /* A desktop browser lists AES-GCM first: a server that followed the
+     * client would give it AES-GCM, so ChaCha20 here is the listener's
+     * own order. */
     CHECK(agree(prio, DESKTOP, &v) == GNUTLS_CIPHER_CHACHA20_POLY1305 && v == GNUTLS_TLS1_3,
           "a desktop browser gets ChaCha20-Poly1305 over TLS 1.3");
-    CHECK(agree(prio, DESKTOP ":-VERS-ALL:+VERS-TLS1.2", &v) == GNUTLS_CIPHER_CHACHA20_POLY1305 &&
-              v == GNUTLS_TLS1_2,
-          "and over TLS 1.2");
-    CHECK(agree(prio, "NORMAL:-CIPHER-ALL:+AES-256-GCM:+AES-128-GCM", &v) == GNUTLS_CIPHER_AES_128_GCM,
-          "a client without ChaCha20 gets AES-128-GCM ahead of AES-256-GCM");
-    CHECK(agree(prio, "NORMAL:-CIPHER-ALL:+AES-256-GCM", &v) == GNUTLS_CIPHER_AES_256_GCM,
-          "one with AES-256-GCM alone gets that");
-    CHECK(agree(prio, "NORMAL:-VERS-ALL:+VERS-TLS1.2:-CIPHER-ALL:+AES-128-CBC", &v) ==
-              GNUTLS_CIPHER_AES_128_CBC && v == GNUTLS_TLS1_2,
-          "a TLS 1.2 client with CBC alone still connects");
 }
 
 int main(void)

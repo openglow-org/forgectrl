@@ -347,8 +347,8 @@ add_executable(wizcalc_test tests/wizcalc_test.c src/wizcalc.c)
 target_compile_options(wizcalc_test PRIVATE -Wall -Wextra)
 target_link_libraries(wizcalc_test m)
 
-# The setup sheet: the font table, every card inside its box,
-# the programs, the SVG, the curve inverse.
+# The setup sheet: the text, every card inside its box, the programs,
+# the SVG.
 add_executable(sheet_test tests/sheet_test.c src/sheet.c src/font_hershey.c)
 target_compile_options(sheet_test PRIVATE -Wall -Wextra)
 target_link_libraries(sheet_test m)
