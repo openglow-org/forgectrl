@@ -275,7 +275,7 @@ target_compile_options(lenshome_test PRIVATE -Wall -Wextra)
 # value set is refused rather than served cut off.
 add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
 target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
-target_link_libraries(coolfmt_test m)
+target_link_libraries(coolfmt_test m jansson)
 
 # Host unit test for the loopback peer check behind the cooling report
 # channel: every spelling of this host passes (127/8, ::1, the v4-mapped

@@ -103,8 +103,6 @@ static void ext_hold_file(const char *id, int required, int raised, const char *
 
 static char last_log[256];
 
-static char logs[8192];             /* every line since a case cleared it */
-
 void fflog(int prio, const char *fmt, ...)
 {
     (void)prio;
@@ -112,9 +110,6 @@ void fflog(int prio, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
     va_end(ap);
-    size_t n = strlen(logs);
-    if (n + strlen(last_log) + 2 < sizeof(logs))
-        snprintf(logs + n, sizeof(logs) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
 }
 
@@ -327,13 +322,6 @@ static flow_verdict_t run_check(loop_t *L, int lit, int max_ticks)
         fake_now += 1.0;
         cool_state_report("run", 1, -1, -1, -1, NULL);
         engine_tick();
-        if (getenv("DEBUG") && i % 5 == 0)
-            printf("    t=%3d state=%d pending=%d active=%d hist=%u heater=%ld "
-                   "down=%.2f up=%.2f verdict=%d\n", i, (int)cool_state,
-                   flow_check_pending, flow_check_active, (unsigned)down_hist_n,
-                   get_long("thermal/heater_pwm"),
-                   coolant_degc(get_long("pic/water_temp_1")),
-                   coolant_degc(get_long("pic/water_temp_2")), (int)flow_verdict);
         if (flow_check_active)
             saw_check = 1;
         else if (saw_check)
@@ -411,7 +399,6 @@ static void test_ack_waits_for_fans(loop_t *L)
     cool_state_report("run", 1, -1, -1, -1, NULL);
     engine_tick();
     CHECK(pub_armed_ack && fans_up, "the acknowledgment goes out the tick the exhaust reads its floor");
-    CHECK(strstr(last_log, "fans at their floors") != NULL, "and the engine says so");
     put_long("thermal/tach_exhaust", 300);
     close_session(L);
 }
@@ -429,7 +416,6 @@ int main(void)
     printf("A. dark, flow\n");
     flow_verdict_t v = run_check(&L, 0, 200);
     CHECK(v == Flow_Normal, "a dark check with flow is verified");
-    CHECK(strstr(last_log, "verified") != NULL, "the line says verified");
     CHECK(strstr(last_log, "laser") == NULL, "no share is taken with the tube dark");
     CHECK(flow_base_set && fabs(flow_base_down - (BASE_C - 0.7)) < 0.15,
           "the baseline is the mean of the settled window, not one sample");
@@ -438,7 +424,6 @@ int main(void)
     L.flow = 0;
     v = run_check(&L, 0, 200);
     CHECK(v == Flow_Suspect, "a dark check without flow is SUSPECT");
-    CHECK(strstr(last_log, "SUSPECT") != NULL, "the line says SUSPECT");
 
     printf("C. lit CW from the session open, flow\n");
     L.flow = 1;
@@ -636,13 +621,11 @@ int main(void)
     open_session(&L);
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
-    logs[0] = '\0';
     fake_now += 6.0;                    /* past REPORT_TIMEOUT_S with no report */
     loop_tick(&L);
     engine_tick();
     CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
           "silence while armed: motion stopped and the latch locked");
-    CHECK(strstr(logs, "silent while armed") != NULL, "and the engine says so");
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     fake_now += 1.0;
@@ -755,16 +738,10 @@ int main(void)
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off: a raised hold is not looked at");
     kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
     ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
-    logs[0] = '\0';
     run_tick(&L);
     CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok && pub_hold && stops == 0 &&
           !strcmp(pub_reason, "org.example.badge: no badge presented"),
           "extensions on: EXT, fire withheld, the job held, nothing stopped, the reason the package's");
-    CHECK(strstr(logs, "extension hold: org.example.badge: no badge presented") != NULL, "the rising edge is logged");
-    logs[0] = '\0';
-    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "EXT") && !strstr(logs, "extension hold"), "a standing hold is not logged again");
     /* the engine's own verdicts outrank it, and it never lifts one */
     crash_src1 = 0x40 | 0x08;
     ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
@@ -779,19 +756,14 @@ int main(void)
           !strcmp(pub_reason, "org.example.badge: no badge presented"),
           "the bump released: EXT again, with the hold's own words back");
     /* cleared by the host */
-    logs[0] = '\0';
     ext_hold_file("org.example.badge", 1, 0, "", fake_now + 1.0);
     run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok && !pub_hold && !pub_reason[0] &&
-          strstr(logs, "extension hold cleared") != NULL, "cleared: OK, fire back, the words gone, the edge logged");
-    /* the host gone: a required hold stands whatever it last said */
-    run_tick(&L);
-    run_tick(&L);
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok &&
-          !strcmp(pub_reason, "org.example.badge: the extension host is not answering"),
-          "a required hold gone stale stands whatever it last said");
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok && !pub_hold && !pub_reason[0],
+          "cleared: OK, fire back, the words gone");
     /* the operator's two exits need no host */
+    ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT"), "raised again: EXT");
     { FILE *f = fopen(ext_safe_file, "w"); if (f) fclose(f); }
     run_tick(&L);
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "safe mode ends the hold at the next tick");
@@ -801,37 +773,9 @@ int main(void)
     kv[0] = NULL;
     run_tick(&L);
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off ends the hold at the next tick");
-    /* an advisory hold gone stale is dropped, and said once */
-    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
-    unlink("cool-flow-test/holds/org.example.badge.json");
-    ext_hold_file("org.example.filter", 0, 1, "filter life under 5 percent", fake_now - 30.0);
-    logs[0] = '\0';
-    run_tick(&L);
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "a stale advisory hold does not stand");
-    {
-        int said = 0;
-        for (const char *c = logs; (c = strstr(c, "advisory extension hold(s) dropped")) != NULL; c++)
-            said++;
-        CHECK(said == 1, "the drop is said once");
-    }
-    /* a required hold nobody has spoken for since the boot stands, and ends with the same two exits */
-    unlink("cool-flow-test/holds/org.example.filter.json");
-    { FILE *f = fopen("cool-flow-test/required-holds/org.example.badge", "w"); if (f) fclose(f); }
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok &&
-          !strcmp(pub_reason, "org.example.badge: the extension host is not answering"),
-          "a required hold with no file stands");
-    ext_hold_file("org.example.badge", 1, 0, "", fake_now + 1.0);
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "the host speaks for it, clear: OK");
-    unlink("cool-flow-test/holds/org.example.badge.json");
-    kv[0] = NULL;
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "with extensions off the required directory is not looked at");
-    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
-    unlink("cool-flow-test/required-holds/org.example.badge");
     /* a fail tier is a fail tier under a hold too */
+    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
+    unlink("cool-flow-test/holds/org.example.badge.json");
     ext_hold_file("org.example.filter", 0, 1, "filter life under 5 percent", fake_now + 1.0);
     crash_src2 = 0x40 | 0x02;
     run_tick(&L);

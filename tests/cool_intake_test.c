@@ -208,6 +208,19 @@ static int failures;
     else { printf("  FAIL: %s\n", msg); failures++; } \
 } while (0)
 
+/* The published row for one fan: its reading, floor and state. */
+static int gate_is(const char *id, double reading, double floor, const char *state)
+{
+    json_error_t e;
+    json_t *j = json_loads(pub_fan_gates, 0, &e);
+    json_t *g = json_object_get(j, id);
+    const char *s = json_string_value(json_object_get(g, "state"));
+    int ok = g && json_number_value(json_object_get(g, "reading")) == reading &&
+             json_number_value(json_object_get(g, "floor")) == floor && s && !strcmp(s, state);
+    json_decref(j);
+    return ok;
+}
+
 static void t_two_fans(void)
 {
     printf("A. two fans, the default: the silent intake 2 is judged\n");
@@ -220,8 +233,7 @@ static void t_two_fans(void)
     CHECK(strstr(pub_reason, "hold, no resume this job") != NULL, "the hold stands");
     CHECK(!fans_up && !log_has("the armed window is acknowledged"),
           "the armed window was never acknowledged");
-    CHECK(strstr(pub_fan_gates, "\"intake_2\":{\"reading\":0,\"floor\":2290,\"state\":\"TRIPPED\"}") != NULL,
-          "intake_2 is published tripped at the intake floor");
+    CHECK(gate_is("intake_2", 0, 2290, "TRIPPED"), "intake_2 is published tripped at the intake floor");
 }
 
 static void t_one_fan(void)
@@ -236,10 +248,8 @@ static void t_one_fan(void)
     CHECK(!airflow_alarm, "no airflow fault through the grace and after");
     CHECK(fans_up && log_has("the armed window is acknowledged"), "the armed window is acknowledged");
     printf("    fan gates: %s\n", pub_fan_gates);
-    CHECK(strstr(pub_fan_gates, "\"intake_2\":{\"reading\":0,\"floor\":0,\"state\":\"not fitted\"}") != NULL,
-          "intake_2 is published not fitted, with no floor");
-    CHECK(strstr(pub_fan_gates, "\"intake_1\":{\"reading\":4167,\"floor\":2290,\"state\":\"ok\"}") != NULL,
-          "intake_1 is judged at the intake floor");
+    CHECK(gate_is("intake_2", 0, 0, "not fitted"), "intake_2 is published not fitted, with no floor");
+    CHECK(gate_is("intake_1", 4167, 2290, "ok"), "intake_1 is judged at the intake floor");
 }
 
 static void t_one_fan_intake1_silent(void)
@@ -265,8 +275,7 @@ static void t_one_fan_gate_off(void)
     armed_session(40);
     CHECK(!airflow_alarm, "no airflow fault");
     CHECK(!log_has("gate intake_2 is OFF"), "no would-have-tripped warning names intake_2");
-    CHECK(strstr(pub_fan_gates, "\"intake_2\":{\"reading\":0,\"floor\":0,\"state\":\"not fitted\"}") != NULL,
-          "intake_2 is still published not fitted");
+    CHECK(gate_is("intake_2", 0, 0, "not fitted"), "intake_2 is still published not fitted");
 }
 
 static void t_other_value(void)

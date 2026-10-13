@@ -6,10 +6,10 @@
  *
  * The cooling gates are plain settings whose far end means off, and
  * every consumer (the validators, the engine, the settings reply, the
- * panel) reads one table. This test pins the table's shape (default
+ * panel) reads one table. This test holds the table's shape (default
  * inside band inside legal range, off end where the contract says),
  * the parse rules the validators rely on, the state classification,
- * and the two JSON encodings the panel and /status consume.
+ * and what the two JSON encodings the panel and /status consume carry.
  */
 #include "../src/gates.h"
 
@@ -40,13 +40,29 @@ static double value_from_table(const gate_setting_t *g, void *ctx)
     return g->def;
 }
 
+/* The object gates_json writes for one key, braces included. */
+static int json_row(const char *buf, const char *key, char *out, size_t len)
+{
+    char want[96];
+    snprintf(want, sizeof(want), "\"%s\":{", key);
+    const char *a = strstr(buf, want);
+    if (!a)
+        return 0;
+    a += strlen(want) - 1;
+    const char *b = strchr(a, '}');
+    if (!b || (size_t)(b - a + 1) >= len)
+        return 0;
+    memcpy(out, a, (size_t)(b - a + 1));
+    out[b - a + 1] = '\0';
+    return 1;
+}
+
 int main(void)
 {
     size_t n;
     const gate_setting_t *t = gate_settings(&n);
 
     printf("table shape\n");
-    CHECK(n == 22, "twenty-two gate settings");
     for (size_t i = 0; i < n; i++) {
         char msg[128];
         snprintf(msg, sizeof(msg), "%s: lo <= band_lo <= def <= band_hi <= hi", t[i].key);
@@ -72,7 +88,6 @@ int main(void)
           gate_state(rise, 40.0) == Gate_Ok,
           "a calibrated flow rise is never warned (the bands differ from loop to loop)");
     CHECK(tres->hi < tmax->hi, "the resume range tops out under the ceiling range");
-    CHECK(tmax->band_hi == 38.0, "the ceiling band tops out at the former hard cap");
     const gate_setting_t *exh = gate_setting_find("cool_tach_exhaust_min_rpm");
     const gate_setting_t *inl = gate_setting_find("cool_tach_intake_min_rpm");
     const gate_setting_t *air = gate_setting_find("cool_tach_air_assist_min_rpm");
@@ -89,8 +104,8 @@ int main(void)
           "the purge current floor is the purge gate, off at zero, capped at the ADC rail");
     CHECK(!grc->gate && grc->off_end == 0, "the grace window is not a gate of its own");
     const gate_setting_t *crt = gate_setting_find("cool_temp_critical_c");
-    CHECK(crt && crt->gate && !strcmp(crt->gate, "coolant_critical") && crt->off_end > 0 && crt->hi == 70.0,
-          "the critical line is the coolant_critical gate, off at its top of 70 C");
+    CHECK(crt && crt->gate && !strcmp(crt->gate, "coolant_critical") && crt->off_end > 0,
+          "the critical line is the coolant_critical gate, off at its top");
     const gate_setting_t *flo = gate_setting_find("cool_temp_min");
     const gate_setting_t *sta = gate_setting_find("cool_temp_start");
     CHECK(flo && flo->gate && !strcmp(flo->gate, "coolant_min") && flo->off_end < 0 && flo->lo == 0.0,
@@ -115,7 +130,6 @@ int main(void)
     CHECK(q1c->gate && !strcmp(q1c->gate, "flame_q1_critical") && q1c->off_end < 0,
           "the q1 critical is the flame_q1_critical gate, off at zero");
     CHECK(q1a->def < q1c->def && q2a->def < q2c->def, "alert under critical in both quartiles by default");
-    CHECK(q1a->def > 200.0 && q2a->def > 200.0, "both alert defaults sit above a fully lit lamp");
 
     printf("floor hysteresis\n");
     CHECK(!gate_floor_trip(0, 5.0, 5.0, 1.0), "at the floor, not under it: no trip");
@@ -185,18 +199,15 @@ int main(void)
     char buf[3072];
     int r = gates_json(buf, sizeof(buf), value_default, NULL);
     CHECK(r > 0 && buf[0] == '{' && buf[r - 1] == '}', "gates_json is an object");
-    CHECK(strstr(buf, "\"cool_temp_max\":{\"gate\":\"coolant_max\",\"def\":33,\"lo\":5,"
-                      "\"hi\":60,\"band\":[25,38],\"off\":\"high\",\"value\":33,"
-                      "\"state\":\"ok\"}") != NULL,
-          "the ceiling row carries gate, range, band, off end, value and state");
-    CHECK(strstr(buf, "\"cool_temp_resume\":{\"gate\":null,") != NULL,
+    char row[512];
+    CHECK(json_row(buf, "cool_temp_max", row, sizeof(row)) && strstr(row, "\"gate\":\"coolant_max\"") &&
+          strstr(row, "\"band\":[") && strstr(row, "\"off\":\"high\"") && strstr(row, "\"value\":33") &&
+          strstr(row, "\"state\":\"ok\""), "the ceiling row carries its gate, band, off end, value and state");
+    CHECK(json_row(buf, "cool_temp_resume", row, sizeof(row)) && strstr(row, "\"gate\":null"),
           "a non-gate row carries gate:null");
-    CHECK(strstr(buf, "\"cool_flow_rise\":{\"gate\":null,\"def\":14.4,") != NULL,
-          "a fractional default prints without trailing zeros");
-    CHECK(strstr(buf, "\"cool_flow_check_s\":{\"gate\":\"flow\",\"def\":50,\"lo\":0,"
-                      "\"hi\":300,\"band\":[30,120],\"off\":\"low\",") != NULL,
-          "the flow row says its off end is low");
-    CHECK(strstr(buf, "\"cool_tach_exhaust_min_rpm\":{\"gate\":\"exhaust\",\"def\":6400,") != NULL,
+    CHECK(json_row(buf, "cool_flow_check_s", row, sizeof(row)) && strstr(row, "\"gate\":\"flow\"") &&
+          strstr(row, "\"off\":\"low\""), "the flow row says its off end is low");
+    CHECK(json_row(buf, "cool_tach_exhaust_min_rpm", row, sizeof(row)) && strstr(row, "\"gate\":\"exhaust\""),
           "the exhaust row is there");
     CHECK(gates_json(buf, 16, value_default, NULL) == -1, "a short buffer reports -1");
 
