@@ -1,5 +1,5 @@
 /*
- * cool_flow_test.c - host unit test for the flow check's reading
+ * cool_flow_test.c - host unit test for the cooling engine, tick by tick
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
@@ -37,6 +37,34 @@
  *   N. the fail tiers:      FIRE and CRASH end the controller through the
  *                           supervisor's hook, once, after the kernel writes
  *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
+ *
+ * The fan writes: every duty the engine writes is read back, tried again
+ * when the device did not take it, and held to the command once a tick.
+ * The fake tree's writes can be dropped (the device answers and keeps its
+ * value) or refused (the bus fails):
+ *
+ *   fan writes A. clean:    a session opens and every fan reads its run duty
+ *   fan writes B. dropped:  two writes dropped, the third takes; no fault
+ *   fan writes C. lost:     a device loses its duty mid-session; the tick
+ *                           puts it back and the fan gets its spin-up
+ *                           grace, so a fan that then runs is not tripped
+ *   fan writes D. refused:  a device takes nothing, or the bus refuses the
+ *                           write; the fan is tripped at its tach and the
+ *                           fault names the duty and the readback
+ *   fan writes E. thermal:  the same readback route holds the exhaust PWM
+ *
+ * The intakes fitted: cool_intake_fans 1 (the setup's airflow check
+ * writes it) takes the second intake tach out of the airflow gates and
+ * changes nothing else. The fake tree's second intake tach reads no pulse:
+ *
+ *   intakes A. two fans:    the default judges the silent tach, trips
+ *                           AIRFLOW on it, and never acknowledges the window
+ *   intakes B. one fan:     no fault, the window is acknowledged, and
+ *                           intake_2 is published not fitted with no floor
+ *   intakes C. one fan:     a silent intake 1 still trips AIRFLOW
+ *   intakes D. one fan:     with the intake gate off, no warning names
+ *                           intake_2
+ *   intakes E. any other value (a hand-edited 0) keeps intake_2 judged
  */
 #define GF_SYSFS    "cool-flow-test/sys/"
 #define VERDICT_DIR "cool-flow-test/run"
@@ -50,14 +78,50 @@
 #define crash_hw_close  fake_crash_close
 /* The fake tree is plain files: a write must truncate, as a sysfs store
  * replaces, or a short duty leaves the tail of a longer one for the
- * engine's readback to find. */
+ * engine's readback to find. The one attribute a fan-write case names can
+ * drop writes (the device answers, keeps its value) or refuse them (the
+ * bus fails). */
+#include <errno.h>
 #include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
+static const char *drop_attr;       /* a path suffix, or NULL */
+static int drop_left;               /* writes to drop; -1 = every one */
+static int refuse;                  /* refuse instead of dropping */
+static int drop_fd = -1;
+
 static int fake_open(const char *path, int flags, ...)
 {
-    return openat(AT_FDCWD, path, (flags & O_WRONLY) ? (flags | O_TRUNC) : flags, 0644);
+    int drop = 0;
+    if ((flags & O_WRONLY) && drop_attr && drop_left != 0) {
+        size_t lp = strlen(path), la = strlen(drop_attr);
+        drop = lp >= la && !strcmp(path + lp - la, drop_attr);
+    }
+    /* A dropped write leaves the device's value where it was: no
+     * truncation for that one. */
+    int fd = openat(AT_FDCWD, path,
+                    (flags & O_WRONLY) && !drop ? (flags | O_TRUNC) : flags, 0644);
+    if (fd >= 0 && drop)
+        drop_fd = fd;
+    return fd;
+}
+
+static ssize_t fake_write(int fd, const void *buf, size_t n)
+{
+    if (fd == drop_fd && drop_left != 0) {
+        if (drop_left > 0)
+            drop_left--;
+        drop_fd = -1;
+        if (refuse) {
+            errno = EIO;
+            return -1;
+        }
+        return (ssize_t)n;          /* taken, as far as the writer sees */
+    }
+    return write(fd, buf, n);
 }
 #define open fake_open
+#define write fake_write
 
 #include "../src/cool.c"
 
@@ -102,6 +166,7 @@ static void ext_hold_file(const char *id, int required, int raised, const char *
 }
 
 static char last_log[256];
+static char logbuf[16384];          /* every line since an intake case began */
 
 void fflog(int prio, const char *fmt, ...)
 {
@@ -110,7 +175,15 @@ void fflog(int prio, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
     va_end(ap);
+    size_t n = strlen(logbuf);
+    if (n + strlen(last_log) + 2 < sizeof(logbuf))
+        snprintf(logbuf + n, sizeof(logbuf) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
+}
+
+static int log_has(const char *needle)
+{
+    return strstr(logbuf, needle) != NULL;
 }
 
 int diag_running(void) { return 0; }
@@ -403,6 +476,284 @@ static void test_ack_waits_for_fans(loop_t *L)
     close_session(L);
 }
 
+/* --- the fan writes and the intakes fitted ------------------------------ */
+
+/* Tach periods. 300 is a fast fan; 3518 is the air assist at its idle
+ * duty on the bench reference (about 2130 rpm, under the 6093 floor). In
+ * ns at 2 pulses/rev, 7200000 is about 4170 rpm, an intake at its run
+ * duty on the bench reference; 0 is a tach that saw no pulse, which is
+ * what the kernel reads with no fan on it. */
+#define AA_FAST     300
+#define AA_IDLE     3518
+#define TACH_RUN    7200000
+#define TACH_NONE   0
+
+/* The tree these cases start from: a settled loop at 22.3 C, the supply
+ * good, every fan at its idle duty and fast but the intakes named. */
+static void fan_tree(long intake_1, long intake_2)
+{
+    put_long("cnc/laser_pgood_sampled", 255);
+    put_long("thermal/tach_exhaust", 300);
+    put_long("thermal/tach_intake_1", intake_1);
+    put_long("thermal/tach_intake_2", intake_2);
+    put_long("head/air_assist_tach", AA_FAST);
+    put_long("pic/hv_current", 0);
+    put_long("pic/water_temp_1", raw_for(22.3));
+    put_long("pic/water_temp_2", raw_for(22.3));
+    put_long("head/air_assist_pwm", AIR_ASSIST_IDLE);
+    put_long("thermal/exhaust_pwm", EXHAUST_IDLE);
+    put_long("thermal/intake_pwm", INTAKE_IDLE);
+}
+
+static void tick(const char *mode, int armed)
+{
+    fake_now += 1.0;
+    cool_state_report(mode, armed, -1, -1, -1, NULL);
+    engine_tick();
+}
+
+/* Close any session and settle idle, the fake device honest again. */
+static void fan_settle(void)
+{
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    put_long("head/air_assist_tach", AA_FAST);
+    for (int i = 0; i < 400; i++) {
+        tick("idle", 0);
+        if (cool_state == Cool_Idle)
+            break;
+    }
+}
+
+static void fw_clean(void)
+{
+    printf("fan writes A. a session opens and every fan reads its run duty\n");
+    fan_settle();
+    tick("run", 1);
+    CHECK(cool_state == Cool_Run, "the session is open");
+    CHECK(get_long("head/air_assist_pwm") == AIR_ASSIST_RUN, "air assist at run duty");
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN, "exhaust at run duty");
+    CHECK(get_long("thermal/intake_pwm") == INTAKE_RUN, "intake at run duty");
+    CHECK(fan_cmd[Fx_AirAssist] == AIR_ASSIST_RUN, "the command mirror agrees");
+    for (int i = 0; i < 25; i++)
+        tick("run", 1);
+    CHECK(fan_lost[Fx_AirAssist] == 0 && fan_lost[Fx_Exhaust] == 0,
+          "no fan lost its duty through the grace and after");
+    CHECK(!airflow_alarm, "no airflow fault");
+}
+
+static void fw_dropped(void)
+{
+    printf("fan writes B. two writes dropped, the third takes\n");
+    fan_settle();
+    drop_attr = "head/air_assist_pwm";
+    drop_left = 2;
+    tick("run", 1);
+    CHECK(get_long("head/air_assist_pwm") == AIR_ASSIST_RUN, "the third try took");
+    CHECK(drop_left == 0, "both dropped writes were spent before the third took");
+    for (int i = 0; i < 25; i++)
+        tick("run", 1);
+    CHECK(!airflow_alarm, "no airflow fault");
+}
+
+static void fw_lost(void)
+{
+    printf("fan writes C. a device loses its duty mid-session\n");
+    fan_settle();
+    tick("run", 1);
+    for (int i = 0; i < 20; i++)
+        tick("run", 1);                 /* past the spin-up grace */
+    CHECK(get_long("head/air_assist_pwm") == AIR_ASSIST_RUN, "at run duty before the loss");
+    /* The head resets: its register back at idle, the fan winding down. */
+    put_long("head/air_assist_pwm", AIR_ASSIST_IDLE);
+    put_long("head/air_assist_tach", AA_IDLE);
+    tick("run", 1);
+    CHECK(get_long("head/air_assist_pwm") == AIR_ASSIST_RUN, "the tick put the duty back");
+    CHECK(fan_lost[Fx_AirAssist] == 1, "counted once");
+    /* The fan spins up over a few seconds; the grace covers it. */
+    for (int i = 0; i < 5; i++)
+        tick("run", 1);
+    CHECK(!airflow_alarm, "no fault while the fan spins back up inside the grace");
+    put_long("head/air_assist_tach", AA_FAST);
+    for (int i = 0; i < 25; i++)
+        tick("run", 1);
+    CHECK(!airflow_alarm, "no fault once the fan is back at speed");
+}
+
+static void fw_refused(void)
+{
+    printf("fan writes D. a device takes nothing: the fault names the duty and the readback\n");
+    fan_settle();
+    drop_attr = "head/air_assist_pwm";
+    drop_left = -1;
+    put_long("head/air_assist_tach", AA_IDLE);
+    tick("run", 1);
+    CHECK(get_long("head/air_assist_pwm") == AIR_ASSIST_IDLE, "the head kept its idle duty");
+    for (int i = 0; i < 25 && !airflow_alarm; i++)
+        tick("run", 1);
+    CHECK(airflow_alarm, "the fan is tripped at its tach");
+    printf("    reason: %s\n", pub_reason);
+    CHECK(strstr(pub_reason, "AIRFLOW: air_assist") != NULL, "the airflow fault");
+    CHECK(strstr(pub_reason, "(duty 1023, reads 204)") != NULL,
+          "the fault names the duty commanded and the duty in force");
+    CHECK(strstr(pub_reason, "hold, no resume this job") != NULL, "the hold stands");
+}
+
+static void fw_refused_bus(void)
+{
+    printf("fan writes D2. the bus refuses the write: named, and the fault the same\n");
+    fan_settle();
+    drop_attr = "head/air_assist_pwm";
+    drop_left = -1;
+    refuse = 1;
+    put_long("head/air_assist_tach", AA_IDLE);
+    tick("run", 1);
+    for (int i = 0; i < 25 && !airflow_alarm; i++)
+        tick("run", 1);
+    CHECK(airflow_alarm && strstr(pub_reason, "(duty 1023, reads 204)") != NULL,
+          "the fault names the duty in force");
+}
+
+static void fw_thermal_lost(void)
+{
+    printf("fan writes E. the exhaust PWM loses its duty: the same route puts it back\n");
+    fan_settle();
+    tick("run", 1);
+    for (int i = 0; i < 20; i++)
+        tick("run", 1);
+    put_long("thermal/exhaust_pwm", EXHAUST_IDLE);
+    tick("run", 1);
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN, "the exhaust duty is put back");
+    CHECK(fan_lost[Fx_Exhaust] == 1 && fan_lost[Fx_AirAssist] == 0, "counted on the right fan");
+    for (int i = 0; i < 25; i++)
+        tick("run", 1);
+    CHECK(!airflow_alarm, "no fault");
+}
+
+/* Close any session and settle idle; the next session reloads the
+ * settings a case sets. */
+static void intake_settle(void)
+{
+    for (int i = 0; i < 400; i++) {
+        tick("idle", 0);
+        if (cool_state == Cool_Idle)
+            break;
+    }
+    put_long("thermal/tach_intake_1", TACH_RUN);
+    put_long("thermal/tach_intake_2", TACH_NONE);
+    kv[0] = NULL;
+    logbuf[0] = '\0';
+}
+
+/* An armed session, run until it faults or for `ticks` ticks. */
+static void armed_session(int ticks)
+{
+    for (int i = 0; i < ticks && !airflow_alarm; i++)
+        tick("run", 1);
+}
+
+/* The published row for one fan: its reading, floor and state. */
+static int gate_is(const char *id, double reading, double floor, const char *state)
+{
+    json_error_t e;
+    json_t *j = json_loads(pub_fan_gates, 0, &e);
+    json_t *g = json_object_get(j, id);
+    const char *s = json_string_value(json_object_get(g, "state"));
+    int ok = g && json_number_value(json_object_get(g, "reading")) == reading &&
+             json_number_value(json_object_get(g, "floor")) == floor && s && !strcmp(s, state);
+    json_decref(j);
+    return ok;
+}
+
+static void in_two_fans(void)
+{
+    printf("intakes A. two fans, the default: the silent intake 2 is judged\n");
+    intake_settle();
+    armed_session(40);
+    CHECK(intake_fans == 2, "the default is two intake fans");
+    CHECK(airflow_alarm, "the silent tach trips the airflow gate");
+    printf("    reason: %s\n", pub_reason);
+    CHECK(strstr(pub_reason, "AIRFLOW: intake_2 0 under") != NULL, "the fault names intake_2");
+    CHECK(strstr(pub_reason, "hold, no resume this job") != NULL, "the hold stands");
+    CHECK(!fans_up && !pub_armed_ack, "the armed window was never acknowledged");
+    CHECK(gate_is("intake_2", 0, 2290, "TRIPPED"), "intake_2 is published tripped at the intake floor");
+}
+
+static void in_one_fan(void)
+{
+    printf("intakes B. one fan: intake 2 is not judged, intake 1 is\n");
+    intake_settle();
+    kv[0] = "cool_intake_fans"; kv[1] = "1"; kv[2] = NULL;
+    armed_session(40);
+    CHECK(intake_fans == 1, "the setting is in force");
+    CHECK(!airflow_alarm, "no airflow fault through the grace and after");
+    CHECK(fans_up && pub_armed_ack, "the armed window is acknowledged");
+    printf("    fan gates: %s\n", pub_fan_gates);
+    CHECK(gate_is("intake_2", 0, 0, "not fitted"), "intake_2 is published not fitted, with no floor");
+    CHECK(gate_is("intake_1", 4167, 2290, "ok"), "intake_1 is judged at the intake floor");
+}
+
+static void in_one_fan_intake1_silent(void)
+{
+    printf("intakes C. one fan, and intake 1 stops: intake 1 still trips\n");
+    intake_settle();
+    kv[0] = "cool_intake_fans"; kv[1] = "1"; kv[2] = NULL;
+    put_long("thermal/tach_intake_1", TACH_NONE);
+    armed_session(40);
+    CHECK(airflow_alarm, "the airflow gate trips");
+    printf("    reason: %s\n", pub_reason);
+    CHECK(strstr(pub_reason, "AIRFLOW: intake_1 0 under the 2290 floor") != NULL,
+          "the fault names intake_1 at the intake floor");
+    CHECK(!fans_up, "the armed window was never acknowledged");
+}
+
+static void in_one_fan_gate_off(void)
+{
+    printf("intakes D. one fan, the intake gate off: nothing names intake_2\n");
+    intake_settle();
+    kv[0] = "cool_intake_fans"; kv[1] = "1";
+    kv[2] = "cool_tach_intake_min_rpm"; kv[3] = "0"; kv[4] = NULL;
+    armed_session(40);
+    CHECK(!airflow_alarm, "no airflow fault");
+    CHECK(!log_has("gate intake_2 is OFF"), "no would-have-tripped warning names intake_2");
+    CHECK(gate_is("intake_2", 0, 0, "not fitted"), "intake_2 is still published not fitted");
+}
+
+static void in_other_value(void)
+{
+    printf("intakes E. a hand-edited 0: intake 2 stays judged\n");
+    intake_settle();
+    kv[0] = "cool_intake_fans"; kv[1] = "0"; kv[2] = NULL;
+    armed_session(40);
+    CHECK(airflow_alarm && strstr(pub_reason, "AIRFLOW: intake_2") != NULL,
+          "only 1 takes intake_2 out of the judging");
+}
+
+static void fan_writes(void)
+{
+    fan_tree(300, 300);
+    kv[0] = "cool_tach_air_assist_min_rpm"; kv[1] = "6093"; kv[2] = NULL;
+    fw_clean();
+    fw_dropped();
+    fw_lost();
+    fw_refused();
+    fw_refused_bus();
+    fw_thermal_lost();
+    kv[0] = NULL;
+}
+
+static void intakes(void)
+{
+    fan_tree(TACH_RUN, TACH_NONE);
+    in_two_fans();
+    in_one_fan();
+    in_one_fan_intake1_silent();
+    in_one_fan_gate_off();
+    in_other_value();
+    kv[0] = NULL;
+}
+
 int main(void)
 {
     make_tree();
@@ -410,6 +761,11 @@ int main(void)
      * (the config key is gone; density is the only product model, and
      * the analog value survives for the host-test reference builds). */
     cool_state_model(0);
+    /* The fan writes and the intakes fitted run on a loop at rest; the
+     * flow check's tree is laid again after them. */
+    fan_writes();
+    intakes();
+    make_tree();
     kv[0] = NULL;
     loop_t L = { .flow = 1, .lit = 0, .k_true = LASER_HEAT_CW };
 
@@ -790,7 +1146,8 @@ int main(void)
                     : "PASS: the flow check reads means, takes the tube's share off, "
                       "bounds it, still sees a stopped pump under a lit tube, takes "
                       "the air-assist offset off while the fan runs, and says SENSOR "
-                      "rather than fire blind\n",
+                      "rather than fire blind; every fan duty is read back and held, "
+                      "and one intake fan fitted leaves the second tach unjudged\n",
            failures);
     return failures ? 1 : 0;
 }

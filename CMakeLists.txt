@@ -216,11 +216,13 @@ add_executable(cool_gate_test tests/cool_gate_test.c src/gates.c)
 target_compile_options(cool_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_gate_test m)
 
-# Host unit test for the flow check's reading: the baseline as the mean
-# of the settled window, the end as the mean of the last samples, the
-# tube's share subtracted from the rise and bounded, and a stopped pump
-# still read as stopped under a lit tube. Includes the engine source
-# against a fake sysfs tree and a fake clock; CI runs it after the build.
+# Host unit test for the cooling engine, tick by tick: the flow check's
+# reading (the means, the tube's share bounded, a stopped pump still read
+# as stopped under a lit tube), SENSOR, COLD, warm-up, the fan
+# acknowledgment, the hang dead-man, the fail and pause tiers, extension
+# holds, the verified fan writes, and the intakes fitted. Includes the
+# engine source against a fake sysfs tree whose writes can be dropped or
+# refused, and a fake clock; CI runs it after the build.
 add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
 target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_flow_test m pthread jansson)
@@ -231,23 +233,6 @@ target_link_libraries(cool_flow_test m pthread jansson)
 add_executable(holds_test tests/holds_test.c src/holds.c)
 target_compile_options(holds_test PRIVATE -Wall -Wextra)
 target_link_libraries(holds_test jansson)
-
-# Host unit test for the verified fan writes: every duty read back and
-# retried, a duty a device lost put back by the tick with the spin-up
-# grace, and the airflow fault naming the duty commanded and the duty in
-# force. Includes the engine source against a fake sysfs tree whose writes
-# can be dropped or refused; CI runs it after the build.
-add_executable(cool_fanwrite_test tests/cool_fanwrite_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
-target_compile_options(cool_fanwrite_test PRIVATE -Wall -Wextra)
-target_link_libraries(cool_fanwrite_test m pthread jansson)
-
-# Host unit test for the intake fans fitted: on a machine built with one
-# intake fan (cool_intake_fans 1) the silent second tach is not judged,
-# intake 1 still is, and any other value keeps both. Includes the engine
-# source against a fake sysfs tree; CI runs it after the build.
-add_executable(cool_intake_test tests/cool_intake_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
-target_compile_options(cool_intake_test PRIVATE -Wall -Wextra)
-target_link_libraries(cool_intake_test m pthread jansson)
 
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs

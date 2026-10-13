@@ -77,7 +77,7 @@ jobs:
         run: ./build/camhealth_test
       - name: Gate settings table
         run: ./build/cool_gate_test
-      - name: Flow check reading (means, the tube's share, the bound)
+      - name: "cool_flow_test (the cooling engine: the flow check, the tiers, extension holds, the verified fan writes, the intakes fitted)"
         run: ./build/cool_flow_test
       - name: "holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)"
         run: ./build/holds_test
@@ -89,10 +89,6 @@ jobs:
         run: ./build/senderout_test
       - name: "wizpkg_test (a package's check on the Setup page: each step held to its form, the check run through the host, the result the package's own)"
         run: ./build/wizpkg_test
-      - name: Verified fan writes (readback, retry, the duty a device lost put back)
-        run: ./build/cool_fanwrite_test
-      - name: Intake fans fitted (one intake fan, the second tach not judged)
-        run: ./build/cool_intake_test
       - name: Airflow gate
         run: ./build/airflow_test
       - name: Crash-watch tiers
