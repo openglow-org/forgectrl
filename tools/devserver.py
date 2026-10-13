@@ -404,7 +404,6 @@ MOCK_SVG = (
 # The settings keys forgectrl serves, in the order of its setting_defs
 # table (src/main.c). GET /settings reports a secret key as "<key>_set"
 # (a boolean) and never its value; POST accepts it under its own name.
-# tests/test_devserver_mock.py holds both tuples to the C table.
 SETTINGS_KEYS = (
     'controller_mode', 'homing_mode',
     'gfcloud_home_x', 'gfcloud_home_y',
@@ -801,7 +800,6 @@ class Mock:
     # key, the gate name /status reports (None for a key that tunes a
     # gate without being one), default, legal range, recommended band,
     # and which end of the range turns the gate off.
-    # tests/test_devserver_mock.py holds this to the C table.
     GATES = (
         ('cool_temp_max', 'coolant_max', 33.0, 5.0, 60.0, 25.0, 38.0, 'high'),
         ('cool_temp_resume', None, 31.0, 5.0, 59.0, 20.0, 36.0, 'none'),

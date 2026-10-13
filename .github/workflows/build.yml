@@ -109,5 +109,5 @@ jobs:
         run: ./build/camkey_test
       - name: Published-release check (the tag from the first hop)
         run: ./build/relcheck_test
-      - name: Panel dev-server mock mirrors the daemon
-        run: python3 -B -m unittest -v tests/test_devserver_mock.py
+      - name: "test_routes (every panel route registered, every route's capability, the page policy)"
+        run: python3 -B -m unittest -v tests/test_routes.py

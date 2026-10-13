@@ -24,9 +24,12 @@ cmake --build build
 
 Then run the test binaries under `build/`. A warning is a failure. The host
 tests are in `tests/`. `tests/fflog_e2e.sh` proves the whole logging path
-against a private rsyslogd. `tests/test_devserver_mock.py` parses the C
-tables and holds the panel's dev-server mock to them, so a new settings key,
-a new gate row or a new route needs its mock entry in the same change.
+against a private rsyslogd. `tests/test_routes.py` reads `src/main.c`'s
+route table: every route the panel calls is registered, every row carries
+its capability column, and every page carries the page policy. The panel's
+dev-server mock (`tools/devserver.py`) is kept by hand: a new settings key,
+a new gate row or a new route needs its mock entry in the same change, and
+no test holds it to the C tables.
 
 The board binary is a cross-build, never a native one:
 `forgefirm/scripts/bench/build-forgectrl.sh`.
