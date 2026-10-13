@@ -249,12 +249,6 @@ add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
 target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
 target_link_libraries(coolfmt_test m jansson)
 
-# Host unit test for the loopback peer check behind the cooling report
-# channel: every spelling of this host passes (127/8, ::1, the v4-mapped
-# ::ffff:127/8 a dual-stack listener reports for an IPv4 client); every
-# other address, another family and a truncated sockaddr fail closed.
-add_executable(auth_peer_test tests/auth_peer_test.c src/peer.c)
-target_compile_options(auth_peer_test PRIVATE -Wall -Wextra)
 
 # Host unit test for the fragmented-MP4 muxer behind /cam/h264: the init
 # segment's box tree and avcC must match the fed SPS/PPS, fragments must
@@ -365,7 +359,10 @@ target_link_libraries(tokens_test pthread)
 
 # The guards' judgment of a scoped token: auth.c with the real token store
 # and real ulfius requests; the account, the sessions, the camera key, and
-# the settings are the test's stubs.
+# the settings are the test's stubs. With it, the loopback peer check:
+# 127/8, ::1 and the v4-mapped 127 a dual-stack listener reports pass; a
+# LAN address in either family, a link-local, another family and a
+# truncated sockaddr fail closed.
 add_executable(auth_scoped_test tests/auth_scoped_test.c src/auth.c src/tokens.c src/sha256.c
                src/peer.c src/fflog.c)
 target_compile_options(auth_scoped_test PRIVATE -Wall -Wextra)

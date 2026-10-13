@@ -18,9 +18,17 @@
  * token that is not this machine's is refused and never falls through to
  * the open reads; the upload sink's silent form; closed reads open to
  * machine.read alone.
+ *
+ * The loopback peer check behind auth.c's loopback-only rules (peer.c):
+ * a dual-stack listener reports an IPv4 client as a v4-mapped
+ * IPv6 peer, so 127/8, ::1 and mapped 127 pass, and a LAN address in
+ * either family, a link-local, another family, NULL, and a sockaddr_in6
+ * whose address bytes were lost to a sizeof(struct sockaddr) copy (what
+ * an unpatched ulfius hands over) fail closed.
  */
 #define _GNU_SOURCE
 #include "../src/auth.h"
+#include "../src/peer.h"
 #include "../src/tokens.h"
 
 #include <arpa/inet.h>
@@ -29,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 /* ---- what auth.c asks of the rest of the daemon ---- */
@@ -84,10 +93,50 @@ static int on_route(const char *cap, int plain, int write)
 
 #define LAN "192.168.1.50"
 
+static int peer_v4(const char *ip)
+{
+    struct sockaddr_in s = { .sin_family = AF_INET };
+    inet_pton(AF_INET, ip, &s.sin_addr);
+    return peer_is_loopback((const struct sockaddr *)&s);
+}
+
+static int peer_v6(const char *ip)
+{
+    struct sockaddr_in6 s = { .sin6_family = AF_INET6 };
+    inet_pton(AF_INET6, ip, &s.sin6_addr);
+    return peer_is_loopback((const struct sockaddr *)&s);
+}
+
+static void test_peer(void)
+{
+    CHECK(peer_v4("127.255.0.3"), "127.255.0.3 (all of 127/8) is not this host");
+    CHECK(peer_v6("::1"), "::1 is not this host");
+    CHECK(peer_v6("::ffff:127.0.0.1"), "::ffff:127.0.0.1 (v4-mapped, a dual-stack listener) is not this host");
+    CHECK(!peer_v4("192.0.2.5"), "192.0.2.5 (LAN) passed");
+    CHECK(!peer_v6("::ffff:192.0.2.5"), "::ffff:192.0.2.5 (mapped LAN) passed");
+    CHECK(!peer_v6("fe80::1"), "fe80::1 (link-local) passed");
+    struct sockaddr_un un = { .sun_family = AF_UNIX };
+    CHECK(!peer_is_loopback((const struct sockaddr *)&un), "AF_UNIX passed");
+    CHECK(!peer_is_loopback(NULL), "NULL passed");
+
+    /* A copy of sizeof(struct sockaddr) keeps the family and the first
+     * eight address bytes; the rest reads as zero here (it is heap
+     * garbage in the unpatched library). The check must fail closed. */
+    struct sockaddr_in6 full = { .sin6_family = AF_INET6 };
+    inet_pton(AF_INET6, "::ffff:127.0.0.1", &full.sin6_addr);
+    struct sockaddr_in6 cut;
+    memset(&cut, 0, sizeof(cut));
+    memcpy(&cut, &full, sizeof(struct sockaddr));
+    CHECK(!peer_is_loopback((const struct sockaddr *)&cut),
+          "::ffff:127.0.0.1 cut to sizeof(struct sockaddr) passed");
+}
+
 int main(void)
 {
     char root[128], hub[TOKENS_TEXT_LEN + 1], pend[TOKENS_TEXT_LEN + 1], view[TOKENS_TEXT_LEN + 1];
     char id[TOKENS_ID_HEX + 1], err[160];
+    test_peer();
+
     snprintf(root, sizeof(root), "/tmp/auth_scoped_test.%d", (int)getpid());
     mkdir(root, 0755);
     setenv("FORGECTRL_DATA_DIR", root, 1);

@@ -43,7 +43,7 @@ jobs:
       - name: "tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)"
         run: ./build/tokens_test
 
-      - name: auth_scoped_test (the guards' judgment of a scoped token, route by route)
+      - name: auth_scoped_test (the guards' judgment of a scoped token, route by route, and the loopback peer check)
         run: ./build/auth_scoped_test
 
       - name: "builtin_test (the built-in extensions: the cloud entry, its refusals, its sweep, the list)"
@@ -89,8 +89,6 @@ jobs:
         run: ./build/lenshome_test
       - name: Cooling status document
         run: ./build/coolfmt_test
-      - name: Loopback peer check
-        run: ./build/auth_peer_test
       - name: Fragmented-MP4 muxer
         run: ./build/mp4mux_test
       - name: Digest primitives (SHA-256, HMAC, constant-time compare)

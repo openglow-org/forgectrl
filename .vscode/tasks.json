@@ -34,7 +34,7 @@
       "label": "tests (host)",
       "detail": "The CI unit tests",
       "type": "shell",
-      "command": "for t in status_test curverec_fit_test sanitize_test debayer_test camhealth_test cool_gate_test cool_flow_test airflow_test accel_test coolfmt_test auth_peer_test mp4mux_test; do ./build/$t || exit 1; done",
+      "command": "for t in status_test curverec_fit_test sanitize_test debayer_test camhealth_test cool_gate_test cool_flow_test airflow_test accel_test coolfmt_test mp4mux_test; do ./build/$t || exit 1; done",
       "dependsOn": ["build (host)"],
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": []
