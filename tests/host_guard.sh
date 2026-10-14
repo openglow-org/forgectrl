@@ -14,16 +14,17 @@
 #     the slot inventory's archive list, and the setup page's confirmed
 #     call; confirm=1 is never sent
 #   the record: as JSON with the token (schema 1, the sheet id GET /wiz
-#     reports, no password hash), as a download (an attachment of the
-#     record), as a printable page with no script that names every
-#     completed wizard, both refused without a token or a login; and the
-#     sanitized log export carrying it as system/setup.json, with no
-#     panel token anywhere in the archive though a log line in the tree
-#     carries it
+#     reports, no password hash, not an attachment), as a download (an
+#     attachment of the record named with that sheet id), as a printable
+#     page (text/html, no script, the sheet id, every completed wizard),
+#     both refused without a token or a login; and the sanitized log
+#     export carrying it as system/setup.json with the same sheet id and
+#     wizards and no password hash, and no panel token anywhere in the
+#     archive though a log line in the tree carries it
 #
-# A host has no fuses, so it derives no sheet id: the seeded record
-# carries one, as a record made on a machine does, and the download's
-# file name (the fuses' sheet id) stays with setup.record-export.
+# GF_FUSE_SERIAL gives the daemon a fuse serial, so it derives the sheet
+# id from the salt it makes in the data directory, as a machine does; the
+# seeded record carries none, and the script reads the id from GET /wiz.
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh). Runs
 # unprivileged; build.yml runs it:
@@ -91,7 +92,7 @@ get() {
 header() { tr -d '\r' < "$T/head" | sed -n "s/^$1: //Ip"; }
 
 start_daemon() {
-    env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
+    env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 GF_FUSE_SERIAL=314159265 \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
@@ -155,9 +156,6 @@ rec = {
     'wizards': {i: {'version': version[i], 'completed': ts, 'result': {}, 'applied': {}}
                 for i in st['missing']},
     'flags': {},
-    # a record made on a machine carries the sheet id its fuses derive;
-    # a host has no fuses, so the seeded record brings its own
-    'sheet_id': 'HOSTA-BCDEF',
 }
 json.dump(rec, open(sys.argv[2], 'w'), indent=2)
 EOF
@@ -205,22 +203,29 @@ grep -qF '/restore/factory-return?confirm=1' "$T/body" && ok "the page carries t
 
 echo "== the record"
 curl -s -o "$T/wiz.json" "$URL/wiz"
-SID=$(jget "$T/wiz.json" 'd["sheet_id"]')
+SID=$(jget "$T/wiz.json" 'd.get("sheet_id") or ""')
 [ -n "$SID" ] && ok "GET /wiz reports the sheet id $SID" || bad "GET /wiz reports no sheet id"
 expect 200 "$(get /wiz/record "$TOKEN")" "GET /wiz/record with the token is 200"
 cp "$T/body" "$T/record.json"
-expect "1|$SID" "$(jget "$T/record.json" '"%s|%s" % (d["schema"], d["sheet_id"])')" "the record: schema 1, the sheet id"
+expect "1|$SID" "$(jget "$T/record.json" '"%s|%s" % (d.get("schema"), d.get("sheet_id") or "")')" "the record: schema 1, the sheet id"
 grep -qF '$6$' "$T/record.json" && bad "the record carries a password hash" || ok "no password hash"
-# The download's file name comes from the fuses' sheet id, which a host
-# does not have: setup.record-export holds the name on the machine.
-expect 200 "$(get '/wiz/record?download=1' "$TOKEN")" "download=1 is 200"
 case $(header Content-Disposition) in
-    attachment*) ok "an attachment: $(header Content-Disposition)" ;;
+    *attachment*) bad "a plain read came as an attachment" ;;
+    *) ok "a plain read is not an attachment" ;;
+esac
+expect 200 "$(get '/wiz/record?download=1' "$TOKEN")" "download=1 is 200"
+case $SID:$(header Content-Disposition) in
+    ?*:*attachment*"$SID"*) ok "an attachment named with the sheet id: $(header Content-Disposition)" ;;
     *) bad "the download's disposition is '$(header Content-Disposition)'" ;;
 esac
 expect True "$(jget "$T/body" "str(d == json.load(open('$T/record.json')))")" "the download is the record"
 expect 200 "$(get /wiz/record.html "$TOKEN")" "GET /wiz/record.html is 200"
 cp "$T/body" "$T/record.html"
+case $(header Content-Type) in
+    *text/html*) ok "text/html" ;;
+    *) bad "the page's type is '$(header Content-Type)'" ;;
+esac
+grep -qF 'setup record' "$T/record.html" && ok "the page says setup record" || bad "the page does not say setup record"
 grep -qi '<script' "$T/record.html" && bad "the page carries a script" || ok "no script"
 [ -n "$SID" ] && grep -qF "$SID" "$T/record.html" && ok "the page carries the sheet id" \
     || bad "the page lacks the sheet id"
@@ -244,19 +249,24 @@ mkdir -p "$T/log/forgectrl"
 echo "2026-10-14T09:00:00 forgectrl[1] INFO probe panel token $TOKEN" >> "$T/log/forgectrl/forgectrl.log"
 code=$(curl -s -o "$T/export.tgz" -w '%{http_code}' --max-time 120 -X POST -H "X-ForgeFIRM-Token: $TOKEN" "$URL/logs/export")
 expect 200 "$code" "a sanitized POST /logs/export is 200"
-python3 - "$T/export.tgz" "$SID" "$TOKEN" <<'EOF'
+python3 - "$T/export.tgz" "$SID" "$TOKEN" "$T/record.json" <<'EOF'
 import gzip, io, json, sys, tarfile
 path, sid, token = sys.argv[1], sys.argv[2], sys.argv[3].encode()
+record = json.load(open(sys.argv[4]))
 raw = gzip.decompress(open(path, 'rb').read())
 tf = tarfile.open(fileobj=io.BytesIO(raw))
 names = {m.name: m for m in tf.getmembers()}
 member = names.get('forgefirm-logs/system/setup.json')
-rec = json.loads(tf.extractfile(member).read().decode('utf-8')) if member else None
+text = tf.extractfile(member).read() if member else b''
+rec = json.loads(text.decode('utf-8')) if member else None
 def say(ok, what):
     print('  %s: %s' % ('ok' if ok else 'FAIL', what))
     return 0 if ok else 1
 fails = say(member is not None, 'the archive carries forgefirm-logs/system/setup.json')
-fails += say(isinstance(rec, dict) and rec.get('sheet_id') == sid, 'it parses, with the sheet id %s' % sid)
+fails += say(isinstance(rec, dict) and sid and rec.get('sheet_id') == sid, 'it parses, with the sheet id %s' % sid)
+fails += say(isinstance(rec, dict) and sorted(rec.get('wizards') or {}) == sorted(record.get('wizards') or {}),
+             "its wizards are the record's")
+fails += say(member is not None and b'$6$' not in text, 'it carries no password hash')
 fails += say(token not in raw, 'the panel token is nowhere in the archive')
 sys.exit(1 if fails else 0)
 EOF

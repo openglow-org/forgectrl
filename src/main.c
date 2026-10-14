@@ -73,6 +73,7 @@
 #include "wizdark.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -956,13 +957,24 @@ void apply_wifi(int set_region)
  * base-23 over the alphabet BCDFGHJKMQRTVWXY2346789, up to six
  * characters, split XXX-YYY. The GUI always identifies the machine by
  * this fuse identity - the gf_serial setting overrides only what is
- * sent to the Glowforge cloud. */
+ * sent to the Glowforge cloud. GF_FUSE_SERIAL, set and not empty, is
+ * the serial instead (a host has no fuses): an integer that is not 0
+ * (base 0), else no serial; the fuses are not read either way. Read
+ * once, at the first call. */
 unsigned long fuse_serial(void)
 {
     static unsigned long cached;
     static int tried;
     if (!tried) {
         tried = 1;
+        const char *ov = getenv("GF_FUSE_SERIAL");
+        if (ov && *ov) {
+            char *end;
+            errno = 0;
+            unsigned long v = strtoul(ov, &end, 0);
+            cached = isdigit((unsigned char)ov[0]) && !*end && !errno ? v : 0;
+            return cached;
+        }
         FILE *f = fopen("/sys/bus/nvmem/devices/imx-ocotp0/nvmem", "rb");
         if (f) {
             unsigned char w[4];
