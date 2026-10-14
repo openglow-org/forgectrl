@@ -23,6 +23,10 @@
 #   the motion routes: the token, the numbers, a line on the port each
 #   /ext/call with extensions off, a package check that is no wizard,
 #   /wiz/changed, and the menu GET /wiz carries
+#   the write routes without the token, an upload, and a body over the
+#     cap; the Host, Origin and Sec-Fetch-Site checks on a read
+#   the settings' bounds, in the file FORGECTRL_CONF names; the page's
+#     frame policy
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
 # distribution's library cuts the peer address that the loopback checks
@@ -278,6 +282,52 @@ sys.exit(0 if menu and named and named <= have else 1)
 EOF
 then ok "GET /wiz carries the menu, and every step it names is one of the wizards"
 else bad "the menu GET /wiz carries names a step the wizard list does not have"; fi
+
+echo "== the write routes without the token"
+n=$(lines)
+for p in /controller/stop /controller/start /mode /settings /diag/flow-verify /diag/abort \
+         /update/apply /boot /update/check /update/dismiss /system/reboot /restore/factory \
+         /restore/factory-return /system/ssh /wiz/advisories/accept /wiz/account /wiz/complete; do
+    code=$(post $p -)
+    if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
+        ok "POST $p: 403, authentication required"
+    else bad "POST $p without the token -> $code $(cat "$T/body")"; fi
+done
+expect "$n" "$(lines)" "the port got nothing from them"
+echo "not firmware" > "$T/small"
+code=$(curl -s -o "$T/body" -w '%{http_code}' -X POST -F "file=@$T/small;filename=update.fw" "$URL/update/upload")
+case $code in 400|403) ok "an upload without the token is $code" ;; *) bad "an upload without the token -> $code" ;; esac
+head -c 100000 /dev/zero | tr '\0' a | sed 's/^/x=/' > "$T/big"
+expect 403 "$(post /settings - --data-binary @"$T/big")" "a settings body over the cap without the token is 403"
+expect 200 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/status")" "GET /status is 200 after it"
+
+echo "== the Host, Origin and fetch checks on a read"
+status_with() { curl -s -o /dev/null -w '%{http_code}' "$@" "$URL/status"; }
+NAME=$(uname -n)
+expect 403 "$(status_with -H 'Host: evil.example.net')" "Host: evil.example.net is refused"
+expect 200 "$(status_with -H "Host: $NAME")" "Host: $NAME (this machine's name) is 200"
+expect 403 "$(status_with -H "Host: $NAME.example.net")" "Host: $NAME.example.net is refused"
+expect 403 "$(status_with -H 'Origin: http://evil.example.net')" "Origin: http://evil.example.net is refused"
+expect 403 "$(status_with -H 'Sec-Fetch-Site: cross-site')" "Sec-Fetch-Site: cross-site is refused"
+expect 200 "$(status_with -H 'Sec-Fetch-Site: same-origin' -H 'Origin: http://127.0.0.1')" \
+    "Sec-Fetch-Site: same-origin from http://127.0.0.1 is 200"
+
+echo "== the settings' bounds"
+CONF=$T/data/forgefirm.conf
+cp "$CONF" "$T/conf.before"
+expect 400 "$(post /settings "$TOKEN" -d gf_serial=1234567890123)" "a 13-digit gf_serial is 400"
+expect 400 "$(post /settings "$TOKEN" -d laser_disarm_s=99999)" "laser_disarm_s=99999 is 400"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is byte for byte the same" \
+    || bad "a refused value changed the settings file"
+expect 200 "$(post /settings "$TOKEN" -d laser_disarm_s=120)" "laser_disarm_s=120 is 200"
+grep -qx 'laser_disarm_s = 120' "$CONF" && ok "the settings file holds it" \
+    || bad "the settings file does not hold laser_disarm_s = 120"
+
+echo "== the page"
+expect 200 "$(curl -s -D "$T/page.h" -o /dev/null -w '%{http_code}' "$URL/")" "GET / is 200"
+tr -d '\r' < "$T/page.h" | grep -qix "content-security-policy: frame-src 'none'" \
+    && ok "its Content-Security-Policy is frame-src 'none'" \
+    || bad "its Content-Security-Policy is '$(tr -d '\r' < "$T/page.h" | grep -i '^content-security-policy')'"
 
 echo "== the secret ends with its controller"
 CP=$(cat "$T/ctl.pid")
