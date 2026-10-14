@@ -18,7 +18,11 @@
 #   the same settings write from 127.0.0.1 inside the daemon's namespace
 #     is served, and the file then says imperial;
 #   with no account in the scratch tree, a settings write with the token
-#     over HTTPS from 192.0.2.1 is served.
+#     over HTTPS from 192.0.2.1 is served;
+#   GET /events with X-ForgeFIRM-Client: extension-host from 127.0.0.1 in
+#     the daemon's namespace is 200 text/event-stream greeting with event:
+#     hello, and the same header from 192.0.2.1 does not end it (no event:
+#     bye, no "replaced"): the host's slot is a loopback peer's alone.
 #
 # Nothing posts /system/reboot, /system/ssh, or confirm=1. The namespace
 # and the veth are removed on the way out, failure included. Needs root
@@ -45,7 +49,10 @@ T=$(mktemp -d)
 SYS=$T/sys
 CONF=$T/data/forgefirm.conf
 PID=
+EV1=
+EV2=
 cleanup() {
+    for p in $EV1 $EV2; do kill $p 2>/dev/null; wait $p 2>/dev/null; done
     if [ -n "$PID" ]; then kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null; fi
     ip netns del $NS 2>/dev/null
     ip link del $VA 2>/dev/null
@@ -142,6 +149,26 @@ echo "== over HTTPS from $CLIENT, no account"
 expect 200 "$(lan POST "https://$DAEMON:$TLS_PORT/settings" -H "X-ForgeFIRM-Token: $TOKEN" -d ui_units=metric)" \
     "POST /settings with the token over HTTPS is 200"
 expect metric "$(units)" "the settings file says metric again"
+
+echo "== the extension host's event stream"
+ip netns exec $NS curl -sN -D "$T/ev1.head" -o "$T/ev1" -H "X-ForgeFIRM-Client: extension-host" \
+    "http://127.0.0.1:$HTTP_PORT/events" &
+EV1=$!
+until_ok 50 grep -qs '^event: hello' "$T/ev1" && ok "the host's stream greets with event: hello" \
+    || bad "no greeting on the host's stream"
+expect 200 "$(tr -d '\r' < "$T/ev1.head" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p')" \
+    "GET /events with the host's header from 127.0.0.1 is 200"
+expect text/event-stream "$(tr -d '\r' < "$T/ev1.head" | sed -n 's/^Content-Type: //Ip')" "as text/event-stream"
+curl -sN --interface $CLIENT -o "$T/ev2" -H "X-ForgeFIRM-Client: extension-host" "http://$DAEMON:$HTTP_PORT/events" &
+EV2=$!
+until_ok 50 grep -qs '^event: hello' "$T/ev2" || bad "the stream from $CLIENT was not opened"
+sleep 1
+grep -qs -e '^event: bye' -e replaced "$T/ev1" && bad "the same header from $CLIENT ended the host's stream" \
+    || ok "the same header from $CLIENT leaves the host's stream open: no event: bye, no replaced"
+kill $EV1 $EV2
+wait $EV1 $EV2 2>/dev/null
+EV1=
+EV2=
 
 kill $PID
 until_ok 75 eval '! alive $PID' || fatal "the daemon did not stop in 15 s"
