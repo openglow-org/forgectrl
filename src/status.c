@@ -280,6 +280,17 @@ unsigned long machine_switch_bits(void)
     return read_switches();
 }
 
+machine_switches_t machine_switches_decode(unsigned long bits)
+{
+    machine_switches_t s = {
+        .lid = (bits & (1ul << 3)) != 0,
+        .button = (bits & (1ul << 2)) != 0,
+        .interlock_ok = (bits & (1ul << 5)) == 0,
+        .hv_enable = (bits & (1ul << 4)) != 0,
+    };
+    return s;
+}
+
 int machine_lid_closed(void)
 {
     /* Bit 3 (`doors`) is the series combination of both lid switches -
@@ -290,7 +301,7 @@ int machine_lid_closed(void)
      * failure (device missing, not an input device, fd exhaustion), and
      * 0 means "not closed" here, so an unreadable lid keeps the cameras
      * dark rather than letting them capture on a bad read. */
-    return (read_switches() & (1u << 3)) != 0;
+    return machine_switches_decode(read_switches()).lid;
 }
 
 /* Pull one "key":"value" string out of the small gf-latest.json the
@@ -637,7 +648,7 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     if (t2 > aa_off)
         t2 -= aa_off;
     long ilk = rd_attr_long("cnc/interlock_circuit", -1);
-    unsigned long sw = read_switches();
+    machine_switches_t sw = machine_switches_decode(read_switches());
 
     /* The lens: the head's reference and the reach around it, from the
      * same keys the controller opens its Z limit from (lens.h). With the
@@ -775,10 +786,10 @@ int machine_status_json(char *buf, size_t len, const char *extra)
     append(buf, len, &off,
         "\"switches\":{\"lid\":%s,\"button\":%s,\"interlock_ok\":%s,"
         "\"head\":%s,\"hv_enable\":%s}}",
-        (sw & (1u << 3)) ? "true" : "false",
-        (sw & (1u << 2)) ? "true" : "false",
-        (sw & (1u << 5)) ? "false" : "true",
+        sw.lid ? "true" : "false",
+        sw.button ? "true" : "false",
+        sw.interlock_ok ? "true" : "false",
         head_present ? "true" : "false",
-        (sw & (1u << 4)) ? "true" : "false");
+        sw.hv_enable ? "true" : "false");
     return 0;
 }

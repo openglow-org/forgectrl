@@ -6,7 +6,7 @@
  *
  * The real status.c, pointed at one temp directory through its test
  * seams (GF_SYSFS_ROOT, GF_SWITCH_DEV, GF_PROC_STAT, GF_RUN_DIR,
- * FORGECTRL_DATA_DIR), with the supervisor stubbed. Four parts:
+ * FORGECTRL_DATA_DIR), with the supervisor stubbed. Five parts:
  *
  * The camera privacy gate. Every camera entry point in cam.c refuses
  * while machine_lid_closed() is false, but for the head camera to a
@@ -20,6 +20,14 @@
  * process: none may read closed, none may leave an fd behind. The reader
  * caches its device path on first use, so each case runs in its own
  * child, and this part runs before the parent reads the switch at all.
+ *
+ * The switch word's decode, which machine_lid_closed() and the
+ * document's switches read through, driven with literal words: the
+ * device tree's bit numbers and senses, written as numbers, so a
+ * renumbered or inverted bit fails here. Bit 3 set is the lid closed,
+ * bit 2 the button pressed, bit 5 set the interlock loop open
+ * (interlock_ok false), bit 4 the HV_ENABLE readback, which moves
+ * nothing else, and bit 7 decodes to nothing: it is not head presence.
  *
  * machine_is_idle() fails closed: not idle on any read failure, the
  * fd-table exhaustion a connection flood can cause (EMFILE) included. A
@@ -201,6 +209,30 @@ static void lid_gate(void)
           "100 reads without EVIOCGSW: each NOT closed, no fd kept");
 
     unlink(regular);
+}
+
+/* --- the switch word's decode ------------------------------------------- */
+
+static int same(machine_switches_t a, machine_switches_t b)
+{
+    return a.lid == b.lid && a.button == b.button && a.interlock_ok == b.interlock_ok && a.hv_enable == b.hv_enable;
+}
+
+static void switch_decode(void)
+{
+    printf("the switch word's decode (the device tree's bits, as numbers):\n");
+    machine_switches_t none = machine_switches_decode(0);
+    CHECK(!none.lid && !none.button && none.interlock_ok && !none.hv_enable,
+          "no bits: lid open, button up, interlock loop closed, HV_ENABLE low");
+    CHECK(machine_switches_decode(1ul << 3).lid, "bit 3 set: the lid is closed");
+    CHECK(!machine_switches_decode(~(1ul << 3) & 0xffff).lid, "bit 3 clear: the lid is open, whatever else is set");
+    CHECK(machine_switches_decode(1ul << 2).button && !machine_switches_decode(1ul << 2).lid, "bit 2 set: the button is pressed");
+    CHECK(!machine_switches_decode((1ul << 3) | (1ul << 5)).interlock_ok, "bit 5 set: the interlock loop is open");
+    CHECK(machine_switches_decode(1ul << 3).interlock_ok, "bit 5 clear: interlock_ok");
+    machine_switches_t hv = machine_switches_decode((1ul << 3) | (1ul << 4));
+    CHECK(hv.hv_enable && hv.lid && hv.interlock_ok && !hv.button, "bit 4 set: hv_enable, the lid and the loop as they were");
+    CHECK(same(machine_switches_decode(1ul << 7), none) && same(machine_switches_decode((1ul << 3) | (1ul << 7)),
+          machine_switches_decode(1ul << 3)), "bit 7 set decodes to nothing: it is not the head");
 }
 
 /* --- machine_is_idle() -------------------------------------------------- */
@@ -459,13 +491,15 @@ int main(void)
     setenv("FORGECTRL_DATA_DIR", dir, 1);
 
     lid_gate();
+    switch_decode();
     idle_fails_closed();
     sys_block();
     grbl_block();
 
     rmdir(dir);
     printf(failures ? "FAIL: %d check(s) failed\n"
-                    : "PASS: the lid and idle reads fail closed, the sys block reports CPU and "
+                    : "PASS: the lid and idle reads fail closed, the switch word decodes by the device tree's bits, "
+                      "the sys block reports CPU and "
                       "memory, and the grbl block is echoed fresh and gated on a live controller\n",
            failures);
     return failures ? 1 : 0;

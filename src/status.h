@@ -44,6 +44,18 @@ int machine_lid_closed(void);
  * (active = the loop is open), 7 head. */
 unsigned long machine_switch_bits(void);
 
+/* The EV_SW word decoded: the one place in this file each bit's number
+ * and sense is written (the device tree's map). lid is bit 3 set (both
+ * lid switches closed), button bit 2 set, interlock_ok bit 5 CLEAR (the
+ * bit is active while the remote-interlock loop is open), and hv_enable
+ * bit 4 set (a readback that gates nothing). Bit 7 is not head presence
+ * and is not decoded. machine_lid_closed() and the status document's
+ * switches both read through it. */
+typedef struct {
+    int lid, button, interlock_ok, hv_enable;
+} machine_switches_t;
+machine_switches_t machine_switches_decode(unsigned long bits);
+
 /* Factory coolant-thermistor conversion (shared with the diagnostics
  * runner). Raw 10-bit ADC count -> degrees C; out-of-range input maps
  * to -273.15. */
