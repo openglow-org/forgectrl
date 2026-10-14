@@ -913,12 +913,22 @@ static void record_snapshot(FILE *out)
     free(text);
 }
 
+/* FORGECTRL_HOST_TEST=1: the daemon runs on a host, and leaves the
+ * radio and its OOM score alone. */
+static int host_test(void)
+{
+    const char *v = getenv("FORGECTRL_HOST_TEST");
+    return v && strcmp(v, "1") == 0;
+}
+
 /* WiFi radio policy, applied at startup and whenever the wifi_country
  * setting changes. The stored region (unset = "00", the world domain)
  * goes to cfg80211 as the user regulatory hint; power save is pinned
  * off - on a mains-powered machine it only adds latency. */
 void apply_wifi(int set_region)
 {
+    if (host_test())
+        return;
     char cc[8], cmd[48];
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
         !valid_country(cc))
@@ -3370,7 +3380,7 @@ int main(int argc, char **argv)
      * the processes it supervises. Controllers respawn at -500 (see
      * super.c), so they are reclaimed first and the daemon safes and
      * respawns them. */
-    int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+    int ofd = host_test() ? -1 : open("/proc/self/oom_score_adj", O_WRONLY);
     if (ofd >= 0) {
         (void)!write(ofd, "-900", 4);
         close(ofd);

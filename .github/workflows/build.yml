@@ -65,6 +65,8 @@ jobs:
         run: ./build/sanitize_test
       - name: "fflog_e2e (the logging path: the image's rsyslog.conf and the rendered rules, each logger in its own file at its level, a stray tag in system/, the kern facility in kernel/)"
         run: sudo sh tests/fflog_e2e.sh build forgefirm-layer/meta-forgefirm/recipes-extended/rsyslog/rsyslog/rsyslog.conf
+      - name: "host_start (the built daemon on a host: its machine paths in a temporary directory, one read answered, no controller started, iw not run)"
+        run: sh tests/host_start.sh build
       - name: Raw-frame narrowing and Bayer phase
         run: ./build/debayer_test
       - name: Motion gate enclosure read

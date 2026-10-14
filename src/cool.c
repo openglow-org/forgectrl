@@ -155,6 +155,13 @@
 #ifndef GF_SYSFS                /* the host test points these at a fake tree */
 #define GF_SYSFS     "/sys/glowforge/"
 #endif
+/* GF_SYSFS_ROOT overrides the tree at run time, as status.c reads it
+ * (it ends with '/'); unset, GF_SYSFS stands. */
+static const char *sysfs_root(void)
+{
+    const char *r = getenv("GF_SYSFS_ROOT");
+    return (r && *r) ? r : GF_SYSFS;
+}
 #ifndef VERDICT_DIR
 #define VERDICT_DIR  "/run/forgefirm"
 #endif
@@ -577,7 +584,7 @@ static double wall_s(void)
 static int wr_attr(const char *attr, const char *val)
 {
     char path[128];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
@@ -606,7 +613,7 @@ static int wr_attr_long(const char *attr, long val)
 static long rd_long(const char *attr)
 {
     char path[128], buf[24];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
@@ -638,7 +645,7 @@ static int read_temp(const char *attr, float *c)
 static int cnc_is_running(void)
 {
     char path[128], buf[16];
-    snprintf(path, sizeof(path), GF_SYSFS "cnc/state");
+    snprintf(path, sizeof(path), "%scnc/state", sysfs_root());
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return 0;

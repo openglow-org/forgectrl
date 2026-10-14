@@ -79,7 +79,10 @@
  * data directory. */
 #define GRBL_NVS_FILE "EEPROM-glowforge.DAT"
 /* The sysfs tree and the pulse device: the host unit test points both
- * at a directory of plain files. */
+ * at a directory of plain files. At run time GF_SYSFS_ROOT and
+ * GF_PULSE_DEV override them, as FORGECTRL_GRBL_BIN and
+ * FORGECTRL_CLOUD_BIN override the two controllers; unset, each is the
+ * path below. */
 #ifndef GF_SYSFS
 #define GF_SYSFS "/sys/glowforge/"
 #endif
@@ -101,6 +104,30 @@
 #define WR_ATTR_RETRY_US   10000  /* ...this far apart */
 
 typedef enum { Ctl_None = 0, Ctl_Grbl, Ctl_Cloud } ctl_t;
+
+static const char *env_or(const char *name, const char *def)
+{
+    const char *v = getenv(name);
+    return (v && *v) ? v : def;
+}
+
+/* GF_SYSFS_ROOT ends with '/', as status.c reads it. */
+static const char *sysfs_root(void) { return env_or("GF_SYSFS_ROOT", GF_SYSFS); }
+static const char *pulse_dev(void)  { return env_or("GF_PULSE_DEV", PULSE_DEV); }
+
+static const char *ctl_bin(ctl_t ctl)
+{
+    return ctl == Ctl_Grbl ? env_or("FORGECTRL_GRBL_BIN", GRBL_BIN)
+                           : env_or("FORGECTRL_CLOUD_BIN", CLOUD_BIN);
+}
+
+/* FORGECTRL_HOST_TEST=1: the daemon runs on a host, and no process it
+ * starts writes its OOM score. */
+static int host_test(void)
+{
+    const char *v = getenv("FORGECTRL_HOST_TEST");
+    return v && strcmp(v, "1") == 0;
+}
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
@@ -229,12 +256,13 @@ static void broker_open_locked(void)
 {
     if (broker_fd >= 0)
         return;
+    const char *dev = pulse_dev();
     /* A just-stopped legacy holder's close can lag its exit. O_CLOEXEC:
      * only the controller spawn clears the flag before exec, so helper
      * children (curl, fwup, media-ctl, pkill, ...) can never pin the
      * pulse device and defeat the kernel dead-man on the description. */
     for (int i = 0; i < 30 && broker_fd < 0; i++) {
-        broker_fd = open(PULSE_DEV, O_WRONLY | O_CLOEXEC);
+        broker_fd = open(dev, O_WRONLY | O_CLOEXEC);
         if (broker_fd < 0)
             usleep(100 * 1000);
     }
@@ -244,17 +272,17 @@ static void broker_open_locked(void)
      * The loop tries again; the refusal is said once per episode. */
     if (broker_fd < 0) {
         if (!broker_warned)
-            fflog(LOG_CRIT, "super: cannot open " PULSE_DEV ": %s - no "
+            fflog(LOG_CRIT, "super: cannot open %s: %s - no "
                             "controller until the broker holds it",
-                  strerror(errno));
+                  dev, strerror(errno));
         broker_warned = 1;
         return;
     }
     if (flock(broker_fd, LOCK_EX) != 0) {
         if (!broker_warned)
-            fflog(LOG_CRIT, "super: flock on " PULSE_DEV " failed: %s - the "
+            fflog(LOG_CRIT, "super: flock on %s failed: %s - the "
                             "kernel dead-man would be unarmed; no controller "
-                            "until it locks", strerror(errno));
+                            "until it locks", dev, strerror(errno));
         broker_warned = 1;
         close(broker_fd);
         broker_fd = -1;
@@ -264,7 +292,7 @@ static void broker_open_locked(void)
     probed = 0;     /* a fresh hold means unverified motion */
     probe_skipped = 0;
     lenshome_clear();   /* ...and an unreferenced lens */
-    fflog(LOG_INFO, "super: holding " PULSE_DEV " (broker)");
+    fflog(LOG_INFO, "super: holding %s (broker)", dev);
 }
 
 /* The gate's wait for the enclosure. The probe moves the gantry, so it
@@ -423,7 +451,7 @@ aborted:
 static int wr_attr(const char *attr, const char *val)
 {
     char path[96];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int err = 0;
     for (int i = 0; i < WR_ATTR_TRIES; i++) {
         if (i)
@@ -534,7 +562,9 @@ static char **build_child_env(ctl_t ctl, int pulse_fd)
         k++;
     }
     if (ctl == Ctl_Grbl) {
-        if (!(env[k] = strdup("GFSINK=" PULSE_DEV)))
+        char sink[160];
+        snprintf(sink, sizeof(sink), "GFSINK=%s", pulse_dev());
+        if (!(env[k] = strdup(sink)))
             goto fail;
         k++;
     }
@@ -576,6 +606,7 @@ static void free_child_env(char **env)
 static int spawn_output_relay(const char *tag)
 {
     int p[2];
+    int oom = !host_test();
     if (pipe2(p, O_CLOEXEC) != 0)
         return -1;
     pid_t pid = fork();
@@ -601,7 +632,7 @@ static int spawn_output_relay(const char *tag)
             close(fd);
         /* Reclaimed no sooner than the controller it serves: a dead
          * relay turns the controller's stray writes into EPIPE. */
-        int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+        int ofd = oom ? open("/proc/self/oom_score_adj", O_WRONLY) : -1;
         if (ofd >= 0) {
             (void)!write(ofd, "-500", 4);
             close(ofd);
@@ -653,6 +684,8 @@ static void spawn_locked(ctl_t ctl)
         return;
     }
 
+    const char *bin = ctl_bin(ctl);
+    int oom = !host_test();
     int lfd = spawn_output_relay(ctl == Ctl_Grbl ? "grblhal" : "gfcloud");
     pid_t pid = fork();
     if (pid < 0) {
@@ -690,7 +723,7 @@ static void spawn_locked(ctl_t ctl)
         /* A controller must be a less-preferred OOM victim than
          * ordinary processes, but a MORE preferred one than the daemon
          * (which is its dead-man and respawns it). */
-        int ofd = open("/proc/self/oom_score_adj", O_WRONLY);
+        int ofd = oom ? open("/proc/self/oom_score_adj", O_WRONLY) : -1;
         if (ofd >= 0) {
             (void)!write(ofd, "-500", 4);
             close(ofd);
@@ -702,13 +735,13 @@ static void spawn_locked(ctl_t ctl)
              * only: the wizard's own streamer reaches it, no sender
              * on the network does. */
             if (local_posture)
-                execle(GRBL_BIN, GRBL_BIN, "-p", "23", "-b", "::1",
+                execle(bin, bin, "-p", "23", "-b", "::1",
                        "-e", nvs, (char *)NULL, env);
             else
-                execle(GRBL_BIN, GRBL_BIN, "-p", "23",
+                execle(bin, bin, "-p", "23",
                        "-e", nvs, (char *)NULL, env);
         } else {
-            execle(CLOUD_BIN, CLOUD_BIN, (char *)NULL, env);
+            execle(bin, bin, (char *)NULL, env);
         }
         _exit(127);
     }

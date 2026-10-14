@@ -57,6 +57,17 @@ static const char *switch_dev(void)
     return (d && *d) ? d : SWITCH_DEV;
 }
 
+/* And the sysfs tree: GF_SYSFS_ROOT overrides it at run time, as
+ * status.c reads it (it ends with '/'); unset, GF_SYSFS stands. */
+#ifndef GF_SYSFS
+#define GF_SYSFS "/sys/glowforge/"
+#endif
+static const char *sysfs_root(void)
+{
+    const char *r = getenv("GF_SYSFS_ROOT");
+    return (r && *r) ? r : GF_SYSFS;
+}
+
 int liveness_enclosure_classify(unsigned sw, char *why, size_t wlen)
 {
     int lid = !(sw & (1u << SW_BIT_DOORS));
@@ -116,7 +127,7 @@ int liveness_enclosure(char *why, size_t wlen)
 static int wr_attr(const char *attr, const char *val)
 {
     char path[96];
-    snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int fd = open(path, O_WRONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
@@ -128,7 +139,7 @@ static int wr_attr(const char *attr, const char *val)
 static int rd_attr(const char *attr, char *buf, size_t len)
 {
     char path[96];
-    snprintf(path, sizeof(path), "/sys/glowforge/%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;

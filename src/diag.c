@@ -57,6 +57,14 @@
 #define GF_SYSFS   "/sys/glowforge/"
 #define MARKER     "/run/forgefirm-diag.active"
 
+/* GF_SYSFS_ROOT overrides the tree at run time, as status.c reads it
+ * (it ends with '/'); unset, GF_SYSFS stands. */
+static const char *sysfs_root(void)
+{
+    const char *r = getenv("GF_SYSFS_ROOT");
+    return (r && *r) ? r : GF_SYSFS;
+}
+
 /* Check parameters come from cool.h - the same compiled defaults the
  * engine runs - and the configured cool_* keys override both, so the
  * tools always test the check the engine actually runs. */
@@ -109,7 +117,7 @@ static char st_result[768];      /* JSON object, or "" while running */
 static long rd_long(const char *attr)
 {
     char path[128], buf[24];
-    snprintf(path, sizeof(path), GF_SYSFS "%s", attr);
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return -1;
