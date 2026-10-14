@@ -15,10 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: openglow-org/forgefirm
+          path: forgefirm-layer
       - name: Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libulfius-dev libjpeg-dev zlib1g-dev libjansson-dev libgnutls28-dev libcrypt-dev
+          sudo apt-get install -y -qq libulfius-dev libjpeg-dev zlib1g-dev libjansson-dev libgnutls28-dev libcrypt-dev rsyslog
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
       - name: Build
@@ -59,6 +63,8 @@ jobs:
         run: ./build/events_test
       - name: Log-export sanitizer
         run: ./build/sanitize_test
+      - name: "fflog_e2e (the logging path: the image's rsyslog.conf and the rendered rules, each logger in its own file at its level, a stray tag in system/, the kern facility in kernel/)"
+        run: sudo sh tests/fflog_e2e.sh build forgefirm-layer/meta-forgefirm/recipes-extended/rsyslog/rsyslog/rsyslog.conf
       - name: Raw-frame narrowing and Bayer phase
         run: ./build/debayer_test
       - name: Motion gate enclosure read

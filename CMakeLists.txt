@@ -438,7 +438,7 @@ target_compile_options(relcheck_test PRIVATE -Wall -Wextra)
 target_link_libraries(relcheck_test jansson)
 
 # Emitter half of the host end-to-end logging check (tests/fflog_e2e.sh
-# drives it against a private rsyslogd; manual, not CI).
+# drives it against a private rsyslogd; build.yml runs it).
 add_executable(fflog_e2e_test tests/fflog_e2e_test.c src/fflog.c)
 target_compile_options(fflog_e2e_test PRIVATE -Wall -Wextra)
 target_link_libraries(fflog_e2e_test pthread)
