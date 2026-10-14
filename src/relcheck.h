@@ -27,6 +27,16 @@
 #define RELCHECK_DOWNLOAD_FMT \
     "https://github.com/openglow-org/forgefirm/releases/download/%s/%s"
 
+/* The two in force: FORGECTRL_RELCHECK_URL and
+ * FORGECTRL_RELCHECK_DOWNLOAD_FMT when set (a host test's own release
+ * server), the constants above when not. A value is taken only when it
+ * is letters, digits and . - _ : / (the pattern also its two %s): the
+ * check single-quotes the API URL into a command, and the download
+ * passes its URL to curl unquoted. A refused value is no URL, NULL,
+ * never the constant. */
+const char *relcheck_api_url(void);
+const char *relcheck_download_fmt(void);
+
 /* Ceilings: the API reply a fetch may hand over, and the release notes
  * kept from it (cut at a character boundary past the ceiling). */
 #define RELCHECK_BODY_MAX  (256 * 1024)

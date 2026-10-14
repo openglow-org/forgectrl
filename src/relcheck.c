@@ -37,12 +37,48 @@ int relcheck_tag_ok(const char *s)
     return 1;
 }
 
+/* Letters, digits and . - _ : / only; with fmt, also exactly two %s. */
+static int url_ok(const char *s, int fmt)
+{
+    int conv = 0;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || c == '.' || c == '-' || c == '_' || c == ':' || c == '/')
+            continue;
+        if (fmt && c == '%' && s[1] == 's') {
+            conv++;
+            s++;
+            continue;
+        }
+        return 0;
+    }
+    return fmt ? conv == 2 : 1;
+}
+
+static const char *url_from_env(const char *name, const char *def, int fmt)
+{
+    const char *v = getenv(name);
+    if (!v || !*v)
+        return def;
+    return url_ok(v, fmt) ? v : NULL;
+}
+
+const char *relcheck_api_url(void)
+{
+    return url_from_env("FORGECTRL_RELCHECK_URL", RELCHECK_API_URL, 0);
+}
+
+const char *relcheck_download_fmt(void)
+{
+    return url_from_env("FORGECTRL_RELCHECK_DOWNLOAD_FMT", RELCHECK_DOWNLOAD_FMT, 1);
+}
+
 int relcheck_download_url(char *out, size_t len, const char *tag, int probe)
 {
-    if (!relcheck_tag_ok(tag))
+    const char *fmt = relcheck_download_fmt();
+    if (!fmt || !relcheck_tag_ok(tag))
         return -1;
-    int n = snprintf(out, len, RELCHECK_DOWNLOAD_FMT, tag,
-                     probe ? RELCHECK_PROBE_ASSET : RELCHECK_ASSET);
+    int n = snprintf(out, len, fmt, tag, probe ? RELCHECK_PROBE_ASSET : RELCHECK_ASSET);
     return n > 0 && (size_t)n < len ? 0 : -1;
 }
 
@@ -68,11 +104,17 @@ static const char *str_or(json_t *v, const char *dflt)
 int relcheck(struct relcheck_result *r, relcheck_fetch_fn fetch)
 {
     memset(r, 0, sizeof(*r));
+    const char *url = relcheck_api_url();
+    if (!url) {
+        snprintf(r->detail, sizeof(r->detail),
+                 "FORGECTRL_RELCHECK_URL is not a URL this check takes");
+        return 0;
+    }
     char *body = malloc(RELCHECK_BODY_MAX);
     if (!body)
         return -1;
     int http = 0;
-    if (fetch(RELCHECK_API_URL, body, RELCHECK_BODY_MAX, &http) != 0) {
+    if (fetch(url, body, RELCHECK_BODY_MAX, &http) != 0) {
         free(body);
         return -1;
     }

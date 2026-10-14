@@ -36,6 +36,7 @@
 #include "diag.h"
 #include "fflog.h"
 #include "lease.h"
+#include "paths.h"
 #include "relcheck.h"
 #include "settings.h"
 #include "status.h"
@@ -57,12 +58,15 @@
 #include <unistd.h>
 
 #define FFBOOT      "/usr/sbin/ffboot"
-#define DATA_DIR    "/data/forgefirm"
-#define ARCHIVE_DIR DATA_DIR "/archive"
-#define DL_FW       DATA_DIR "/download.fw"
-#define DL_PROBE    DATA_DIR "/download-probe"
-#define UP_FW       DATA_DIR "/upload.fw"
-#define LOCK_FILE   DATA_DIR "/update.lock"
+/* The update's files, in the data directory (paths.h: FORGECTRL_DATA_DIR,
+ * /data/forgefirm when unset). Made once by update_init, before any route
+ * or job reads them. */
+static char archive_dir[200], dl_fw[200], dl_probe[200], up_fw[200], lock_file[200];
+#define ARCHIVE_DIR archive_dir
+#define DL_FW       dl_fw
+#define DL_PROBE    dl_probe
+#define UP_FW       up_fw
+#define LOCK_FILE   lock_file
 #define KEY_RELEASE "/etc/forgefirm/keys/forgefirm-release.pub"
 #define KEY_GF_DIR  "/etc/forgefirm/keys/gf"
 /* An upload larger than any plausible archive is cut off (slot is
@@ -91,7 +95,7 @@ static char   job_kind[24];
 static char   job_phase[96];
 static time_t job_started;
 static char   job_result[768];      /* JSON object, or "" */
-static char   progress_file[64];    /* file whose growth is progress */
+static char   progress_file[200];   /* file whose growth is progress */
 static int    job_probe;            /* the job is a probe download */
 
 static pthread_mutex_t up_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -305,7 +309,9 @@ static int fw_classify(const char *file)
 static void archive_manifest_version(const char *file, char *out, size_t len)
 {
     out[0] = '\0';
-    FILE *f = fopen(ARCHIVE_DIR "/manifest", "r");
+    char manifest[256];
+    snprintf(manifest, sizeof(manifest), "%s/manifest", ARCHIVE_DIR);
+    FILE *f = fopen(manifest, "r");
     if (!f)
         return;
     char line[512];
@@ -493,7 +499,7 @@ static int lock_fd = -1;
 
 static int take_lock(void)
 {
-    mkdir(DATA_DIR, 0755);
+    mkdir(ff_data_dir(), 0755);
     lock_fd = open(LOCK_FILE, O_CREAT | O_RDWR, 0644);
     if (lock_fd < 0)
         return -1;
@@ -687,7 +693,7 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
                 continue;
             char path[512];
             struct stat st;
-            snprintf(path, sizeof(path), ARCHIVE_DIR "/%s", e->d_name);
+            snprintf(path, sizeof(path), "%s/%s", ARCHIVE_DIR, e->d_name);
             if (stat(path, &st) != 0)
                 continue;
             char name[160], ver[48] = "", date[24] = "";
@@ -1014,9 +1020,9 @@ static void *dl_worker(void *arg)
     snprintf(progress_file, sizeof(progress_file), "%s", path);
     pthread_mutex_unlock(&mu);
 
-    mkdir(DATA_DIR, 0755);
+    mkdir(ff_data_dir(), 0755);
     unlink(path);
-    char cmd[512], out[512];
+    char cmd[768], out[512];
     snprintf(cmd, sizeof(cmd),
              "curl -fSL --max-time 600 --max-filesize " DL_MAX_BYTES
              " -o %s %s 2>&1", path, url);
@@ -1076,7 +1082,7 @@ int cb_update_download(const struct _u_request *req,
 
 struct apply_args {
     const struct slot_target *slot;
-    char file[128];
+    char file[200];                 /* the staged archive's path */
     int allow_unsigned;
 };
 
@@ -1268,7 +1274,7 @@ int update_upload_sink(const struct _u_request *req, const char *key,
             up_error = 1;
             up_bytes = 0;
         } else {
-            mkdir(DATA_DIR, 0755);
+            mkdir(ff_data_dir(), 0755);
             up_fp = fopen(UP_FW, "wb");
             up_bytes = 0;
             up_error = up_fp ? 0 : 1;
@@ -1379,10 +1385,10 @@ static int restore_run(const struct slot_target *slot, const char *file,
     job_set_phase("verifying archive checksum");
     snprintf(cmd, sizeof(cmd),
              "M=$(sed -n 's|.* %s md5=\\([0-9a-f]*\\)$|\\1|p' "
-             ARCHIVE_DIR "/manifest | head -n 1); "
+             "%s/manifest | head -n 1); "
              "[ -n \"$M\" ] || exit 2; "
-             "echo \"$M  " ARCHIVE_DIR "/%s\" | md5sum -c - >/dev/null 2>&1",
-             file, file);
+             "echo \"$M  %s/%s\" | md5sum -c - >/dev/null 2>&1",
+             file, ARCHIVE_DIR, ARCHIVE_DIR, file);
     int rc = run_cmd(out, sizeof(out), cmd);
     if (rc == 2) {
         drop_lock();
@@ -1407,8 +1413,8 @@ static int restore_run(const struct slot_target *slot, const char *file,
      * name is charset-restricted at the endpoint, so no second `sh -c`
      * wrapper around the interpolated value. */
     snprintf(cmd, sizeof(cmd),
-             "set -o pipefail; gzip -dc " ARCHIVE_DIR "/%s | "
-             "dd of=%s bs=1M 2>&1 | tail -n 1", file, slot->dev);
+             "set -o pipefail; gzip -dc %s/%s | "
+             "dd of=%s bs=1M 2>&1 | tail -n 1", ARCHIVE_DIR, file, slot->dev);
     rc = run_cmd(out, sizeof(out), cmd);
     if (rc != 0) {
         drop_lock();
@@ -1641,7 +1647,7 @@ int cb_restore_factory(const struct _u_request *req,
     if (strstr(file, ".."))
         return reply_err(res, 400, "invalid archive name");
     char path[256];
-    snprintf(path, sizeof(path), ARCHIVE_DIR "/%s", file);
+    snprintf(path, sizeof(path), "%s/%s", ARCHIVE_DIR, file);
     struct stat st;
     if (stat(path, &st) != 0 || st.st_size == 0)
         return reply_err(res, 404, "archive not found");
@@ -1689,7 +1695,13 @@ int cb_update_status(const struct _u_request *req, struct _u_response *res,
 
 void update_init(void)
 {
-    mkdir(DATA_DIR, 0755);
+    const char *dd = ff_data_dir();
+    snprintf(archive_dir, sizeof(archive_dir), "%s/archive", dd);
+    snprintf(dl_fw, sizeof(dl_fw), "%s/download.fw", dd);
+    snprintf(dl_probe, sizeof(dl_probe), "%s/download-probe", dd);
+    snprintf(up_fw, sizeof(up_fw), "%s/upload.fw", dd);
+    snprintf(lock_file, sizeof(lock_file), "%s/update.lock", dd);
+    mkdir(dd, 0755);
     /* A stale lock file from a crash is harmless: flock state dies with
      * the holder. Partial staged files are re-verified before use. */
 
