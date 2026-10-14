@@ -71,6 +71,8 @@ jobs:
         run: sh tests/ulfius_image.sh forgefirm-layer/meta-forgefirm/recipes-extended/ulfius build/ulfius-image
       - name: "host_routes (the controller up on a host: the report channel and its secret, the event streams' cap, the motion routes to the port, the extension and setup routes)"
         run: sh tests/host_routes.sh build build/ulfius-image/lib
+      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off)"
+        run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: Raw-frame narrowing and Bayer phase
         run: ./build/debayer_test
       - name: Motion gate enclosure read
