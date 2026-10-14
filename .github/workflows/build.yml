@@ -75,13 +75,13 @@ jobs:
         run: sh tests/ulfius_image.sh forgefirm-layer/meta-forgefirm/recipes-extended/ulfius build/ulfius-image
       - name: "host_routes (the controller up on a host: the report channel and its secret, the event streams' cap, the motion routes to the port, the extension and setup routes)"
         run: sh tests/host_routes.sh build build/ulfius-image/lib
-      - name: "host_ext (the package upload sink on a host: the token, the idle machine, the host's verdict on the staged bytes, the discard, the install with nothing staged, a key without the button)"
+      - name: "host_ext (the extension host's routes on a host, against a compiled stand-in that is a live host: the upload sink, the install and a key without the button, the package routes and their 403s, a package's check run with the lease free and the setup record untouched)"
         run: sh tests/host_ext.sh build build/ulfius-image/lib
       - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off)"
         run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: "host_guard (the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export)"
         run: sh tests/host_guard.sh build build/ulfius-image/lib
-      - name: "host_lan (writes from a LAN peer go to HTTPS: a network namespace, one veth, the daemon as the CI user)"
+      - name: "host_lan (writes from a LAN peer go to HTTPS, and the camera key reads from the LAN with the reads closed: a network namespace, one veth, the daemon as the CI user)"
         run: sudo sh tests/host_lan.sh build build/ulfius-image/lib
       - name: "host_update (the release check against a local release server, and an update job's lease: a probe download refuses the settings and a job)"
         run: sh tests/host_update.sh build build/ulfius-image/lib

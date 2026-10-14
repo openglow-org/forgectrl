@@ -19,6 +19,14 @@
 #     is served, and the file then says imperial;
 #   with no account in the scratch tree, a settings write with the token
 #     over HTTPS from 192.0.2.1 is served;
+#   the camera key: read from 127.0.0.1 with the token (32 characters);
+#     with panel_open_reads=0, GET /cam/status from 192.0.2.1 over HTTP
+#     and over HTTPS is 403 with no key or a wrong one, and 200 with the
+#     key as ?key= or as X-ForgeFIRM-Camera-Key; the key alone writes no
+#     setting (403); after a rotation from 127.0.0.1 the old key is 403 and
+#     the new one 200; panel_open_reads is then put back (127.0.0.1 itself
+#     reads with the reads closed, so the closed reads are the LAN
+#     client's);
 #   GET /events with X-ForgeFIRM-Client: extension-host from 127.0.0.1 in
 #     the daemon's namespace is 200 text/event-stream greeting with event:
 #     hello, and the same header from 192.0.2.1 does not end it (no event:
@@ -69,6 +77,8 @@ alive() { s=$(cut -d' ' -f3 /proc/$1/stat 2>/dev/null); [ -n "$s" ] && [ "$s" !=
 until_ok() { n=$1; shift; while ! "$@"; do n=$((n - 1)); [ $n -gt 0 ] || return 1; sleep 0.2; done; }
 header() { tr -d '\r' < "$T/head" | sed -n "s/^$1: //Ip"; }
 units() { sed -n 's/^ui_units *= *//p' "$CONF"; }
+open_reads() { sed -n 's/^panel_open_reads *= *//p' "$CONF"; }
+key() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("key") or "")' "$T/body" 2>/dev/null; }
 
 # lan <method> <url> [curl args]: from 192.0.2.1; the status, the body in
 # $T/body, the headers in $T/head; never follows a redirect
@@ -149,6 +159,35 @@ echo "== over HTTPS from $CLIENT, no account"
 expect 200 "$(lan POST "https://$DAEMON:$TLS_PORT/settings" -H "X-ForgeFIRM-Token: $TOKEN" -d ui_units=metric)" \
     "POST /settings with the token over HTTPS is 200"
 expect metric "$(units)" "the settings file says metric again"
+
+echo "== the camera key, with the reads closed"
+expect 200 "$(inside GET "http://127.0.0.1:$HTTP_PORT/system/camera-key" -H "X-ForgeFIRM-Token: $TOKEN")" \
+    "GET /system/camera-key from 127.0.0.1 with the token is 200"
+KEY=$(key)
+expect 32 "${#KEY}" "the key is 32 characters"
+case $KEY in 0*) WRONG=1${KEY#?} ;; *) WRONG=0${KEY#?} ;; esac
+OPEN=$(open_reads)
+expect 200 "$(inside POST "http://127.0.0.1:$HTTP_PORT/settings" -H "X-ForgeFIRM-Token: $TOKEN" -d panel_open_reads=0)" \
+    "panel_open_reads=0 from 127.0.0.1 is 200"
+for base in "http://$DAEMON:$HTTP_PORT" "https://$DAEMON:$TLS_PORT"; do
+    expect 403 "$(lan GET "$base/cam/status")" "GET $base/cam/status from $CLIENT with no key is 403"
+    expect 403 "$(lan GET "$base/cam/status?key=$WRONG")" "with a wrong key, 403"
+    expect 200 "$(lan GET "$base/cam/status?key=$KEY")" "with ?key= of the key, 200"
+    expect 200 "$(lan GET "$base/cam/status" -H "X-ForgeFIRM-Camera-Key: $KEY")" "with the key in X-ForgeFIRM-Camera-Key, 200"
+done
+expect 403 "$(lan POST "https://$DAEMON:$TLS_PORT/settings" -H "X-ForgeFIRM-Camera-Key: $KEY" -d panel_open_reads=0)" \
+    "POST /settings from $CLIENT with only the camera key is 403"
+expect 200 "$(inside POST "http://127.0.0.1:$HTTP_PORT/system/camera-key?rotate=1" -H "X-ForgeFIRM-Token: $TOKEN")" \
+    "POST /system/camera-key?rotate=1 from 127.0.0.1 with the token is 200"
+NEW=$(key)
+[ ${#NEW} = 32 ] && [ "$NEW" != "$KEY" ] && ok "the new key is another 32 characters" || bad "the rotation gave '$NEW'"
+expect 403 "$(lan GET "http://$DAEMON:$HTTP_PORT/cam/status?key=$KEY")" "the old key is then 403"
+expect 200 "$(lan GET "http://$DAEMON:$HTTP_PORT/cam/status?key=$NEW")" "and the new key 200"
+# unset is 1, the default; the settings refuse an empty value for it
+BACK=${OPEN:-1}
+expect 200 "$(inside POST "http://127.0.0.1:$HTTP_PORT/settings" -H "X-ForgeFIRM-Token: $TOKEN" -d "panel_open_reads=$BACK")" \
+    "panel_open_reads=$BACK, put back, is 200"
+expect "$BACK" "$(open_reads)" "the settings file holds panel_open_reads = $BACK"
 
 echo "== the extension host's event stream"
 ip netns exec $NS curl -sN -D "$T/ev1.head" -o "$T/ev1" -H "X-ForgeFIRM-Client: extension-host" \
