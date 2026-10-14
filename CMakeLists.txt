@@ -264,6 +264,21 @@ target_compile_options(mp4mux_test PRIVATE -Wall -Wextra)
 add_executable(sha256_test tests/sha256_test.c src/sha256.c)
 target_compile_options(sha256_test PRIVATE -Wall -Wextra)
 
+# Host unit tests for the logging tree, in a scratch tree: logs_test the
+# paths (the machine's while their variables are unset), the validators,
+# configured against effective levels with the reboot that applies them,
+# and the tail; logs_export_test the sanitized export, the panel token,
+# the camera key and the addresses gone from it. CI runs both after the
+# build.
+set(LOGS_TEST_SRC src/logs.c src/auth.c src/camkey.c src/extpkg.c src/lease.c
+    src/sanitize.c src/settings.c src/tokens.c src/sha256.c src/peer.c src/fflog.c)
+add_executable(logs_test tests/logs_test.c ${LOGS_TEST_SRC})
+target_compile_options(logs_test PRIVATE -Wall -Wextra)
+target_link_libraries(logs_test ulfius jansson z pthread)
+add_executable(logs_export_test tests/logs_export_test.c ${LOGS_TEST_SRC})
+target_compile_options(logs_export_test PRIVATE -Wall -Wextra)
+target_link_libraries(logs_export_test ulfius jansson z pthread)
+
 # Host unit test for the sheet id: a fixed salt yields the ids an
 # independent HMAC/base32 implementation yields, and the id never
 # carries the serial. CI runs it after the build.

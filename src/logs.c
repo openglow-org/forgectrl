@@ -67,6 +67,19 @@ static const char *const level_names[] = {
 #define EXPORT_MAX_TOTAL (256L * 1024 * 1024)
 static long export_staged_bytes;
 
+/* The paths at run time (logs.h): the variable when it is set, else the
+ * machine's path. */
+static const char *env_or(const char *name, const char *def)
+{
+    const char *v = getenv(name);
+    return (v && *v) ? v : def;
+}
+
+const char *logs_root(void)      { return env_or("GF_LOGS_ROOT", LOGS_ROOT); }
+const char *logs_rsyslog(void)   { return env_or("GF_LOGS_RSYSLOG", LOGS_RSYSLOG); }
+const char *logs_effective(void) { return env_or("GF_LOGS_EFFECTIVE", LOGS_EFFECTIVE); }
+const char *logs_stage(void)     { return env_or("GF_LOGS_STAGE", STAGE_DIR); }
+
 /* ------------------------------------------------------- validators */
 
 int logs_valid_level(const char *v)
@@ -245,7 +258,7 @@ static void render_logger(FILE *f, const char *name, const char *cond,
                 " flushInterval=\"1\" ioBufferSize=\"64k\""
                 " fileCreateMode=\"0640\" dirCreateMode=\"0755\""
                 " createDirs=\"on\")\n",
-                ind, sd, LOGS_ROOT, name, name);
+                ind, sd, logs_root(), name, name);
     if (sr >= 0 && remote_on)
         fprintf(f, "%sif $syslogseverity <= %d then call ff_remote\n",
                 ind, sr);
@@ -254,17 +267,17 @@ static void render_logger(FILE *f, const char *name, const char *cond,
 
 int logs_render(char *err, size_t errlen)
 {
-    if (mkdir_p(LOGS_ROOT, 0755) != 0) {
-        snprintf(err, errlen, "cannot create %s: %s", LOGS_ROOT,
+    if (mkdir_p(logs_root(), 0755) != 0) {
+        snprintf(err, errlen, "cannot create %s: %s", logs_root(),
                  strerror(errno));
         return -1;
     }
     for (size_t i = 0; i < logs_count; i++) {
         char d[128];
-        snprintf(d, sizeof(d), "%s/%s", LOGS_ROOT, logs_names[i]);
+        snprintf(d, sizeof(d), "%s/%s", logs_root(), logs_names[i]);
         (void)mkdir(d, 0755);
     }
-    (void)mkdir_p(STAGE_DIR, 0700);
+    (void)mkdir_p(logs_stage(), 0700);
 
     char server[132], port[8], proto[8];
     remote_target(server, sizeof(server), port, sizeof(port), proto,
@@ -272,7 +285,7 @@ int logs_render(char *err, size_t errlen)
     int remote_on = server[0] != '\0';
 
     char tmp[160];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", LOGS_RSYSLOG);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", logs_rsyslog());
     FILE *f = fopen(tmp, "w");
     if (!f) {
         snprintf(err, errlen, "cannot write %s: %s", tmp, strerror(errno));
@@ -306,8 +319,8 @@ int logs_render(char *err, size_t errlen)
     render_logger(f, "forgeext",  "$programname == \"forgeext\"",  remote_on);
     render_logger(f, "kernel",    "$syslogfacility-text == \"kern\"", remote_on);
     render_logger(f, "system",    NULL, remote_on);
-    if (fclose(f) != 0 || rename(tmp, LOGS_RSYSLOG) != 0) {
-        snprintf(err, errlen, "cannot install %s: %s", LOGS_RSYSLOG,
+    if (fclose(f) != 0 || rename(tmp, logs_rsyslog()) != 0) {
+        snprintf(err, errlen, "cannot install %s: %s", logs_rsyslog(),
                  strerror(errno));
         unlink(tmp);
         return -1;
@@ -315,7 +328,7 @@ int logs_render(char *err, size_t errlen)
 
     /* The levels now in force, for the panel's configured-vs-effective
      * view (tmpfs: gone at reboot, rewritten by the next render). */
-    snprintf(tmp, sizeof(tmp), "%s.tmp", LOGS_EFFECTIVE);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", logs_effective());
     f = fopen(tmp, "w");
     if (f) {
         for (size_t i = 0; i < logs_count; i++) {
@@ -328,7 +341,7 @@ int logs_render(char *err, size_t errlen)
         fprintf(f, "syslog_server=%s\nsyslog_port=%s\nsyslog_proto=%s\n",
                 server, port, proto);
         fclose(f);
-        (void)rename(tmp, LOGS_EFFECTIVE);
+        (void)rename(tmp, logs_effective());
     }
     return 0;
 }
@@ -339,7 +352,7 @@ int logs_render(char *err, size_t errlen)
  * absent (no render since boot, or an image without one). */
 static int effective_get(const char *key, char *val, size_t len)
 {
-    FILE *f = fopen(LOGS_EFFECTIVE, "r");
+    FILE *f = fopen(logs_effective(), "r");
     if (!f)
         return -1;
     char line[256];
@@ -360,7 +373,7 @@ static int effective_get(const char *key, char *val, size_t len)
 static void dir_usage(const char *name, unsigned long long *bytes, int *files)
 {
     char d[128];
-    snprintf(d, sizeof(d), "%s/%s", LOGS_ROOT, name);
+    snprintf(d, sizeof(d), "%s/%s", logs_root(), name);
     *bytes = 0;
     *files = 0;
     DIR *dp = opendir(d);
@@ -385,9 +398,9 @@ char *logs_list_json(void)
 {
     struct buf b = { NULL, 0, 0 };
     int pending = 0;
-    int have_eff = access(LOGS_EFFECTIVE, R_OK) == 0;
+    int have_eff = access(logs_effective(), R_OK) == 0;
 
-    bput(&b, "{\"root\":\"%s\",\"levels\":[", LOGS_ROOT);
+    bput(&b, "{\"root\":\"%s\",\"levels\":[", logs_root());
     for (size_t i = 0; i < N_LEVELS; i++)
         bput(&b, "%s\"%s\"", i ? "," : "", level_names[i]);
     bput(&b, "],\"loggers\":[");
@@ -446,7 +459,7 @@ char *logs_tail_json(const char *name, long lines, long long from)
         lines = 2000;
 
     char path[256];
-    snprintf(path, sizeof(path), "%s/%s/%s.log", LOGS_ROOT, name, name);
+    snprintf(path, sizeof(path), "%s/%s/%s.log", logs_root(), name, name);
     struct buf b = { NULL, 0, 0 };
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     struct stat st;
@@ -544,14 +557,14 @@ static void rm_rf(const char *path)
 /* Any staging left by an interrupted export. */
 static void clean_stage(void)
 {
-    DIR *dp = opendir(STAGE_DIR);
+    DIR *dp = opendir(logs_stage());
     if (!dp)
         return;
     struct dirent *e;
     while ((e = readdir(dp)) != NULL) {
         if (!strncmp(e->d_name, "export.", 7)) {
             char p[512];
-            snprintf(p, sizeof(p), "%s/%s", STAGE_DIR, e->d_name);
+            snprintf(p, sizeof(p), "%s/%s", logs_stage(), e->d_name);
             rm_rf(p);
         }
     }
@@ -732,7 +745,7 @@ static void stage_tree_dir(sanitizer_t *san, const char *top, const char *name,
                            int always)
 {
     char d[256], sd[160], src[640], dst[640];
-    snprintf(sd, sizeof(sd), "%s/%s", LOGS_ROOT, name);
+    snprintf(sd, sizeof(sd), "%s/%s", logs_root(), name);
     snprintf(d, sizeof(d), "%s/logs/%s", top, name);
     DIR *dp = opendir(sd);
     if (dp || always)
@@ -782,9 +795,9 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
     sanitizer_t *san = NULL;
     if (!e)
         goto fail_oom;
-    (void)mkdir_p(STAGE_DIR, 0700);
+    (void)mkdir_p(logs_stage(), 0700);
     clean_stage();
-    snprintf(e->base, sizeof(e->base), "%s/export.XXXXXX", STAGE_DIR);
+    snprintf(e->base, sizeof(e->base), "%s/export.XXXXXX", logs_stage());
     if (!mkdtemp(e->base)) {
         snprintf(err, errlen, "cannot create staging: %s", strerror(errno));
         goto fail;
@@ -839,9 +852,9 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
     (void)stage_text(san, ext, dst);
     free(ext);
     snprintf(dst, sizeof(dst), "%s/system/rsyslog-forgefirm.conf", top);
-    (void)stage_file(san, LOGS_RSYSLOG, dst);
+    (void)stage_file(san, logs_rsyslog(), dst);
     snprintf(dst, sizeof(dst), "%s/system/loglevels.txt", top);
-    (void)stage_file(san, LOGS_EFFECTIVE, dst);
+    (void)stage_file(san, logs_effective(), dst);
 
     /* crash records: what pstore (ramoops) carried across the last panic
      * reboots, if anything; the directory exists only when it holds some */

@@ -18,6 +18,14 @@
 /* Levels in force since boot (tmpfs; rewritten by every render). */
 #define LOGS_EFFECTIVE "/var/run/forgefirm-loglevels"
 
+/* The paths at run time: GF_LOGS_ROOT, GF_LOGS_RSYSLOG, GF_LOGS_EFFECTIVE
+ * and GF_LOGS_STAGE override them (a host test's scratch tree); unset,
+ * each is the machine's path. */
+const char *logs_root(void);        /* LOGS_ROOT */
+const char *logs_rsyslog(void);     /* LOGS_RSYSLOG */
+const char *logs_effective(void);   /* LOGS_EFFECTIVE */
+const char *logs_stage(void);       /* the export's staging, /data/forgefirm/tmp */
+
 /* The loggers, in display order. */
 extern const char *const logs_names[];
 extern const size_t logs_count;

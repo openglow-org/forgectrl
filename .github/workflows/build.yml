@@ -63,6 +63,10 @@ jobs:
         run: ./build/events_test
       - name: Log-export sanitizer
         run: ./build/sanitize_test
+      - name: "logs_test (the logging tree's paths, the level and target validators, configured against effective levels, the tail)"
+        run: ./build/logs_test
+      - name: "logs_export_test (the sanitized export: the README, the installer's directory without its addresses, the extension list, no panel token or camera key)"
+        run: ./build/logs_export_test
       - name: "fflog_e2e (the logging path: the image's rsyslog.conf and the rendered rules, each logger in its own file at its level, a stray tag in system/, the kern facility in kernel/)"
         run: sudo sh tests/fflog_e2e.sh build forgefirm-layer/meta-forgefirm/recipes-extended/rsyslog/rsyslog/rsyslog.conf
       - name: "host_start (the built daemon on a host: its machine paths in a temporary directory, one read answered, no controller started, iw not run)"
