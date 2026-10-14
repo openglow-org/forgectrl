@@ -21,6 +21,9 @@
 #     export carrying it as system/setup.json with the same sheet id and
 #     wizards and no password hash, and no panel token anywhere in the
 #     archive though a log line in the tree carries it
+#   the certificate page, over HTTP and over HTTPS with no token: GET
+#     /cert with the fingerprint GET /settings reports and the host's
+#     name, and no redirect; GET /cert.pem a PEM certificate
 #
 # GF_FUSE_SERIAL gives the daemon a fuse serial, so it derives the sheet
 # id from the salt it makes in the data directory, as a machine does; the
@@ -273,6 +276,22 @@ EOF
 [ $? -eq 0 ] || fails=$((fails + 1))
 [ -z "$(ls -A "$T/stage" 2>/dev/null)" ] && ok "the export's staging is gone from the temporary tree" \
     || bad "the staging is left: $(ls "$T/stage")"
+
+echo "== the certificate page"
+expect 200 "$(get /settings "$TOKEN")" "GET /settings with the token is 200"
+FP=$(jget "$T/body" 'd.get("tls_fingerprint") or ""')
+expect 95 "${#FP}" "tls_fingerprint is 95 characters"
+NAME=$(python3 -c 'import socket; print(socket.gethostname())')
+for base in "http://127.0.0.1:$HTTP_PORT" "https://127.0.0.1:$TLS_PORT"; do
+    expect 200 "$(curl -sk -D "$T/head" -o "$T/body" -w '%{http_code}' "$base/cert")" "GET $base/cert is 200"
+    [ -z "$(header Location)" ] && ok "no Location" || bad "it redirects to $(header Location)"
+    [ ${#FP} -eq 95 ] && grep -qF "$FP" "$T/body" && ok "the page carries the fingerprint" \
+        || bad "the page lacks the fingerprint"
+    grep -qF "$NAME" "$T/body" && ok "the page carries the name $NAME" || bad "the page lacks the name $NAME"
+    expect 200 "$(curl -sk -o "$T/body" -w '%{http_code}' "$base/cert.pem")" "GET $base/cert.pem is 200"
+    [ "$(head -c 27 "$T/body")" = "-----BEGIN CERTIFICATE-----" ] && ok "a PEM certificate" \
+        || bad "/cert.pem does not start with -----BEGIN CERTIFICATE-----"
+done
 
 stop_daemon
 if [ $fails -eq 0 ]; then
