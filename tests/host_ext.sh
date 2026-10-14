@@ -38,6 +38,12 @@
 #     machine lease free, answered yes, ended with its summary, listed
 #     done; the setup record's wizards and the gate as they were; a second
 #     run aborted; a check of a package that is not installed: 404
+#   one session drives a check, another follows: with a temporary
+#     account and two logins, the run session A starts is owned and A's,
+#     owned and not B's, and the token's with no session; B's abort is
+#     409 and the run goes on; B's takeover makes it B's and not A's, and
+#     B's abort ends it aborted; both log out and the users file is
+#     removed again
 #
 # No package is installed and no key is added: each takes the machine's
 # button, which a host does not have. Nothing posts confirm=1, a reboot,
@@ -282,6 +288,49 @@ until_ok 100 ended || bad "the run did not end: $(cat "$T/dark.json")"
 expect aborted "$(jget "$T/dark.json" 'd.get("error")')" "the run ends aborted"
 grep -qx "wizard $PKG abort" "$RAN" && ok "the host was told of the abort" || bad "the host ran: $(tail -3 "$RAN")"
 expect 404 "$(post /wiz/pkg:org.forgetest.nothere/start "$TOKEN")" "a check of a package that is not installed is 404"
+
+echo "== one session drives the check, another follows"
+[ ! -e "$T/data/users" ] || fatal "the scratch tree has an account before the temporary one"
+MNAME=forgetest
+MPW=$(python3 -c 'import secrets; print(secrets.token_hex(8))')
+expect 200 "$(post /wiz/account "$TOKEN" -d name=$MNAME -d password=$MPW)" "POST /wiz/account for a temporary account is 200"
+# login: a new session's cookie, ffsid=<id>
+login() {
+    [ "$(curl -s -D "$T/head" -o "$T/body" -w '%{http_code}' -X POST -d name=$MNAME -d password=$MPW "$URL/login")" = 200 ] \
+        && tr -d '\r' < "$T/head" | sed -n 's/^[Ss]et-[Cc]ookie: \(ffsid=[0-9a-f]*\).*/\1/p' | head -1
+}
+# as <cookie or -> <method> <path>: with the token, and a session's cookie; the status
+as() {
+    if [ "$1" = - ]; then
+        curl -s -o "$T/body" -w '%{http_code}' -X "$2" -H "X-ForgeFIRM-Token: $TOKEN" "$URL$3"
+    else
+        curl -s -o "$T/body" -w '%{http_code}' -X "$2" -H "X-ForgeFIRM-Token: $TOKEN" -H "Cookie: $1" "$URL$3"
+    fi
+}
+# sees <cookie or ->: owned|mine, as GET /wiz/dark tells that requester
+sees() { as "$1" GET /wiz/dark > /dev/null && jget "$T/body" '"%s|%s" % (d.get("owned"), d.get("mine"))'; }
+A=$(login)
+B=$(login)
+[ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ] && ok "two sessions logged in" || bad "no two sessions: '$A' '$B'"
+expect 200 "$(as "$A" POST /wiz/$WID/start)" "session A's start is 200"
+until_ok 100 at_prompt && ok "the run reaches its prompt" || bad "no prompt: $(cat "$T/dark.json")"
+expect 'True|True' "$(sees "$A")" "GET /wiz/dark for A: owned, and mine"
+expect 'True|False' "$(sees "$B")" "for B: owned, and not mine"
+expect 'True' "$(sees - | cut -d'|' -f2)" "for the token with no cookie: mine"
+expect 409 "$(as "$B" POST /wiz/$WID/abort)" "B's abort is 409"
+dark
+expect true "$(jget "$T/dark.json" 'd.get("running")')" "and the run is still going"
+expect 200 "$(as "$B" POST /wiz/$WID/takeover)" "B's takeover is 200"
+expect 'True|False' "$(sees "$B" | cut -d'|' -f2)|$(sees "$A" | cut -d'|' -f2)" "then B's, and not A's"
+expect 200 "$(as "$B" POST /wiz/$WID/abort)" "B's abort is then 200"
+until_ok 100 ended || bad "the run did not end: $(cat "$T/dark.json")"
+expect 'aborted|false' "$(jget "$T/dark.json" '"%s|%s" % (d.get("error"), json.dumps(d.get("running")))')" \
+    "the run ends aborted, and is not running"
+for c in "$A" "$B"; do
+    expect 200 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: $c" "$URL/logout")" "a session logs out"
+done
+rm -f "$T/data/users"
+[ ! -e "$T/data/users" ] && ok "the users file is as it was: none" || bad "the users file is left"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

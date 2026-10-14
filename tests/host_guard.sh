@@ -21,6 +21,12 @@
 #     export carrying it as system/setup.json with the same sheet id and
 #     wizards and no password hash, and no panel token anywhere in the
 #     archive though a log line in the tree carries it
+#   the log tree: GET /logs names forgectrl, its tail carries a line just
+#     written, an unknown logger is 404; the export carries README.txt,
+#     the installer's directory (a probe file there without its MAC or
+#     IP address, and install.log), and system/extensions.json with
+#     enabled, safe_mode, host, and packages; neither the panel token nor
+#     the camera key, each planted in a log line, is in any member
 #   the certificate page, over HTTP and over HTTPS with no token: GET
 #     /cert with the fingerprint GET /settings reports and the host's
 #     name, and no redirect; GET /cert.pem a PEM certificate
@@ -276,6 +282,56 @@ EOF
 [ $? -eq 0 ] || fails=$((fails + 1))
 [ -z "$(ls -A "$T/stage" 2>/dev/null)" ] && ok "the export's staging is gone from the temporary tree" \
     || bad "the staging is left: $(ls "$T/stage")"
+
+echo "== the log tree, the tail, and what the export carries"
+# the installer's directory, which no logger feeds: a probe with two
+# addresses (documentation ranges) for the sanitizer, and an install log
+mkdir -p "$T/log/install"
+echo "forgetest export probe from 02:00:5e:10:20:30 at 192.0.2.77" > "$T/log/install/forgetest-probe.txt"
+echo "the installer's own line" > "$T/log/install/install.log"
+expect 200 "$(get /system/camera-key "$TOKEN")" "GET /system/camera-key is 200"
+CAMKEY=$(jget "$T/body" 'd.get("key") or ""')
+LINE="2026-10-14T09:01:00 forgectrl[1] INFO host_guard tail probe $$"
+echo "$LINE" >> "$T/log/forgectrl/forgectrl.log"
+# a line that carries the camera key, so the export has one to remove
+echo "2026-10-14T09:01:01 forgectrl[1] INFO probe camera key $CAMKEY" >> "$T/log/forgectrl/forgectrl.log"
+expect 200 "$(get /logs "$TOKEN")" "GET /logs is 200"
+expect True "$(jget "$T/body" 'str("forgectrl" in [l.get("name") for l in d.get("loggers") or []])')" "and names forgectrl"
+expect 200 "$(get '/logs/tail?name=forgectrl' "$TOKEN")" "GET /logs/tail?name=forgectrl is 200"
+grep -qF "$LINE" "$T/body" && ok "and carries the line just written" || bad "the tail lacks the line just written"
+expect 404 "$(get '/logs/tail?name=no-such-logger' "$TOKEN")" "an unknown logger is 404"
+code=$(curl -s -o "$T/export2.tgz" -w '%{http_code}' --max-time 120 -X POST -H "X-ForgeFIRM-Token: $TOKEN" "$URL/logs/export")
+expect 200 "$code" "POST /logs/export is 200"
+python3 - "$T/export2.tgz" "$TOKEN" "$CAMKEY" <<'EOF'
+import gzip, io, json, sys, tarfile
+path, token, camkey = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
+def say(ok, what):
+    print('  %s: %s' % ('ok' if ok else 'FAIL', what))
+    return 0 if ok else 1
+try:
+    tf = tarfile.open(fileobj=io.BytesIO(gzip.decompress(open(path, 'rb').read())))
+    files = {m.name: tf.extractfile(m).read() for m in tf.getmembers() if m.isfile()}
+except (OSError, tarfile.TarError, EOFError) as e:
+    sys.exit(say(False, 'the export is a tar.gz: %s' % e))
+fails = say(True, 'the export is a tar.gz of %d files' % len(files))
+def one(suffix):
+    got = [n for n in files if n.endswith(suffix)]
+    return files[got[0]] if got else None
+fails += say(one('/README.txt') is not None, 'it carries README.txt')
+probe = (one('/logs/install/forgetest-probe.txt') or b'').decode('utf-8', 'replace')
+fails += say('forgetest export probe' in probe, 'it carries the installer directory\'s probe, with its line')
+fails += say('02:00:5e:10:20:30' not in probe, 'the probe without its MAC address')
+fails += say('192.0.2.77' not in probe, 'the probe without its IP address')
+fails += say(one('/logs/install/install.log') is not None, 'it carries install.log')
+ext = one('/system/extensions.json')
+doc = json.loads(ext.decode('utf-8')) if ext else {}
+fails += say(set(doc) >= {'enabled', 'safe_mode', 'host', 'packages'},
+             'system/extensions.json has enabled, safe_mode, host, and packages: %s' % sorted(doc))
+fails += say(len(camkey) == 32 and not [n for n, b in files.items() if token in b or camkey in b],
+             'neither the panel token nor the camera key is in any member')
+sys.exit(1 if fails else 0)
+EOF
+[ $? -eq 0 ] || fails=$((fails + 1))
 
 echo "== the certificate page"
 expect 200 "$(get /settings "$TOKEN")" "GET /settings with the token is 200"
