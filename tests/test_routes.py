@@ -6,11 +6,14 @@
 
 Every API path the panel's scripts call is a route main.c registers;
 every row of main.c's routes[] carries its capability column, NULL or
-a capability the closed list in tokens.c resolves; and serve_page sends
-PAGE_POLICY, the header that lets no frame navigate anywhere.
+a capability the closed list in tokens.c resolves; serve_page sends
+PAGE_POLICY, the header that lets no frame navigate anywhere; and the
+dev-server mock serves the daemon's page, its policy and its panel's
+files, because the frame-isolation harness renders the mock's page.
 
 Run: python3 -B -m unittest -v tests/test_routes.py
 """
+import importlib.util
 import os
 import re
 import unittest
@@ -47,6 +50,15 @@ def resolves(cap, closed):
     return cap in closed
 
 
+def devserver():
+    """tools/devserver.py, loaded: the page the dev server and the
+    frame-isolation harness serve."""
+    spec = importlib.util.spec_from_file_location('devserver', os.path.join(ROOT, 'tools', 'devserver.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def panel_routes():
     """The API paths the panel's scripts call (a quoted literal starting
     with a slash, at a fetch/fx/startJob call or as a stream source)."""
@@ -78,6 +90,14 @@ class RouteTest(unittest.TestCase):
         self.assertRegex(src, r'#define PAGE_POLICY "[^"]+"')
         body = re.search(r'static int serve_page\(.*?\n\}', src, re.S).group(0)
         self.assertIn('"Content-Security-Policy", PAGE_POLICY', body)
+
+    def test_the_mock_serves_the_daemons_page(self):
+        ds = devserver()
+        policy = re.search(r'#define PAGE_POLICY "([^"]*)"', read('src/main.c')).group(1)
+        index = re.search(r'PAGE STREQUAL "index"\)\s*set\(CSS_FILES ([^)]*)\)\s*set\(JS_FILES ([^)]*)\)',
+                          read('src/ui/embed.cmake'))
+        self.assertEqual(ds.PAGE_HEADERS['Content-Security-Policy'], policy)
+        self.assertEqual((ds.CSS_FILES, ds.JS_FILES), (tuple(index.group(1).split()), tuple(index.group(2).split())))
 
 
 if __name__ == '__main__':

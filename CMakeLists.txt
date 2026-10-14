@@ -361,8 +361,8 @@ target_link_libraries(tokens_test pthread)
 # and real ulfius requests; the account, the sessions, the camera key, and
 # the settings are the test's stubs. With it, the loopback peer check:
 # 127/8, ::1 and the v4-mapped 127 a dual-stack listener reports pass; a
-# LAN address in either family, a link-local, another family and a
-# truncated sockaddr fail closed.
+# LAN address in either family, a link-local, ffff and 127 without the
+# mapped prefix, another family and a truncated sockaddr fail closed.
 add_executable(auth_scoped_test tests/auth_scoped_test.c src/auth.c src/tokens.c src/sha256.c
                src/peer.c src/fflog.c)
 target_compile_options(auth_scoped_test PRIVATE -Wall -Wextra)

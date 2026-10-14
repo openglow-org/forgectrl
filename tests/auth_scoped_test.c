@@ -22,7 +22,8 @@
  * The loopback peer check behind auth.c's loopback-only rules (peer.c):
  * a dual-stack listener reports an IPv4 client as a v4-mapped
  * IPv6 peer, so 127/8, ::1 and mapped 127 pass, and a LAN address in
- * either family, a link-local, another family, NULL, and a sockaddr_in6
+ * either family, a link-local, ffff and 127 without the twelve-byte
+ * mapped prefix, another family, NULL, and a sockaddr_in6
  * whose address bytes were lost to a sizeof(struct sockaddr) copy (what
  * an unpatched ulfius hands over) fail closed.
  */
@@ -115,6 +116,7 @@ static void test_peer(void)
     CHECK(!peer_v4("192.0.2.5"), "192.0.2.5 (LAN) passed");
     CHECK(!peer_v6("::ffff:192.0.2.5"), "::ffff:192.0.2.5 (mapped LAN) passed");
     CHECK(!peer_v6("fe80::1"), "fe80::1 (link-local) passed");
+    CHECK(!peer_v6("1::ffff:7f00:1"), "1::ffff:7f00:1 (ffff and 127 without the mapped prefix) passed");
     struct sockaddr_un un = { .sun_family = AF_UNIX };
     CHECK(!peer_is_loopback((const struct sockaddr *)&un), "AF_UNIX passed");
     CHECK(!peer_is_loopback(NULL), "NULL passed");
