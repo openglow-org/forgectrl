@@ -25,7 +25,9 @@
  *   G. a safing write is tried three times before it is named;
  *      the stop path repeats the pair after the signal
  *   H. a broker fd that cannot be locked refuses the spawn, and an
- *      open that fails keeps trying instead of a self-opening controller
+ *      open that fails keeps trying instead of a self-opening controller;
+ *      GF_PULSE_DEV moves the device, and the refusal names the path
+ *      it tried
  *   I. the engine's fail tier stops the controller and starts it again
  *      without a backoff
  *   J. a motor release is nobody's to end but the operator's: the probe
@@ -613,6 +615,13 @@ int main(void)
             fclose(f);
     }
     CHECK(run_until_spawned(4.0), "the controller comes up once the device opens");
+    /* The default device is there now: only the override can refuse. */
+    reset_state();
+    setenv("GF_PULSE_DEV", "super-test/dev/elsewhere", 1);
+    CHECK(!run_until_spawned(4.0), "a GF_PULSE_DEV that is not there starts no controller");
+    CHECK(strstr(logs, "super-test/dev/elsewhere") != NULL && crit_logs == 1,
+          "the refusal names the path it tried");
+    unsetenv("GF_PULSE_DEV");
 
     printf("I. the engine's fail tier stops the controller and starts it again\n");
     bring_up();
