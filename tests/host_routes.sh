@@ -11,8 +11,8 @@
 # motion probe is skipped and the supervisor spawns the controller's
 # stand-in, which stays running and records the report secret it was
 # handed. A listener on $GF_RUN_DIR/grbl.ctl stands in for the
-# controller's port and answers ok. One case per route, against that
-# daemon:
+# controller's port: it answers state in the controller's form and every
+# other line ok. One case per route, against that daemon:
 #
 #   the report channel: a run report with the secret moves the exhaust
 #     duty; an idle report with no secret, a wrong one, or one of the
@@ -20,7 +20,9 @@
 #     report with the secret ends the session; the secret dies with its
 #     controller
 #   /events: the stream, the cap, the reads beside it, a freed place
-#   the motion routes: the token, the numbers, a line on the port each
+#   the motion routes: the token, the numbers, a line on the port each;
+#     GET /motion/state passing the port's state on, GET /motion/sender,
+#     and the panel page's tray switch
 #   /ext/call with extensions off, a package check that is no wizard,
 #   /wiz/changed, and the menu GET /wiz carries
 #   the write routes without the token, an upload, and a body over the
@@ -150,22 +152,26 @@ rec = {
     'wizards': {i: {'version': version[i], 'completed': ts, 'result': {}, 'applied': {}}
                 for i in st['missing']},
     'flags': {},
+    'completed': ts,
 }
 json.dump(rec, open(sys.argv[2], 'w'), indent=2)
 EOF
 
-# The controller's port: every line is recorded and answered ok.
+# The controller's port: every line is recorded.
 python3 - "$T/run/grbl.ctl" "$T/port.log" <<'EOF' &
 import socket, sys, threading
 path, log = sys.argv[1], sys.argv[2]
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(path)
 srv.listen(4)
+# state is answered in the controller's form (ctlport.c), every other line ok
+STATE = (b'{"state":"Idle","sender":false,"port_jog":false,"released":false,"mpos":[0.000,0.000,0.000],'
+         b'"homed":3,"envelope_open":false,"mcode":null,"sender_out":false,"tray":"in"}\n')
 def serve(c):
     for line in c.makefile('rb'):
         with open(log, 'ab') as o:
             o.write(line)
-        c.sendall(b'ok\n')
+        c.sendall(STATE if line.strip() == b'state' else b'ok\n')
 while True:
     c, _ = srv.accept()
     threading.Thread(target=serve, args=(c,), daemon=True).start()
@@ -260,6 +266,15 @@ expect "tray in" "$(last)" "the port got tray in"
 n=$(lines)
 expect 400 "$(post /motion/tray "$TOKEN" -d tray=up)" "tray=up is 400"
 expect "$n" "$(lines)" "the port got nothing"
+code=$(curl -s -o "$T/body" -w '%{http_code}' "$URL/motion/state")
+expect 200 "$code" "GET /motion/state is 200"
+expect True "$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print("state" in d and "sender" in d)' "$T/body" 2>&1)" \
+    "its body has state and sender"
+expect 200 "$(curl -s -o "$T/body" -w '%{http_code}' "$URL/motion/sender")" "GET /motion/sender is 200"
+expect 200 "$(curl -s -o "$T/page.html" -w '%{http_code}' "$URL/")" "the panel page is 200"
+for want in 'id="traybtn"' trayToggle /motion/tray; do
+    grep -qF "$want" "$T/page.html" && ok "and carries $want" || bad "the panel page lacks $want"
+done
 
 echo "== the extension and setup routes"
 expect 403 "$(post /ext/call - -d id=x)" "an unauthenticated /ext/call is refused"
