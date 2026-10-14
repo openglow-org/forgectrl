@@ -9,7 +9,10 @@ in build/ui/: the page's own inline scripts and every script it names,
 inlined. A syntax error anywhere in one of them stops that script, and a
 page whose script does not run comes up empty while every C test passes.
 This runs `node --check` on each inline script block of each bundled
-page and fails on any error.
+page and fails on any error. It also reads what a page must carry
+(MUST_CARRY): index.html holds the extension card and its script, and
+defines loadExt before the call panel.js runs while the page parses, so
+a later ext.js is a broken tab.
 
 Usage: check_ui_js.py [BUNDLE_DIR]   (default build/ui)
 The node binary is NODE from the environment, else `node` on the PATH.
@@ -25,6 +28,24 @@ import tempfile
 
 SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S | re.I)
 
+# page: (the strings it carries, the (first, then) pairs whose first
+# occurrences come in that order)
+MUST_CARRY = {
+    "index.html": (("extpkgs", "extswitch", "extfile", "extstaged", "extinstallphrase", "extAct", "loadExt"),
+                   (("function loadExt", "loadExt();"),)),
+}
+
+
+def carry_failures(name, html):
+    """What a bundled page lacks of MUST_CARRY, one line each."""
+    strings, order = MUST_CARRY.get(name, ((), ()))
+    out = ["%s carries no %s" % (name, s) for s in strings if s not in html]
+    for first, then in order:
+        a, b = html.find(first), html.find(then)
+        if a < 0 or b < 0 or a > b:
+            out.append("%s has no %s before %s" % (name, first, then))
+    return out
+
 
 def main():
     bundle = sys.argv[1] if len(sys.argv) > 1 else os.path.join("build", "ui")
@@ -37,6 +58,7 @@ def main():
         print("check_ui_js: no bundled pages under %s" % bundle)
         return 2
     failures = 0
+    lacking = 0
     checked = 0
     with tempfile.TemporaryDirectory(prefix="check-ui-js-") as tmp:
         for page in pages:
@@ -56,11 +78,18 @@ def main():
                     print("FAIL %s script %d:\n%s" % (os.path.basename(page), i,
                                                       (r.stderr or r.stdout).strip()))
             print("%-24s %d script(s)" % (os.path.basename(page), len(blocks)))
+            for why in carry_failures(os.path.basename(page), html):
+                lacking += 1
+                print("FAIL %s" % why)
+    for name in sorted(set(MUST_CARRY) - {os.path.basename(p) for p in pages}):
+        lacking += 1
+        print("FAIL %s is not in the bundle" % name)
     if not checked:
         print("check_ui_js: no scripts in the bundled pages")
         return 2
-    print("%s: %d script(s) checked, %d failed" % ("FAIL" if failures else "PASS", checked, failures))
-    return 1 if failures else 0
+    print("%s: %d script(s) checked, %d failed; %d page check(s) failed"
+          % ("FAIL" if failures or lacking else "PASS", checked, failures, lacking))
+    return 1 if failures or lacking else 0
 
 
 if __name__ == "__main__":
