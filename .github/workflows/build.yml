@@ -79,6 +79,8 @@ jobs:
         run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: "host_guard (the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export)"
         run: sh tests/host_guard.sh build build/ulfius-image/lib
+      - name: "host_lan (writes from a LAN peer go to HTTPS: a network namespace, one veth, the daemon as the CI user)"
+        run: sudo sh tests/host_lan.sh build build/ulfius-image/lib
       - name: Raw-frame narrowing and Bayer phase
         run: ./build/debayer_test
       - name: Motion gate enclosure read
