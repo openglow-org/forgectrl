@@ -82,20 +82,53 @@ int liveness_enclosure_classify(unsigned sw, char *why, size_t wlen)
     return 1;
 }
 
+/* The switch word from a file, for a host start: GF_SWITCH_WORD_FILE
+ * names a file holding the word as a C integer (8, or 0x8), and
+ * only when it is set is the device left unread. A file that cannot be
+ * read, or holds anything else, is a failed read. */
+static int switch_word_file(const char *path, unsigned *sw)
+{
+    char buf[32];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    char *end;
+    unsigned long v = strtoul(buf, &end, 0);
+    while (*end == '\n' || *end == ' ')
+        end++;
+    if (buf[0] < '0' || buf[0] > '9' || *end)
+        return -1;
+    *sw = (unsigned)v;
+    return 0;
+}
+
 /* Fails closed: a switch device that cannot be read is no license to
  * drive the gantry with an opening the operator could reach into. */
 int liveness_enclosure(char *why, size_t wlen)
 {
-    uint8_t sw[2] = { 0 };
-    int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    int ok = fd >= 0 && ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
-    if (fd >= 0)
-        close(fd);
+    unsigned word = 0;
+    int ok;
+    const char *wf = getenv("GF_SWITCH_WORD_FILE");
+    if (wf && *wf) {
+        ok = switch_word_file(wf, &word) == 0;
+    } else {
+        uint8_t sw[2] = { 0 };
+        int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        ok = fd >= 0 && ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
+        if (fd >= 0)
+            close(fd);
+        word = sw[0];
+    }
     if (!ok) {
         snprintf(why, wlen, "the lid switches cannot be read");
         return -1;
     }
-    return liveness_enclosure_classify(sw[0], why, wlen);
+    return liveness_enclosure_classify(word, why, wlen);
 }
 
 /* Head accelerometer: iio device on i2c-3 addr 0x1e (glowforge.dts

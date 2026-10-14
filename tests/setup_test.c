@@ -362,6 +362,17 @@ int main(void)
     const char *head[] = { "machine", "lens.travel", "laser.focus", "motion", "cameras" };
     for (size_t i = 0; i < sizeof(head) / sizeof(*head); i++)
         setup_flag(head[i], NULL);
+    /* Under the image's own table: a new tray recommends the focus, a
+     * new fan the airflow check, each with the change as the reason. */
+    setup_set_steps(NULL, 0);
+    CHECK(setup_change_apply("tray") == 0 && rec_reason("laser.focus") &&
+          strstr(rec_reason("laser.focus"), "tray"),
+          "a new tray recommends the focus with the tray as the reason");
+    CHECK(setup_change_apply("fan") == 0 && rec_reason("airflow") &&
+          strstr(rec_reason("airflow"), "fan"),
+          "a new fan recommends the airflow check with the fan as the reason");
+    setup_flag("laser.focus", NULL);
+    setup_flag("airflow", NULL);
     setup_set_steps(steps, 3);
     FILE *f;
 

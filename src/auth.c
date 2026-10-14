@@ -53,6 +53,7 @@
 #include "camkey.h"
 #include "fflog.h"
 #include "logs.h"
+#include "paths.h"
 #include "peer.h"
 #include "session.h"
 #include "settings.h"
@@ -74,8 +75,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define TOKEN_DIR   "/data/forgefirm"
-#define TOKEN_FILE  TOKEN_DIR "/panel.token"
+#define TOKEN_NAME  "panel.token"   /* in the data directory (paths.h) */
 #define TOKEN_HEX   32                 /* 128 bits */
 #define SWITCH_DEV  "/dev/input/event0"
 #define SW_BIT_BUTTON 2
@@ -107,9 +107,11 @@ static void generate_token(void)
 
 void auth_init(void)
 {
-    mkdir(TOKEN_DIR, 0755);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/" TOKEN_NAME, ff_data_dir());
+    mkdir(ff_data_dir(), 0755);
 
-    FILE *f = fopen(TOKEN_FILE, "r");
+    FILE *f = fopen(path, "r");
     if (f) {
         char buf[TOKEN_HEX + 4] = "";
         if (fgets(buf, sizeof(buf), f)) {
@@ -128,7 +130,7 @@ void auth_init(void)
     if (!token[0])
         return;
 
-    int fd = open(TOKEN_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) {
         fflog(LOG_ERR, "auth: cannot persist panel token");
         return;

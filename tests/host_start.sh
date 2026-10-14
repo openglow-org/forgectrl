@@ -14,8 +14,8 @@
 #
 #   sh tests/host_start.sh <build-dir>
 set -e
-# as root the daemon would write the paths it has no override for (the
-# panel token under /data/forgefirm, its markers under /run)
+# as root the daemon would write the paths it has no override for (its
+# markers under /run)
 [ "$(id -u)" != 0 ] || { echo "host_start.sh runs unprivileged"; exit 2; }
 BUILD=$(cd "${1:?build dir}" && pwd)
 HTTP_PORT=18080
