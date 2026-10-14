@@ -11,10 +11,14 @@
  * wrong); a use is remembered in memory and reaches the file at a flush,
  * not at the use; a reload keeps every token; a revoke ends one and only
  * that one; sixteen at most, one name once; a damaged line is dropped and
- * its neighbors kept.
+ * its neighbors kept; the extension host's credential is written mode
+ * 0600, owned by the uid that minted it, and holds exactly
+ * TOKENS_HOST_CAPS of the closed list.
  */
 #include "../src/tokens.h"
 
+#include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +29,34 @@ static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
 
 static char root[128], path[192];
+
+/* The host credential's file is at a fixed path under /run, which is not
+ * the test's to write: while host_file is set, an open or an unlink of
+ * that one path reaches host_file instead. Every other goes through as
+ * it is. */
+static char host_file[224];
+
+static const char *moved(const char *p)
+{
+    return host_file[0] && p && !strcmp(p, TOKENS_HOST_FILE) ? host_file : p;
+}
+
+int open(const char *p, int flags, ...)
+{
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = va_arg(ap, mode_t);
+        va_end(ap);
+    }
+    return openat(AT_FDCWD, moved(p), flags, mode);
+}
+
+int unlink(const char *p)
+{
+    return unlinkat(AT_FDCWD, moved(p), 0);
+}
 
 static const char *file_text(void)
 {
@@ -168,6 +200,50 @@ static void test_damaged_store(void)
           "the list after a damaged store: %s", json());
 }
 
+/* Whether word is one of csv's comma-separated words. */
+static int in_csv(const char *csv, const char *word)
+{
+    size_t n = strlen(word);
+    for (const char *p = csv; p; p = strchr(p, ',') ? strchr(p, ',') + 1 : NULL)
+        if (!strncmp(p, word, n) && (p[n] == ',' || !p[n]))
+            return 1;
+    return 0;
+}
+
+static void test_host_credential(void)
+{
+    char err[200] = "", tok[TOKENS_TEXT_LEN + 2] = "", wrong[256] = "";
+    struct stat st = { 0 };
+    snprintf(host_file, sizeof(host_file), "%s/ext-host.token", root);
+    CHECK(tokens_host_mint(err, sizeof(err)) == 0, "the host credential: %s", err);
+    CHECK(stat(host_file, &st) == 0 && (st.st_mode & 0777) == 0600 && st.st_uid == geteuid(),
+          "the host credential's file: mode %o, owner %d", (unsigned)(st.st_mode & 0777), (int)st.st_uid);
+    FILE *f = fopen(host_file, "r");
+    if (f) {
+        if (!fgets(tok, sizeof(tok), f))
+            tok[0] = '\0';
+        fclose(f);
+    }
+    tok[strcspn(tok, "\n")] = '\0';
+
+    /* Every capability on the closed list, as the list says it: held when
+     * TOKENS_HOST_CAPS names it, and only then. */
+    const char *p = strstr(json(), "\"caps\":[");
+    int judged = 0;
+    for (p = p ? p + 8 : NULL; p && *p == '"'; judged++) {
+        char cap[48];
+        size_t n = strcspn(p + 1, "\"");
+        snprintf(cap, sizeof(cap), "%.*s", (int)n, p + 1);
+        if (tokens_host_check(tok, cap) != in_csv(TOKENS_HOST_CAPS, cap))
+            snprintf(wrong + strlen(wrong), sizeof(wrong) - strlen(wrong), " %s", cap);
+        p += n + 2;
+        if (*p == ',')
+            p++;
+    }
+    CHECK(judged > 0 && !wrong[0], "the host credential is judged wrong on:%s (%d judged)", wrong, judged);
+    host_file[0] = '\0';
+}
+
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/tokens_test.%d", (int)getpid());
@@ -180,6 +256,7 @@ int main(void)
     test_shape_and_check();
     test_limits();
     test_damaged_store();
+    test_host_credential();
 
     char cmd[192];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);

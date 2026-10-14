@@ -65,6 +65,26 @@
  *   intakes D. one fan:     with the intake gate off, no warning names
  *                           intake_2
  *   intakes E. any other value (a hand-edited 0) keeps intake_2 judged
+ *
+ * The phases and the gates, each setting moved past the loop the way the
+ * run start reads it:
+ *
+ *   phases A.  a closed session ends at the idle duties
+ *   phases B.  a busy start takes the cooldown duties until the kernel is
+ *              idle with no session, then the idle duties
+ *   gates A.   the ceiling under the loop: OVERTEMP at the run start; at
+ *              60 it is off, said so; the run's end names the board temps
+ *   gates B.   the start gate over the loop: WARMUP with the heater on and
+ *              the fans idle, released on the minute's minimum, not on a
+ *              slug; both low gates at 0 are off
+ *   gates C.   the critical line under the loop: CRITICAL, no resume, gone
+ *              with the session; at 70 it is off and the ceiling pauses
+ *   gates D.   a fan floor no fan meets: AIRFLOW after the grace and three
+ *              ticks, gone with the session; a floor of 0 is off
+ *   crash watch: never armed in an unarmed session; its thresholds at 0
+ *              are its gates off
+ *   TEC.       fitted: on with the run airflow, off at idle, a dwell before
+ *              it comes on again; not fitted: never
  */
 #define GF_SYSFS    "cool-flow-test/sys/"
 #define VERDICT_DIR "cool-flow-test/run"
@@ -76,6 +96,8 @@
 #define crash_hw_poll   fake_crash_poll
 #define crash_hw_disarm fake_crash_disarm
 #define crash_hw_close  fake_crash_close
+/* The engine's start runs here without its thread: the cases tick it. */
+#define pthread_create  fake_pthread_create
 /* The fake tree is plain files: a write must truncate, as a sysfs store
  * replaces, or a short duty leaves the tail of a longer one for the
  * engine's readback to find. The one attribute a fan-write case names can
@@ -192,9 +214,16 @@ int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 /* The faked crash watch hardware: armed on request, and the next poll
    reports what the test put in src1/src2. */
 static int crash_armed_fake;
+static int crash_arm_calls;
 static unsigned crash_src1, crash_src2;
 int fake_crash_open(void) { return 0; }
-int fake_crash_arm(int x, int y, int abort) { (void)x; (void)y; (void)abort; crash_armed_fake = 1; return 0; }
+int fake_crash_arm(int x, int y, int abort)
+{
+    (void)x; (void)y; (void)abort;
+    crash_armed_fake = 1;
+    crash_arm_calls++;
+    return 0;
+}
 int fake_crash_poll(unsigned *s1, unsigned *s2) { *s1 = crash_src1; *s2 = crash_src2; return 0; }
 void fake_crash_disarm(void) { crash_armed_fake = 0; }
 void fake_crash_close(void) { }
@@ -212,7 +241,13 @@ static void fake_stop(const char *why)
     stop_seen_stop = get_long("cnc/stop");
     stop_seen_latch = get_long("cnc/laser_latch");
 }
-int machine_is_idle(void) { return 1; }
+static int machine_idle = 1;        /* the kernel idle, as status.c reads it */
+int machine_is_idle(void) { return machine_idle; }
+int fake_pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void *), void *arg)
+{
+    (void)t; (void)a; (void)fn; (void)arg;
+    return 0;
+}
 static char last_flag[160];
 int setup_flag(const char *id, const char *reason)
 {
@@ -299,6 +334,7 @@ static void make_tree(void)
     put_long("head/air_assist_pwm", 204);
     put_long("thermal/exhaust_pwm", 0);
     put_long("thermal/intake_pwm", 0);
+    put_long("thermal/tec_on", 0);
 }
 
 /* --- the loop model --------------------------------------------------- */
@@ -313,6 +349,7 @@ typedef struct {
     int session;                    /* ticks since the session opened */
     int heater_ticks;               /* ticks the heater has been on */
     double tube_c;                  /* tube heat arrived at the sensor */
+    double bulk_c;                  /* the bulk warmed past its base (a warm-up) */
 } loop_t;
 
 static void loop_tick(loop_t *L)
@@ -334,8 +371,8 @@ static void loop_tick(loop_t *L)
         L->tube_c += L->k_true * 970.0;
     /* The run airflow's ADC offset: in from the session open, toggling. */
     double offset = L->session > 0 ? -1.0 + ((L->session & 1) ? 0.6 : 0.0) : 0.0;
-    double down = BASE_C + offset + heater_c + L->tube_c;
-    double up = BASE_C + offset + 0.07 * heater_c + L->tube_c;
+    double down = BASE_C + L->bulk_c + offset + heater_c + L->tube_c;
+    double up = BASE_C + L->bulk_c + offset + 0.07 * heater_c + L->tube_c;
     if (L->dead_down)
         unlink(GF_SYSFS "pic/water_temp_1");
     else
@@ -414,10 +451,11 @@ static void run_tick(loop_t *L)
     engine_tick();
 }
 
-/* Open a run session on a settled loop (the session's first tick runs). */
-static void open_session(loop_t *L)
+/* Settle idle and open a run session (the session's first tick runs). The
+ * engine reads its settings at the run start, so a case that sets them
+ * after close_session sees them take effect here. */
+static void settle_and_open(loop_t *L)
 {
-    close_session(L);
     L->lit = 0;
     L->heater_ticks = 0;
     L->tube_c = 0.0;
@@ -429,6 +467,13 @@ static void open_session(loop_t *L)
     }
     L->session = 1;
     run_tick(L);
+}
+
+/* Open a run session on a settled loop. */
+static void open_session(loop_t *L)
+{
+    close_session(L);
+    settle_and_open(L);
 }
 
 static int failures;
@@ -754,6 +799,261 @@ static void intakes(void)
     kv[0] = NULL;
 }
 
+/* --- the phases' duties, the gates moved past the loop, the TEC ------- */
+
+/* The exhaust at its run duty on the bench reference: about 11640 rpm. */
+#define EXHAUST_TACH_RUN 2577320
+
+/* The verdict document as a controller reads it carries this text. */
+static int verdict_has(const char *needle)
+{
+    char buf[512];
+    FILE *f = fopen(VERDICT_FILE, "r");
+    if (!f)
+        return 0;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
+/* The published state of one fan's gate. */
+static int fan_state_is(const char *id, const char *state)
+{
+    json_error_t e;
+    json_t *j = json_loads(pub_fan_gates, 0, &e);
+    const char *s = json_string_value(json_object_get(json_object_get(j, id), "state"));
+    int ok = s && !strcmp(s, state);
+    json_decref(j);
+    return ok;
+}
+
+/* The session ends: one idle report, one tick. */
+static void session_end_tick(loop_t *L)
+{
+    L->session = 0;
+    loop_tick(L);
+    tick("idle", 0);
+}
+
+static void phases(loop_t *L)
+{
+    printf("phases A. a closed session ends at the idle duties\n");
+    open_session(L);
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN && get_long("thermal/intake_pwm") == INTAKE_RUN,
+          "the session at its run duties");
+    close_session(L);
+    CHECK(cool_state == Cool_Idle && get_long("thermal/exhaust_pwm") == 0 && get_long("thermal/intake_pwm") == 0,
+          "idle: the exhaust and intake PWMs at 0");
+
+    printf("phases B. a busy start takes the cooldown duties and gives them up once the machine is idle\n");
+    machine_idle = 0;
+    cool_init();
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_COOL && get_long("thermal/intake_pwm") == INTAKE_COOL,
+          "the kernel busy at the start: the cooldown duties");
+    for (int i = 0; i < 3; i++)
+        tick("idle", 0);
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_COOL, "they stand while the kernel is busy");
+    machine_idle = 1;
+    logbuf[0] = '\0';
+    tick("idle", 0);
+    CHECK(get_long("thermal/exhaust_pwm") == 0 && get_long("thermal/intake_pwm") == 0,
+          "idle with no session: the idle duties");
+    CHECK(log_has("the machine is idle after the busy start"), "and the line says so");
+}
+
+static void gate_ceiling(loop_t *L)
+{
+    printf("gates A. the ceiling under the loop holds the run at its start; at its off end it is skipped\n");
+    close_session(L);
+    CHECK(!strcmp(pub_verdict, "OK"), "before the run: OK");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && !pub_fire_ok && pub_hold,
+          "a ceiling under the loop: OVERTEMP, fire blocked, hold at the run start");
+    close_session(L);
+    kv[0] = "cool_temp_max"; kv[1] = "60"; kv[2] = NULL;
+    logbuf[0] = '\0';
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "OK") && strstr(pub_gates_off, "\"coolant_max\""),
+          "the ceiling at 60: OK, coolant_max in gates_off");
+    CHECK(log_has("gate coolant_max OFF: cool_temp_max = 60"), "the run-start line names the gate off");
+    logbuf[0] = '\0';
+    session_end_tick(L);
+    const char *t = strstr(logbuf, "temps this job");
+    CHECK(t && strstr(t, "chassis 25.0") && strstr(t, "soc 38.0"), "the run's end names the board temperatures");
+    kv[0] = NULL;
+    close_session(L);
+}
+
+static void gate_warmup(loop_t *L)
+{
+    printf("gates B. the start gate over the loop holds a warm-up; the bulk, not a slug, releases it\n");
+    close_session(L);
+    kv[0] = "cool_temp_start"; kv[1] = "23.3"; kv[2] = NULL;     /* 1 C over the loop's 22.3 */
+    settle_and_open(L);
+    CHECK(cool_state == Cool_Warmup && !strcmp(pub_verdict, "WARMUP") && pub_hold && !pub_fire_ok &&
+          !strcmp(pub_phase, "warm-up"), "WARMUP, hold, fire blocked, phase warm-up");
+    CHECK(get_long("thermal/heater_pwm") > 0, "the loop heater on");
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_IDLE && get_long("thermal/intake_pwm") == INTAKE_IDLE &&
+          get_long("head/air_assist_pwm") == AIR_ASSIST_IDLE, "the fans at their idle duties");
+    for (int i = 0; i < WARMUP_WIN + 10; i++)
+        run_tick(L);
+    L->bulk_c = 3.0;                    /* one warm sample: a slug passing the sensor */
+    run_tick(L);
+    L->bulk_c = 0.0;
+    run_tick(L);
+    CHECK(cool_state == Cool_Warmup, "one warm sample does not release it");
+    L->bulk_c = 2.5;                    /* the bulk warms past the gate */
+    for (int i = 0; i < WARMUP_WIN - 1; i++)
+        run_tick(L);
+    CHECK(cool_state == Cool_Warmup, "the minute's minimum still under the gate: held");
+    logbuf[0] = '\0';
+    run_tick(L);
+    CHECK(cool_state == Cool_Run && get_long("thermal/heater_pwm") == 0,
+          "the minute's minimum at the gate: released into run, the heater 0");
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN && get_long("thermal/intake_pwm") == INTAKE_RUN,
+          "the run duties");
+    CHECK(log_has("warm-up complete"), "the line says the warm-up is complete");
+    close_session(L);
+    L->bulk_c = 0.0;
+    kv[0] = "cool_temp_min"; kv[1] = "0"; kv[2] = "cool_temp_start"; kv[3] = "0"; kv[4] = NULL;
+    logbuf[0] = '\0';
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "OK") && strstr(pub_gates_off, "\"coolant_min\"") &&
+          strstr(pub_gates_off, "\"warm_up\""), "both low gates at 0: OK, coolant_min and warm_up in gates_off");
+    CHECK(log_has("gate coolant_min OFF: cool_temp_min = 0") && log_has("gate warm_up OFF: cool_temp_start = 0"),
+          "the run-start lines name both gates off");
+    kv[0] = NULL;
+    close_session(L);
+}
+
+static void gate_critical(loop_t *L)
+{
+    printf("gates C. the critical line and the ceiling under the loop: CRITICAL, ended with the session\n");
+    close_session(L);
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+    kv[4] = "cool_temp_critical_c"; kv[5] = "20"; kv[6] = NULL;
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "CRITICAL") && !pub_fire_ok && pub_hold && verdict_has("\"resume_ok\":false"),
+          "CRITICAL, fire blocked, hold, no resume");
+    CHECK(strstr(pub_reason, "CRITICAL") && strstr(pub_reason, "coolant"),
+          "the reason names the tier and the coolant");
+    session_end_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP"), "the session over: OVERTEMP, the ceiling still under the loop");
+    /* The ceiling's own hold stands under the case above: with the
+     * ceiling at its off end the critical line holds alone. */
+    close_session(L);
+    kv[1] = "60";
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "CRITICAL") && !pub_fire_ok && pub_hold && verdict_has("\"resume_ok\":false"),
+          "the ceiling off: CRITICAL holds alone, no resume");
+    close_session(L);
+    kv[1] = "18";
+    kv[5] = "70";
+    logbuf[0] = '\0';
+    settle_and_open(L);
+    run_tick(L);
+    run_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && strstr(pub_gates_off, "\"coolant_critical\""),
+          "the critical line at 70: coolant_critical in gates_off, OVERTEMP alone");
+    CHECK(log_has("gate coolant_critical OFF: cool_temp_critical_c = 70"), "the run-start line names the gate off");
+    kv[0] = NULL;
+    close_session(L);
+}
+
+static void gate_fans(loop_t *L)
+{
+    printf("gates D. a fan floor no fan meets: AIRFLOW after the grace and three ticks, for the session\n");
+    close_session(L);
+    put_long("thermal/tach_exhaust", EXHAUST_TACH_RUN);
+    kv[0] = "cool_tach_exhaust_min_rpm"; kv[1] = "20000"; kv[2] = NULL;
+    settle_and_open(L);
+    double t0 = fake_now;               /* the session's open starts the grace */
+    while (fake_now < t0 + FAN_GRACE_S + 1)
+        run_tick(L);
+    CHECK(!airflow_alarm && !strcmp(pub_verdict, "OK"), "the grace and two ticks under the floor: no fault yet");
+    run_tick(L);
+    CHECK(!strcmp(pub_verdict, "AIRFLOW") && !pub_fire_ok && pub_hold && verdict_has("\"resume_ok\":false"),
+          "the third tick past the grace: AIRFLOW, fire blocked, hold, no resume");
+    CHECK(strstr(pub_reason, "exhaust") && fan_state_is("exhaust", "TRIPPED"),
+          "the reason names the exhaust, its gate TRIPPED");
+    session_end_tick(L);
+    CHECK(!strcmp(pub_verdict, "OK") && !pub_hold, "the session over: OK, no hold");
+    close_session(L);
+    put_long("thermal/tach_exhaust", 300);
+    kv[0] = "cool_purge_min_current"; kv[1] = "1023"; kv[2] = NULL;
+    settle_and_open(L);
+    for (int i = 0; i < (int)FAN_GRACE_S + 3; i++)
+        run_tick(L);
+    CHECK(fan_state_is("purge", "TRIPPED"), "a purge current floor of 1023: purge TRIPPED");
+    close_session(L);
+    kv[0] = "cool_tach_exhaust_min_rpm"; kv[1] = "0"; kv[2] = NULL;
+    settle_and_open(L);
+    CHECK(strstr(pub_gates_off, "\"exhaust\"") && fan_state_is("exhaust", "off"),
+          "an exhaust floor of 0: exhaust in gates_off, its state off");
+    kv[0] = NULL;
+    close_session(L);
+}
+
+static void crash_watch(loop_t *L)
+{
+    printf("crash watch. never armed in an unarmed session; its three thresholds at 0 are its gates off\n");
+    close_session(L);
+    int arms = crash_arm_calls;
+    for (int i = 0; i < 20; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+    }
+    L->session = 1;
+    for (int i = 0; i < 10; i++) {
+        loop_tick(L);
+        tick("run", 0);
+    }
+    CHECK(cool_state == Cool_Run && crash_arm_calls == arms && !strcmp(pub_accel_watch, "watch"),
+          "an unarmed run session: crash_hw_arm never called, accel_watch watch");
+    close_session(L);
+    kv[0] = "cool_accel_x_alert"; kv[1] = "0"; kv[2] = "cool_accel_y_alert"; kv[3] = "0";
+    kv[4] = "cool_accel_abort"; kv[5] = "0"; kv[6] = NULL;
+    settle_and_open(L);
+    CHECK(!strcmp(pub_verdict, "OK") && strstr(pub_gates_off, "\"crash_x_alert\"") &&
+          strstr(pub_gates_off, "\"crash_y_alert\"") && strstr(pub_gates_off, "\"crash_abort\""),
+          "the three thresholds at 0: OK, the three crash gates in gates_off");
+    kv[0] = NULL;
+    close_session(L);
+}
+
+static void tec(loop_t *L)
+{
+    printf("TEC. fitted: on with the run airflow, off at idle, a dwell before it comes on again; not fitted: never\n");
+    close_session(L);
+    kv[0] = "cool_tec_present"; kv[1] = "1"; kv[2] = "cool_tec_on_c"; kv[3] = "15";
+    kv[4] = "cool_tec_off_c"; kv[5] = "13"; kv[6] = NULL;
+    settle_and_open(L);
+    CHECK(get_long("thermal/tec_on") == 1, "fitted, its thresholds under the loop: on in a run session");
+    close_session(L);
+    double off_at = fake_now;           /* the tick that reached idle turned it off */
+    CHECK(get_long("thermal/tec_on") == 0, "off at idle: no airflow");
+    settle_and_open(L);
+    CHECK(get_long("thermal/tec_on") == 0, "a run session inside the dwell: still off");
+    while (get_long("thermal/tec_on") != 1 && fake_now - off_at < 120)
+        run_tick(L);
+    CHECK(get_long("thermal/tec_on") == 1 && fake_now - off_at >= TEC_DWELL_S,
+          "on again once the dwell has passed, not before");
+    close_session(L);
+    kv[1] = "0";
+    settle_and_open(L);
+    int driven = get_long("thermal/tec_on") == 1;
+    for (int i = 0; i < TEC_DWELL_S + 10; i++) {
+        run_tick(L);
+        if (get_long("thermal/tec_on") == 1)
+            driven = 1;
+    }
+    CHECK(!driven, "not fitted: never written 1");
+    kv[0] = NULL;
+    close_session(L);
+}
+
 int main(void)
 {
     make_tree();
@@ -1017,11 +1317,12 @@ int main(void)
     for (int i = 1; i <= 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
-        put_long(attr, 4000);                       /* every quartile past critical */
+        put_long(attr, 800);                        /* q1 past its critical, q2 under its own */
     }
     run_tick(&L);
     run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "FIRE"), "the lid IR past its critical threshold: FIRE");
+    CHECK(!strcmp(pub_verdict, "FIRE") && !strcmp(pub_fire_watch, "ALARM"),
+          "the q1 quartile past its critical threshold: FIRE, the watch ALARM");
     CHECK(stops == 1 && !strcmp(stop_why, "lid IR fire signal"),
           "FIRE ends the controller through the hook, once, naming the signal");
     CHECK(stop_seen_stop == 1 && stop_seen_latch == 1,
@@ -1066,16 +1367,34 @@ int main(void)
     for (int i = 1; i <= 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
-        put_long(attr, 500);                        /* past alert, under critical */
+        put_long(attr, 300);                        /* q1 past its alert, q2 under its own */
     }
     run_tick(&L);
     run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "FLAME") && stops == 0, "the lid IR over its alert threshold: FLAME, no stop");
+    CHECK(!strcmp(pub_verdict, "FLAME") && pub_hold && !strcmp(pub_fire_watch, "alert") && stops == 0,
+          "the q1 quartile over its alert threshold: FLAME, hold, the watch alert, no stop");
     for (int i = 1; i <= 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
         put_long(attr, 100);
     }
+    open_session(&L);
+    CHECK(!strcmp(pub_verdict, "OK"), "a new session after the restore: OK");
+
+    printf("O2. the fire watch's four thresholds at 0 are its gates off\n");
+    close_session(&L);
+    kv[0] = "cool_fire_q1_alert"; kv[1] = "0"; kv[2] = "cool_fire_q1_critical"; kv[3] = "0";
+    kv[4] = "cool_fire_q2_alert"; kv[5] = "0"; kv[6] = "cool_fire_q2_critical"; kv[7] = "0";
+    kv[8] = NULL;
+    settle_and_open(&L);
+    CHECK(strstr(pub_gates_off, "\"flame_q1_alert\"") && strstr(pub_gates_off, "\"flame_q1_critical\"") &&
+          strstr(pub_gates_off, "\"flame_q2_alert\"") && strstr(pub_gates_off, "\"flame_q2_critical\""),
+          "the four flame gates are in gates_off");
+    CHECK(!strcmp(pub_fire_watch, "watch"), "the watch reads watch");
+    close_session(&L);
+    kv[0] = NULL;
+    settle_and_open(&L);
+    CHECK(!strcmp(pub_fire_watch, "armed"), "restored, the watch reads armed");
     close_session(&L);
 
     printf("P. an extension's hold joins the pause tier, under every verdict of the engine's own\n");
@@ -1142,12 +1461,22 @@ int main(void)
     close_session(&L);
     cool_fail_tier_stop = NULL;
 
+    phases(&L);
+    gate_ceiling(&L);
+    gate_warmup(&L);
+    gate_critical(&L);
+    gate_fans(&L);
+    crash_watch(&L);
+    tec(&L);
+
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the flow check reads means, takes the tube's share off, "
                       "bounds it, still sees a stopped pump under a lit tube, takes "
                       "the air-assist offset off while the fan runs, and says SENSOR "
                       "rather than fire blind; every fan duty is read back and held, "
-                      "and one intake fan fitted leaves the second tach unjudged\n",
+                      "and one intake fan fitted leaves the second tach unjudged; the "
+                      "gates trip past the loop and are off at their far ends, the "
+                      "phases end at their duties, and the TEC keeps its rules\n",
            failures);
     return failures ? 1 : 0;
 }

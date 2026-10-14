@@ -158,6 +158,17 @@ add_executable(curverec_fit_test tests/curverec_fit_test.c src/curverec.c src/jo
 target_compile_options(curverec_fit_test PRIVATE -Wall -Wextra)
 target_link_libraries(curverec_fit_test m pthread)
 
+# The recorder's run on the job runner, against a mock controller on a
+# local port and the test's own settings store: the lease and the job
+# record while it waits, the floor and the curve overridden, the abort
+# route and a posted job refused in its name, the stop before the ladder
+# fired, and the keys restored. fopen and unlink are wrapped so the
+# override's marker lands in the test's tree, not under /data.
+add_executable(curverec_test tests/curverec_test.c src/curverec.c src/jobrun.c src/jobstream.c
+               src/lease.c src/fflog.c)
+target_compile_options(curverec_test PRIVATE -Wall -Wextra)
+target_link_libraries(curverec_test -Wl,--wrap=fopen -Wl,--wrap=unlink m pthread)
+
 # Host unit test for the log-export sanitizer: every identifying class
 # redacted, ordinary log text untouched, stable placeholders, idempotent.
 # A sanitized bundle is what gets attached to public issue reports.
@@ -207,7 +218,8 @@ target_link_libraries(cool_gate_test m)
 # reading (the means, the tube's share bounded, a stopped pump still read
 # as stopped under a lit tube), SENSOR, COLD, warm-up, the fan
 # acknowledgment, the hang dead-man, the fail and pause tiers, extension
-# holds, the verified fan writes, and the intakes fitted. Includes the
+# holds, the verified fan writes, the intakes fitted, the gates moved past
+# the loop and at their off ends, the phases' duties, and the TEC. Includes the
 # engine source against a fake sysfs tree whose writes can be dropped or
 # refused, and a fake clock; CI runs it after the build.
 add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)

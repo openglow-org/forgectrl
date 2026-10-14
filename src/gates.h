@@ -67,6 +67,15 @@ double gate_effective(double local, double header, int is_floor, int *from_heade
  * tripped state. */
 int gate_floor_trip(int tripped, double up_c, double floor_c, double hyst_c);
 
+/* The settings cross-checks between two keys, one call per pair. Each
+ * returns 1 when the pair is refused. The critical line is the fail
+ * tier above the ceiling's pause tier: at or below a ceiling it would
+ * fail a job the ceiling meant to pause. A ceiling at its off end is no
+ * ceiling, so the line is held above a ceiling that gates only. */
+int gate_critical_refused(double temp_max_c, double critical_c);
+/* The TEC's hysteresis pair: off under on. */
+int gate_tec_refused(double on_c, double off_c);
+
 /* Value source for the JSON helpers: the engine passes its resolved
  * tunables, the settings reply passes the file's values. */
 typedef double (*gate_value_fn)(const gate_setting_t *g, void *ctx);

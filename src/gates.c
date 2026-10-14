@@ -184,6 +184,18 @@ int gate_floor_trip(int tripped, double up_c, double floor_c, double hyst_c)
     return up_c < (tripped ? floor_c + hyst_c : floor_c);
 }
 
+int gate_critical_refused(double temp_max_c, double critical_c)
+{
+    const gate_setting_t *ceil = gate_setting_find("cool_temp_max");
+    int ceiling_off = ceil && ceil->off_end > 0 && temp_max_c >= ceil->hi;
+    return !ceiling_off && critical_c <= temp_max_c;
+}
+
+int gate_tec_refused(double on_c, double off_c)
+{
+    return off_c >= on_c;
+}
+
 /* %g keeps 33 as 33 and 14.4 as 14.4 without trailing zeros. */
 static int put(char *buf, size_t len, size_t *off, const char *fmt, ...)
 {

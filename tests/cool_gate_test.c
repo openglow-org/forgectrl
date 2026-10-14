@@ -9,7 +9,8 @@
  * panel) reads one table. This test holds the table's shape (default
  * inside band inside legal range, off end where the contract says),
  * the parse rules the validators rely on, the state classification,
- * and what the two JSON encodings the panel and /status consume carry.
+ * the settings route's cross-checks between two keys, and what the two
+ * JSON encodings the panel and /status consume carry.
  */
 #include "../src/gates.h"
 
@@ -159,6 +160,17 @@ int main(void)
     CHECK(!gate_parse(fcs, "-1", &v), "the flow window rejects negatives");
     CHECK(gate_parse(rise, "40", &v), "the flow rise accepts its wide top");
     CHECK(!gate_parse(NULL, "1", &v), "a NULL row parses nothing");
+    const gate_setting_t *xal = gate_setting_find("cool_accel_x_alert");
+    CHECK(xal && !gate_parse(xal, "300", &v), "a crash threshold past the register range (300 on 0..255) is refused");
+
+    printf("cross-checks\n");
+    CHECK(gate_critical_refused(33.0, 33.0) && gate_critical_refused(33.0, 30.0),
+          "a critical line at or under a gating ceiling is refused");
+    CHECK(!gate_critical_refused(33.0, 38.0), "a critical line above the ceiling stands");
+    CHECK(!gate_critical_refused(60.0, 38.0), "a ceiling at its off end leaves the line standing alone");
+    CHECK(gate_tec_refused(18.0, 19.0) && gate_tec_refused(18.0, 18.0),
+          "a TEC off threshold at or over its on threshold is refused");
+    CHECK(!gate_tec_refused(20.0, 18.0), "off under on stands");
 
     printf("state\n");
     CHECK(gate_state(tmax, 33.0) == Gate_Ok, "ceiling at default: ok");

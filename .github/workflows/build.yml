@@ -33,6 +33,8 @@ jobs:
         run: ./build/status_test
       - name: Dose-curve fitter test
         run: ./build/curverec_fit_test
+      - name: "curverec_test (the dose-curve recorder on the job runner: the lease as a sender, the floor and the curve overridden while it runs, the abort route and a posted job refused in its name, the stop before the ladder fired, the keys restored)"
+        run: ./build/curverec_test
       - name: sheet_test (the setup sheet renderer)
         run: ./build/sheet_test
       - name: lens_test (the lens frame, every Z inside the controller's window)
@@ -97,7 +99,7 @@ jobs:
         run: ./build/camhealth_test
       - name: Gate settings table
         run: ./build/cool_gate_test
-      - name: "cool_flow_test (the cooling engine: the flow check, the tiers, extension holds, the verified fan writes, the intakes fitted)"
+      - name: "cool_flow_test (the cooling engine: the flow check, the tiers, extension holds, the verified fan writes, the intakes fitted, the gates past the loop and off, the phases' duties, the TEC)"
         run: ./build/cool_flow_test
       - name: "holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)"
         run: ./build/holds_test

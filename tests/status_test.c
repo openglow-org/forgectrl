@@ -50,12 +50,16 @@
  * (no closing brace) or an absurd age all read as no block at all: the
  * panel treats absence as "no controller", never as stale truth. The
  * lens block's reach moves up by the crumb tray's offset while the
- * controller's tray.out marker stands.
+ * controller's tray.out marker stands. A manual home's anchor, as the
+ * controller writes it, reads back on /status as home_source manual with
+ * the axes it names; the anchor's path is fixed under /run, so the test's
+ * fopen moves that one path into the temp directory.
  */
 #define _GNU_SOURCE
 #include "../src/status.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -73,6 +77,18 @@ int diag_running(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
 static int grbl_up;
 int super_grbl_running(void) { return grbl_up; }
+
+/* The home anchor's path is fixed, and /run is not the test's to write:
+ * while anchor is set, an open of that one path opens anchor instead.
+ * Every other open goes through as it is. */
+static char anchor[320];
+FILE *fopen(const char *path, const char *mode)
+{
+    static FILE *(*real)(const char *, const char *);
+    if (!real)
+        *(void **)&real = dlsym(RTLD_NEXT, "fopen");
+    return real(anchor[0] && !strcmp(path, "/run/grblhal.homed") ? anchor : path, mode);
+}
 
 static int failures;
 static char dir[256];        /* the temp directory */
@@ -475,6 +491,22 @@ static void grbl_block(void)
           "tray out: the reach moves up by the offset's grid");
     CHECK(strstr(doc, "\"edge_z\":3.35") != NULL, "tray out: the edge setting reads as set");
     unlink(marker);
+
+    /* A manual home's anchor, in the controller's form: X and Y
+     * referenced, the lens not yet. */
+    printf("/status home anchor:\n");
+    snprintf(anchor, sizeof(anchor), "%s/grblhal.homed", dir);
+    FILE *a = fopen(anchor, "w");
+    fputs("0.000 0.000 0.000 3 manual\n", a);
+    fclose(a);
+    machine_status_json(doc, sizeof(doc), "\"x\":1");
+    unsigned axes = 0;
+    char source[16] = "";
+    machine_home_state(&axes, source, sizeof(source));
+    CHECK(strstr(doc, "\"home_source\":\"manual\"") && strstr(doc, "\"homed_axes\":3,") &&
+          axes == 3 && !strcmp(source, "manual"), "a manual home: home_source manual, homed_axes 3 (X and Y)");
+    unlink(anchor);
+    anchor[0] = '\0';
     grbl_up = 0;
 }
 

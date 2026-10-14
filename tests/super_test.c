@@ -17,6 +17,10 @@
  *      bound the kernel is halted and said so
  *   D. the enclosure check runs before every spawn: an open lid holds a
  *      respawn until it closes, with no second motion probe
+ *  D2. the first spawn of a broker hold waits for it the same way: no
+ *      probe and no fork while the lid is open, /mode says waiting and
+ *      why, and the button blinks amber; once it closes the probe runs,
+ *      then the spawn
  *   E. a busy kernel makes the probe wait and ask again; a missing
  *      accelerometer skips it and the controller starts unverified
  *   F. the stop lever reaches a probe in flight: the ladder ends
@@ -259,7 +263,8 @@ void fflog(int prio, const char *fmt, ...)
 static int engine_stops;
 void cool_controller_stopped(void) { engine_stops++; }
 double cool_report_age(void) { return -1.0; }
-void led_set(led_pattern_t p) { (void)p; }
+static int led_last = -1;               /* the pattern led_set was last given */
+void led_set(led_pattern_t p) { led_last = (int)p; }
 void led_release(void) { }
 void lenshome_clear(void) { }
 int lenshome_run(char *detail, size_t dlen) { snprintf(detail, dlen, "fake edge"); return 1; }
@@ -407,6 +412,7 @@ static void reset_state(void)
     flock_fails = 0;
     engine_stops = 0;
     crit_logs = 0;
+    led_last = -1;
     calls[0] = '\0';
     logs[0] = '\0';
     clear_safing();
@@ -519,6 +525,23 @@ int main(void)
     CHECK(run_until_spawned(1.0), "the respawn follows the lid");
     CHECK(!enclosure_wait, "the wait is over");
     CHECK(probes == 1, "the motion probe ran once for the broker hold, not again");
+
+    printf("D2. the first spawn waits for the lid the same way\n");
+    reset_state();
+    enclosure_open = 1;
+    CHECK(!run_until_spawned(3.0), "an open lid holds the first spawn");
+    CHECK(probes == 0 && forks == 0 && child_pid == 0, "no motion probe, no fork, no pid");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(enclosure_wait && !strcmp(wait_why, "the lid is open") &&
+              strstr(st, "\"controller\":\"waiting\"") != NULL, "/mode says waiting, and that the lid is open");
+    }
+    CHECK(led_last == LED_BLINK_AMBER, "the button blinks amber");
+    enclosure_open = 0;
+    tick();
+    CHECK(probes == 1 && child_pid == 0, "the lid closed: the probe runs first");
+    CHECK(run_until_spawned(1.0) && forks == 1 && probes == 1, "then the spawn");
 
     printf("E. a busy kernel makes the probe wait; a missing accelerometer skips it\n");
     reset_state();

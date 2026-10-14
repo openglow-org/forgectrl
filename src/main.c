@@ -1823,15 +1823,14 @@ static int cb_settings_post(const struct _u_request *req,
     if (tresume >= tmax)
         return reply_error(res, 400,
             "cool_temp_resume must be below cool_temp_max");
-    /* The critical line is the fail tier above the pause tier; at or
-     * below the ceiling it would fail a job the ceiling meant to pause.
-     * A ceiling at its off end is no ceiling (every gate is off by value
-     * on its own), so the line is only held above a ceiling that gates. */
-    const gate_setting_t *ceil = gate_setting_find("cool_temp_max");
-    int ceiling_off = ceil && ceil->off_end > 0 && tmax >= ceil->hi;
-    if (!ceiling_off && tcrit <= tmax)
+    /* The critical line above a ceiling that gates (gates.h). */
+    if (gate_critical_refused(tmax, tcrit))
         return reply_error(res, 400,
             "cool_temp_critical_c must be above cool_temp_max");
+    /* A ceiling at its off end is no ceiling (every gate is off by value
+     * on its own): the floor below is held under a ceiling that gates. */
+    const gate_setting_t *ceil = gate_setting_find("cool_temp_max");
+    int ceiling_off = ceil && ceil->off_end > 0 && tmax >= ceil->hi;
     /* The low side: floor under start under ceiling, each relation held
      * only between gates that are on (zero is a floor or a start gate
      * off, its own off end). */
@@ -1859,7 +1858,7 @@ static int cb_settings_post(const struct _u_request *req,
     double teon, teoff;
     effective_temp(req, "cool_tec_on_c", &teon);
     effective_temp(req, "cool_tec_off_c", &teoff);
-    if (teoff >= teon)
+    if (gate_tec_refused(teon, teoff))
         return reply_error(res, 400,
             "cool_tec_off_c must be below cool_tec_on_c");
     /* The fire watch: within each quartile the alert must sit under the
