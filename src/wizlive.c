@@ -220,7 +220,6 @@ typedef struct {
     int stopped, local;
     double spmx, spmy, spmz;
     double thickness;           /* the scrap's, as the operator gave it */
-    int z_taken;                /* the lens unlocked for the session */
     int g92;                    /* the program's head handed out its G92 origin */
     int clean;                  /* the program played to its tail: the lens is back on its
                                    reference and the G92 origin cleared */
@@ -297,21 +296,12 @@ static int live_begin(live_t *L, json_t *r)
         return -1;
     }
     wiz_msleep(1200);               /* the driver's next read of the verdict */
-    /* The driver starts with the lens locked out of the pulse path (the
-     * factory's posture: a sender's Z never moves the lens) and the lens
-     * motor at its hold current. The burns move the lens from the
-     * reference the session just took, inside the travel, so the session
-     * lifts the lock and drives the motor at its run current; the end
-     * puts both back. */
-    /* Taken as soon as the first write lands, so a later one failing
-     * still hands the motor back at the end: the lock is lifted by then,
-     * and leaving it lifted would let a sender's Z drive the lens. */
-    L->z_taken = 1;
-    if (wiz_wr_attr("cnc/motor_lock", "0") != 0 || wiz_wr_attr("head/z_current", "0") != 0 ||
-        wiz_wr_attr("head/z_mode", "1") != 0 || wiz_wr_attr("head/z_enable", "0") != 0) {
-        wiz_finish_err("cannot take the lens motor for the session");
-        return -1;
-    }
+    /* The lens motor is the controller's while it runs: its start puts
+     * every axis in the pulse path, the lens included (cnc/motor_lock
+     * 0), in half-step mode at the hold current, and a run drives the
+     * lens at the drive current and hands the hold current back at its
+     * end (glowforge_io.c, stepper_stream.c). The session writes none
+     * of them. */
     return 0;
 }
 
@@ -350,10 +340,6 @@ static void live_end(live_t *L)
      * cannot, the marker goes and the controller holds Z unreferenced. */
     if (!L->clean && (L->local || L->stopped) && wiz_lens_rehome() != 0)
         wiz_log("the lens could not find its reference: Z stays unreferenced until it does");
-    if (L->z_taken) {
-        wiz_wr_attr("cnc/motor_lock", "8");
-        wiz_wr_attr("head/z_current", "1");
-    }
     if (L->local)
         super_set_local(0);
     if (L->local || L->stopped)

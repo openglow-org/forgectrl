@@ -43,7 +43,8 @@
 #   the laser floor burn: refused before any prompt without Focus on the
 #     record; with it, the gantry stops asked, then the controller
 #     stopped and started again and the lens referenced before the home
-#     question, the lens motor taken before the scrap question, then the
+#     question, the lens motor at rest and the lock unwritten before the
+#     scrap question, then the
 #     thickness: one outside the lens window is not stored and is asked
 #     again, with no program line streamed, nothing armed and
 #     laser_floor_density unwritten at either question; the program's
@@ -920,8 +921,8 @@ s = [json.loads(l) for l in open(sys.argv[1]) if json.loads(l)["at"] == sys.argv
 print(eval(sys.argv[4]))' "$T/snaps" "$1" "$2" "$3" 2>&1; }
 expect True "$(snaps home 0 's["pid"] not in (None, "'"$P0"'") and s["lens_home"]')" \
     "after the gantry stops, before the home question: the controller stopped and started again, the lens referenced"
-expect '0|1|0' "$(snaps scrap 0 '"%s|%s|%s" % (s["motor_lock"], s["z_mode"], s["z_enable"])')" \
-    "before the scrap question: the lens motor taken"
+expect '|1|0' "$(snaps scrap 0 '"%s|%s|%s" % (s["motor_lock"], s["z_mode"], s["z_enable"])')" \
+    "before the scrap question: the lens motor rests after its reference, the lock never written"
 for n in 0 1; do
     expect '0|4|False|True' "$(snaps thickness $n '"%s|%s|%s|%s" % (s["socket_lines"], s["floor"], s["armed"], s["phase"] != "the program goes to the controller, the button lights at the arm")')" \
         "at thickness question $((n + 1)): no program line streamed, laser_floor_density still 4, not armed, the burn not entered"
@@ -940,6 +941,8 @@ expect '|8|10' "$(run '"%s|%g|%g" % (d["dark"]["error"], d["dark"]["result"]["fa
 grep -qx 'laser_floor_density = 10' "$CONF" && ok "the setting reads 10" || bad "the conf file has $(grep laser_floor "$CONF")"
 expect 1 "$(recv laser.floor)" "the record carries laser.floor at version 1"
 [ ! -e "$T/data/curverec.saved" ] && ok "the saved keys' marker is gone" || bad "the saved keys' marker is left"
+[ ! -s "$SYS/cnc/motor_lock" ] && ok "the session never wrote the lens lock: it is the controller's" \
+    || bad "the session wrote cnc/motor_lock $(cat "$SYS/cnc/motor_lock")"
 OLD=$(ctl_pid)
 stop_daemon
 kill $HALL
