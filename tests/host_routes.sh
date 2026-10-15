@@ -28,6 +28,9 @@
 #   the write routes without the token, an upload, a 4 MiB body, and the
 #     fuse view without the token; the Host, Origin and Sec-Fetch-Site
 #     checks on a read
+#   the license bundle (FORGECTRL_LICENSES, a fixture in the image's
+#     form): the manifest, the bundle and the Licenses page, each read
+#     with no token
 #   the settings' bounds, in the file FORGECTRL_CONF names: each refusal
 #     leaves the file byte for byte, a write changes its own key alone,
 #     and an empty value clears it
@@ -107,6 +110,7 @@ start_daemon() {
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_SSHD_INIT="$T/bin/sshd-init" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
+        FORGECTRL_LICENSES="$T/licenses.tar.gz" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -149,6 +153,13 @@ EOF
 printf '#!/bin/sh\necho "$0" >> "%s/cloud.started"\n' "$T" > "$T/bin/cloud"
 printf '#!/bin/sh\necho "$1" >> "%s/sshd.log"\n' "$T" > "$T/bin/sshd-init"
 chmod +x "$T/bin/grbl" "$T/bin/cloud" "$T/bin/sshd-init"
+# The license bundle in the image's form: a gzip tar holding
+# common-licenses/license.manifest. The daemon hands its path to tar in
+# single quotes, and mktemp's name has none.
+mkdir -p "$T/lic/common-licenses"
+printf 'PACKAGE NAME: forgectrl\nPACKAGE VERSION: 1.0\nRECIPE NAME: forgectrl\nLICENSE: MIT\n\n' \
+    > "$T/lic/common-licenses/license.manifest"
+tar -C "$T/lic" -czf "$T/licenses.tar.gz" common-licenses
 
 # A first start reads the documents' hashes and the required steps; the
 # record is then written as a finished first run would leave it.
@@ -347,6 +358,20 @@ expect 403 "$(status_with -H 'Origin: http://evil.example.net')" "Origin: http:/
 expect 403 "$(status_with -H 'Sec-Fetch-Site: cross-site')" "Sec-Fetch-Site: cross-site is refused"
 expect 200 "$(status_with -H 'Sec-Fetch-Site: same-origin' -H 'Origin: http://127.0.0.1')" \
     "Sec-Fetch-Site: same-origin from http://127.0.0.1 is 200"
+
+echo "== the license bundle, read with no token and no Origin"
+LIC=$T/licenses.tar.gz
+expect 200 "$(curl -s -o "$T/body" -w '%{http_code}' "$URL/system/licenses/manifest")" \
+    "GET /system/licenses/manifest is 200"
+cmp -s "$T/lic/common-licenses/license.manifest" "$T/body" && ok "its body is the manifest" \
+    || bad "its body is not the manifest: $(cat "$T/body")"
+expect 200 "$(curl -s -o "$T/lic.got" -w '%{http_code}' "$URL/system/licenses")" "GET /system/licenses is 200"
+expect "$(wc -c < "$LIC")" "$(wc -c < "$T/lic.got")" "the bundle is as long as the file"
+tar -tzf "$T/lic.got" 2>/dev/null | grep -qx common-licenses/license.manifest \
+    && ok "the served tar holds common-licenses/license.manifest" || bad "the served tar holds no manifest"
+expect 200 "$(curl -s -o "$T/lic.html" -w '%{http_code}' "$URL/licenses")" "GET /licenses is 200"
+grep -qF /system/licenses "$T/lic.html" && grep -qF 'PACKAGE NAME:' "$T/lic.html" \
+    && ok "the page carries /system/licenses and the manifest" || bad "the page lacks the link or the manifest"
 
 echo "== the settings' bounds"
 CONF=$T/data/forgefirm.conf
