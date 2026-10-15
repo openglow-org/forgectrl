@@ -84,13 +84,33 @@ struct camdef {
     const char *name;
     int         bus;       /* I2C bus: sensor entity resolved by <bus>-0036 */
     int         muxpad;    /* video-mux sink pad */
-    const char *lamp;      /* sysfs illumination attribute */
+    const char *lamp;      /* illumination attribute, under the sysfs root */
 };
 
 static const struct camdef camdefs[2] = {
-    [CAM_LID]  = { "lid",  0, 0, "/sys/glowforge/pic/lid_led"    },
-    [CAM_HEAD] = { "head", 3, 1, "/sys/glowforge/head/white_led" },
+    [CAM_LID]  = { "lid",  0, 0, "pic/lid_led"    },
+    [CAM_HEAD] = { "head", 3, 1, "head/white_led" },
 };
+
+/* The sysfs root is fixed in production; GF_SYSFS_ROOT overrides it for
+ * host tests, read as status.c reads it. Must end with '/'. The lamp
+ * paths are resolved once, by cam_engine_init, before any lamp call; an
+ * unresolved path opens nothing. */
+#define GF_SYSFS "/sys/glowforge/"
+static char lamp_paths[2][160];
+
+static void lamp_paths_init(void)
+{
+    const char *r = getenv("GF_SYSFS_ROOT");
+    const char *root = (r && *r) ? r : GF_SYSFS;
+    for (int i = 0; i < 2; i++)
+        snprintf(lamp_paths[i], sizeof(lamp_paths[i]), "%s%s", root, camdefs[i].lamp);
+}
+
+static const char *lamp_path(int cam)
+{
+    return lamp_paths[cam];
+}
 
 /* ------------------------------------------------------ sensor profiles */
 
@@ -673,7 +693,7 @@ void cam_lamp_apply_idle(void)
     if (lid_capturing)
         eng.lamp_prev = level;      /* restored at the capture's teardown */
     else
-        sysfs_write_int(camdefs[CAM_LID].lamp, level);
+        sysfs_write_int(lamp_path(CAM_LID), level);
     pthread_mutex_unlock(&eng.ctl);
     fflog(LOG_INFO, "cam: lid lamp idle level %d%s", level,
           lid_capturing ? " (applies after the capture)" : "");
@@ -953,7 +973,7 @@ static void release_capture(void)
         eng.fd = -1;
     }
     if (eng.lamp_prev >= 0) {
-        sysfs_write_int(camdefs[eng.cam].lamp, eng.lamp_prev);
+        sysfs_write_int(lamp_path(eng.cam), eng.lamp_prev);
         eng.lamp_prev = -1;
     }
 }
@@ -1041,9 +1061,9 @@ static int start_capture(cam_id_t cam, int head_open, char *err, size_t errlen)
 
     /* Scene lighting for the duration; the previous level is restored at
      * teardown (raw register write - instant, no fade). */
-    if (sysfs_read_int(c->lamp, &eng.lamp_prev))
+    if (sysfs_read_int(lamp_path(cam), &eng.lamp_prev))
         eng.lamp_prev = 0;
-    sysfs_write_int(c->lamp, eng.lamp_level);
+    sysfs_write_int(lamp_path(cam), eng.lamp_level);
 
     /* O_CLOEXEC: a controller spawned while the capture is up must not
      * inherit this descriptor - the buffers stay allocated for as long as
@@ -2112,7 +2132,7 @@ static void *worker(void *arg)
         /* A stream client's lamp level, or the engine's again when none
          * asks, outside a snapshot's own relight. */
         if (lamp_restore < 0 && want_lamp != lamp_applied) {
-            sysfs_write_int(camdefs[orig_cam].lamp, want_lamp);
+            sysfs_write_int(lamp_path(orig_cam), want_lamp);
             lamp_applied = want_lamp;
         }
 
@@ -2121,11 +2141,11 @@ static void *worker(void *arg)
          * level is restored after delivery (or if the requester gives
          * up). */
         if (snap && snap_lamp >= 0 && lamp_restore < 0) {
-            sysfs_write_int(camdefs[orig_cam].lamp, snap_lamp);
+            sysfs_write_int(lamp_path(orig_cam), snap_lamp);
             lamp_restore = lamp_applied;
             lamp_skip = LAMP_SKIP_FRAMES;
         } else if (!snap && lamp_restore >= 0) {
-            sysfs_write_int(camdefs[orig_cam].lamp, lamp_restore);
+            sysfs_write_int(lamp_path(orig_cam), lamp_restore);
             lamp_restore = -1;
         }
 
@@ -2138,7 +2158,7 @@ static void *worker(void *arg)
             if (start_capture(borrow_cam, snap_local, berr, sizeof(berr)) == 0) {
                 int skip = 0;
                 if (snap_lamp >= 0) {
-                    sysfs_write_int(camdefs[borrow_cam].lamp, snap_lamp);
+                    sysfs_write_int(lamp_path(borrow_cam), snap_lamp);
                     skip = LAMP_SKIP_FRAMES;
                 }
                 if (grab_one_snap(raw_cached, rgb_half, &rgb_full,
@@ -2283,7 +2303,7 @@ static void *worker(void *arg)
                     strm.snap.valid = 0;
                     snap = 0;
                     if (lamp_restore >= 0) {
-                        sysfs_write_int(camdefs[orig_cam].lamp,
+                        sysfs_write_int(lamp_path(orig_cam),
                                         lamp_restore);
                         lamp_restore = -1;
                     }
@@ -2470,6 +2490,7 @@ static int ensure_engine(cam_id_t cam, int local, char *err, size_t errlen)
 
 void cam_engine_init(void)
 {
+    lamp_paths_init();
     /* The waits are timeouts, and timeouts never ride the wall clock on
      * this RTC-less board: the condvars wake on CLOCK_MONOTONIC. */
     pthread_condattr_t ca;

@@ -402,6 +402,17 @@ grep -qx 'laser_disarm_s = 90' "$CONF" && grep -v '^laser_disarm_s ' "$CONF" | c
 expect 200 "$(post '/settings?laser_disarm_s=' "$TOKEN")" "an empty laser_disarm_s is 200"
 cmp -s "$T/conf.before" "$CONF" && ok "the key is gone: the file is as it was before the writes" \
     || bad "the cleared key left the file as: $(cat "$CONF")"
+# The lid lamp under the sysfs root follows lid_lamp_idle at once: a level
+# is written to it, a refused value writes nothing, and a cleared key
+# writes the default.
+mkdir -p "$SYS/pic"
+lamp() { cat "$SYS/pic/lid_led" 2>/dev/null; }
+expect 200 "$(post /settings "$TOKEN" -d lid_lamp_idle=100)" "lid_lamp_idle=100 is 200"
+expect 100 "$(lamp)" "and pic/lid_led reads 100"
+expect 400 "$(post /settings "$TOKEN" -d lid_lamp_idle=bright)" "lid_lamp_idle=bright is 400"
+expect 100 "$(lamp)" "and pic/lid_led is as it was"
+expect 200 "$(post '/settings?lid_lamp_idle=' "$TOKEN")" "an empty lid_lamp_idle is 200"
+expect 236 "$(lamp)" "and pic/lid_led reads the default, 236"
 
 echo "== the page and the reads beside it"
 expect 200 "$(curl -s -D "$T/page.h" -o "$T/page.html" -w '%{http_code}' "$URL/")" "GET / is 200"
