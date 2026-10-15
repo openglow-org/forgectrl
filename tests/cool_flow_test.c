@@ -62,8 +62,9 @@
  *   intakes B. one fan:     no fault, the window is acknowledged, and
  *                           intake_2 is published not fitted with no floor
  *   intakes C. one fan:     a silent intake 1 still trips AIRFLOW
- *   intakes D. one fan:     with the intake gate off, no warning names
- *                           intake_2
+ *   intakes D. one fan:     with the intake gate off, intake_2 is still
+ *                           not judged, and a fitted fan under the
+ *                           default is still named
  *   intakes E. any other value (a hand-edited 0) keeps intake_2 judged
  *
  * The phases and the gates, each setting moved past the loop the way the
@@ -755,14 +756,20 @@ static void in_one_fan_intake1_silent(void)
 
 static void in_one_fan_gate_off(void)
 {
-    printf("intakes D. one fan, the intake gate off: nothing names intake_2\n");
+    printf("intakes D. one fan, the intake gate off: intake_2 is not judged, intake_1 still is\n");
     intake_settle();
     kv[0] = "cool_intake_fans"; kv[1] = "1";
     kv[2] = "cool_tach_intake_min_rpm"; kv[3] = "0"; kv[4] = NULL;
     armed_session(40);
     CHECK(!airflow_alarm, "no airflow fault");
-    CHECK(!log_has("gate intake_2 is OFF"), "no would-have-tripped warning names intake_2");
+    CHECK(!fan_would_warned, "the silent intake_2 drew no would-have-tripped warning: it is not judged");
     CHECK(gate_is("intake_2", 0, 0, "not fitted"), "intake_2 is still published not fitted");
+    /* The control: the off gate still names a fitted fan under the
+     * default, so the quiet above is the judging's, not the warning's. */
+    put_long("thermal/tach_intake_1", TACH_NONE);
+    armed_session(40);
+    CHECK(!airflow_alarm && fan_would_warned, "intake_1 under the default draws the warning, and no fault");
+    CHECK(gate_is("intake_1", 0, 0, "off"), "intake_1 is published off at its reading");
 }
 
 static void in_other_value(void)
