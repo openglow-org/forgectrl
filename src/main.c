@@ -3006,6 +3006,15 @@ static int cb_licenses_page(const struct _u_request *req,
  * daemon starts or stops sshd through it. */
 #define SSH_FLAG_NAME "ssh-enabled"
 
+/* sshd's init script start or stop, or a test's stand-in for it. */
+static int ssh_init(const char *action)
+{
+    const char *v = getenv("FORGECTRL_SSHD_INIT");
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "'%s' %s >/dev/null 2>&1", v && *v ? v : "/etc/init.d/sshd", action);
+    return system(cmd);
+}
+
 static int ssh_running(void)
 {
     return system("pgrep -x sshd >/dev/null 2>&1") == 0;
@@ -3110,12 +3119,12 @@ static int cb_ssh_post(const struct _u_request *req, struct _u_response *res,
         if (fd < 0)
             return reply_error(res, 500, "cannot write the ssh flag");
         close(fd);
-        if (system("/etc/init.d/sshd start >/dev/null 2>&1") != 0)
+        if (ssh_init("start") != 0)
             fflog(LOG_ERR, "ssh: sshd did not start");
         fflog(LOG_NOTICE, "ssh: enabled until the next reboot");
     } else {
         unlink(flag);
-        (void)!system("/etc/init.d/sshd stop >/dev/null 2>&1");
+        (void)!ssh_init("stop");
         fflog(LOG_NOTICE, "ssh: disabled");
     }
     return ssh_reply(res);

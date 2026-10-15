@@ -1,5 +1,5 @@
 #!/bin/sh
-# host_setup.sh - the setup gate and its consents, on a host
+# host_setup.sh - the setup gate, its consents, and its checks, on a host
 # Copyright 2026 514 LLC d/b/a OpenGlow
 # Written by Scott Wiederhold
 # SPDX-License-Identifier: MIT
@@ -20,7 +20,49 @@
 #     route, and turning extensions on over it through the settings
 #   cloud mode off: the built-in's roles, and every way of pointing at
 #     the cloud refused while it is off
+#   the checks, driven as the page drives them (start, the status
+#     polled, each prompt answered), on scripted readings:
+#     sensors: a judge that fails ends the check with no result and no
+#       record; at rest it asks nothing, its result carries the readings,
+#       the record carries it, and no setting is written
+#     the intake fans: both tachs turning count two, the setting written
+#       and the record carrying it, no question; intake 2 silent asks for
+#       the count, and the answer is written
+#     the cameras: an open lid is waited for; the lid shot, its question,
+#       the head shot, its question; each shot served as captured, and
+#       the result names the engine's sensor
+#     the bed check: an unhomed machine is refused with nothing written
+#       and the envelope never opened; homed, every prompt is a jog that
+#       offers This is the end, the ends are the home plus the jogs, the
+#       keys the ends less 1 mm, the envelope opened and applied; a
+#       Grbl client's line closing the envelope ends the next run at its
+#       answer with nothing written
+#     the flow check: the diagnostic's phases are the check's, its
+#       result the check's with pass true, and a thin margin flags the
+#       calibration in the record
+#   the laser floor burn: refused before any prompt without Focus on the
+#     record; with it, the gantry stops asked, then the controller
+#     stopped and started again and the lens referenced before the home
+#     question, the lens motor taken before the scrap question, then the
+#     thickness: one outside the lens window is not stored and is asked
+#     again, with no program line streamed, nothing armed and
+#     laser_floor_density unwritten at either question; the program's
+#     ;keys=floor-off reaches the controller as M102 with the floor 0 and
+#     the dose curve off, the keys are as they were after the burn, and
+#     the pick 8 writes the floor 10
+#   the first run, in the page's order: each document accepted at its
+#     hash, the press step breathing teal, the press accepted, the
+#     account and its cookie, the gate's reason after each form step,
+#     the intake fan count opening the gate, and the run completed
 #
+# The switch device is a plain file: a preloaded stand-in answers the
+# readers' switch-state request from the switch word, so the lid, the
+# button and the motion gate read one word. The cameras' capture is the
+# stand-in FORGECTRL_WIZ_SHOTS names, the button LEDs a scratch tree. In
+# the burn the controller is a stand-in on the Grbl socket (port 23 on
+# loopback, which the preloaded stand-in points at a high port), the
+# lens's hall sensor a stand-in that follows the lens steps, and the
+# burn's witnesses files the controller's stand-in sets: no laser fires.
 # The record is read at start, so it is replaced only while the daemon
 # is stopped. Each case puts back what it changed. The daemon runs on
 # the image's ulfius (tests/ulfius_image.sh). Runs unprivileged;
@@ -40,11 +82,17 @@ T=$(mktemp -d)
 SYS=$T/sys
 REC=$T/data/setup.json
 CONF=$T/data/forgefirm.conf
+# The lens's sysfs: none (no head) but in the burn's case
+LENS_SYS=$T/no-head
+GRBL_PORT=18471
 PID=
 LPID=
+PLANT=
+HALL=
 cleanup() {
     if [ -n "$PID" ]; then kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null; fi
     [ -z "$LPID" ] || kill $LPID 2>/dev/null
+    for p in $PLANT $HALL; do kill $p 2>/dev/null; done
     [ ! -f "$T/ctl.pids" ] || kill $(cat "$T/ctl.pids") 2>/dev/null
     chmod 755 "$T/data" 2>/dev/null
     rm -rf "$T"
@@ -86,8 +134,10 @@ start_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
-        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
-        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
+        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" \
+        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" LD_PRELOAD="$T/swshim.so" \
+        GF_LED_ROOT="$T/leds" FORGECTRL_WIZ_SHOTS="$T/shots" \
+        GF_SYSFS_DIR="$LENS_SYS" GF_LENS_STEP_US=20000 HOST_GRBL_PORT=$GRBL_PORT \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
@@ -132,17 +182,144 @@ held() {
 # The machine, as host_routes.sh builds it: the kernel idle, the files
 # the supervisor's safing and the probe write, the three fan duties, no
 # head accelerometer; the switch word closed (8); the pulse device a
-# plain file.
-mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head"
+# plain file. Then the readings the checks take at rest: both coolant
+# sensors at 25 C (ADC 666), the lid IR low, no tube current, the
+# supply's power-good sampled good, every fan tach at 1500 rpm (a 20 ms
+# period, two pulses a turn), the pump on, the purge drawing.
+mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head" "$SYS/pic" "$T/shots"
 echo idle > "$SYS/cnc/state"
 for a in cnc/stop cnc/laser_latch cnc/enable cnc/disable cnc/halt \
-         head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm; do
+         head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm thermal/heater_pwm; do
     : > "$SYS/$a"
 done
+at_rest() {
+    echo 666 > "$SYS/pic/water_temp_1"
+    echo 666 > "$SYS/pic/water_temp_2"
+    for i in 1 2 3 4; do echo 10 > "$SYS/pic/lid_ir_$i"; done
+    echo 0 > "$SYS/pic/hv_current"
+    echo 1 > "$SYS/cnc/laser_pgood_sampled"
+    for f in tach_exhaust tach_intake_1 tach_intake_2; do echo 20000000 > "$SYS/thermal/$f"; done
+    echo 1 > "$SYS/thermal/water_pump_on"
+    echo 1 > "$SYS/head/purge_air"
+    echo 630 > "$SYS/head/purge_air_current"
+}
+at_rest
+for ch in 1 2 3; do mkdir -p "$T/leds/button_led_$ch"; done
 echo 8 > "$T/switches"
+# sw <word>: the switch word, replaced whole (bit 3 the lid closed, bit 2
+# the button held)
+printf '#!/bin/sh\necho "$1" > "%s/switches.new" && mv "%s/switches.new" "%s/switches"\n' "$T" "$T" "$T" > "$T/bin/sw"
+chmod +x "$T/bin/sw"
+sw() { "$T/bin/sw" "$1"; }
 : > "$T/pulse"
 : > "$T/port.log"
 echo "cool_intake_fans = 1" > "$CONF"
+
+# The readers' switch-state request (EVIOCGSW) on the switch device,
+# answered from the switch word; every other request goes through. For
+# the burn's case it also points the Grbl socket (port 23 on loopback)
+# at HOST_GRBL_PORT, and the dose keys' saved-keys marker into the data
+# directory, as curverec_test's wrapped fopen does.
+cat > "$T/swshim.c" <<'EOF'
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <linux/input.h>
+#include <netinet/in.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+
+int connect(int fd, const struct sockaddr *sa, socklen_t len)
+{
+    static int (*real)(int, const struct sockaddr *, socklen_t);
+    if (!real)
+        real = (int (*)(int, const struct sockaddr *, socklen_t))dlsym(RTLD_NEXT, "connect");
+    const char *p = getenv("HOST_GRBL_PORT");
+    if (p && sa && sa->sa_family == AF_INET6 && len >= sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 a;
+        memcpy(&a, sa, sizeof(a));
+        if (ntohs(a.sin6_port) == 23 && IN6_IS_ADDR_LOOPBACK(&a.sin6_addr)) {
+            a.sin6_port = htons((unsigned short)atoi(p));
+            return real(fd, (struct sockaddr *)&a, sizeof(a));
+        }
+    } else if (p && sa && sa->sa_family == AF_INET && len >= sizeof(struct sockaddr_in)) {
+        struct sockaddr_in a;
+        memcpy(&a, sa, sizeof(a));
+        if (ntohs(a.sin_port) == 23 && a.sin_addr.s_addr == htonl(INADDR_LOOPBACK)) {
+            a.sin_port = htons((unsigned short)atoi(p));
+            return real(fd, (struct sockaddr *)&a, sizeof(a));
+        }
+    }
+    return real(fd, sa, len);
+}
+
+static const char *moved(const char *path, char *buf, size_t len)
+{
+    const char *d = getenv("FORGECTRL_DATA_DIR");
+    if (d && path && !strcmp(path, "/data/forgefirm/curverec.saved")) {
+        snprintf(buf, len, "%s/curverec.saved", d);
+        return buf;
+    }
+    return path;
+}
+
+FILE *fopen(const char *path, const char *mode)
+{
+    static FILE *(*real)(const char *, const char *);
+    char b[512];
+    if (!real)
+        real = (FILE *(*)(const char *, const char *))dlsym(RTLD_NEXT, "fopen");
+    return real(moved(path, b, sizeof(b)), mode);
+}
+
+FILE *fopen64(const char *path, const char *mode)
+{
+    static FILE *(*real)(const char *, const char *);
+    char b[512];
+    if (!real)
+        real = (FILE *(*)(const char *, const char *))dlsym(RTLD_NEXT, "fopen64");
+    return real(moved(path, b, sizeof(b)), mode);
+}
+
+int unlink(const char *path)
+{
+    static int (*real)(const char *);
+    char b[512];
+    if (!real)
+        real = (int (*)(const char *))dlsym(RTLD_NEXT, "unlink");
+    return real(moved(path, b, sizeof(b)));
+}
+
+int ioctl(int fd, unsigned long req, ...)
+{
+    va_list ap;
+    va_start(ap, req);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    if (_IOC_TYPE(req) == 'E' && _IOC_NR(req) == _IOC_NR(EVIOCGSW(0)) && _IOC_DIR(req) == _IOC_READ) {
+        const char *wf = getenv("GF_SWITCH_WORD_FILE");
+        FILE *f = wf ? fopen(wf, "r") : NULL;
+        unsigned long word;
+        int got = f && fscanf(f, "%lu", &word) == 1;
+        if (f)
+            fclose(f);
+        if (!got)
+            return -1;
+        unsigned char *b = arg;
+        for (unsigned i = 0; i < _IOC_SIZE(req); i++)
+            b[i] = (unsigned char)(word >> (8 * i));
+        return (int)_IOC_SIZE(req);
+    }
+    static int (*real)(int, unsigned long, ...);
+    if (!real)
+        real = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
+    return real(fd, req, arg);
+}
+EOF
+cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch stand-in did not build"
 cat > "$T/bin/grbl" <<EOF
 #!/bin/sh
 echo \$\$ >> "$T/ctl.pids"
@@ -188,18 +365,48 @@ r = copy.deepcopy(seed); r.pop('account'); put('no-account', r)
 r = copy.deepcopy(seed); r['wizards'] = {}; r['flags'] = {}; put('no-steps', r)
 EOF
 
-# The controller's port, as host_routes.sh stands it in.
-python3 - "$T/run/grbl.ctl" "$T/port.log" <<'EOF' &
-import socket, sys, threading
-path, log = sys.argv[1], sys.argv[2]
-srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(path)
-srv.listen(4)
+# The controller's port, as host_routes.sh stands it in: every line
+# recorded, state answered in the controller's form, a jog moving the
+# position it reports, the envelope opened (refused, error:homed, until
+# $T/port.homed stands, as the controller refuses it before a home) and
+# applied. $T/port.sender is a Grbl client's line: it closes an open
+# envelope, as the controller does. The head starts at X10 Y10.
+python3 - "$T/run/grbl.ctl" "$T/port.log" "$T/port" <<'EOF' &
+import json, os, socket, sys, threading
+path, log, ctl = sys.argv[1], sys.argv[2], sys.argv[3]
+st = {'x': 10.0, 'y': 10.0, 'open': False}
+mu = threading.Lock()
+def answer(words):
+    if os.path.exists(ctl + '.sender'):
+        os.unlink(ctl + '.sender')
+        st['open'] = False
+    homed = 3 if os.path.exists(ctl + '.homed') else 0
+    if words[:1] == ['state']:
+        return json.dumps({'state': 'Idle', 'sender': False, 'port_jog': False, 'released': False,
+                           'mpos': [round(st['x'], 3), round(st['y'], 3), 0.0], 'homed': homed,
+                           'envelope_open': st['open'], 'mcode': None, 'sender_out': False,
+                           'tray': 'in'})
+    if words[:2] == ['envelope', 'open']:
+        if not homed:
+            return 'error:homed'
+        st['open'] = True
+    elif words[:2] == ['envelope', 'apply']:
+        st['open'] = False
+    elif words[:1] == ['jog']:
+        for w in words[1:]:
+            if w[:1] in ('X', 'Y'):
+                st[w[0].lower()] += float(w[1:])
+    return 'ok'
 def serve(c):
     for line in c.makefile('rb'):
         with open(log, 'ab') as o:
             o.write(line)
-        c.sendall(b'ok\n')
+        with mu:
+            reply = answer(line.decode().split())
+        c.sendall(reply.encode() + b'\n')
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(path)
+srv.listen(4)
 while True:
     c, _ = srv.accept()
     threading.Thread(target=serve, args=(c,), daemon=True).start()
@@ -355,6 +562,472 @@ mode
 expect 'grbl|running' "$(jget "$T/mode.json" 'd["mode"] + "|" + d["controller"]')" "GET /mode stays grbl, the controller running"
 [ ! -e "$T/cloud.started" ] && ok "the cloud client never started" || bad "the cloud client started"
 grep -qx 'cool_intake_fans = 1' "$CONF" && ok "the conf file keeps cool_intake_fans = 1" || bad "the conf file lost the fan count"
+
+# The checks, as the page drives them: check <id> [what...] starts the
+# check, polls GET /wiz/dark, and writes to $T/run.json the start's
+# status, every phase and prompt seen, and the status it ended on. Each
+# what is answer:<prompt>=<value> (one answer per prompt shown, in
+# order), on:<prompt>=<command> (run when the prompt shows, before its
+# answer), shot:<prompt>=<cam> (GET /wiz/shot?cam=<cam> when it shows,
+# saved as $T/run.json.<cam>), or diag (GET /diag/status's phases beside
+# the check's).
+cat > "$T/drive.py" <<'EOF'
+import json, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+url, token, wid, out = sys.argv[1:5]
+answers, actions, shots, diag = {}, {}, {}, False
+for a in sys.argv[5:]:
+    kind, _, rest = a.partition(':')
+    pid, _, v = rest.partition('=')
+    if kind == 'answer':
+        answers.setdefault(pid, []).append(v)
+    elif kind == 'on':
+        actions[pid] = v
+    elif kind == 'shot':
+        shots[pid] = v
+    elif kind == 'diag':
+        diag = True
+def call(method, path, data=None):
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    req = urllib.request.Request(url + path, data=body, method=method, headers={'X-ForgeFIRM-Token': token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+def seen(log, v):
+    if v and (not log or log[-1] != v):
+        log.append(v)
+rec = {'phases': [], 'prompts': [], 'diag_phases': [], 'shots': {}}
+rec['start'], body = call('POST', '/wiz/%s/start' % wid, {})
+done, t0 = set(), time.time()
+while rec['start'] == 200:
+    d = json.loads(call('GET', '/wiz/dark')[1])
+    seen(rec['phases'], d.get('phase'))
+    if diag:
+        seen(rec['diag_phases'], json.loads(call('GET', '/diag/status')[1]).get('phase'))
+    p = d.get('prompt')
+    if d.get('running') and p and p['seq'] not in done:
+        done.add(p['seq'])
+        pid = p['id']
+        rec['prompts'].append({'id': pid, 'kind': p['kind'], 'options': p['options']})
+        if pid in shots:
+            st, img = call('GET', '/wiz/shot?cam=' + shots[pid])
+            rec['shots'][shots[pid]] = st
+            open('%s.%s' % (out, shots[pid]), 'wb').write(img)
+        if pid in actions:
+            subprocess.run(actions[pid], shell=True)
+        if answers.get(pid):
+            call('POST', '/wiz/%s/answer' % wid, {'seq': str(p['seq']), 'value': answers[pid].pop(0)})
+    if not d.get('running'):
+        rec['dark'] = d
+        break
+    if time.time() - t0 > 240:
+        call('POST', '/wiz/%s/abort' % wid, {})
+        rec['dark'] = dict(d, timed_out=True)
+        break
+    time.sleep(0.2)
+json.dump(rec, open(out, 'w'))
+EOF
+check() { c=$1; shift; python3 "$T/drive.py" "$URL" "$TOKEN" "$c" "$T/run.json" "$@" 2>> "$T/out" || bad "the driver failed on $c"; }
+# run <python expression over d, the driver's record>
+run() { jget "$T/run.json" "$1"; }
+# the record's version of a step, or nothing
+recv() { jget "$REC" "str(d.get('wizards', {}).get('$1', {}).get('version', ''))"; }
+
+echo "== the sensors check"
+cp "$CONF" "$T/conf.before"
+echo 50 > "$SYS/pic/hv_current"                  # a tube current at rest: the judge fails
+check sensors
+expect '200|True|True|0' "$(run '"%s|%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), d["dark"]["result"] is None, len(d["prompts"]))')" \
+    "a failing judge ends the check with an error, no result, and no question"
+expect '' "$(recv sensors)" "and the record carries no sensors"
+at_rest
+check sensors
+expect '200||0' "$(run '"%s|%s|%d" % (d["start"], d["dark"]["error"], len(d["prompts"]))')" "at rest: no error, no question"
+expect 'True|1' "$(run '"%s|%s" % (all(k in d["dark"]["result"] for k in ("coolant_down_c", "coolant_up_c", "lid_ir_max", "laser_pgood", "hv_current_max", "exhaust_rpm_idle", "intake_rpm_idle")), d["dark"]["result"]["laser_pgood"])')" \
+    "the result carries the readings, power-good 1"
+expect 1 "$(recv sensors)" "the record carries sensors at version 1"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is byte for byte the same" || bad "the sensors check wrote a setting"
+
+echo "== the intake fans step"
+check airflow.intakes
+expect '200||tachs|2|0' "$(run '"%s|%s|%s|%s|%d" % (d["start"], d["dark"]["error"], d["dark"]["result"]["counted_by"], d["dark"]["result"]["intake_fans"], len(d["prompts"]))')" \
+    "both intakes turning: counted 2 by the tachs, no question"
+grep -qx 'cool_intake_fans = 2' "$CONF" && ok "the setting reads 2" || bad "the conf file has $(grep cool_intake_fans "$CONF")"
+expect 1 "$(recv airflow.intakes)" "the record carries airflow.intakes at version 1"
+# the step hands the machine back: the controller up, the cooling engine idle
+settled() {
+    mode
+    [ "$(jget "$T/mode.json" 'd["controller"]')" = running ] && curl -s -o "$T/cool.json" "$URL/cool/status" \
+        && [ "$(jget "$T/cool.json" 'd.get("phase", "")')" = idle ]
+}
+until_ok 100 settled || bad "the machine did not settle after the step: $(cat "$T/mode.json") $(cat "$T/cool.json")"
+echo 0 > "$SYS/thermal/tach_intake_2"            # intake 2 silent: the tachs cannot count
+check airflow.intakes answer:intake-count=One
+expect 'intake-count|choice|One,Two' "$(run '"|".join([d["prompts"][0]["id"], d["prompts"][0]["kind"], ",".join(d["prompts"][0]["options"])])')" \
+    "intake 2 silent: the step asks for the count$(run '"" if d["prompts"] else " (%s %s)" % (d["start"], d.get("dark", {}).get("error"))')"
+expect '|operator|1' "$(run '"%s|%s|%s" % (d["dark"]["error"], d["dark"]["result"]["counted_by"], d["dark"]["result"]["intake_fans"])')" \
+    "the answer One is the count"
+grep -qx 'cool_intake_fans = 1' "$CONF" && ok "the setting reads 1" || bad "the conf file has $(grep cool_intake_fans "$CONF")"
+at_rest
+up || bad "no controller after the intake fans step"
+
+echo "== the cameras check"
+python3 -c 'import sys
+for cam in ("lid", "head"):
+    open("%s/%s.jpg" % (sys.argv[1], cam), "wb").write(bytes([255, 216]) + cam.encode() * 8 + bytes([255, 217]))' "$T/shots"
+curl -s -o "$T/cam.json" "$URL/cam/status"
+SENSOR=$(jget "$T/cam.json" 'd["sensor"]')
+sw 0                                             # the lid open
+check cameras "on:lid-close=$T/bin/sw 8" shot:lid-view=lid shot:head-view=head answer:lid-view=Yes answer:head-view=Yes
+expect 'lid-close|lid-view|head-view' "$(run '"|".join(p["id"] for p in d["prompts"])')" \
+    "the lid is waited for, then the lid shot's question, then the head shot's"
+expect '200|200' "$(run '"%s|%s" % (d["shots"].get("lid"), d["shots"].get("head"))')" "GET /wiz/shot serves each shot at its question"
+cmp -s "$T/run.json.lid" "$T/shots/lid.jpg" && cmp -s "$T/run.json.head" "$T/shots/head.jpg" \
+    && ok "each shot is the capture" || bad "a shot served is not the capture"
+expect "|True|True|$SENSOR" "$(run '"%s|%s|%s|%s" % (d["dark"]["error"], d["dark"]["result"]["lid_ok"], d["dark"]["result"]["head_ok"], d["dark"]["result"]["sensor"])')" \
+    "both views accepted, and the result names the sensor GET /cam/status gives"
+expect 1 "$(recv cameras)" "the record carries cameras at version 1"
+sw 8
+
+echo "== the bed check"
+cp "$CONF" "$T/conf.before"
+: > "$T/port.log"
+check motion.envelope
+expect '200|True|0' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), len(d["prompts"]))')" \
+    "on an unhomed machine the check ends in an error, with no prompt"
+grep -q '^envelope' "$T/port.log" && bad "the port got: $(grep '^envelope' "$T/port.log")" || ok "the envelope was never opened"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is byte for byte the same" || bad "an unhomed check wrote a setting"
+touch "$T/port.homed"                            # homed: the head at X10 Y10
+X10=answer:x-end=X+10
+Y10=answer:y-end=Y+10
+check motion.envelope $X10 $X10 $X10 $X10 $X10 answer:x-end=X+1 answer:x-end=X+0.1 "answer:x-end=This is the end" \
+    $Y10 $Y10 $Y10 $Y10 $Y10 answer:y-end=Y+1 "answer:y-end=This is the end"
+expect '|15|True' "$(run '"%s|%d|%s" % (d["dark"]["error"], len(d["prompts"]), all(p["kind"] == "jog" and "This is the end" in p["options"] for p in d["prompts"]))')" \
+    "fifteen prompts, every one a jog that offers This is the end"
+expect '61.1|61.0' "$(run '"%.1f|%.1f" % (d["dark"]["result"]["x_end_mm"], d["dark"]["result"]["y_end_mm"])')" \
+    "the ends are the home plus the jogs: X 61.1, Y 61.0"
+grep -qx 'envelope_x_mm = 60.10' "$CONF" && grep -qx 'envelope_y_mm = 60.00' "$CONF" \
+    && ok "the keys are the ends less 1 mm" || bad "the conf file has $(grep envelope_ "$CONF" | tr '\n' ' ')"
+expect 'envelope open|envelope apply' "$(grep '^envelope' "$T/port.log" | tr '\n' '|' | sed 's/|$//')" \
+    "the envelope was opened for the jogs and applied"
+expect 1 "$(recv motion.envelope)" "the record carries motion.envelope at version 1"
+cp "$CONF" "$T/conf.mid"
+check motion.envelope "on:x-end=touch $T/port.sender" answer:x-end=X+1
+expect '200|True|1' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), len(d["prompts"]))')" \
+    "a Grbl client's line closing the envelope ends the check at the answer, in an error"
+cmp -s "$T/conf.mid" "$CONF" && ok "and nothing is written" || bad "the closed check wrote a setting"
+rm -f "$T/port.homed"
+expect 200 "$(post '/settings?envelope_x_mm=&envelope_y_mm=' "$TOKEN")" "clearing the keys is 200"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the keys were not cleared"
+
+echo "== the flow check"
+cp "$CONF" "$T/conf.before"
+expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=5 -d cool_flow_rise=6.0)" \
+    "a 5 s check window and a 6.0 C threshold are 200"
+# The loop as the diagnostic reads it: at 20 C at rest; with the heater
+# on the downstream sensor 5.0 C up with the pump on and 9.0 C up with it
+# off, so the threshold passes with a thin margin on the flowing side.
+# The heater's file is emptied as it is read: a shorter value written
+# over a longer one would keep the longer one's tail.
+python3 - "$SYS" <<'EOF' &
+import math, os, sys, time
+sysfs = sys.argv[1]
+def raw(t):
+    r = 10000 * math.exp(-3380 / 298.15) * math.exp(3380 / (t + 273.15))
+    return round(1024 * 1.3 / (10000 / r + 1))
+def put(attr, v):
+    open(os.path.join(sysfs, attr + '.new'), 'w').write('%d\n' % v)
+    os.replace(os.path.join(sysfs, attr + '.new'), os.path.join(sysfs, attr))
+heater = 0
+while True:
+    with open(os.path.join(sysfs, 'thermal/heater_pwm'), 'r+') as f:
+        v = f.read().strip()
+        if v:
+            heater = int(v)
+            f.truncate(0)
+    pump = open(os.path.join(sysfs, 'thermal/water_pump_on')).read().strip() != '0'
+    put('pic/water_temp_1', raw(20.0 + ((5.0 if pump else 9.0) if heater else 0.0)))
+    put('pic/water_temp_2', raw(20.0))
+    time.sleep(0.05)
+EOF
+PLANT=$!
+check cooling.flow-verify diag
+kill $PLANT
+PLANT=
+expect '200||True|True' "$(run '"%s|%s|%s|%s" % (d["start"], d["dark"]["error"], d["dark"]["result"]["pass"], d["dark"]["result"]["thin_margin"])')" \
+    "the diagnostic's result is the check's: pass true, a thin margin"
+expect True "$(run 'str(len(set(d["phases"]) & set(d["diag_phases"])) >= 4)')" \
+    "the diagnostic's phases show as the check's ($(run 'str(len(set(d["phases"]) & set(d["diag_phases"])))') shared)"
+expect '1|True' "$(jget "$REC" '"%s|%s" % (d["wizards"]["cooling.flow-verify"]["version"], "cooling.flow" in d.get("flags", {}))')" \
+    "the record carries cooling.flow-verify at version 1, and the thin margin flags the calibration"
+at_rest
+expect 200 "$(post '/settings?cool_flow_check_s=&cool_flow_rise=' "$TOKEN")" "clearing the window and the threshold is 200"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the flow settings were not cleared"
+restart "$T/seed.json"
+up || bad "no controller on the seeded record"
+
+echo "== the laser floor burn"
+cp "$CONF" "$T/conf.before"
+: > "$T/burn.log"
+check laser.floor
+expect '200|True|0' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), len(d["prompts"]))')" \
+    "without Focus on the record the burn is refused before any prompt"
+cmp -s "$T/conf.before" "$CONF" && ok "and nothing is written" || bad "the refused burn wrote a setting"
+# The burn on a host: Focus on the record; the head's hall sensor
+# following the lens steps written to cnc/z_step (a pipe); the GRBL
+# controller's stand-in publishing its settings, reporting to the
+# cooling engine with its secret, and answering the Grbl socket: ok to
+# every line, each recorded; at the program's first M3 or M4 it reports
+# its window armed and sets the tube current and the LASER_ON samples
+# the burn's witnesses read, at M102 it reads the settings in force, and
+# at M2 it puts both witnesses back to zero. Nothing fires: no laser is
+# there, and the witnesses are files.
+python3 - "$T/seed.json" "$T/focus.json" <<'EOF' || fatal "the Focus record was not written"
+import json, sys
+r = json.load(open(sys.argv[1]))
+r['wizards']['laser.focus'] = {'version': 1, 'completed': r['created'], 'result': {}, 'applied': {}}
+json.dump(r, open(sys.argv[2], 'w'), indent=2)
+EOF
+cat > "$T/burnctl.py" <<'EOF'
+import json, os, socket, sys, threading, time, urllib.parse, urllib.request
+T, URL, SYS, PORT = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+SECRET, RUN = os.environ.get('GF_REPORT_SECRET', ''), os.environ['GF_RUN_DIR']
+def put(path, text):
+    open(path + '.new', 'w').write(text)
+    os.replace(path + '.new', path)
+open(T + '/ctl.pids', 'a').write('%d\n' % os.getpid())
+put(T + '/ctl.pid', '%d\n' % os.getpid())
+put(T + '/ctl.secret', SECRET + '\n')
+put(RUN + '/grbl.settings', '$100=213.333\n$101=213.333\n$102=2.922\n')
+armed = [0]
+def report():
+    data = urllib.parse.urlencode({'mode': 'idle', 'armed': str(armed[0])}).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request(URL + '/cool/state', data=data,
+                                                      headers={'X-ForgeFIRM-Report': SECRET}), timeout=5).read()
+    except OSError:
+        pass
+def reporter():
+    while True:
+        put(RUN + '/grbl.state', json.dumps({'connected': False, 'ts_mono': time.monotonic()},
+                                          separators=(',', ':')))
+        report()
+        time.sleep(0.5)
+def serve(c):
+    c.sendall(b"Grbl 1.1h ['$' for help]\r\n")
+    lit = False
+    for raw in c.makefile('rb'):
+        line = raw.decode().strip()
+        open(T + '/burn.log', 'a').write(line + '\n')
+        if line == 'M102':
+            put(T + '/at_m102.json', urllib.request.urlopen(URL + '/settings', timeout=5).read().decode())
+        if not lit and line[:2] in ('M3', 'M4'):
+            lit = True
+            armed[0] = 1
+            report()
+            put(SYS + '/pic/hv_current', '60\n')
+            put(SYS + '/cnc/laser_on_sampled', '12\n')
+        if line == 'M2':
+            time.sleep(0.3)
+            put(SYS + '/pic/hv_current', '0\n')
+            put(SYS + '/cnc/laser_on_sampled', '0\n')
+            armed[0] = 0
+        c.sendall(b'ok\r\n')
+def listen(fam, host):
+    s = socket.socket(fam, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((host, PORT))
+    s.listen(4)
+    while True:
+        threading.Thread(target=serve, args=(s.accept()[0],), daemon=True).start()
+threading.Thread(target=reporter, daemon=True).start()
+threading.Thread(target=listen, args=(socket.AF_INET6, '::1'), daemon=True).start()
+listen(socket.AF_INET, '127.0.0.1')
+EOF
+cat > "$T/hall.py" <<'EOF'
+import os, sys
+sysfs = sys.argv[1]
+fd = os.open(os.path.join(sysfs, 'cnc/z_step'), os.O_RDWR)
+k = 0
+def hall():
+    p = os.path.join(sysfs, 'head/hall_sensor')
+    open(p + '.new', 'w').write('0\n' if k >= 0 else '1\n')
+    os.replace(p + '.new', p)
+hall()
+while True:
+    for b in os.read(fd, 64):
+        k += 1 if b == ord('1') else -1
+    hall()
+EOF
+OLD=$(ctl_pid)
+stop_daemon
+cp "$T/bin/grbl" "$T/bin/grbl.sh"
+printf '#!/bin/sh\nexec python3 "%s/burnctl.py" "%s" "%s" "%s" %s\n' "$T" "$T" "$URL" "$SYS" "$GRBL_PORT" > "$T/bin/grbl"
+for a in head/z_current head/z_mode head/z_enable cnc/motor_lock; do : > "$SYS/$a"; done
+echo 0 > "$SYS/cnc/laser_on_sampled"
+mkfifo "$SYS/cnc/z_step"
+python3 "$T/hall.py" "$SYS" &
+HALL=$!
+until_ok 25 test -s "$SYS/head/hall_sensor" || fatal "the hall sensor's stand-in did not start"
+LENS_SYS=$SYS
+cp "$T/focus.json" "$REC"
+start_daemon
+up || bad "no controller on the Focus record"
+expect 200 "$(post /settings "$TOKEN" -d laser_floor_density=4)" "a floor of 4 to start from is 200"
+curl -s -o "$T/status.json" "$URL/status"
+IN=$(jget "$T/status.json" '"%.1f" % ((d["lens"]["reach_min"] + d["lens"]["reach_max"]) / 2)')
+OUT=$(jget "$T/status.json" '"%.1f" % (d["lens"]["reach_max"] + 2)')
+curl -s -o "$T/floor.gcode" "$URL/wiz/sheet.gcode?card=laser.floor"
+grep -qx ';keys=floor-off' "$T/floor.gcode" && ok "the program carries ;keys=floor-off" || bad "the program has no ;keys=floor-off"
+# snap <prompt>: the machine as the prompt shows, one JSON line in $T/snaps
+# (the controller's pid, the lens's reference marker, the lens motor's
+# attributes, the lines on the Grbl socket, the floor setting, the
+# wizard's phase, and the cooling engine's armed)
+cat > "$T/bin/snap" <<EOF
+#!/bin/sh
+exec python3 - "\$1" <<'PY'
+import json, os, sys, urllib.request
+def rd(p):
+    try:
+        return open(p).read().strip()
+    except OSError:
+        return None
+def get(path):
+    return json.loads(urllib.request.urlopen('$URL' + path, timeout=5).read())
+conf = rd('$CONF') or ''
+floor = [l.split('=', 1)[1].strip() for l in conf.splitlines() if l.startswith('laser_floor_density ')]
+print(json.dumps({'at': sys.argv[1], 'pid': rd('$T/ctl.pid'), 'lens_home': os.path.exists('$T/run/lens.home'),
+                  'motor_lock': rd('$SYS/cnc/motor_lock'), 'z_mode': rd('$SYS/head/z_mode'),
+                  'z_enable': rd('$SYS/head/z_enable'), 'socket_lines': len((rd('$T/burn.log') or '').split()),
+                  'floor': floor[0] if floor else None, 'phase': get('/wiz/dark').get('phase'),
+                  'armed': get('/cool/status').get('armed')}), file=open('$T/snaps', 'a'))
+PY
+EOF
+chmod +x "$T/bin/snap"
+: > "$T/snaps"
+P0=$(ctl_pid)
+rm -f "$T/run/lens.home"
+check laser.floor answer:gantry-stops=Yes "on:home=$T/bin/snap home" "answer:home=The head is home" \
+    "on:scrap=$T/bin/snap scrap" answer:scrap=Continue "on:thickness=$T/bin/snap thickness" \
+    answer:thickness=$OUT answer:thickness=$IN "on:floor-arm=wc -l < $T/burn.log > $T/at_arm" answer:floor-arm=Continue \
+    "on:floor-pick=curl -s -o $T/at_pick.json $URL/settings" answer:floor-pick=8
+expect 'gantry-stops|home|scrap|thickness|thickness|floor-arm|floor-pick' "$(run '"|".join(p["id"] for p in d["prompts"])')" \
+    "the prompts in order: gantry stops, home, scrap, thickness, thickness again, the arm, the pick"
+# snaps <python expression over s, the snapshot at prompt $1 (the n-th: $2)>
+snaps() { python3 -c 'import json, sys
+s = [json.loads(l) for l in open(sys.argv[1]) if json.loads(l)["at"] == sys.argv[2]][int(sys.argv[3])]
+print(eval(sys.argv[4]))' "$T/snaps" "$1" "$2" "$3" 2>&1; }
+expect True "$(snaps home 0 's["pid"] not in (None, "'"$P0"'") and s["lens_home"]')" \
+    "after the gantry stops, before the home question: the controller stopped and started again, the lens referenced"
+expect '0|1|0' "$(snaps scrap 0 '"%s|%s|%s" % (s["motor_lock"], s["z_mode"], s["z_enable"])')" \
+    "before the scrap question: the lens motor taken"
+for n in 0 1; do
+    expect '0|4|False|True' "$(snaps thickness $n '"%s|%s|%s|%s" % (s["socket_lines"], s["floor"], s["armed"], s["phase"] != "the program goes to the controller, the button lights at the arm")')" \
+        "at thickness question $((n + 1)): no program line streamed, laser_floor_density still 4, not armed, the burn not entered"
+done
+expect "$IN" "$(run '"%.1f" % d["dark"]["result"]["thickness_mm"]')" \
+    "$OUT mm, outside the lens window, was not stored: the burn ran at $IN mm"
+expect 0 "$(cat "$T/at_arm" 2>/dev/null)" "nothing went to the controller before the arm"
+expect '1|0' "$(grep -cx M102 "$T/burn.log")|$(grep -c '^;' "$T/burn.log")" \
+    "the program reaches the controller with ;keys=floor-off as M102, and no other directive"
+expect '0|off' "$(jget "$T/at_m102.json" 'd.get("laser_floor_density", "") + "|" + d.get("laser_dose_curve", "")')" \
+    "at M102 the floor is 0 and the dose curve off"
+expect '4|' "$(jget "$T/at_pick.json" 'd.get("laser_floor_density", "") + "|" + d.get("laser_dose_curve", "")')" \
+    "after the burn the keys are as they were: the floor 4, the curve unset"
+expect '|8|10' "$(run '"%s|%g|%g" % (d["dark"]["error"], d["dark"]["result"]["faintest_density"], d["dark"]["result"]["floor_density"])')" \
+    "the pick 8 sets the floor 10"
+grep -qx 'laser_floor_density = 10' "$CONF" && ok "the setting reads 10" || bad "the conf file has $(grep laser_floor "$CONF")"
+expect 1 "$(recv laser.floor)" "the record carries laser.floor at version 1"
+[ ! -e "$T/data/curverec.saved" ] && ok "the saved keys' marker is gone" || bad "the saved keys' marker is left"
+OLD=$(ctl_pid)
+stop_daemon
+kill $HALL
+wait $HALL 2>/dev/null
+HALL=
+rm -f "$SYS/cnc/z_step" "$SYS/head/hall_sensor" "$SYS/head/z_current" "$SYS/head/z_mode" "$SYS/head/z_enable" \
+      "$SYS/cnc/motor_lock" "$SYS/cnc/laser_on_sampled" "$T/run/grbl.settings" "$T/run/grbl.state" "$T/run/lens.home"
+mv "$T/bin/grbl.sh" "$T/bin/grbl"
+LENS_SYS=$T/no-head
+at_rest
+cp "$T/conf.before" "$CONF"
+cp "$T/seed.json" "$REC"
+start_daemon
+up || bad "no controller on the seeded record"
+
+echo "== the first run"
+# The record as a first run leaves it behind the checks: no consent, no
+# press, no account, no form step; the coolant calibration kept; no
+# users file, and the intake fans not counted.
+python3 - "$T/seed.json" "$T/first.json" <<'EOF' || fatal "the first-run record was not written"
+import json, sys
+r = json.load(open(sys.argv[1]))
+r['advisories'] = {}
+for k in ('acceptance', 'account'):
+    r.pop(k, None)
+r['wizards'] = {k: v for k, v in r['wizards'].items()
+                if k not in ('advisories', 'account', 'preferences', 'machine', 'cloud')}
+json.dump(r, open(sys.argv[2], 'w'), indent=2)
+EOF
+cp "$CONF" "$T/conf.before"
+OLD=$(ctl_pid)
+stop_daemon
+cp "$T/first.json" "$REC"
+: > "$CONF"
+start_daemon
+wiz
+expect 'false|false|closed' "$(jget "$T/wiz.json" 'json.dumps(d["advisories_complete"]) + "|" + json.dumps(d["acceptance_done"]) + "|" + d["gate"]')" \
+    "GET /wiz: nothing accepted, the gate closed"
+for doc in $(jget "$T/wiz.json" '" ".join(x["id"] for x in d["documents"])'); do
+    H=$(jget "$T/wiz.json" "[x['hash'] for x in d['documents'] if x['id'] == '$doc'][0]")
+    P=$(jget "$T/wiz.json" "[x.get('phrase') or '' for x in d['documents'] if x['id'] == '$doc'][0]")
+    expect 200 "$(post /wiz/advisories/accept "$TOKEN" -d "doc=$doc" -d "hash=$H" --data-urlencode "phrase=$P")" \
+        "$doc accepted at its hash"
+done
+wiz
+expect true "$(jget "$T/wiz.json" 'json.dumps(d["advisories_complete"])')" "the documents are accepted"
+expect 200 "$(post /wiz/advisories/press "$TOKEN")" "POST /wiz/advisories/press is 200"
+led() { cat "$T/leds/button_led_$1/$2" 2>/dev/null; }
+if [ "$(led 1 target)" = 0 ] && [ "$(led 2 target)" -gt 0 ] && [ "$(led 3 target)" -gt 0 ] \
+   && [ "$(led 2 pulse_on)" -gt 0 ] && [ "$(led 3 pulse_on)" -gt 0 ]; then
+    ok "the button breathes teal: red off, green and blue lit and pulsing"
+else bad "the button LEDs: targets $(led 1 target)/$(led 2 target)/$(led 3 target), pulse_on $(led 2 pulse_on)/$(led 3 pulse_on)"; fi
+# a new reason: the supervisor takes it up on its next tick, then holds the gate on it
+says() { mode; [ "$(jget "$T/mode.json" 'd.get("why", "")')" = "$1" ]; }
+held_next() { until_ok 50 says "$1"; held "$1"; }
+press() { curl -s -o "$T/press.json" "$URL/wiz/advisories/press" && [ "$(jget "$T/press.json" 'json.dumps(d["accepted"])')" = true ]; }
+sw 12                                            # the button held
+until_ok 50 press && ok "the press is taken as the acceptance" || bad "the press was not accepted: $(cat "$T/press.json")"
+sw 8
+wiz
+expect 'true|True' "$(jget "$T/wiz.json" 'json.dumps(d["acceptance_done"])')|$(jget "$REC" 'str(bool(d["acceptance"]["pressed_at"]))')" \
+    "acceptance_done, and the record holds the press"
+code=$(curl -s -D "$T/head" -o "$T/body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $TOKEN" \
+            -d name=owner -d "password=$(python3 -c 'import secrets; print(secrets.token_hex(8))')" "$URL/wiz/account")
+expect 200 "$code" "POST /wiz/account is 200"
+tr -d '\r' < "$T/head" | grep -qi '^set-cookie: ffsid=[0-9a-f]' && ok "and sets the session cookie" || bad "no session cookie: $(grep -i cookie "$T/head")"
+held_next "setup required: preferences, machine, cloud"
+expect 200 "$(post /wiz/preferences "$TOKEN" -d ui_units=metric)" "POST /wiz/preferences is 200"
+held_next "setup required: machine, cloud"
+expect 200 "$(post /wiz/machine "$TOKEN" -d model=basic -d tec=0)" "POST /wiz/machine is 200"
+held_next "setup required: cloud"
+expect 200 "$(post /wiz/cloud "$TOKEN" -d enabled=0)" "POST /wiz/cloud is 200"
+held_next "the intake fans are not counted"
+OLD=$(ctl_pid)
+expect 200 "$(post /settings "$TOKEN" -d cool_intake_fans=1)" "cool_intake_fans=1 is 200"
+wiz
+expect 'open|' "$(jget "$T/wiz.json" 'd["gate"] + "|" + d["why"]')" "the count opens the gate"
+up && ok "the controller starts" || bad "no controller with the gate open"
+expect 200 "$(post /wiz/complete "$TOKEN")" "POST /wiz/complete is 200"
+wiz
+expect 'true|open' "$(jget "$T/wiz.json" 'json.dumps(d["completed"]) + "|" + d["gate"]')" "the run is complete, the gate open"
+OLD=$(ctl_pid)
+stop_daemon
+cp "$T/seed.json" "$REC"
+cp "$T/conf.before" "$CONF"
+rm -f "$T/data/users"
+start_daemon
+up || bad "no controller on the seeded record"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

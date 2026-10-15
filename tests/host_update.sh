@@ -10,8 +10,11 @@
 # pointed at a release server of its own on 127.0.0.1:18099. That server
 # answers release v0.0.9 with notes and a forgefirm.fw asset of a size
 # above 0, and serves a few bytes that are no archive as acceptance.json,
-# after a delay that keeps the job, and so its lease, running. One case
-# each:
+# after a delay that keeps the job, and so its lease, running. fwup on the
+# daemon's PATH is a stand-in that reads an archive as text: -m prints its
+# meta- lines, -V passes only for the key a signed-by line names, -l passes
+# on an archive with a product and lists its task lines, and every call is
+# recorded. One case each:
 #
 #   the release check: GET /update/release's keys; POST /update/check;
 #     the version, the size, the notes, and new; a dismissal refused for
@@ -23,6 +26,13 @@
 #     probe ends refused by the signature check, leaving neither
 #     download-probe nor download.fw, and the same settings write is then
 #     taken
+#   the product gate on POST /update/upload: an extension package
+#     unsigned, one signed with a throwaway key, and one that carries a
+#     task are each 400, an extension package, not firmware; an archive of
+#     another product is 400, not firmware; each leaves nothing staged.
+#     ForgeFIRM firmware is taken as the unsigned upload it is (200,
+#     signature unsigned, the bytes staged), and the staged file is then
+#     removed; fwup is never asked to apply
 #
 # No firmware file is requested, nothing is applied, no slot is written,
 # and nothing posts confirm=1, a reboot, or /system/ssh. The daemon runs
@@ -95,7 +105,7 @@ start_daemon() {
         GF_LOGS_EFFECTIVE="$T/loglevels" GF_LOGS_STAGE="$T/stage" \
         FORGECTRL_RELCHECK_URL="http://127.0.0.1:$REL_PORT/repos/openglow-org/forgefirm/releases/latest" \
         FORGECTRL_RELCHECK_DOWNLOAD_FMT="http://127.0.0.1:$REL_PORT/releases/download/%s/%s" \
-        FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
+        FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT PATH="$T/path:$PATH" \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
     curl -s -o /dev/null --retry 30 --retry-connrefused --retry-delay 1 "$URL/status" \
@@ -130,6 +140,29 @@ exec sleep 600
 EOF
 printf '#!/bin/sh\necho "$0" >> "%s/cloud.started"\n' "$T" > "$T/bin/cloud"
 chmod +x "$T/bin/grbl" "$T/bin/cloud"
+# fwup's stand-in: the archive is text, and the gate decides from what
+# this prints, as it does from what fwup prints.
+mkdir -p "$T/path"
+cat > "$T/path/fwup" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${0%/*}/fwup.log"
+op=$1
+shift
+f=
+k=
+while [ $# -gt 0 ]; do
+    case $1 in -i) f=$2; shift ;; -p) k=$2; shift ;; esac
+    shift
+done
+[ -f "$f" ] || exit 1
+case $op in
+-m) grep '^meta-' "$f" ;;
+-V) [ -n "$k" ] && grep -qxF "signed-by=$k" "$f" ;;
+-l) grep -q '^meta-product=' "$f" && sed -n 's/^task //p' "$f" ;;
+*) exit 1 ;;
+esac
+EOF
+chmod +x "$T/path/fwup"
 
 # The release server: the latest release, and the acceptance record late.
 python3 - "$REL_PORT" "$T/rel.log" <<'EOF' &
@@ -248,6 +281,30 @@ esac
 [ ! -e "$T/data/download.fw" ] && ok "no download.fw was made" || bad "download.fw was made"
 grep -qs 'forgefirm.fw' "$T/rel.log" && bad "the firmware file was requested" || ok "the firmware file was never requested"
 expect 200 "$(post /settings "$TOKEN" -d ui_units=metric)" "the same settings write is then 200"
+
+echo "== the product gate on the upload"
+STAGED=$T/data/upload.fw
+upload() { post /update/upload "$TOKEN" -F "file=@$1;filename=${1##*/}"; }
+ext='meta-product="ForgeFIRM extension"\nmeta-version=1.0.0\n'
+printf "$ext" > "$T/ext-unsigned.fw"
+printf "${ext}signed-by=$T/throwaway.pub\n" > "$T/ext-signed.fw"
+printf "${ext}task upgrade.a\n" > "$T/ext-task.fw"
+printf 'meta-product="forgetest"\nmeta-version=0.0.0-test\n' > "$T/other.fw"
+printf 'meta-product="ForgeFIRM firmware"\nmeta-version=0.0.0-test\n' > "$T/firmware.fw"
+for a in ext-unsigned ext-signed ext-task; do
+    expect 400 "$(upload "$T/$a.fw")" "$a is 400"
+    grep -qF 'an extension package, not firmware' "$T/body" && ok "and says an extension package, not firmware" \
+        || bad "the refusal says '$(cat "$T/body")'"
+    [ ! -e "$STAGED" ] && ok "and nothing is staged" || bad "$a is staged"
+done
+expect 400 "$(upload "$T/other.fw")" "an archive of another product is 400"
+grep -qF 'not firmware' "$T/body" && ok "and says not firmware" || bad "the refusal says '$(cat "$T/body")'"
+[ ! -e "$STAGED" ] && ok "and nothing is staged" || bad "the other product is staged"
+expect 200 "$(upload "$T/firmware.fw")" "ForgeFIRM firmware is 200"
+expect unsigned "$(jget "$T/body" 'd.get("signature")')" "its signature reads unsigned"
+cmp -s "$T/firmware.fw" "$STAGED" && ok "and its bytes are staged" || bad "the staged file is not the upload"
+rm -f "$STAGED"
+grep -q '^-a' "$T/path/fwup.log" && bad "fwup was asked to apply" || ok "fwup was never asked to apply"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

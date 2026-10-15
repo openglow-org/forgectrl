@@ -29,6 +29,8 @@ jobs:
         run: cmake --build build -j"$(nproc)"
       - name: "The served pages' scripts parse (node --check on every bundled script), and index.html carries the extension card with loadExt defined before its call"
         run: python3 -B tools/check_ui_js.py build/ui
+      - name: "wizard_walk (the first-run page as bundled, walked in headless Chrome against the dev server's mock: the documents, the press, the account, preferences, machine, cloud, the intake fans counted, the choice onto the panel)"
+        run: python3 -B tests/wizard_walk.py build/ui
       - name: "status_test (the lid and idle reads fail closed; the sys, grbl and lens blocks of /status)"
         run: ./build/status_test
       - name: Dose-curve fitter test
@@ -45,6 +47,8 @@ jobs:
         run: ./build/grblport_test
       - name: "jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort; the daemon's own sender under it)"
         run: ./build/jobrun_test
+      - name: "jobpost_test (POST /job's multipart reader: the form parts reach the start, a missing name, a $ line and a malformed boundary are refused)"
+        run: ./build/jobpost_test
 
       - name: "tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)"
         run: ./build/tokens_test

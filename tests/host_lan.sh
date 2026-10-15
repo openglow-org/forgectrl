@@ -30,7 +30,10 @@
 #   GET /events with X-ForgeFIRM-Client: extension-host from 127.0.0.1 in
 #     the daemon's namespace is 200 text/event-stream greeting with event:
 #     hello, and the same header from 192.0.2.1 does not end it (no event:
-#     bye, no "replaced"): the host's slot is a loopback peer's alone.
+#     bye, no "replaced"): the host's slot is a loopback peer's alone;
+#   once an account is made from 127.0.0.1, GET /setup?step=laser.focus
+#     from 192.0.2.1 with no session is a 302 to the login carrying the
+#     path and its query.
 #
 # Nothing posts /system/reboot, /system/ssh, or confirm=1. The namespace
 # and the veth are removed on the way out, failure included. Needs root
@@ -110,6 +113,9 @@ done
 echo 8 > "$T/switches"
 : > "$T/pulse"
 echo "ui_units = metric" > "$CONF"
+# the press recorded and nothing else: the account route takes a first
+# account, and the gate stays closed
+printf '{"schema": 1, "acceptance": {"pressed_at": "%s"}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$T/data/setup.json"
 printf '#!/bin/sh\necho "$0" >> "%s/grbl.started"\nexec sleep 600\n' "$T" > "$T/bin/grbl"
 printf '#!/bin/sh\necho "$0" >> "%s/cloud.started"\n' "$T" > "$T/bin/cloud"
 chmod +x "$T/bin/grbl" "$T/bin/cloud"
@@ -208,6 +214,14 @@ kill $EV1 $EV2
 wait $EV1 $EV2 2>/dev/null
 EV1=
 EV2=
+
+echo "== a page from $CLIENT once an account exists"
+expect 200 "$(inside POST "http://127.0.0.1:$HTTP_PORT/wiz/account" -H "X-ForgeFIRM-Token: $TOKEN" \
+                  -d name=hostlan -d password=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n'))" \
+    "POST /wiz/account from 127.0.0.1 makes an account"
+expect 302 "$(lan GET "https://$DAEMON:$TLS_PORT/setup?step=laser.focus")" \
+    "GET /setup?step=laser.focus from $CLIENT with no session is 302"
+expect "/login?next=/setup%3Fstep%3Dlaser.focus" "$(header Location)" "to the login, carrying the path and its query"
 
 kill $PID
 until_ok 75 eval '! alive $PID' || fatal "the daemon did not stop in 15 s"

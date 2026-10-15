@@ -1601,12 +1601,37 @@ out:
 
 /* --------------------------------------------------------- the cameras */
 
+/* A test's stand-in for the capture, on a host with no cameras:
+ * FORGECTRL_WIZ_SHOTS names a directory, and <name>.jpg there is the
+ * snapshot. Unset, the camera engine captures. */
+static int stub_shot(const char *dir, const char *name, uint8_t **jpeg, size_t *len,
+                     char *err, size_t elen)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s.jpg", dir, name);
+    FILE *f = fopen(path, "rb");
+    uint8_t *buf = f ? malloc(1 << 20) : NULL;
+    size_t n = buf ? fread(buf, 1, 1 << 20, f) : 0;
+    if (f)
+        fclose(f);
+    if (!n) {
+        free(buf);
+        snprintf(err, elen, "no stand-in snapshot %.16s.jpg", name);
+        return -1;
+    }
+    *jpeg = buf;
+    *len = n;
+    return 0;
+}
+
 static int shot(cam_id_t cam, const char *name)
 {
     uint8_t *jpeg = NULL;
     size_t len = 0;
     char err[128] = "";
-    if (cam_snapshot(cam, 0, 80, -1, 0, &jpeg, &len, err, sizeof(err)) != 0) {
+    const char *stub = getenv("FORGECTRL_WIZ_SHOTS");
+    if (stub && *stub ? stub_shot(stub, name, &jpeg, &len, err, sizeof(err)) != 0
+                      : cam_snapshot(cam, 0, 80, -1, 0, &jpeg, &len, err, sizeof(err)) != 0) {
         wlog("%s snapshot: %s", name, err);
         return -1;
     }

@@ -308,8 +308,17 @@ static int random_hex(char *out, size_t bytes)
 static char host_tok[TOKENS_TEXT_LEN + 1];
 static unsigned host_caps;
 
+/* TOKENS_HOST_FILE, or a test's own file, so an unprivileged host test
+ * can read the credential it just made. */
+static const char *host_file(void)
+{
+    const char *v = getenv("FORGECTRL_EXT_HOST_TOKEN");
+    return v && *v ? v : TOKENS_HOST_FILE;
+}
+
 int tokens_host_mint(char *err, size_t elen)
 {
+    const char *path = host_file();
     char bad[64], fresh[TOKENS_TEXT_LEN + 1];
     unsigned caps = 0;
     FILE *f;
@@ -333,21 +342,21 @@ int tokens_host_mint(char *err, size_t elen)
 
     /* Made unreadable before it has contents: the file is opened with
      * the mode it keeps, not chmod'd after the secret is in it. */
-    unlink(TOKENS_HOST_FILE);
-    fd = open(TOKENS_HOST_FILE, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    unlink(path);
+    fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) {
-        snprintf(err, elen, "cannot make %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        snprintf(err, elen, "cannot make %s: %s", path, strerror(errno));
         return -1;
     }
     f = fdopen(fd, "w");
     if (!f) {
         close(fd);
-        snprintf(err, elen, "cannot write %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        snprintf(err, elen, "cannot write %s: %s", path, strerror(errno));
         return -1;
     }
     fputs(text, f);
     if (fclose(f) != 0) {
-        snprintf(err, elen, "cannot write %s: %s", TOKENS_HOST_FILE, strerror(errno));
+        snprintf(err, elen, "cannot write %s: %s", path, strerror(errno));
         return -1;
     }
     return 0;
