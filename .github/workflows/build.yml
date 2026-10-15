@@ -19,6 +19,10 @@ jobs:
         with:
           repository: openglow-org/forgefirm
           path: forgefirm-layer
+      - uses: actions/checkout@v4
+        with:
+          repository: openglow-org/forgeext
+          path: forgeext-src
       - name: Dependencies
         run: |
           sudo apt-get update -qq
@@ -27,7 +31,7 @@ jobs:
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y -qq /tmp/chrome.deb
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror -DFORGEEXT_SRC=forgeext-src/src
       - name: Build
         run: cmake --build build -j"$(nproc)"
       - name: "The served pages' scripts parse (node --check on every bundled script), and index.html carries the extension card with loadExt defined before its call"
@@ -110,6 +114,8 @@ jobs:
         run: ./build/cool_flow_test
       - name: "holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)"
         run: ./build/holds_test
+      - name: "holds_wire_test (the extension host's real hold files, read by the engine's real reader: the names, the fields and their types, the monotonic stamp, the write period inside the window, stale on a silent host)"
+        run: ./build/holds_wire_test
       - name: "extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words)"
         run: ./build/extpkg_test
       - name: "mcode_test (the M-code relay: the table from the host's status, the host's mcode command, the answer line in the port's form, the daemon set)"

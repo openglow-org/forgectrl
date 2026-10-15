@@ -1,0 +1,135 @@
+/*
+ * holds_wire_test.c - host test: the extension host's real hold files, read by the engine's real reader
+ * Copyright 2026 514 LLC d/b/a OpenGlow
+ * Written by Scott Wiederhold
+ * SPDX-License-Identifier: MIT
+ *
+ * forgeext's holdkeep.c writes into a directory; forgectrl's holds.c reads
+ * it with the host's CLOCK_MONOTONIC. What the two daemons must agree on
+ * is proven here together, built from the host's own source: the file
+ * names, the field names and their types, the clock base of ts_mono, the
+ * write period against the reader's freshness window, the directory
+ * literals, and the table sizes.
+ */
+#define _GNU_SOURCE
+#include "../src/holds.h"
+#include "holdkeep.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+static int fails;
+#define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
+
+static double mono(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static void nap(double s)
+{
+    struct timespec t = { (time_t)s, (long)((s - (double)(time_t)s) * 1e9) };
+    nanosleep(&t, NULL);
+}
+
+int main(void)
+{
+    char dir[] = "/tmp/holds-wire-XXXXXX", req[] = "/tmp/holds-wire-req-XXXXXX", err[200];
+    hold_entry_t e[2];
+    holds_t h;
+    static holdkeep_t k;
+
+    /* The directory literals: one home on each side. */
+    CHECK(!strcmp(HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT), "the holds directory differs: host %s, engine %s",
+          HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT);
+    /* The table sizes: the host never writes more files than the engine reads. */
+    CHECK(HOLDKEEP_MAX <= HOLDS_MAX, "the host keeps %d holds, the engine reads %d", HOLDKEEP_MAX, HOLDS_MAX);
+    /* The write period against the reader's window: a missed write still reads fresh. */
+    CHECK(2.0 * HOLDKEEP_PERIOD_MS / 1000.0 < HOLDS_FRESH_S, "two write periods (%d ms) do not fit the window (%.1f s)",
+          HOLDKEEP_PERIOD_MS, HOLDS_FRESH_S);
+
+    if (!mkdtemp(dir) || !mkdtemp(req)) {
+        printf("FAIL mkdtemp\n");
+        return 1;
+    }
+
+    /* The host writes: a required hold clear, an advisory one raised. */
+    CHECK(holdkeep_start(&k, dir, HOLDKEEP_MAIN_S, err, sizeof(err)) == 0, "the keeper did not start: %s", err);
+    hold_decide("org.example.badge", 1, 1, 1, 0, NULL, &e[0]);
+    hold_decide("org.example.filter", 0, 1, 0, 1, "filter life under 5 percent", &e[1]);
+    holdkeep_set(&k, e, 2);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.files == 2 && h.unreadable == 0, "the engine did not read the host's two files as holds: files %d, unreadable %d (%s)",
+          h.files, h.unreadable, h.reason);
+    CHECK(h.standing && h.raised == 1 && h.stale_required == 0 && h.stale_advisory == 0 &&
+          !strcmp(h.reason, "org.example.filter: filter life under 5 percent"),
+          "the advisory hold the package raised does not stand in its words: standing %d raised %d stale %d/%d reason %s",
+          h.standing, h.raised, h.stale_required, h.stale_advisory, h.reason);
+
+    /* The package raises the required one in its own words: first by name. */
+    hold_decide("org.example.badge", 1, 1, 1, 1, "no badge presented", &e[0]);
+    holdkeep_set(&k, e, 2);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && h.raised == 2 && !strcmp(h.reason, "org.example.badge: no badge presented"),
+          "the raised required hold does not stand in the package's words: raised %d reason %s", h.raised, h.reason);
+
+    /* The host's own words for a package that cannot speak. */
+    hold_decide("org.example.badge", 1, 0, 0, 0, NULL, &e[0]);
+    holdkeep_set(&k, e, 2);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && !strcmp(h.reason, "org.example.badge: the extension is not running"),
+          "the host's words for a package that is not running do not reach the verdict: %s", h.reason);
+
+    /* Both clear: nothing stands. */
+    hold_decide("org.example.badge", 1, 1, 1, 0, NULL, &e[0]);
+    hold_decide("org.example.filter", 0, 1, 0, 0, NULL, &e[1]);
+    holdkeep_set(&k, e, 2);
+    holds_read(dir, req, mono(), &h);
+    CHECK(!h.standing && h.files == 2, "two clear holds stand: %s", h.reason);
+
+    /* The keeper's thread, not the main loop, keeps them fresh: no set for longer than the
+       window, and the engine still reads them fresh. */
+    nap(HOLDS_FRESH_S + 0.6);
+    holds_read(dir, req, mono(), &h);
+    CHECK(!h.standing && h.stale_required == 0 && h.stale_advisory == 0,
+          "the thread's rewrites did not keep the files fresh across %.1f s: stale %d/%d (%s)",
+          HOLDS_FRESH_S + 0.6, h.stale_required, h.stale_advisory, h.reason);
+
+    /* A host whose main loop has gone silent: the thread stops writing, the files go stale on
+       the engine's clock, the required hold stands in the engine's words, the advisory is
+       dropped. The silence bound is shortened for the test; the window is the reader's own. */
+    holdkeep_stop(&k);
+    CHECK(holdkeep_start(&k, dir, 0.3, err, sizeof(err)) == 0, "the keeper did not restart: %s", err);
+    hold_decide("org.example.badge", 1, 1, 1, 0, NULL, &e[0]);
+    hold_decide("org.example.filter", 0, 1, 0, 1, "filter life under 5 percent", &e[1]);
+    holdkeep_set(&k, e, 2);
+    nap(HOLDS_FRESH_S + 0.6);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && h.stale_required == 1 && h.stale_advisory == 1 && h.raised == 0 &&
+          !strcmp(h.reason, "org.example.badge: the extension host is not answering"),
+          "a silent host: standing %d, stale required %d, stale advisory %d, raised %d, reason %s",
+          h.standing, h.stale_required, h.stale_advisory, h.raised, h.reason);
+
+    /* A clean stop: the advisory file goes, the required one is left to go stale, and the
+       marker the host keeps on /data makes the hold stand even with the files gone. */
+    holdkeep_set(&k, e, 2);
+    holdkeep_stop(&k);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.files == 1 && h.raised == 0, "after a clean stop: %d files, raised %d (%s)", h.files, h.raised, h.reason);
+    nap(HOLDS_FRESH_S + 0.6);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && h.stale_required == 1 && !strcmp(h.reason, "org.example.badge: the extension host is not answering"),
+          "the required file a stopped host left does not stand stale: %d %s", h.standing, h.reason);
+
+    char cmd[600];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s %s", dir, req);
+    if (system(cmd) != 0)
+        fails++;
+    printf("%s: holds_wire_test, %d failure%s\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");
+    return fails ? 1 : 0;
+}

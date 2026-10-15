@@ -233,6 +233,24 @@ add_executable(holds_test tests/holds_test.c src/holds.c)
 target_compile_options(holds_test PRIVATE -Wall -Wextra)
 target_link_libraries(holds_test jansson)
 
+# The extension host's real hold files, read by the engine's real reader:
+# the file names, the fields and their types, the monotonic stamp, the
+# write period inside the reader's window, the directory literals, and a
+# silent host's files going stale. Built from the host's own holdkeep.c
+# when FORGEEXT_SRC names forgeext's src directory (build.yml checks that
+# repository out beside this one); a FORGEEXT_SRC without it is a mistake
+# and stops the configure.
+if(FORGEEXT_SRC)
+  get_filename_component(FORGEEXT_SRC "${FORGEEXT_SRC}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+  if(NOT EXISTS "${FORGEEXT_SRC}/holdkeep.c")
+    message(FATAL_ERROR "FORGEEXT_SRC=${FORGEEXT_SRC} holds no holdkeep.c")
+  endif()
+  add_executable(holds_wire_test tests/holds_wire_test.c src/holds.c "${FORGEEXT_SRC}/holdkeep.c")
+  target_include_directories(holds_wire_test PRIVATE "${FORGEEXT_SRC}")
+  target_compile_options(holds_wire_test PRIVATE -Wall -Wextra)
+  target_link_libraries(holds_wire_test jansson pthread)
+endif()
+
 # Host unit test for the per-fan airflow gate: grace, the three-tick
 # debounce, the latch, off by value, and the tach conversions. CI runs
 # it after the build.
