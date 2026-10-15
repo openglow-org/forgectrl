@@ -25,7 +25,8 @@
 #     and the panel page's tray switch
 #   /ext/call with extensions off, a package check that is no wizard,
 #   /wiz/changed, and the menu GET /wiz carries
-#   the write routes without the token, an upload, a 4 MiB body, and the
+#   the write routes without the token, an upload (nothing staged), a
+#     4 MiB body, and the
 #     fuse view without the token; the Host, Origin and Sec-Fetch-Site
 #     checks on a read
 #   the license bundle (FORGECTRL_LICENSES, a fixture in the image's
@@ -339,7 +340,10 @@ done
 expect "$n" "$(lines)" "the port got nothing from them"
 echo "not firmware" > "$T/small"
 code=$(curl -s -o "$T/body" -w '%{http_code}' -X POST -F "file=@$T/small;filename=update.fw" "$URL/update/upload")
-case $code in 400|403) ok "an upload without the token is $code" ;; *) bad "an upload without the token -> $code" ;; esac
+if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
+    ok "an upload without the token: 403, authentication required"
+else bad "an upload without the token -> $code $(cat "$T/body")"; fi
+[ ! -e "$T/data/upload.fw" ] && ok "and nothing is staged" || bad "an upload without the token staged data/upload.fw"
 head -c 4194304 /dev/zero | tr '\0' a | sed 's/^/x=/' > "$T/big"
 expect 403 "$(post /settings - --data-binary @"$T/big")" "a 4 MiB settings body without the token is 403"
 expect 200 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/status")" "GET /status is 200 after it"
