@@ -21,10 +21,13 @@ the wizard to the panel. The steps are in STEPS below: the welcome; each
 document read to its end and accepted (the typed phrase where it asks
 for one); the press step, which the mock's button takes; the account;
 preferences; the machine; cloud mode left off; the intake fans shown
-counted and passed by; the coolant flow calibration run to its result;
-the choice, where Start using the machine lands on the panel with the
-setup complete; one setting saved through the panel's save bar; and the
-login page, which refuses a wrong password and signs the account in.
+counted and passed by; the coolant flow calibration run to its result,
+through a prompt whose options are text (one shaped like code, one with
+quotes), each shown as written and the code-shaped one answered as
+written; the choice, where Start using the machine lands on the panel
+with the setup complete; one setting saved through the panel's save
+bar; and the login page, which refuses a wrong password and signs the
+account in.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
 
@@ -52,6 +55,15 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import devserver  # noqa: E402
 
 PAGES = ("index", "wizard", "login")
+
+# The prompt the walk puts on the coolant flow check (the daemon's own has
+# none): the options a step offers are text, and a package's check writes
+# its own. One is shaped like the code the page would run if it built a
+# button's handler from the option, one carries quotes and markup; the
+# page shows each as written and posts the code-shaped one as written.
+FLOW_HOSTILE = "No'); window.__ran = 1; ('"
+FLOW_OPTIONS = ["Yes", FLOW_HOSTILE, 'He said "go" <b>&amp;</b>']
+FLOW_PROMPT = ("choice", "flow-text", "Does the loop look full? An option is text.", FLOW_OPTIONS)
 BROWSERS = {
     "chrome": [r"C:\Program Files\Google\Chrome\Application\chrome.exe", "/usr/bin/google-chrome",
                "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"],
@@ -71,6 +83,8 @@ iframe { display: block; width: 1280px; height: 960px; border: 0; }
 var F = document.getElementById('f'), log = [];
 /* The account the walk makes: the mock's login takes this password alone. */
 var NAME = 'walker', PW = 'correct horse';
+/* The flow check's prompt options and the code-shaped one (FLOW_OPTIONS). */
+var FLOW = __FLOW__;
 function d() { return F.contentDocument; }
 function w() { return F.contentWindow; }
 function q(s) { var x = d(); return x ? x.querySelector(s) : null; }
@@ -164,11 +178,27 @@ var STEPS = [
     if (!row || !row.classList.contains('done'))
       throw new Error('the rail does not show the intake fans counted: ' + (row ? row.outerHTML : 'no such row'));
     if (on('st-dark') && w().K.id === 'airflow.intakes') throw new Error('the page opened the intake fans check'); }],
-  ['the coolant flow calibration runs to its result', function () {
+  ['the coolant flow calibration runs to its result; its prompt shows each option as text and takes the code-shaped one as written', function () {
     return until('the coolant flow check', function () { return on('st-dark') && w().K.id === 'cooling.flow'; })
       .then(function () { click('#k-start'); })
+      .then(function () { return until('its prompt', function () { return shown('#k-prompt') && q('#k-pbtns button'); }, 20000); })
+      .then(function () {
+        var bs = [].slice.call(d().querySelectorAll('#k-pbtns button'));
+        var got = bs.map(function (b) { return b.textContent; });
+        if (JSON.stringify(got) !== JSON.stringify(FLOW.options)) throw new Error('the prompt offers ' + JSON.stringify(got));
+        var inline = bs.filter(function (b) { return b.getAttributeNames().some(function (n) { return n.indexOf('on') === 0; }); });
+        if (inline.length) throw new Error('a prompt button carries inline script: ' + inline[0].outerHTML);
+        var hit = bs.filter(function (b) { return b.getAttribute('data-v') === FLOW.hostile; })[0];
+        if (!hit) throw new Error('no button carries the code-shaped option as written: ' +
+          JSON.stringify(bs.map(function (b) { return b.getAttribute('data-v'); })));
+        hit.click();
+        if (w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
+        return until('the answer taken', function () { return !q('#k-pbtns button'); });
+      })
       .then(function () { return until('its result', function () { return shown('#k-result') && shown('#k-next'); }, 20000); })
-      .then(function () { click('#k-next'); }); }],
+      .then(function () {
+        if (w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
+        click('#k-next'); }); }],
   ['the choice offers Start using the machine', function () {
     return until('the choice', function () { return on('st-choice'); })
       .then(function () {
@@ -229,7 +259,8 @@ class Walk(devserver.Handler):
         u = urlsplit(self.path)
         q = dict(parse_qsl(u.query, keep_blank_values=True))
         if u.path == "/__walk/":
-            return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, RUNNER.encode())
+            page = RUNNER.replace("__FLOW__", json.dumps({"options": FLOW_OPTIONS, "hostile": FLOW_HOSTILE}), 1)
+            return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, page.encode())
         if u.path == "/__walk/result" and self.command == "POST":
             Walk.result = json.loads(self._read_body() or b"{}")
             return self._json(200, {"ok": True})
@@ -303,6 +334,7 @@ def main():
     for k in ("GF_MOCK_BUTTON", "GF_MOCK_MIRROR", "GF_MOCK_REQUIRED_AGAIN"):
         os.environ.pop(k, None)
     os.environ["GF_MOCK_FIRST_RUN"] = "1"
+    devserver.DARK_PROMPTS["cooling.flow"] = FLOW_PROMPT
     Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
     Walk.mock.call_port = 0
     Walk.cfg = types.SimpleNamespace(mock=True)
@@ -350,11 +382,17 @@ def main():
         print("\n".join(Walk.said[-40:]))
         return 2
     print("\n".join(Walk.result.get("log") or []))
-    if not Walk.result.get("ok"):
+    ok = bool(Walk.result.get("ok"))
+    # The answer the page posted for the code-shaped option, as the mock took it.
+    answer = (Walk.mock.dark or {}).get("answer")
+    if ok and answer != FLOW_HOSTILE:
+        print("FAIL the flow prompt's answer reached the mock as %r, not the option as written" % (answer,))
+        ok = False
+    if not ok:
         print("--- the mock's last requests")
         print("\n".join(Walk.said[-40:]))
-    print("PASS: wizard_walk" if Walk.result.get("ok") else "FAIL: wizard_walk")
-    return 0 if Walk.result.get("ok") else 1
+    print("PASS: wizard_walk" if ok else "FAIL: wizard_walk")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -138,7 +138,9 @@ function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 function fx(u, o) {
   o = o || {};
@@ -1088,6 +1090,7 @@ function darkRender(d) {
       $('k-pinput').style.display = number ? '' : 'none';
       if (number) $('k-pvalue').value = '';
       var b = '';
+      var multi = p.kind === 'multichoice';
       if (p.kind === 'wait') {
         b = '<span class="msg">' + (p.id === 'press' ? 'Waiting for your press…' : 'Waiting for the machine…') + '</span>';
       } else if (mirror) {
@@ -1095,17 +1098,16 @@ function darkRender(d) {
       } else if (jog) {
         b = jogButtons(p);
       } else {
-        var multi = p.kind === 'multichoice';
         (p.options || ['Continue']).forEach(function (o, i) {
           var val = number && i === 0 ? '__value__' : o;
           var primary = i === 0 && p.kind !== 'choice' && !multi;
-          var click = multi ? 'darkToggle(this)' : 'darkChoose(' + p.seq + ', \'' + esc(val) + '\')';
           b += '<button class="btn btn-sm ' + (primary ? 'btn-primary' : 'btn-outline-secondary') +
-            '" data-v="' + esc(val) + '" onclick="' + click + '">' + esc(o) + '</button>';
+            '" data-v="' + esc(val) + '">' + esc(o) + '</button>';
         });
-        if (multi) b += '<button class="btn btn-sm btn-primary" onclick="darkChooseMulti(' + p.seq + ')">Done</button>';
+        if (multi) b += '<button class="btn btn-sm btn-primary" data-done="1">Done</button>';
       }
       $('k-pbtns').innerHTML = b;
+      bindPrompt(p.seq, multi);
     }
     /* A wait prompt is the machine's own: the phase counts it. An
      * answer prompt waits for the operator, and says how long. */
@@ -1172,8 +1174,8 @@ function jogButtons(p) {
   var opts = p.options || [];
   function btn(label, val, cls) {
     if (opts.indexOf(val) < 0) return '';
-    return '<button class="btn btn-sm ' + (cls || 'btn-outline-secondary') + '" onclick="darkChoose(' +
-      p.seq + ', \'' + esc(val) + '\')">' + label + '</button>';
+    return '<button class="btn btn-sm ' + (cls || 'btn-outline-secondary') + '" data-v="' + esc(val) + '">' +
+      label + '</button>';
   }
   var jogs = opts.filter(function (o) { return /^[XY][-+][\d.]+$/.test(o); });
   var g = '';
@@ -1187,11 +1189,27 @@ function jogButtons(p) {
   opts.forEach(function (o) {
     if (!/^[XY][-+][\d.]+$/.test(o)) g += btn(esc(o), o, 'btn-primary');
   });
-  g += '<button class="btn btn-sm btn-outline-secondary" onclick="jogRefresh()">Refresh the view</button>';
+  g += '<button class="btn btn-sm btn-outline-secondary" data-refresh="1">Refresh the view</button>';
   return g;
 }
 function jogRefresh() {
   $('k-shot').src = '/cam/snapshot?cam=lid&res=half&t=' + Date.now();
+}
+/* The prompt's buttons are bound here, each to the value it carries in
+ * data-v, never through inline script: an option is text from the step
+ * (a package's check writes its own), and text is never code. */
+function bindPrompt(seq, multi) {
+  var box = $('k-pbtns');
+  [].forEach.call(box.querySelectorAll('button[data-v]'), function (bt) {
+    bt.addEventListener('click', function () {
+      if (multi) darkToggle(bt);
+      else darkChoose(seq, bt.getAttribute('data-v'));
+    });
+  });
+  var done = box.querySelector('button[data-done]');
+  if (done) done.addEventListener('click', function () { darkChooseMulti(seq); });
+  var fresh = box.querySelector('button[data-refresh]');
+  if (fresh) fresh.addEventListener('click', jogRefresh);
 }
 /* A multichoice: the options toggle, Done posts the chosen ones joined
  * by commas. */
