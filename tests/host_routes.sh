@@ -512,8 +512,10 @@ expect 200 "$(host /motion/jog -d id=$PKG -d x=1)" "the credential's jog for $PK
 case $(last) in "jog G91 G21 X1"*) ok "the port got: $(last)" ;; *) bad "the port's last line is '$(last)'" ;; esac
 expect 403 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-ForgeFIRM-Token: $CRED" "$URL/cam/snapshot?cam=lid")" \
     "the same credential on GET /cam/snapshot is 403"
-code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cam/snapshot?cam=lid")
-[ "$code" != 403 ] && ok "where the panel token is let through ($code)" || bad "the panel token's snapshot is 403 too"
+# let through to the camera's own refusal: with no switch device the lid
+# reads open, and the snapshot is 409 for it, not 403 from the guard
+expect 409 "$(curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cam/snapshot?cam=lid")" \
+    "where the panel token is let through: 409, the camera's lid refusal"
 expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
 
 echo "== SSH until the next reboot"
