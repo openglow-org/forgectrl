@@ -46,11 +46,15 @@ EOF
 FORGECTRL_CONF="$T/forgefirm.conf" "$BUILD/forgectrl" --render-syslog
 
 # private rsyslog: the shipped conf with the socket and the work
-# directory moved, and imklog dropped
+# directory moved, and imklog dropped. The daemon runs from a copy of
+# the binary: Ubuntu's AppArmor profile for rsyslogd attaches by path to
+# /usr/sbin/rsyslogd and confines it to /etc/rsyslog* and /var/log, so
+# the installed binary may not read this conf or write these files.
 sed -e "s|SysSock.Use=\"on\"|SysSock.Use=\"on\" SysSock.Name=\"$T/log\"|" \
     -e "s|workDirectory=\"[^\"]*\"|workDirectory=\"$T\"|" \
     -e '/imklog/d' "$RSCONF" > "$T/rsyslog.conf"
-rsyslogd -f "$T/rsyslog.conf" -i "$T/rsyslogd.pid" -n >"$T/rsyslogd.out" 2>&1 &
+cp "$(command -v rsyslogd)" "$T/rsyslogd"
+"$T/rsyslogd" -f "$T/rsyslog.conf" -i "$T/rsyslogd.pid" -n >"$T/rsyslogd.out" 2>&1 &
 RSPID=$!
 for i in 1 2 3 4 5 6 7 8 9 10; do
     [ -S "$T/log" ] && break
