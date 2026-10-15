@@ -1482,11 +1482,16 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     pub_armed_ack = armed_ack;
     pub_down = have_down ? down : -273.15;
     pub_up = have_up ? up : -273.15;
+    /* To the millisecond, rounded down: a reader on this clock never
+     * sees a stamp from its future. Both readers refuse one, and the
+     * cloud client reads with no cache, so a refused read is a lost
+     * verdict there. */
+    double stamp = floor(wall_s() * 1000.0) / 1000.0;
     int n = snprintf(body, sizeof(body),
         "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
         "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
         "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
-        ++verdict_seq, wall_s(), fire_ok ? "true" : "false",
+        ++verdict_seq, stamp, fire_ok ? "true" : "false",
         verdict, hold ? "true" : "false", hold ? "false" : "true",
         armed_ack ? "true" : "false",
         pub_reason, pub_down, pub_up);

@@ -39,6 +39,8 @@
  *   N. the fail tiers:      FIRE and CRASH end the controller through the
  *                           supervisor's hook, once, after the kernel writes
  *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
+ *   Q. the verdict file:    the contract's keys and types; the stamp to
+ *                           the millisecond, never ahead of the clock
  *
  * The fan writes: every duty the engine writes is read back, tried again
  * when the device did not take it, and held to the command once a tick.
@@ -1481,6 +1483,28 @@ int main(void)
     kv[0] = NULL;
     close_session(&L);
     cool_fail_tier_stop = NULL;
+
+    printf("Q. the verdict file: the contract's keys and types, the stamp to the millisecond and never ahead of the clock\n");
+    open_session(&L);
+    fake_now = floor(fake_now) + 1.0006;    /* a fraction the nearest millisecond rounds up */
+    run_tick(&L);
+    json_t *doc = json_load_file(VERDICT_FILE, 0, NULL);
+    CHECK(doc && json_is_object(doc), "the verdict file parses as an object");
+    CHECK(doc && json_is_integer(json_object_get(doc, "seq")) && json_is_number(json_object_get(doc, "ts_mono")) &&
+          json_is_boolean(json_object_get(doc, "fire_ok")) && json_is_string(json_object_get(doc, "verdict")) &&
+          json_is_boolean(json_object_get(doc, "hold")) && json_is_boolean(json_object_get(doc, "resume_ok")) &&
+          json_is_boolean(json_object_get(doc, "armed")) && json_is_string(json_object_get(doc, "reason")) &&
+          json_is_number(json_object_get(doc, "down_c")) && json_is_number(json_object_get(doc, "up_c")),
+          "the documented keys with their documented types");
+    double ts = doc ? json_number_value(json_object_get(doc, "ts_mono")) : 0.0;
+    printf("    ts_mono %.4f at the clock's %.4f\n", ts, fake_now);
+    CHECK(ts <= fake_now && fake_now - ts < 0.001,
+          "ts_mono is the engine's monotonic clock to the millisecond, never ahead of it");
+    CHECK(doc && json_is_true(json_object_get(doc, "resume_ok")) == !json_is_true(json_object_get(doc, "hold")),
+          "resume_ok is the complement of hold");
+    if (doc)
+        json_decref(doc);
+    close_session(&L);
 
     phases(&L);
     gate_ceiling(&L);
