@@ -32,8 +32,10 @@
  *                           and asked for again once the sensors read
  *   J. blind under the floor: COLD keeps its state through SENSOR
  *   K. blind in a warm-up:  the heater goes off and comes back
- *   M. the hang dead-man:   silence while armed stops and locks once;
- *                           silence while the kernel runs repeats every tick
+ *   M. the hang dead-man:   a report under the timeout is still fresh and
+ *                           acknowledged; silence while armed stops and
+ *                           locks once; silence while the kernel runs
+ *                           repeats every tick
  *   N. the fail tiers:      FIRE and CRASH end the controller through the
  *                           supervisor's hook, once, after the kernel writes
  *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
@@ -1284,7 +1286,19 @@ int main(void)
     open_session(&L);
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
-    fake_now += 6.0;                    /* past REPORT_TIMEOUT_S with no report */
+    logbuf[0] = '\0';
+    /* The tolerance side first: a report 4.5 s old is still fresh, so an
+     * engine stalled under that (its last report up to a second old when
+     * it stopped) comes back to an armed window it still acknowledges,
+     * and the controller's own stale-verdict hold (2 s) resumes with no
+     * press. */
+    fake_now += 4.5;
+    loop_tick(&L);
+    engine_tick();
+    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch") == 0 && pub_armed_ack &&
+          !log_has("controller silent"),
+          "4.5 s without a report: nothing safed, the window still acknowledged");
+    fake_now += 1.5;                    /* 6.0 s: past REPORT_TIMEOUT_S with no report */
     loop_tick(&L);
     engine_tick();
     CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
