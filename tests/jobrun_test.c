@@ -22,13 +22,14 @@
  * run on the caller's thread stands inside a wizard's hold and gives the
  * machine back to the wizard, and is not the abort route's to stop; the
  * ready and done hooks of a started run, with the lease given back from
- * inside done; a program that must light and does not, fails.
+ * inside done; a program that must light and does not, fails; a program
+ * that must light is witnessed every tick.
  *
  * The sender underneath (jobstream): a dark program streams to its end;
  * an error stops the run at the line that drew it; a lit program ends
  * after its dark stretch with the witnesses read; the generator's pacing
- * return, and the abort that ends it with the soft reset; the sender
- * check reads the state file.
+ * return, and the abort that ends it with the soft reset; the witness
+ * rate against the ticks; the sender check reads the state file.
  */
 #include "../src/jobrun.h"
 #include "../src/lease.h"
@@ -498,6 +499,32 @@ static void test_must_light(void)
     CHECK(mock.resets == 1, "%d soft resets", mock.resets);
 }
 
+/* A program that must light is witnessed every tick, with no clock: a
+ * barrier line (M102) goes out alone once the one before it is
+ * acknowledged, one per tick at most, so thirty of them are thirty
+ * ticks at least, and the record's samples count them whatever the
+ * host's load. */
+#define RATE_LINES 30
+static void test_lit_full_rate(void)
+{
+    char err[160] = "", prog[RATE_LINES * 5 + 1] = "";
+    for (int i = 0; i < RATE_LINES; i++)
+        strcat(prog, "M102\n");
+    mock_clear();
+    mock.lit_after = 1;                 /* the tube lights as line 1 is taken */
+    stage(prog, strlen(prog));
+    CHECK(jobrun_program_start(staged, "rate", NULL, 30, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("done", 8000), "the lit run did not end: %s", status());
+    const char *k = strstr(status(), "\"samples\":");
+    int n = k ? atoi(k + 10) : -1;
+    printf("    %d samples over %d barrier lines\n", n, RATE_LINES);
+    CHECK(n >= RATE_LINES, "a program that must light had %d samples over %d barrier lines", n, RATE_LINES);
+    mock.lit_after = 0;
+    sysfs_write("pic/hv_current", 0);
+    msleep(200);
+    CHECK(mock.resets == 0, "%d soft resets", mock.resets);
+}
+
 /* ---- the sender underneath ---- */
 
 static int samples_seen;
@@ -613,6 +640,44 @@ static void test_abort_and_pacing(void)
     CHECK(mock.resets == 1, "no soft reset on abort (%d)", mock.resets);
 }
 
+/* The witness rate against the ticks, with no clock: a generator that
+ * paces is asked once per tick, so what the sample hook has seen by
+ * its tenth call is the ticks' every div-th. */
+#define PACED_TICKS 10
+static int paced_calls, paced_samples;
+static int paced_gen(void *ctx, char *buf, size_t len)
+{
+    (void)ctx;
+    if (++paced_calls < PACED_TICKS)
+        return 2;                       /* pacing: nothing yet */
+    if (paced_calls == PACED_TICKS) {
+        paced_samples = samples_seen;
+        snprintf(buf, len, "G21");
+        return 1;
+    }
+    return 0;
+}
+
+static void rate_case(int div, int want)
+{
+    mock_clear();
+    samples_seen = paced_calls = 0;
+    paced_samples = -1;
+    jobstream_cfg_t cfg = { .gen = paced_gen, .sample = on_sample, .sample_div = div, .run_timeout_s = 10 };
+    jobstream_run_t run;
+    char err[160] = "";
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    msleep(200);
+    CHECK(rc == 0, "sample_div %d: %s", div, err);
+    CHECK(paced_samples == want, "sample_div %d: %d samples by tick %d, not %d", div, paced_samples, PACED_TICKS, want);
+}
+
+static void test_witness_rate(void)
+{
+    rate_case(0, PACED_TICKS);          /* unset: every tick, the burns' and the recorder's rate */
+    rate_case(5, (PACED_TICKS + 4) / 5);
+}
+
 static void test_sender_check(void)
 {
     char dir[160], path[256];
@@ -662,9 +727,10 @@ int main(void)
         { "check", test_check }, { "program-plays", test_program_plays }, { "own-m2", test_own_m2 }, { "unlock", test_unlock }, { "done-is-idle", test_done_is_idle },
         { "abort", test_abort }, { "client-refuses", test_client_refuses },
         { "sync-under-a-wizard", test_sync_under_a_wizard }, { "hooks", test_hooks },
-        { "must-light", test_must_light },
+        { "must-light", test_must_light }, { "lit-full-rate", test_lit_full_rate },
         { "dark-program", test_dark_program }, { "error-stops", test_error_stops },
         { "lit-program", test_lit_program }, { "abort-and-pacing", test_abort_and_pacing },
+        { "witness-rate", test_witness_rate },
         { "sender-check", test_sender_check },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);
