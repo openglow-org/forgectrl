@@ -30,6 +30,7 @@
 #include "jobrun.h"
 #include "led.h"
 #include "lens.h"
+#include "lenshome.h"
 #include "paths.h"
 #include "settings.h"
 #include "sheet.h"
@@ -329,17 +330,34 @@ static void live_end(live_t *L)
      * is stopped (a stop at Idle would discard the tail) and before the
      * lens is stepped. */
     wiz_phase("the machine goes back to its normal posture");
-    wiz_kernel_settle(600.0);
+    int idle = wiz_kernel_settle(600.0) == 0;
     if (L->local && L->g92 && !L->clean && clear_g92() != 0)
         wiz_log("the burn's G92 origin could not be cleared: send G92.1 before a job");
-    if (L->local)
-        wiz_controller_stop();
+    /* No controller: the session stopped it and never started it, or
+     * its own has just left. One that does not leave in the
+     * supervisor's grace keeps the machine, under supervision. */
+    int down = L->stopped;
+    if (L->local) {
+        down = wiz_controller_stop() == 0;
+        if (!down)
+            wiz_log("the controller did not stop");
+    }
     /* A session that did not play to its tail may leave the lens off its
      * reference, and the next controller takes its Z frame from the
-     * reference marker: the lens goes back on its hall edge, or, when it
-     * cannot, the marker goes and the controller holds Z unreferenced. */
-    if (!L->clean && (L->local || L->stopped) && wiz_lens_rehome() != 0)
-        wiz_log("the lens could not find its reference: Z stays unreferenced until it does");
+     * reference marker. The lens goes back on its hall edge only with
+     * no controller and the engine idle: nothing steps the lens while
+     * a controller can (two writers, and a marker for a position the
+     * controller moves away from). Otherwise, as when the hunt cannot
+     * find the edge, the marker goes and the controller holds Z
+     * unreferenced until the lens is referenced again. */
+    if (!L->clean && (L->local || L->stopped)) {
+        if (!down || !idle) {
+            lenshome_clear();
+            wiz_log("the lens stays where it is: Z is unreferenced until the lens is "
+                    "referenced again");
+        } else if (wiz_lens_rehome() != 0)
+            wiz_log("the lens could not find its reference: Z stays unreferenced until it does");
+    }
     if (L->local)
         super_set_local(0);
     if (L->local || L->stopped)

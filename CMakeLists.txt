@@ -340,6 +340,14 @@ add_executable(wizcalc_test tests/wizcalc_test.c src/wizcalc.c)
 target_compile_options(wizcalc_test PRIVATE -Wall -Wextra)
 target_link_libraries(wizcalc_test m)
 
+# The live session's exit (wizlive.c by inclusion): the engine settled, the
+# G92 cleared, the controller stopped, the lens rehomed only with no
+# controller and the engine idle, else the marker cleared; the posture and
+# the controller handed back.
+add_executable(wizlive_test tests/wizlive_test.c src/lens.c src/sheet.c src/font_hershey.c)
+target_compile_options(wizlive_test PRIVATE -Wall -Wextra)
+target_link_libraries(wizlive_test m jansson)
+
 # The setup sheet: the text, every card inside its box, the programs,
 # the SVG.
 add_executable(sheet_test tests/sheet_test.c src/sheet.c src/font_hershey.c)

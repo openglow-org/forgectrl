@@ -142,6 +142,8 @@ jobs:
         run: ./build/tls_test
       - name: Dark wizard decisions
         run: ./build/wizcalc_test
+      - name: "wizlive_test (the live session's exit: the lens stepped only with no controller and the engine idle, else the marker dropped; the posture and the controller handed back)"
+        run: ./build/wizlive_test
       - name: Camera key
         run: ./build/camkey_test
       - name: Published-release check (the tag from the first hop)
