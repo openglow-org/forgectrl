@@ -42,8 +42,7 @@
 #     account and two logins, the run session A starts is owned and A's,
 #     owned and not B's, and the token's with no session; B's abort is
 #     409 and the run goes on; B's takeover makes it B's and not A's, and
-#     B's abort ends it aborted; both log out and the users file is
-#     removed again
+#     B's abort ends it aborted; both log out
 #
 # No package is installed and no key is added: each takes the machine's
 # button, which a host does not have. Nothing posts confirm=1, a reboot,
@@ -329,8 +328,6 @@ expect 'aborted|false' "$(jget "$T/dark.json" '"%s|%s" % (d.get("error"), json.d
 for c in "$A" "$B"; do
     expect 200 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: $c" "$URL/logout")" "a session logs out"
 done
-rm -f "$T/data/users"
-[ ! -e "$T/data/users" ] && ok "the users file is as it was: none" || bad "the users file is left"
 
 stop_daemon
 if [ $fails -eq 0 ]; then
