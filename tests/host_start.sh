@@ -10,7 +10,9 @@
 # there, on high ports, with FORGECTRL_HOST_TEST=1. The two controllers
 # and `iw` are stand-ins that record a start. One unauthenticated read
 # must answer 200; then the daemon is stopped, and nothing may have
-# started a controller or run iw. Runs unprivileged; build.yml runs it:
+# started a controller or run iw. The daemon's start notice names the
+# fourteen overrides set here, names only, and none that is not set.
+# Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_start.sh <build-dir>
 set -e
@@ -58,6 +60,19 @@ done
 wait $PID || fail "the daemon exited $? on SIGTERM"
 PID=
 echo "  ok: the daemon stopped"
+
+line=$(grep -m1 'environment overrides in force: ' "$T/out") || fail "no start notice names the overrides"
+case "$line" in *=*) fail "the notice carries a value: $line" ;; esac
+named=" ${line##*environment overrides in force: } "
+for v in FORGECTRL_HOST_TEST FORGECTRL_DATA_DIR FORGECTRL_CONF FFLOG_CONF FFLOG_SOCK FFLOG_STDERR \
+         GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV GF_PULSE_DEV FORGECTRL_GRBL_BIN FORGECTRL_CLOUD_BIN \
+         FORGECTRL_PORT FORGECTRL_TLS_PORT; do
+    case "$named" in *" $v "*) ;; *) fail "the notice does not name $v" ;; esac
+done
+for v in GF_SWITCH_WORD_FILE FORGECTRL_SSHD_INIT GFCOOL_TEMP_MAX; do
+    case "$named" in *" $v "*) fail "the notice names $v, which is not set" ;; esac
+done
+echo "  ok: the start notice names the fourteen overrides, no others, no values"
 
 [ ! -e "$T/started" ] || fail "started: $(cat "$T/started")"
 echo "  ok: no controller started, iw not run"

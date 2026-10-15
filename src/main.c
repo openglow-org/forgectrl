@@ -27,6 +27,8 @@
  * (1500), FORGECTRL_H264_GOP (30), and the fallback switches
  * FORGECTRL_NO_VPU, FORGECTRL_NO_H264, FORGECTRL_NO_GPU,
  * FORGECTRL_NO_HW_SKIP, FORGECTRL_NO_CACHED_BUFS, FORGECTRL_NO_NEON.
+ * The start notice names every variable of the list in ENV_OVERRIDES
+ * that is set.
  *
  * ulfius runs libmicrohttpd in thread-per-connection mode, so each stream
  * callback may block waiting for the next frame.
@@ -3364,6 +3366,54 @@ static void mhd_log(void *cls, const char *fmt, va_list ap)
         fflog(LOG_DEBUG, "mhd: %s", msg);
 }
 
+/* Every environment variable the daemon reads, in one place: the start
+ * notice names the ones that are set (names only), and test_routes.py
+ * holds this list to the sources. The camera and port knobs are on the
+ * developer page; the rest are the host tests' seams and the cooling
+ * engine's bench overrides, and nothing on a machine sets one. */
+static const char *const ENV_OVERRIDES[] = {
+    "FFLOG_CONF", "FFLOG_LEVEL", "FFLOG_SOCK", "FFLOG_STDERR",
+    "FORGECTRL_CLOUD_BIN", "FORGECTRL_CONF", "FORGECTRL_CURL", "FORGECTRL_DATA_DIR",
+    "FORGECTRL_EXT_HOST_TOKEN", "FORGECTRL_EXT_INDEX_URL", "FORGECTRL_EXT_STAGE", "FORGECTRL_EXT_STATUS",
+    "FORGECTRL_FLAG_EVERY", "FORGECTRL_FORGEEXT", "FORGECTRL_GPU_CHECK", "FORGECTRL_GPU_PASSES",
+    "FORGECTRL_GRBL_BIN", "FORGECTRL_H264_GOP", "FORGECTRL_H264_KBPS", "FORGECTRL_HOST_TEST",
+    "FORGECTRL_LAMP", "FORGECTRL_LICENSES", "FORGECTRL_NEON_CHECK", "FORGECTRL_NO_CACHED_BUFS",
+    "FORGECTRL_NO_GPU", "FORGECTRL_NO_H264", "FORGECTRL_NO_HW_SKIP", "FORGECTRL_NO_NEON",
+    "FORGECTRL_NO_VPU", "FORGECTRL_PORT", "FORGECTRL_RELCHECK_DOWNLOAD_FMT", "FORGECTRL_RELCHECK_URL",
+    "FORGECTRL_SSHD_INIT", "FORGECTRL_STREAM_FPS", "FORGECTRL_STREAM_Q", "FORGECTRL_TLS_PORT",
+    "FORGECTRL_WIZ_SHOTS",
+    "GFCOOL_AA_OFFSET_COUNTS", "GFCOOL_ACCEL_ABORT", "GFCOOL_ACCEL_X_ALERT", "GFCOOL_ACCEL_Y_ALERT",
+    "GFCOOL_CONFIRM_MAX_S", "GFCOOL_COOLDOWN_MAX_S", "GFCOOL_COOLDOWN_S", "GFCOOL_FAN_GRACE_S",
+    "GFCOOL_FIRE_Q1_ALERT", "GFCOOL_FIRE_Q1_CRIT", "GFCOOL_FIRE_Q2_ALERT", "GFCOOL_FIRE_Q2_CRIT",
+    "GFCOOL_FLOW_CHECK_S", "GFCOOL_FLOW_HEATER_PCT", "GFCOOL_FLOW_RISE", "GFCOOL_INTAKE_FANS",
+    "GFCOOL_LASER_HEAT_CW", "GFCOOL_LASER_HEAT_DENSITY", "GFCOOL_PURGE_MIN", "GFCOOL_RECHECK_S",
+    "GFCOOL_TACH_AIR_MIN", "GFCOOL_TACH_EXHAUST_MIN", "GFCOOL_TACH_INTAKE_MIN", "GFCOOL_TEC_OFF",
+    "GFCOOL_TEC_ON", "GFCOOL_TEC_PRESENT", "GFCOOL_TEMP_CRITICAL", "GFCOOL_TEMP_MAX",
+    "GFCOOL_TEMP_MIN", "GFCOOL_TEMP_OFFSET_C", "GFCOOL_TEMP_RESUME", "GFCOOL_TEMP_START",
+    "GF_FUSE_SERIAL", "GF_GRBL_PORT", "GF_LED_ROOT", "GF_LENS_STEP_US", "GF_LOGS_EFFECTIVE",
+    "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_RUN_DIR",
+    "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT",
+};
+
+/* One line at start naming the overrides that are set, names only, never
+ * a value. Nothing here calls setenv, so what is set at start is set for
+ * the process, the lazily read ones included. Silent when none is. */
+static void say_env_overrides(void)
+{
+    char line[2048];
+    size_t off = 0;
+    for (size_t i = 0; i < sizeof(ENV_OVERRIDES) / sizeof(*ENV_OVERRIDES); i++) {
+        if (!getenv(ENV_OVERRIDES[i]))
+            continue;
+        int n = snprintf(line + off, sizeof(line) - off, "%s%s", off ? " " : "", ENV_OVERRIDES[i]);
+        if (n < 0 || (size_t)n >= sizeof(line) - off)
+            break;
+        off += (size_t)n;
+    }
+    if (off)
+        fflog(LOG_NOTICE, "environment overrides in force: %s", line);
+}
+
 int main(int argc, char **argv)
 {
     unsigned port = DEFAULT_PORT;
@@ -3390,6 +3440,7 @@ int main(int argc, char **argv)
     }
 
     fflog_init("forgectrl");
+    say_env_overrides();
 
     /* Stay well below the motion feeder (SCHED_FIFO) and the controller;
      * best effort. */

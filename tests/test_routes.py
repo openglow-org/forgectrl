@@ -9,7 +9,9 @@ every row of main.c's routes[] carries its capability column, NULL or
 a capability the closed list in tokens.c resolves; serve_page sends
 PAGE_POLICY, the header that lets no frame navigate anywhere; and the
 dev-server mock serves the daemon's page, its policy and its panel's
-files, because the frame-isolation harness renders the mock's page.
+files, because the frame-isolation harness renders the mock's page;
+and main.c's list of environment variables, the ones the daemon's
+start notice names, is held to every read in the sources.
 
 Run: python3 -B -m unittest -v tests/test_routes.py
 """
@@ -20,6 +22,10 @@ import unittest
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 ROW = re.compile(r'\{\s*"(GET|POST)",\s*"([^"]+)",\s*\w+,\s*[^,{}]+,\s*[01],\s*(NULL|"[^"]*")\s*\}')
+ENV_NAME = r'"((?:GF|GFCOOL|FORGECTRL|FFLOG)_[A-Z0-9_]+)"'
+ENV_READ = re.compile(r'\b(?:getenv|env_or|url_from_env)\(\s*' + ENV_NAME)
+ENV_TABLE_ROW = re.compile(r'\{\s*' + ENV_NAME)
+ENV_INDIRECT = re.compile(r'\bgetenv\(\s*(?!")([^)]*)\)')
 
 
 def read(rel):
@@ -71,6 +77,22 @@ def panel_routes():
     return sorted(p for p in paths if p != '/' and not p.endswith('/'))
 
 
+def env_reads():
+    """Every environment variable src/ reads: getenv("X"), the env_or and
+    url_from_env wrappers, and the GFCOOL_* rows of cool.c's tunables; and
+    every getenv that does not name its variable, which must be one of
+    those wrappers, that table's loop, or the start notice's own loop."""
+    names, indirect = set(), set()
+    for name in sorted(os.listdir(os.path.join(ROOT, 'src'))):
+        if name.endswith(('.c', '.h')):
+            src = read(os.path.join('src', name))
+            names.update(ENV_READ.findall(src))
+            if name == 'cool.c':
+                names.update(ENV_TABLE_ROW.findall(src))
+            indirect.update('%s:%s' % (name, m.strip()) for m in ENV_INDIRECT.findall(src))
+    return names, indirect
+
+
 class RouteTest(unittest.TestCase):
     def test_every_panel_route_is_registered(self):
         registered = {p for _, p, _ in routes()[0]}
@@ -98,6 +120,16 @@ class RouteTest(unittest.TestCase):
                           read('src/ui/embed.cmake'))
         self.assertEqual(ds.PAGE_HEADERS['Content-Security-Policy'], policy)
         self.assertEqual((ds.CSS_FILES, ds.JS_FILES), (tuple(index.group(1).split()), tuple(index.group(2).split())))
+
+    def test_every_environment_override_is_named_at_start(self):
+        table = re.search(r'ENV_OVERRIDES\[\] = \{(.*?)\};', read('src/main.c'), re.S).group(1)
+        listed = re.findall(ENV_NAME, table)
+        names, indirect = env_reads()
+        self.assertGreater(len(names), 50, 'environment reads parsed')
+        self.assertEqual(sorted(listed), sorted(names))
+        self.assertEqual(len(listed), len(set(listed)), 'a name listed twice')
+        self.assertEqual(indirect, {'logs.c:name', 'relcheck.c:name', 'super.c:name',
+                                    'cool.c:tunables[i].env', 'main.c:ENV_OVERRIDES[i]'})
 
 
 if __name__ == '__main__':
