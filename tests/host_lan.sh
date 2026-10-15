@@ -29,8 +29,10 @@
 #     client's);
 #   GET /events with X-ForgeFIRM-Client: extension-host from 127.0.0.1 in
 #     the daemon's namespace is 200 text/event-stream greeting with event:
-#     hello, and the same header from 192.0.2.1 does not end it (no event:
-#     bye, no "replaced"): the host's slot is a loopback peer's alone;
+#     hello, and the same header from 192.0.2.1 does not end it: the host's
+#     stream carries an event published after that stream was admitted
+#     (the motors.released marker made and removed), with no event: bye
+#     and no "replaced": the host's slot is a loopback peer's alone;
 #   once an account is made from 127.0.0.1, GET /setup?step=laser.focus
 #     from 192.0.2.1 with no session is a 302 to the login carrying the
 #     path and its query.
@@ -207,9 +209,17 @@ expect text/event-stream "$(tr -d '\r' < "$T/ev1.head" | sed -n 's/^Content-Type
 curl -sN --interface $CLIENT -o "$T/ev2" -H "X-ForgeFIRM-Client: extension-host" "http://$DAEMON:$HTTP_PORT/events" &
 EV2=$!
 until_ok 50 grep -qs '^event: hello' "$T/ev2" || bad "the stream from $CLIENT was not opened"
-sleep 1
+# An event published after that stream was admitted reaches the host's
+# stream only while its slot is still its own: a replaced stream gets
+# event: bye and nothing after it. The motors.released marker is a
+# state the sampler reports and this script can make.
+touch "$T/run/motors.released"
+until_ok 25 grep -qs '^event: motors.released' "$T/ev1" \
+    && ok "the host's stream carries an event published after the stream from $CLIENT was admitted" \
+    || bad "no event reached the host's stream after the stream from $CLIENT was admitted"
+rm -f "$T/run/motors.released"
 grep -qs -e '^event: bye' -e replaced "$T/ev1" && bad "the same header from $CLIENT ended the host's stream" \
-    || ok "the same header from $CLIENT leaves the host's stream open: no event: bye, no replaced"
+    || ok "and no event: bye, no replaced: the host's slot is a loopback peer's alone"
 kill $EV1 $EV2
 wait $EV1 $EV2 2>/dev/null
 EV1=
