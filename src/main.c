@@ -777,7 +777,7 @@ static int valid_xy_microsteps(const char *v)
  * wizard; while it is 0 the cloud controller, the cloud homing method
  * and the cloud tab do not exist. panel_open_reads: the read-only
  * routes (status, the cameras) answer any LAN client (unset = 1, so
- * LightBurn reads the camera); 0 closes them to a login or this host. */
+ * a Grbl sender reads the camera); 0 closes them to a login or this host. */
 static int valid_bool(const char *v)       { return !strcmp(v, "0") || !strcmp(v, "1"); }
 
 /* Logging: per-logger disk and remote levels (each off|error|warning|
@@ -3289,7 +3289,7 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
     return cb_root_page(req, res, NULL);
 }
 
-/* "/" on the HTTP listener: the aliases stay (LightBurn's camera URL);
+/* "/" on the HTTP listener: the aliases stay (a Grbl sender's camera URL);
  * a browser is sent to HTTPS, where the pages live. */
 static int cb_root_http(const struct _u_request *req, struct _u_response *res,
                         void *user_data)
@@ -3577,7 +3577,7 @@ int main(int argc, char **argv)
 
     /* Every route, once. The HTTPS listener serves all of them; the
      * HTTP listener serves the read-only ones to the LAN (the camera
-     * for LightBurn, the status), the write ones to this host only
+     * for a Grbl sender, the status), the write ones to this host only
      * (the init scripts, the controllers, the acceptance tool on the
      * board), and sends every other request to HTTPS. */
     static const struct route routes[] = {

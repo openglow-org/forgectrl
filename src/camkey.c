@@ -4,7 +4,7 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * A consumer of the camera (LightBurn's camera URL, a stream viewer, a
+ * A consumer of the camera (a Grbl sender's camera URL, a stream viewer, a
  * script) has no login session and often no TLS. The camera key is a
  * per-machine secret that authorizes the read-only routes alone, on
  * either listener, as a `key` query parameter or an X-ForgeFIRM-Camera-Key

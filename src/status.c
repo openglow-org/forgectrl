@@ -8,8 +8,8 @@
  * motion state and position, fan tachometers, coolant temperatures,
  * pump/TEC, laser lockout, and the safety switches. Everything comes
  * from the kernel driver (sysfs + evdev) - the Grbl TCP socket is
- * never touched, because a connection there displaces the sender's
- * session (LightBurn).
+ * never touched, because a connection there displaces the Grbl
+ * sender's session.
  *
  * Position: the controller zeroes the kernel step counters when a
  * homing cycle completes and writes the home coordinates to

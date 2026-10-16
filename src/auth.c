@@ -39,7 +39,7 @@
  * bench tools keep working. Before the account exists, the token alone
  * writes: the wizard's own calls need it, and the page that carries it
  * is served to whoever reaches the machine first. The read-only routes
- * stay open to the LAN by default (panel_open_reads = 1) so LightBurn
+ * stay open to the LAN by default (panel_open_reads = 1) so a Grbl sender
  * reads the camera; the setting closes them to sessions and this host.
  * The login itself and the session cookie travel over HTTPS only.
  *
