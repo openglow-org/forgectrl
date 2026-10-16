@@ -622,6 +622,7 @@ int main(void)
     put("cnc/stop", "0\n");
     bring_up();
     unlink(GF_SYSFS "cnc/laser_latch");
+    crit_logs = 0;
     pthread_mutex_lock(&mu);
     suspended = 1;
     stop_locked();
@@ -629,6 +630,7 @@ int main(void)
     CHECK(child_pid == 0 && nkills >= 2 && kills[0] == SIGTERM && kill_stop[0] == 1,
           "the stop signals and reaps the controller, motion stopped before the signal");
     CHECK(strstr(logs, "laser_latch failed") != NULL, "a latch write that keeps failing is named");
+    CHECK(crit_logs == 3, "the latch write is tried again after the signal: named before it, after it, and at the reap");
     put("cnc/laser_latch", "0\n");
 
     printf("H. the broker fails closed\n");
