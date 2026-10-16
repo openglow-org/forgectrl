@@ -27,13 +27,15 @@
  *      between its steps with motion stopped, and the lever returns
  *      once the probe is gone
  *   G. a safing write is tried three times before it is named;
- *      the stop path repeats the pair after the signal
+ *      the stop path lands the stop before the signal and repeats the
+ *      pair after it
  *   H. a broker fd that cannot be locked refuses the spawn, and an
  *      open that fails keeps trying instead of a self-opening controller;
  *      GF_PULSE_DEV moves the device, and the refusal names the path
  *      it tried; one that is not an absolute path is refused by its
  *      form, the device it would reach left unopened
- *   I. the engine's fail tier stops the controller and starts it again
+ *   I. the engine's fail tier stops the controller the deliberate way,
+ *      the safing pair landed before the SIGTERM, and starts it again
  *      without a backoff
  *   J. a motor release is nobody's to end but the operator's: the probe
  *      is skipped with nothing written, the controller still starts,
@@ -102,6 +104,7 @@ int fake_clock_gettime(clockid_t id, struct timespec *ts)
 }
 
 static void put(const char *attr, const char *v);
+static long get_long(const char *attr);
 
 int fake_usleep(unsigned us)
 {
@@ -133,6 +136,7 @@ static int death_status;                /* ...with this status */
 static int forks;                       /* controller spawns (relay forks excluded) */
 static int kills[64];                   /* the signals sent, in order */
 static int nkills;
+static long kill_stop[64], kill_latch[64];  /* cnc/stop and cnc/laser_latch as each signal found them */
 static int runner_alive;                /* pgrep -x gfhome.py answers 0 */
 static int runner_term_ignored;         /* ...and SIGTERM does not end it */
 static int flock_fails;
@@ -176,8 +180,13 @@ pid_t fake_waitpid(pid_t pid, int *status, int flags)
 
 int fake_kill(pid_t pid, int sig)
 {
-    if (nkills < 64)
+    if (nkills < 64) {
         kills[nkills] = sig;
+        /* What the kernel attributes read at the moment of the signal:
+         * the proof the safing pair came first. */
+        kill_stop[nkills] = get_long("cnc/stop");
+        kill_latch[nkills] = get_long("cnc/laser_latch");
+    }
     nkills++;
     /* SIGTERM to the child: it dies, the next waitpid finds it. */
     if (sig == SIGTERM && pid > 0)
@@ -617,7 +626,8 @@ int main(void)
     suspended = 1;
     stop_locked();
     pthread_mutex_unlock(&mu);
-    CHECK(child_pid == 0 && nkills >= 2 && kills[0] == SIGTERM, "the stop signals and reaps the controller");
+    CHECK(child_pid == 0 && nkills >= 2 && kills[0] == SIGTERM && kill_stop[0] == 1,
+          "the stop signals and reaps the controller, motion stopped before the signal");
     CHECK(strstr(logs, "laser_latch failed") != NULL, "a latch write that keeps failing is named");
     put("cnc/laser_latch", "0\n");
 
@@ -661,8 +671,9 @@ int main(void)
     CHECK(restart_pending, "the request is posted");
     tick();
     CHECK(child_pid == 0 || child_pid != before, "the controller was stopped");
-    CHECK(nkills >= 1 && kills[0] == SIGTERM, "the deliberate way: SIGTERM after the safing pair");
-    CHECK(safed(), "motion stopped and the latch locked");
+    CHECK(nkills >= 1 && kills[0] == SIGTERM && kill_stop[0] == 1 && kill_latch[0] == 1,
+          "the deliberate way: the SIGTERM found motion stopped and the latch locked");
+    CHECK(safed(), "and both stand after it");
     CHECK(engine_stops >= 1, "the engine forgets the reporter");
     CHECK(run_until_spawned(1.0) && child_pid != before, "a new controller follows without a backoff");
     CHECK(probes == 1, "and without a second motion probe");
