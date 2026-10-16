@@ -110,6 +110,7 @@ static struct {
     char owner[SESSION_ID_HEX + 1];
 } S;
 static int seq_counter;
+static void finish_err(const char *fmt, ...);
 /* The wizard holds the machine with no controller running: the button
  * breathes white until the controller is handed the LED back. */
 static char lease_owner[LEASE_OWNER_MAX];    /* the machine lease the running wizard holds */
@@ -266,8 +267,13 @@ static int ask_t(const char *kind, const char *pid, const char *text,
         snprintf(answer, alen, "%s", S.answer);
     S.prompt_seq = 0;
     pthread_mutex_unlock(&mu);
-    if (rc == -2)
+    /* A question nobody answered ends the step, and the step says so
+     * here, once for every prompt (an abort names itself at the run's
+     * end). */
+    if (rc == -2) {
         wlog("no answer to \"%s\" within %d s", pid, timeout_s);
+        finish_err("no answer within %d min", (timeout_s + 59) / 60);
+    }
     return rc;
 }
 
