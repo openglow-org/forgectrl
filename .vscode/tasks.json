@@ -32,9 +32,9 @@
     },
     {
       "label": "tests (host)",
-      "detail": "The CI unit tests",
+      "detail": "Every test binary of the build, as ctest cases (holds_wire_test only with FORGEEXT_SRC)",
       "type": "shell",
-      "command": "for t in status_test curverec_fit_test sanitize_test debayer_test camhealth_test cool_gate_test cool_flow_test airflow_test accel_test coolfmt_test mp4mux_test; do ./build/$t || exit 1; done",
+      "command": "ctest --test-dir build --output-on-failure",
       "dependsOn": ["build (host)"],
       "group": { "kind": "test", "isDefault": true },
       "problemMatcher": []
