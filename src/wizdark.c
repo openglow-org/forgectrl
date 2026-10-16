@@ -101,8 +101,8 @@ static struct {
     char prompt_id[24], prompt_kind[12], prompt_text[320];
     char prompt_opt[WIZ_PROMPT_OPTS][24];
     int prompt_nopt;
-    time_t prompt_opened;           /* when the open prompt went up */
-    int prompt_timeout;             /* and how long it waits */
+    double prompt_until;            /* the open prompt's deadline, CLOCK_MONOTONIC s */
+    int prompt_timeout;             /* and how long it waits in all */
     int answer_seq;
     char answer[64];
     /* the outcome */
@@ -250,13 +250,14 @@ static int ask_t(const char *kind, const char *pid, const char *text,
     S.prompt_nopt = 0;
     for (int i = 0; i < nopt && i < WIZ_PROMPT_OPTS; i++)
         snprintf(S.prompt_opt[S.prompt_nopt++], sizeof(S.prompt_opt[0]), "%s", opts[i]);
-    S.prompt_opened = time(NULL);
     S.prompt_timeout = timeout_s;
     S.answer_seq = 0;
     S.answer[0] = '\0';
     struct timespec until;
     clock_gettime(CLOCK_MONOTONIC, &until);
     until.tv_sec += timeout_s;
+    /* The page counts down to the deadline the wait itself rides. */
+    S.prompt_until = (double)until.tv_sec + until.tv_nsec / 1e9;
     int rc = 0;
     while (S.answer_seq != seq && !S.abort_req) {
         if (pthread_cond_timedwait(&cv, &mu, &until) == ETIMEDOUT) {
@@ -297,7 +298,7 @@ static void wait_open(const char *pid, const char *text, int timeout_s)
     snprintf(S.prompt_kind, sizeof(S.prompt_kind), "wait");
     snprintf(S.prompt_text, sizeof(S.prompt_text), "%s", text);
     S.prompt_nopt = 0;
-    S.prompt_opened = time(NULL);
+    S.prompt_until = wall_s() + timeout_s;
     S.prompt_timeout = timeout_s;
     pthread_mutex_unlock(&mu);
 }
@@ -2370,7 +2371,11 @@ int wizdark_status_json(char *buf, size_t len, const char *requester)
             json_array_append_new(opts, json_string(S.prompt_opt[i]));
         json_object_set_new(p, "options", opts);
         json_object_set_new(p, "timeout_s", json_integer(S.prompt_timeout));
-        json_object_set_new(p, "since_s", json_integer((long)(time(NULL) - S.prompt_opened)));
+        /* From the monotonic deadline the wait rides: the page counts
+         * timeout_s less since_s down, and a step of the wall clock moves
+         * neither the count nor the wait. */
+        json_object_set_new(p, "since_s",
+                            json_integer((long)(S.prompt_timeout - (S.prompt_until - wall_s()))));
         json_object_set_new(o, "prompt", p);
     } else
         json_object_set_new(o, "prompt", json_null());

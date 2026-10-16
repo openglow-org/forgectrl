@@ -29,7 +29,9 @@
 #       and the record carrying it, no question; intake 2 silent asks for
 #       the count, and the answer is written
 #     the intake-count prompt with the wall clock an hour behind: the
-#       prompt holds (its wait rides CLOCK_MONOTONIC) and takes the answer
+#       prompt holds (its wait rides CLOCK_MONOTONIC), the page's count
+#       stays with it, and with its monotonic deadline put 10 s off it
+#       expires by itself with its reason
 #     the cameras: an open lid is waited for; the lid shot, its question,
 #       the head shot, its question; each shot served as captured, and
 #       the result names the engine's sensor
@@ -335,17 +337,32 @@ int ioctl(int fd, unsigned long req, ...)
 }
 EOF
 cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch stand-in did not build"
-# The clock stand-in: the daemon's own reading of CLOCK_REALTIME is an
-# hour behind while the file TIMESHIM_FLAG names exists. The kernel's
-# clock is not touched, so a condvar deadline computed from that
-# reading is already past for a condvar on CLOCK_REALTIME and untouched
-# for one on CLOCK_MONOTONIC.
+# The clock stand-in: the daemon's own reading of the wall clock
+# (CLOCK_REALTIME and time()) is an hour behind while the file
+# TIMESHIM_FLAG names exists, and its reading of CLOCK_MONOTONIC 590 s
+# behind while that name with .mono exists. The kernel's clocks are not
+# touched: a condvar deadline computed from the wall clock's reading is
+# already past for a condvar on CLOCK_REALTIME and decades away for one
+# on CLOCK_MONOTONIC, and one computed from the monotonic reading is
+# 10 s short of the 600 s it names on the kernel's clock.
 cat > "$T/timeshim.c" <<'EOF'
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+
+/* The flag file TIMESHIM_FLAG names, with the suffix, exists. */
+static int flagged(const char *suffix)
+{
+    const char *f = getenv("TIMESHIM_FLAG");
+    char path[512];
+    if (!f)
+        return 0;
+    snprintf(path, sizeof(path), "%s%s", f, suffix);
+    return access(path, F_OK) == 0;
+}
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
@@ -353,12 +370,24 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
     if (!real)
         real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime");
     int rc = real(clk, ts);
-    if (rc == 0 && clk == CLOCK_REALTIME) {
-        const char *f = getenv("TIMESHIM_FLAG");
-        if (f && access(f, F_OK) == 0)
-            ts->tv_sec -= 3600;
-    }
+    if (rc == 0 && clk == CLOCK_REALTIME && flagged(""))
+        ts->tv_sec -= 3600;
+    if (rc == 0 && clk == CLOCK_MONOTONIC && flagged(".mono"))
+        ts->tv_sec -= 590;
     return rc;
+}
+
+time_t time(time_t *t)
+{
+    static time_t (*real)(time_t *);
+    if (!real)
+        real = (time_t (*)(time_t *))dlsym(RTLD_NEXT, "time");
+    time_t now = real(NULL);
+    if (flagged(""))
+        now -= 3600;
+    if (t)
+        *t = now;
+    return now;
 }
 EOF
 cc -shared -fPIC -O2 -o "$T/timeshim.so" "$T/timeshim.c" -ldl || fatal "the clock stand-in did not build"
@@ -718,10 +747,16 @@ up || bad "no controller after the intake fans step"
 
 echo "== the intake-count prompt with the wall clock an hour behind"
 # The prompt's wait is a timeout, and a timeout rides CLOCK_MONOTONIC:
-# with the daemon's reading of CLOCK_REALTIME an hour behind (the clock
-# stand-in, while the flag file exists) the prompt stays open and takes
-# its answer. A wait on the wall clock ends the moment the prompt
-# opens, its deadline already past. Intake 2 silent makes the step ask.
+# with the daemon's reading of the wall clock an hour behind (the clock
+# stand-in, while the flag file exists) the prompt stays open, and once
+# the wall clock is back the page's count still runs from the prompt. A
+# wait on the wall clock ends the moment the prompt opens, its deadline
+# already past. With the daemon's reading of CLOCK_MONOTONIC also 590 s
+# behind as the prompt opens (the .mono flag), its deadline is 10 s off
+# on the kernel's clock, so the prompt expires by itself with its
+# reason; a deadline read from the wall clock never comes on the
+# monotonic condvar. Intake 2 silent makes the step ask; the intake fans
+# step above takes an answer.
 dark() { curl -s -o "$T/dark.json" "$URL/wiz/dark"; }
 stopped() { dark && [ "$(jget "$T/dark.json" 'd.get("running")')" = false ]; }
 asking() { dark && [ "$(jget "$T/dark.json" '(d.get("prompt") or {}).get("id", "")')" = intake-count ]; }
@@ -730,6 +765,7 @@ asking() { dark && [ "$(jget "$T/dark.json" '(d.get("prompt") or {}).get("id", "
 until_ok 150 settled || bad "the machine did not settle after the step: $(cat "$T/mode.json") $(cat "$T/cool.json")"
 echo 0 > "$SYS/thermal/tach_intake_2"
 : > "$T/timeshift"
+: > "$T/timeshift.mono"
 expect 200 "$(post /wiz/airflow.intakes/start "$TOKEN")" "POST /wiz/airflow.intakes/start is 200"
 n=200
 while ! asking && ! stopped; do n=$((n - 1)); [ $n -gt 0 ] || break; sleep 0.2; done
@@ -738,13 +774,21 @@ if asking; then
     sleep 3
     asking && ok "and still open 3 s later" || bad "the prompt closed within 3 s: $(cat "$T/dark.json")"
     rm -f "$T/timeshift"
-    SEQ=$(jget "$T/dark.json" 'd["prompt"]["seq"]')
-    expect 200 "$(post /wiz/airflow.intakes/answer "$TOKEN" -d "seq=$SEQ" -d value=One)" "the answer One is 200"
-    until_ok 100 stopped && ok "the step ended" || bad "the step did not end: $(cat "$T/dark.json")"
-    expect '|operator|1' "$(jget "$T/dark.json" '"%s|%s|%s" % (d["error"], (d["result"] or {}).get("counted_by"), (d["result"] or {}).get("intake_fans"))')" \
-        "the answer is the count"
+    dark
+    expect True "$(jget "$T/dark.json" 'str((lambda v: v is not None and 0 <= v < 60)((d.get("prompt") or {}).get("since_s")))')" \
+        "with the wall clock back, the page's count still runs from the prompt (since_s $(jget "$T/dark.json" '(d.get("prompt") or {}).get("since_s")'))"
+    rm -f "$T/timeshift.mono"
+    if until_ok 100 stopped; then
+        ok "the step ended by itself"
+        expect 'no answer within 10 min|None' "$(jget "$T/dark.json" '"%s|%s" % (d.get("error"), d.get("result"))')" \
+            "the prompt expired on the monotonic clock, with its reason"
+    else
+        bad "the step did not end by itself in 20 s: $(cat "$T/dark.json")"
+        post /wiz/airflow.intakes/abort "$TOKEN" > /dev/null
+        until_ok 100 stopped || bad "the step did not stop at its abort"
+    fi
 else
-    rm -f "$T/timeshift"
+    rm -f "$T/timeshift" "$T/timeshift.mono"
     bad "the prompt never stayed open: running $(jget "$T/dark.json" 'd.get("running")'), error '$(jget "$T/dark.json" 'd.get("error")')', result $(jget "$T/dark.json" 'd.get("result")'), log $(jget "$T/dark.json" 'd.get("log")')"
 fi
 at_rest
