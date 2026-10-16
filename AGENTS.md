@@ -92,11 +92,16 @@ The board binary is a cross-build, never a native one:
   `embed.cmake`. `tools/devserver.py` serves it against a live board or the
   built-in mock.
 
-### CI coupling that sets the push order
+### CI couplings that set the push order
 
-The acceptance page in `forgefirm` shares this repository's `theme.css` and
-its vendored Bootstrap, byte for byte. Land a panel UI change **here**
-first, push it, and pin it. Only then push `forgefirm`, or its CI goes red.
+- The acceptance page in `forgefirm` shares this repository's `theme.css`
+  and its vendored Bootstrap, byte for byte. Land a panel UI change
+  **here** first, push it, and pin it. Only then push `forgefirm`, or its
+  CI goes red.
+- This repository's CI checks out `forgeext` at the head of its default
+  branch, unpinned, and builds `holds_wire_test` from its
+  `src/holdkeep.c`. **When the hold files change, push `forgeext`
+  first**, then the change here that matches it.
 
 ## Project-wide rules
 

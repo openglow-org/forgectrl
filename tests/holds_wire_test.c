@@ -5,11 +5,12 @@
  * SPDX-License-Identifier: MIT
  *
  * forgeext's holdkeep.c writes into a directory; forgectrl's holds.c reads
- * it with the host's CLOCK_MONOTONIC. What the two daemons must agree on
- * is proven here together, built from the host's own source: the file
- * names, the field names and their types, the clock base of ts_mono, the
- * write period against the reader's freshness window, the directory
- * literals, and the table sizes.
+ * it. What the two daemons must agree on is proven here together, built
+ * from the host's own source: the file names, the field names and their
+ * types, the write period against the reader's freshness window, the
+ * holds directory literal, and the table sizes. The test reads the files
+ * on CLOCK_MONOTONIC, so it also proves that the host stamps ts_mono on
+ * that clock. cool_flow_test holds the engine to the same clock.
  */
 #define _GNU_SOURCE
 #include "../src/holds.h"
@@ -44,7 +45,7 @@ int main(void)
     holds_t h;
     static holdkeep_t k;
 
-    /* The directory literals: one home on each side. */
+    /* The holds directory literal: one home on each side. */
     CHECK(!strcmp(HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT), "the holds directory differs: host %s, engine %s",
           HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT);
     /* The table sizes: the host never writes more files than the engine reads. */
@@ -115,8 +116,7 @@ int main(void)
           "a silent host: standing %d, stale required %d, stale advisory %d, raised %d, reason %s",
           h.standing, h.stale_required, h.stale_advisory, h.raised, h.reason);
 
-    /* A clean stop: the advisory file goes, the required one is left to go stale, and the
-       marker the host keeps on /data makes the hold stand even with the files gone. */
+    /* A clean stop: the advisory file goes, and the required one is left to stand stale. */
     holdkeep_set(&k, e, 2);
     holdkeep_stop(&k);
     holds_read(dir, req, mono(), &h);
