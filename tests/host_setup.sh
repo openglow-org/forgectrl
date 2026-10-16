@@ -47,9 +47,9 @@
 #   the laser floor burn: refused before any prompt without Focus on the
 #     record; with it, the gantry stops asked, then the controller
 #     stopped and started again and the lens referenced before the home
-#     question, the lens motor at rest and the lock unwritten before the
-#     scrap question, then the
-#     thickness: one outside the lens window is not stored and is asked
+#     question, the lens motor at rest (the hold current, half step) and
+#     the lock unwritten before the scrap question, then the thickness:
+#     one outside the lens window is not stored and is asked
 #     again, with no program line streamed, nothing armed and
 #     laser_floor_density unwritten at either question; the program's
 #     ;keys=floor-off reaches the controller as M102 with the floor 0 and
@@ -1012,8 +1012,9 @@ def get(path):
 conf = rd('$CONF') or ''
 floor = [l.split('=', 1)[1].strip() for l in conf.splitlines() if l.startswith('laser_floor_density ')]
 print(json.dumps({'at': sys.argv[1], 'pid': rd('$T/ctl.pid'), 'lens_home': os.path.exists('$T/run/lens.home'),
-                  'motor_lock': rd('$SYS/cnc/motor_lock'), 'z_mode': rd('$SYS/head/z_mode'),
-                  'z_enable': rd('$SYS/head/z_enable'), 'socket_lines': len((rd('$T/burn.log') or '').split()),
+                  'motor_lock': rd('$SYS/cnc/motor_lock'), 'z_current': rd('$SYS/head/z_current'),
+                  'z_mode': rd('$SYS/head/z_mode'), 'z_enable': rd('$SYS/head/z_enable'),
+                  'socket_lines': len((rd('$T/burn.log') or '').split()),
                   'floor': floor[0] if floor else None, 'phase': get('/wiz/dark').get('phase'),
                   'armed': get('/cool/status').get('armed')}), file=open('$T/snaps', 'a'))
 PY
@@ -1034,8 +1035,8 @@ s = [json.loads(l) for l in open(sys.argv[1]) if json.loads(l)["at"] == sys.argv
 print(eval(sys.argv[4]))' "$T/snaps" "$1" "$2" "$3" 2>&1; }
 expect True "$(snaps home 0 's["pid"] not in (None, "'"$P0"'") and s["lens_home"]')" \
     "after the gantry stops, before the home question: the controller stopped and started again, the lens referenced"
-expect '|1|0' "$(snaps scrap 0 '"%s|%s|%s" % (s["motor_lock"], s["z_mode"], s["z_enable"])')" \
-    "before the scrap question: the lens motor rests after its reference, the lock never written"
+expect '|1|1|0' "$(snaps scrap 0 '"%s|%s|%s|%s" % (s["motor_lock"], s["z_current"], s["z_mode"], s["z_enable"])')" \
+    "before the scrap question: the lens motor rests after its reference (the hold current, half step), the lock never written"
 for n in 0 1; do
     expect '0|4|False|True' "$(snaps thickness $n '"%s|%s|%s|%s" % (s["socket_lines"], s["floor"], s["armed"], s["phase"] != "the program goes to the controller, the button lights at the arm")')" \
         "at thickness question $((n + 1)): no program line streamed, laser_floor_density still 4, not armed, the burn not entered"
