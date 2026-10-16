@@ -13,9 +13,11 @@
  * a check run end to end (start, the prompt asked, the answer carried back
  * as the host's answer command, a confirm as yes, the result shown and
  * recorded by nobody); a result that did not pass; the service's refusal;
- * a step out of form, and an operator's abort, each sending abort; the
- * host's own refusal; and the Setup page's list, only for a package whose
- * service runs, with its title and whether it is done.
+ * a step out of form, and an operator's abort, each sending abort; a
+ * prompt nobody answered, sending abort and leaving the step's reason to
+ * the runner, which names the timeout; the host's own refusal; and the
+ * Setup page's list, only for a package whose service runs, with its
+ * title and whether it is done.
  */
 #include "../src/extpkg.h"
 #include "../src/wizpkg.h"
@@ -242,6 +244,12 @@ int main(int argc, char **argv)
     ask_rc = -1;
     wizpkg_run();
     CHECK(!strcmp(finished, "aborted") && strstr(args(), "abort"), "an operator's abort: %s [%s]", finished, args());
+    reset();
+    answers("start", "{\"ok\": true, \"status\": 200, \"body\": {\"prompt\": {\"kind\": \"continue\", \"id\": \"x\", \"text\": \"t\"}}}");
+    ask_rc = -2;
+    wizpkg_run();
+    CHECK(!finished[0] && strstr(args(), "abort"),
+          "a prompt nobody answered: no reason over the runner's, and the check told to abort: '%s' [%s]", finished, args());
     reset();
     answers("start", "{\"ok\": false, \"error\": \"its service is frozen while a job is armed\"}");
     wizpkg_run();

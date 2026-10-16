@@ -34,13 +34,15 @@
 #       expires by itself with its reason
 #     the cameras: an open lid is waited for; the lid shot, its question,
 #       the head shot, its question; each shot served as captured, and
-#       the result names the engine's sensor
+#       the result names the engine's sensor; a lid nobody closes ends the
+#       check with its reason
 #     the bed check: an unhomed machine is refused with nothing written
-#       and the envelope never opened; homed, every prompt is a jog that
-#       offers This is the end, the ends are the home plus the jogs, the
-#       keys the ends less 1 mm, the envelope opened and applied; a
-#       Grbl client's line closing the envelope ends the next run at its
-#       answer with nothing written
+#       and the envelope never opened; homed, a lid nobody closes ends the
+#       check with its reason, the envelope never opened; every prompt is
+#       a jog that offers This is the end, the ends are the home plus the
+#       jogs, the keys the ends less 1 mm, the envelope opened and
+#       applied; a Grbl client's line closing the envelope ends the next
+#       run at its answer with nothing written
 #     the flow check: the diagnostic's phases are the check's, its
 #       result the check's with pass true, and a thin margin flags the
 #       calibration in the record
@@ -811,6 +813,17 @@ expect "|True|True|$SENSOR" "$(run '"%s|%s|%s|%s" % (d["dark"]["error"], d["dark
     "both views accepted, and the result names the sensor GET /cam/status gives"
 expect 1 "$(recv cameras)" "the record carries cameras at version 1"
 sw 8
+# A lid nobody closes: the wait runs out and the check ends with its
+# reason. The clock stand-in's .mono flag, taken off as the wait opens,
+# puts the wait's deadline 10 s off on the kernel's clock.
+sw 0
+: > "$T/timeshift.mono"
+check cameras "on:lid-close=rm -f $T/timeshift.mono"
+rm -f "$T/timeshift.mono"
+expect 'lid-close|the lid was not closed within 10 min|True' \
+    "$(run '"%s|%s|%s" % ("|".join(p["id"] for p in d["prompts"]), d["dark"]["error"], d["dark"]["result"] is None)')" \
+    "a lid nobody closes ends the check with its reason, and no result"
+sw 8
 
 echo "== the bed check"
 cp "$CONF" "$T/conf.before"
@@ -821,6 +834,18 @@ expect '200|True|0' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), 
 grep -q '^envelope' "$T/port.log" && bad "the port got: $(grep '^envelope' "$T/port.log")" || ok "the envelope was never opened"
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is byte for byte the same" || bad "an unhomed check wrote a setting"
 touch "$T/port.homed"                            # homed: the head at X10 Y10
+# Homed, with a lid nobody closes: the check ends with its reason before
+# the envelope opens (the .mono flag as in the cameras check).
+sw 0
+: > "$T/timeshift.mono"
+check motion.envelope "on:lid-close=rm -f $T/timeshift.mono"
+rm -f "$T/timeshift.mono"
+expect 'lid-close|the lid was not closed within 10 min|True' \
+    "$(run '"%s|%s|%s" % ("|".join(p["id"] for p in d["prompts"]), d["dark"]["error"], d["dark"]["result"] is None)')" \
+    "homed, a lid nobody closes ends the check with its reason, and no result"
+grep -q '^envelope' "$T/port.log" && bad "the port got: $(grep '^envelope' "$T/port.log")" || ok "and the envelope was never opened"
+cmp -s "$T/conf.before" "$CONF" && ok "and nothing is written" || bad "the lid's wait wrote a setting"
+sw 8
 X10=answer:x-end=X+10
 Y10=answer:y-end=Y+10
 check motion.envelope $X10 $X10 $X10 $X10 $X10 answer:x-end=X+1 answer:x-end=X+0.1 "answer:x-end=This is the end" \

@@ -168,8 +168,12 @@ void wizpkg_run(void)
             opts[i] = s.opts[i];
         rc = wiz_ask(s.kind, s.pid, s.text, opts, s.nopt, answer, sizeof(answer));
         if (rc != 0) {
+            /* A prompt nobody answered already ends the step with its
+             * reason (the runner names the timeout); an abort is named
+             * here. */
             free(extpkg_wizard_json(id, "abort", NULL, why, sizeof(why)));
-            wiz_finish_err("%s", rc == -1 ? "aborted" : "no answer in time");
+            if (rc == -1)
+                wiz_finish_err("aborted");
             return;
         }
         if (!strcmp(s.kind, "confirm"))

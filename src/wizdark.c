@@ -420,7 +420,8 @@ static int bit_is(void *ctx)
     return ((bits >> w->bit) & 1u) == (unsigned)w->want;
 }
 
-/* Ask for an edge on `bit` toward `want`; returns 0 when seen. */
+/* Ask for an edge on `bit` toward `want`: 0 when seen, -1 aborted, -2
+ * not seen within timeout_s, which the caller names. */
 static int edge(const char *pid, const char *text, unsigned bit, int want, int timeout_s)
 {
     struct bitwait w = { bit, want };
@@ -437,6 +438,22 @@ static int edge(const char *pid, const char *text, unsigned bit, int want, int t
     wait_close();
     if (rc == 0)
         wlog("%s: seen", pid);
+    return rc;
+}
+
+/* The lid closed for a step that needs it closed: 0 when it is, at once
+ * or after the wait, -1 aborted, -2 nobody closed it. A wait that runs
+ * out ends the step with its reason, once, as a question does (an abort
+ * names itself at the run's end). */
+static int lid_closed_wait(const char *text)
+{
+    if (machine_lid_closed())
+        return 0;
+    int rc = edge("lid-close", text, 3, 1, PROMPT_TIMEOUT_S);
+    if (rc == -2) {
+        wlog("lid-close: not seen within %d s", PROMPT_TIMEOUT_S);
+        finish_err("the lid was not closed within %d min", (PROMPT_TIMEOUT_S + 59) / 60);
+    }
     return rc;
 }
 
@@ -1721,11 +1738,8 @@ out:
 static void run_cameras(void)
 {
     json_t *r = json_object();
-    if (!machine_lid_closed()) {
-        if (edge("lid-close", "Close the lid: the cameras capture only with it closed.", 3, 1,
-                 PROMPT_TIMEOUT_S) != 0)
-            goto out;
-    }
+    if (lid_closed_wait("Close the lid: the cameras capture only with it closed.") != 0)
+        goto out;
     struct cam_status st;
     cam_get_status(&st);
     json_object_set_new(r, "sensor", json_string(st.sensor && st.sensor[0] ? st.sensor : "unknown"));
@@ -2045,8 +2059,7 @@ static void run_envelope(void)
                    "its home");
         goto out;
     }
-    if (!machine_lid_closed() &&
-        edge("lid-close", "Close the lid: the head is jogged with it closed.", 3, 1, PROMPT_TIMEOUT_S) != 0)
+    if (lid_closed_wait("Close the lid: the head is jogged with it closed.") != 0)
         goto out;
     if (envelope_op("open") != 0) {
         finish_err("the controller would not open its envelope for the measurement (the machine must be idle, "
