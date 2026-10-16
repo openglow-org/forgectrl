@@ -14,22 +14,32 @@ and the panel after it, /setup the wizard, /login the login page, each
 with the token spliced and the daemon's page policy; every other request
 goes to the mock.
 
+With --daemon the page is the one the running daemon serves: the walk's
+server relays every request to the daemon's HTTPS listener as the dev
+server relays them to a machine (the Host of the daemon, the browser's
+origin headers dropped), so the page, its token, the routes, the
+session cookie and the gate are the daemon's own. The harness that
+starts the daemon (tests/host_setup.sh) presses the button and scripts
+the coolant loop; the walk asserts the first run as the page shows it.
+
 The driver is a page of the walk's own that frames "/" from the same
 origin and works the frame's document as an operator would, so nothing
 is added to the pages under test and the walk follows the frame from
-the wizard to the panel. The steps are in STEPS below: the welcome; each
-document read to its end and accepted (the typed phrase where it asks
-for one); the press step, which the mock's button takes; the account;
-preferences; the machine; cloud mode left off; the intake fans shown
-counted and passed by; the coolant flow calibration run to its result,
-through a prompt whose options are text (one shaped like code, one with
-quotes), each shown as written and the code-shaped one answered as
-written; the choice, where Start using the machine lands on the panel
-with the setup complete; one setting saved through the panel's save
-bar; and the login page, which refuses a wrong password and signs the
-account in.
+the wizard to the panel. The steps are in STEPS below: GET /wiz carries
+every field the page reads and the page's required steps are the
+setup's; the welcome; each document read to its end and accepted (the
+typed phrase where it asks for one); the press step, which the button
+takes; the account; preferences; the machine; cloud mode left off; the
+intake fans shown counted and passed by; the coolant flow calibration
+run to its result (against the mock, through a prompt whose options are
+text, one shaped like code, one with quotes, each shown as written and
+the code-shaped one answered as written); the choice, where Start using
+the machine lands on the panel with the setup complete; one setting
+saved through the panel's save bar; and the login page, which refuses a
+wrong password and signs the account in.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
+  python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
 
 Exit 0 when every step passed, 1 on a failed step, 2 when the walk
 could not run (no pages, no browser, no verdict in time).
@@ -83,8 +93,20 @@ iframe { display: block; width: 1280px; height: 960px; border: 0; }
 var F = document.getElementById('f'), log = [];
 /* The account the walk makes: the mock's login takes this password alone. */
 var NAME = 'walker', PW = 'correct horse';
-/* The flow check's prompt options and the code-shaped one (FLOW_OPTIONS). */
-var FLOW = __FLOW__;
+/* The walk's plan: the check the page opens after the forms and the prompt
+ * it shows there (none against the daemon), how long its result may take,
+ * and whether the panel is signed out before the login (the daemon serves
+ * the login page to no session). */
+var PLAN = __PLAN__, FLOW = PLAN.check.prompt;
+/* The fields the page reads from GET /wiz, each with its type. */
+var READS = [['documents', 'array'], ['documents.0.id', 'string'], ['documents.0.title', 'string'],
+  ['documents.0.consent', 'string'], ['documents.0.hash', 'string'], ['documents.0.accepted', 'boolean'],
+  ['advisories_complete', 'boolean'], ['acceptance_done', 'boolean'], ['completed', 'boolean'],
+  ['fans_counted', 'boolean'], ['first_run', 'boolean'], ['gate', 'string'], ['why', 'string'],
+  ['versions', 'object'], ['missing', 'array'], ['recommended', 'array'], ['extensions', 'array'],
+  ['wizards', 'array'], ['wizards.0.id', 'string'], ['wizards.0.title', 'string'], ['wizards.0.done', 'number'],
+  ['users.exists', 'boolean'], ['users.reset_pending', 'boolean'], ['users.name', 'string'],
+  ['sheet_id', 'string'], ['clock.utc', 'string'], ['clock.set', 'boolean'], ['machine.firmware', 'string']];
 function d() { return F.contentDocument; }
 function w() { return F.contentWindow; }
 function q(s) { var x = d(); return x ? x.querySelector(s) : null; }
@@ -114,8 +136,24 @@ function el(sel) { var e = q(sel); if (!e) throw new Error('the page has no ' + 
 function click(sel) { el(sel).click(); }
 function set(sel, v, ev) { var e = el(sel); e.value = v; e.dispatchEvent(new (w().Event)(ev || 'change', { bubbles: true })); }
 function api(p) { return fetch(p).then(function (r) { return r.json(); }); }
+function at(o, dotted) { return dotted.split('.').reduce(function (x, k) { return x == null ? x : x[k]; }, o); }
 
 var STEPS = [
+  ['GET /wiz carries every field the page reads, and the page\'s required steps are the setup\'s', function () {
+    return until('the page', function () { return w().REQUIRED && w().W; })
+      .then(function () { return api('/wiz'); })
+      .then(function (s) {
+        var lacking = READS.filter(function (r) {
+          var v = at(s, r[0]);
+          return r[1] === 'array' ? !Array.isArray(v) : (v === null || typeof v !== r[1]);
+        }).map(function (r) { return r[0] + ' (' + r[1] + ')'; });
+        if (lacking.length) throw new Error('GET /wiz lacks ' + lacking.join(', '));
+        /* The gate holds the advisories, the account and the fan count on
+         * their own; every other required step of the page is in missing
+         * on a record with none of them done, in the setup's order. */
+        var req = w().REQUIRED.filter(function (id) { return ['advisories', 'account', 'airflow.intakes'].indexOf(id) < 0; });
+        if (JSON.stringify(req) !== JSON.stringify(s.missing))
+          throw new Error('the page requires ' + JSON.stringify(req) + ', the setup ' + JSON.stringify(s.missing)); }); }],
   ['the first run serves the wizard at / and opens on the welcome', function () {
     return until('the welcome', function () { return path() === '/' && on('st-welcome') && q('#rail li'); })
       .then(function () { click('#st-welcome [onclick="go(\'advisories\')"]'); }); }],
@@ -178,26 +216,29 @@ var STEPS = [
     if (!row || !row.classList.contains('done'))
       throw new Error('the rail does not show the intake fans counted: ' + (row ? row.outerHTML : 'no such row'));
     if (on('st-dark') && w().K.id === 'airflow.intakes') throw new Error('the page opened the intake fans check'); }],
-  ['the coolant flow calibration runs to its result; its prompt shows each option as text and takes the code-shaped one as written', function () {
-    return until('the coolant flow check', function () { return on('st-dark') && w().K.id === 'cooling.flow'; })
+  ['the coolant flow calibration runs to its result' + (FLOW ? '; its prompt shows each option as text and takes the code-shaped one as written' : ''), function () {
+    return until('the coolant flow check', function () { return on('st-dark') && w().K.id === PLAN.check.id; })
       .then(function () { click('#k-start'); })
-      .then(function () { return until('its prompt', function () { return shown('#k-prompt') && q('#k-pbtns button'); }, 20000); })
       .then(function () {
-        var bs = [].slice.call(d().querySelectorAll('#k-pbtns button'));
-        var got = bs.map(function (b) { return b.textContent; });
-        if (JSON.stringify(got) !== JSON.stringify(FLOW.options)) throw new Error('the prompt offers ' + JSON.stringify(got));
-        var inline = bs.filter(function (b) { return b.getAttributeNames().some(function (n) { return n.indexOf('on') === 0; }); });
-        if (inline.length) throw new Error('a prompt button carries inline script: ' + inline[0].outerHTML);
-        var hit = bs.filter(function (b) { return b.getAttribute('data-v') === FLOW.hostile; })[0];
-        if (!hit) throw new Error('no button carries the code-shaped option as written: ' +
-          JSON.stringify(bs.map(function (b) { return b.getAttribute('data-v'); })));
-        hit.click();
-        if (w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
-        return until('the answer taken', function () { return !q('#k-pbtns button'); });
+        if (!FLOW) return;
+        return until('its prompt', function () { return shown('#k-prompt') && q('#k-pbtns button'); }, 20000)
+          .then(function () {
+            var bs = [].slice.call(d().querySelectorAll('#k-pbtns button'));
+            var got = bs.map(function (b) { return b.textContent; });
+            if (JSON.stringify(got) !== JSON.stringify(FLOW.options)) throw new Error('the prompt offers ' + JSON.stringify(got));
+            var inline = bs.filter(function (b) { return b.getAttributeNames().some(function (n) { return n.indexOf('on') === 0; }); });
+            if (inline.length) throw new Error('a prompt button carries inline script: ' + inline[0].outerHTML);
+            var hit = bs.filter(function (b) { return b.getAttribute('data-v') === FLOW.hostile; })[0];
+            if (!hit) throw new Error('no button carries the code-shaped option as written: ' +
+              JSON.stringify(bs.map(function (b) { return b.getAttribute('data-v'); })));
+            hit.click();
+            if (w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
+            return until('the answer taken', function () { return !q('#k-pbtns button'); });
+          });
       })
-      .then(function () { return until('its result', function () { return shown('#k-result') && shown('#k-next'); }, 20000); })
+      .then(function () { return until('its result', function () { return shown('#k-result') && shown('#k-next'); }, PLAN.check.result_ms); })
       .then(function () {
-        if (w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
+        if (FLOW && w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
         click('#k-next'); }); }],
   ['the choice offers Start using the machine', function () {
     return until('the choice', function () { return on('st-choice'); })
@@ -221,7 +262,7 @@ var STEPS = [
       .then(function () { return api('/settings'); })
       .then(function (s) { if (s.ui_units !== to) throw new Error('ui_units reads ' + s.ui_units + ' after saving ' + to); }); }],
   ['the login page refuses a wrong password and signs the account in', function () {
-    F.src = '/login?next=%2F';
+    if (PLAN.logout) click('#logoutbtn'); else F.src = '/login?next=%2F';
     return until('the login page', function () { return path() === '/login' && q('#lg'); })
       .then(function () { set('#name', NAME, 'input'); set('#password', 'not the password', 'input'); click('#go'); })
       .then(function () { return until('the refusal', function () { return q('#msg').classList.contains('bad') && !q('#go').disabled; }); })
@@ -247,8 +288,11 @@ run();
 
 class Walk(devserver.Handler):
     """The dev server's handler with main.c's page routes in front of the
-    mock: the bundled pages, the walk's own page, and its verdict."""
+    mock: the bundled pages, the walk's own page, and its verdict. With a
+    daemon, its relay instead: the daemon serves its own pages."""
     pages = {}
+    plan = {}
+    daemon = None
     result = None
     said = []
 
@@ -259,11 +303,13 @@ class Walk(devserver.Handler):
         u = urlsplit(self.path)
         q = dict(parse_qsl(u.query, keep_blank_values=True))
         if u.path == "/__walk/":
-            page = RUNNER.replace("__FLOW__", json.dumps({"options": FLOW_OPTIONS, "hostile": FLOW_HOSTILE}), 1)
+            page = RUNNER.replace("__PLAN__", json.dumps(Walk.plan), 1)
             return self._send(200, {"Content-Type": "text/html; charset=utf-8"}, page.encode())
         if u.path == "/__walk/result" and self.command == "POST":
             Walk.result = json.loads(self._read_body() or b"{}")
             return self._json(200, {"ok": True})
+        if Walk.daemon:
+            return self._proxy(u)
         if self.command in ("GET", "HEAD") and (u.path in ("/setup", "/login") or (u.path == "/" and "action" not in q)):
             if u.path == "/login":
                 name = "login"
@@ -285,10 +331,10 @@ def load_pages(ui_dir):
     return out
 
 
-def call(port, method, path):
+def call(port, method, path, token=None):
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), method=method,
-                                 headers={"X-ForgeFIRM-Token": devserver.MOCK_TOKEN})
-    with urllib.request.urlopen(req, timeout=10) as r:
+                                 headers={"X-ForgeFIRM-Token": token} if token else {})
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read() or b"{}")
 
 
@@ -315,42 +361,69 @@ def end_browser(profile):
 def main():
     ap = argparse.ArgumentParser(description="the first-run page, walked once in a headless browser")
     ap.add_argument("ui_dir", nargs="?", default=os.path.join(ROOT, "build", "ui"),
-                    help="the bundled pages embed.cmake writes (default build/ui)")
+                    help="the bundled pages embed.cmake writes (default build/ui); unused with --daemon")
     ap.add_argument("--browser", default="chrome", choices=sorted(BROWSERS))
+    ap.add_argument("--daemon", metavar="HOST:PORT",
+                    help="walk the page a running daemon serves at its HTTPS listener, through the walk's own "
+                         "relay, instead of the bundled pages against the mock")
     ap.add_argument("--port", type=int, default=8093)
-    ap.add_argument("--timeout", type=float, default=150)
+    ap.add_argument("--timeout", type=float, default=0, help="seconds for the whole walk (default 150; 600 with --daemon)")
     a = ap.parse_args()
-    try:
-        Walk.pages = load_pages(a.ui_dir)
-    except OSError as e:
-        print("cannot read the bundled pages: %s" % e)
-        return 2
+    timeout = a.timeout or (600 if a.daemon else 150)
     exe = find_browser(a.browser)
     if not exe:
         print("no %s found" % a.browser)
         return 2
 
-    # The mock as a first run, nothing held down and no step asked for again.
-    for k in ("GF_MOCK_BUTTON", "GF_MOCK_MIRROR", "GF_MOCK_REQUIRED_AGAIN"):
-        os.environ.pop(k, None)
-    os.environ["GF_MOCK_FIRST_RUN"] = "1"
-    devserver.DARK_PROMPTS["cooling.flow"] = FLOW_PROMPT
-    Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
-    Walk.mock.call_port = 0
-    Walk.cfg = types.SimpleNamespace(mock=True)
+    if a.daemon:
+        host, _, port = a.daemon.rpartition(":")
+        if not host or not port.isdigit():
+            print("--daemon takes HOST:PORT, the daemon's HTTPS listener")
+            return 2
+        # The daemon's own run of the flow calibration asks nothing; on a
+        # host its six windows take a few minutes.
+        Walk.plan = {"check": {"id": "cooling.flow", "prompt": None, "result_ms": 480000}, "logout": True}
+        Walk.daemon = (host, int(port))
+        Walk.cfg = types.SimpleNamespace(mock=False, token="",
+                                         upstream=lambda: (host, int(port), "%s:%s" % (host, port)))
+        Walk.mock = None
+    else:
+        try:
+            Walk.pages = load_pages(a.ui_dir)
+        except OSError as e:
+            print("cannot read the bundled pages: %s" % e)
+            return 2
+        # The mock as a first run, nothing held down and no step asked for again.
+        for k in ("GF_MOCK_BUTTON", "GF_MOCK_MIRROR", "GF_MOCK_REQUIRED_AGAIN"):
+            os.environ.pop(k, None)
+        os.environ["GF_MOCK_FIRST_RUN"] = "1"
+        devserver.DARK_PROMPTS["cooling.flow"] = FLOW_PROMPT
+        Walk.plan = {"check": {"id": "cooling.flow", "prompt": {"options": FLOW_OPTIONS, "hostile": FLOW_HOSTILE},
+                               "result_ms": 20000}, "logout": False}
+        Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
+        Walk.mock.call_port = 0
+        Walk.cfg = types.SimpleNamespace(mock=True)
     Walk.panel = None
     Walk.bundled = True
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), Walk)
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
-    # The intake fans counted: the setting a first run behind the checks keeps.
-    call(a.port, "POST", "/settings?cool_intake_fans=2")
-    w = call(a.port, "GET", "/wiz")
+    # The intake fans counted: the setting a first run behind the checks
+    # keeps (the harness writes it for the daemon).
+    if not a.daemon:
+        call(a.port, "POST", "/settings?cool_intake_fans=2", devserver.MOCK_TOKEN)
+    try:
+        w = call(a.port, "GET", "/wiz")
+    except OSError as e:
+        print("GET /wiz did not answer: %s" % e)
+        print("\n".join(Walk.said[-5:]))
+        srv.shutdown()
+        return 2
     if not (w.get("first_run") is True and w.get("fans_counted") is True and w.get("gate") == "closed"
             and not w.get("account")):
-        print("the mock is not a first run with its intake fans counted: %s"
-              % {k: w.get(k) for k in ("first_run", "fans_counted", "gate", "account")})
+        print("the %s is not a first run with its intake fans counted: %s"
+              % ("daemon" if a.daemon else "mock", {k: w.get(k) for k in ("first_run", "fans_counted", "gate", "account")}))
         srv.shutdown()
         return 2
 
@@ -366,7 +439,7 @@ def main():
     else:
         cmd = [exe, "-headless", "-no-remote", "-new-instance", "-profile", prof, url]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    end = time.monotonic() + a.timeout
+    end = time.monotonic() + timeout
     try:
         while Walk.result is None and time.monotonic() < end:
             time.sleep(0.5)
@@ -378,18 +451,19 @@ def main():
         time.sleep(0.5)
         shutil.rmtree(prof, ignore_errors=True)
     if Walk.result is None:
-        print("NORESULT: the walk did not finish in %.0f s" % a.timeout)
+        print("NORESULT: the walk did not finish in %.0f s" % timeout)
         print("\n".join(Walk.said[-40:]))
         return 2
     print("\n".join(Walk.result.get("log") or []))
     ok = bool(Walk.result.get("ok"))
     # The answer the page posted for the code-shaped option, as the mock took it.
-    answer = (Walk.mock.dark or {}).get("answer")
-    if ok and answer != FLOW_HOSTILE:
-        print("FAIL the flow prompt's answer reached the mock as %r, not the option as written" % (answer,))
-        ok = False
+    if Walk.mock:
+        answer = (Walk.mock.dark or {}).get("answer")
+        if ok and answer != FLOW_HOSTILE:
+            print("FAIL the flow prompt's answer reached the mock as %r, not the option as written" % (answer,))
+            ok = False
     if not ok:
-        print("--- the mock's last requests")
+        print("--- the last requests")
         print("\n".join(Walk.said[-40:]))
     print("PASS: wizard_walk" if ok else "FAIL: wizard_walk")
     return 0 if ok else 1

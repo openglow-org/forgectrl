@@ -59,6 +59,10 @@
 #     hash, the press step breathing teal, the press accepted, the
 #     account and its cookie, the gate's reason after each form step,
 #     the intake fan count opening the gate, and the run completed
+#   the first run, walked in the browser: the page the daemon serves,
+#     in headless Chrome (tests/wizard_walk.py --daemon), from the
+#     documents and the press to the flow calibration on the scripted
+#     loop, the choice onto the panel, a save and the login
 #
 # The switch device is a plain file: a preloaded stand-in answers the
 # readers' switch-state request from the switch word, so the lid, the
@@ -82,6 +86,7 @@
 [ "$(id -u)" != 0 ] || { echo "host_setup.sh runs unprivileged"; exit 2; }
 BUILD=$(cd "${1:?build dir}" && pwd) || exit 2
 ULIB=$(cd "${2:?ulfius lib dir}" && pwd) || exit 2
+HERE=$(cd "$(dirname "$0")" && pwd)
 HTTP_PORT=18092
 TLS_PORT=18455
 URL=http://127.0.0.1:$HTTP_PORT
@@ -96,10 +101,11 @@ PID=
 LPID=
 PLANT=
 HALL=
+PRESSER=
 cleanup() {
     if [ -n "$PID" ]; then kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null; fi
     [ -z "$LPID" ] || kill $LPID 2>/dev/null
-    for p in $PLANT $HALL; do kill $p 2>/dev/null; done
+    for p in $PLANT $HALL $PRESSER; do kill $p 2>/dev/null; done
     [ ! -f "$T/ctl.pids" ] || kill $(cat "$T/ctl.pids") 2>/dev/null
     chmod 755 "$T/data" 2>/dev/null
     rm -rf "$T"
@@ -797,10 +803,12 @@ expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=5 -d cool_flow_rise=6
     "a 5 s check window and a 6.0 C threshold are 200"
 # The loop as the diagnostic reads it: at 20 C at rest; with the heater
 # on the downstream sensor 5.0 C up with the pump on and 9.0 C up with it
-# off, so the threshold passes with a thin margin on the flowing side.
-# The heater's file is emptied as it is read: a shorter value written
-# over a longer one would keep the longer one's tail.
-python3 - "$SYS" <<'EOF' &
+# off, so the threshold passes with a thin margin on the flowing side,
+# and the calibration finds its bands 4 C apart. The heater's file is
+# emptied as it is read: a shorter value written over a longer one would
+# keep the longer one's tail.
+plant_start() {
+    python3 - "$SYS" <<'EOF' &
 import math, os, sys, time
 sysfs = sys.argv[1]
 def raw(t):
@@ -821,7 +829,9 @@ while True:
     put('pic/water_temp_2', raw(20.0))
     time.sleep(0.05)
 EOF
-PLANT=$!
+    PLANT=$!
+}
+plant_start
 check cooling.flow-verify diag
 kill $PLANT
 PLANT=
@@ -1132,6 +1142,62 @@ stop_daemon
 cp "$T/seed.json" "$REC"
 cp "$T/conf.before" "$CONF"
 rm -f "$T/data/users"
+start_daemon
+up || bad "no controller on the seeded record"
+
+echo "== the first run, walked in the browser"
+# The page the daemon serves, walked in headless Chrome as a new owner
+# walks it (tests/wizard_walk.py --daemon): no record and no account, the
+# intake fans counted, a 5 s flow window on the scripted loop so the
+# calibration finds its bands in six windows. The press is the switch
+# word, held once the daemon waits for it; after the walk the record, the
+# settings and GET /wiz are read beside the walk's verdict.
+OLD=$(ctl_pid)
+stop_daemon
+cp "$CONF" "$T/conf.before"
+rm -f "$REC" "$T/data/users"
+start_daemon
+expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=5)" "a 5 s flow window is 200"
+plant_start
+presser() {
+    n=1500
+    while [ $n -gt 0 ]; do
+        if curl -s -o "$T/btn.json" "$URL/wiz" && [ "$(jget "$T/btn.json" 'd["button"]')" = waiting ]; then
+            sw 12; sleep 0.5; sw 8
+            return 0
+        fi
+        n=$((n - 1)); sleep 0.2
+    done
+    return 1
+}
+presser &
+PRESSER=$!
+if python3 -B "$HERE/wizard_walk.py" --daemon 127.0.0.1:$TLS_PORT > "$T/walk.out" 2>&1; then
+    ok "the page walked the first run against the daemon"
+else
+    bad "the walk failed ($?)"
+fi
+sed 's/^/      /' "$T/walk.out"
+kill $PRESSER $PLANT 2>/dev/null
+wait $PRESSER $PLANT 2>/dev/null
+PRESSER=
+PLANT=
+wiz
+expect 'true|open|true|true|walker' \
+    "$(jget "$T/wiz.json" '"%s|%s|%s|%s|%s" % (json.dumps(d["completed"]), d["gate"], json.dumps(d["acceptance_done"]), json.dumps(d["users"]["exists"]), d["users"]["name"])')" \
+    "GET /wiz after the walk: complete, the gate open, the press taken, the account walker"
+expect '1|1|1|1' "$(jget "$T/wiz.json" '"|".join(str(d["versions"].get(k, "")) for k in ("preferences", "machine", "cloud", "cooling.flow"))')" \
+    "the required steps are recorded at version 1"
+expect 4 "$(jget "$REC" 'len(d["advisories"])')" "the record holds the four documents"
+expect True "$(python3 -c 'import sys; v = float(sys.argv[1] or "nan"); print(6.5 <= v <= 7.5)' "$(setting cool_flow_rise)")" \
+    "the calibration wrote the threshold between the bands (cool_flow_rise $(setting cool_flow_rise))"
+expect imperial "$(setting ui_units)" "the panel's save bar wrote ui_units"
+OLD=$(ctl_pid)
+stop_daemon
+rm -f "$T/data/users"
+cp "$T/conf.before" "$CONF"
+cp "$T/seed.json" "$REC"
+at_rest
 start_daemon
 up || bad "no controller on the seeded record"
 
