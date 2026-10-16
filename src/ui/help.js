@@ -112,8 +112,8 @@ var HELP = {
     t: 'Jog',
     d: 'usage/control-panel/#status',
     p: [
-      'Each press moves the head one step of the size you picked, at the speed you picked. The arrows are as you stand at the front of the machine: up is toward the back (Y-), down is toward the front (Y+). Z moves the lens, and the long steps are not offered to it. The square stops a jog in progress. A jog never fires the laser, whatever the Grbl client last commanded.',
-      'The jog goes through the controller beside the Grbl client, so the Grbl sender stays connected, and the client goes first: a line from it stops a jog in progress, and right after one a jog is refused. Its status polling does neither. A jog is also refused during a program, in an alarm, while the motors are released, and past the soft limits once the machine is homed; the reason shows beside the pad for a few seconds.'
+      'Each press moves the head one step of the size you picked, at the speed you picked. The arrows are as you stand at the front of the machine: up is toward the back (Y-), down is toward the front (Y+). Z moves the lens, and the long steps are not offered to it. The square stops a jog in progress. A jog never fires the laser, whatever the Grbl sender last commanded.',
+      'The jog goes through the controller beside the Grbl sender, so the sender stays connected and goes first: a line from it stops a jog in progress, and right after one a jog is refused. Its status polling does neither. A jog is also refused during a program, in an alarm, while the motors are released, and past the soft limits once the machine is homed; the reason shows beside the pad for a few seconds.'
     ]
   },
   lens: {
