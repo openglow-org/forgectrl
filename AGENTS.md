@@ -22,14 +22,42 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
 cmake --build build
 ```
 
-Then run the test binaries under `build/`. A warning is a failure. The host
-tests are in `tests/`. `tests/fflog_e2e.sh` proves the whole logging path
-against a private rsyslogd. `tests/test_routes.py` reads `src/main.c`'s
-route table: every route the panel calls is registered, every row carries
-its capability column, and every page carries the page policy. The panel's
-dev-server mock (`tools/devserver.py`) is kept by hand: a new settings key,
-a new gate row or a new route needs its mock entry in the same change, and
-no test holds it to the C tables.
+Then run every host test, which is what `.github/workflows/build.yml`
+runs, in its order. A warning is a failure.
+
+- `ctest --test-dir build` runs every test binary (`fflog_e2e_test` runs
+  inside `tests/fflog_e2e.sh`). CI keeps one step per binary, because the
+  coverage lint in `forgefirm` reads those steps; the configure stops when
+  a `*_test` target has no `run: ./build/<name>` step there.
+- `python3 -B tools/check_ui_js.py build/ui`: every bundled script parses.
+- `python3 -B tests/wizard_walk.py build/ui`: the first-run page as
+  bundled, walked in headless Chrome (found at a usual path such as
+  `/usr/bin/google-chrome`) against the dev server's mock.
+  `tests/host_setup.sh` runs the walk again against the daemon it starts:
+  a renamed or re-typed `GET /wiz` field fails there.
+- `sudo sh tests/fflog_e2e.sh build <rsyslog.conf>`: the whole logging
+  path against a private rsyslogd, with the image's `rsyslog.conf` from a
+  `forgefirm` checkout (`meta-forgefirm/recipes-extended/rsyslog/rsyslog/`).
+- `sh tests/host_start.sh build`: the built daemon on a host, one read
+  answered, no controller started.
+- `sh tests/ulfius_image.sh <recipe dir> build/ulfius-image`: the image's
+  ulfius, built from `meta-forgefirm/recipes-extended/ulfius` in that
+  checkout. The other host scripts run on it, each as
+  `sh tests/<name>.sh build build/ulfius-image/lib`: `host_routes.sh`,
+  `host_ext.sh`, `host_setup.sh`, `host_lease.sh`, `host_guard.sh` and
+  `host_update.sh` unprivileged, and `host_lan.sh` under `sudo` (it makes
+  a network namespace and runs the daemon as the user who invoked sudo).
+- `python3 -B -m unittest -v tests/test_routes.py`: `src/main.c`'s route
+  table. Every route the panel calls is registered, every row carries its
+  capability column, and every page carries the page policy. It also holds
+  the daemon's list of environment variables, which its start notice
+  names, to the sources.
+
+What each proves is on the Test page of the site:
+<https://docs.forgefirm.org/developers/testing/>. The panel's dev-server
+mock (`tools/devserver.py`) is kept by hand: a new settings key, a new
+gate row or a new route needs its mock entry in the same change, and no
+test holds it to the C tables.
 
 The board binary is a cross-build, never a native one:
 `forgefirm/scripts/bench/build-forgectrl.sh`.
@@ -86,8 +114,8 @@ ForgeFIRM is open firmware for stock Glowforge lasers (Basic, Plus, Pro). It
 runs on the factory NXP i.MX6 control board with no hardware modification. It
 replaces the cloud-dependent factory userspace with an open Linux image that
 controls the machine locally. In GRBL mode the machine is a standard grblHAL
-controller for LightBurn and other senders on TCP port 23. Cloud mode runs the
-factory experience through the Glowforge web service, and it is a deliberate,
+controller for a Grbl sender on TCP port 23. Cloud mode runs the factory
+experience through the Glowforge web service, and it is a deliberate,
 maintained feature. The stack is hardware validated: GRBL mode cuts real jobs,
 and cloud mode runs end to end.
 

@@ -37,9 +37,13 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
 cmake --build build
 ```
 
-Then run the test binaries under `build/`. A warning is a failure. The host
-tests live in `tests/`; `tests/fflog_e2e.sh` proves the whole logging path
-against a private rsyslogd.
+Then run the host tests as `.github/workflows/build.yml` runs them:
+`ctest --test-dir build` for every test binary (`fflog_e2e_test` runs
+inside `tests/fflog_e2e.sh`), the bundled scripts' parse, the first-run
+page walk, the logging path, the `host_*.sh` scripts on the image's
+ulfius, and the route table. [AGENTS.md](AGENTS.md) lists each with its
+invocation, and the Test page of the site says what each proves. A
+warning is a failure.
 
 It builds with CMake and links against ulfius, libjpeg and zlib. The target
 needs Linux with imx-media, the coda VPU driver, and v4l-utils (`media-ctl`
