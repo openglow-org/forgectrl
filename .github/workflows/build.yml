@@ -86,7 +86,7 @@ jobs:
         run: sh tests/host_routes.sh build build/ulfius-image/lib
       - name: "host_ext (the extension host's routes on a host, against a compiled stand-in that is a live host: the upload sink, the install and a key without the button, the package routes and their 403s, a package's check run with the lease free and the setup record untouched, one session driving it and another following until it takes over)"
         run: sh tests/host_ext.sh build build/ulfius-image/lib
-      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off)"
+      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off, the flow calibration's abort leaving the heater duty as it was)"
         run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: "host_lease (the machine lease on a host: a waiting switches check holds it, six requests are refused in its name, the abort frees it, and the event stream says both)"
         run: sh tests/host_lease.sh build build/ulfius-image/lib

@@ -40,6 +40,8 @@
 #     the flow check: the diagnostic's phases are the check's, its
 #       result the check's with pass true, and a thin margin flags the
 #       calibration in the record
+#     the flow calibration aborted at its first rung: the heater duty
+#       as it was (unset stays unset, a seeded one comes back)
 #   the laser floor burn: refused before any prompt without Focus on the
 #     record; with it, the gantry stops asked, then the controller
 #     stopped and started again and the lens referenced before the home
@@ -767,6 +769,42 @@ expect 200 "$(post '/settings?cool_flow_check_s=&cool_flow_rise=' "$TOKEN")" "cl
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the flow settings were not cleared"
 restart "$T/seed.json"
 up || bad "no controller on the seeded record"
+
+echo "== the flow calibration aborted at its first rung"
+# The duty is written beside its threshold or not at all: the rung's
+# duty is in force while the diagnostic runs under the check, and an
+# abort puts back what was there.
+dark() { curl -s -o "$T/dark.json" "$URL/wiz/dark"; }
+stopped() { dark && [ "$(jget "$T/dark.json" 'd.get("running")')" = false ]; }
+calibrating() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" -o "$T/diag.json" "$URL/diag/status" \
+    && [ "$(jget "$T/diag.json" '"%s|%s" % (d.get("running"), d.get("tool"))')" = "True|flow-calibrate" ]; }
+holder() { curl -s -o "$T/status.json" "$URL/status"; jget "$T/status.json" '(d["lease"]["holder"] or {}).get("owner") or "none"'; }
+free() { [ "$(holder)" = none ]; }
+start_flow() { [ "$(post /wiz/cooling.flow/start "$TOKEN")" = 200 ]; }
+# abort_at_rung1 <label>: started, its diagnostic running, the duty 40 in force, aborted, ended, the machine handed back
+abort_at_rung1() {
+    until_ok 50 start_flow && ok "$1: POST /wiz/cooling.flow/start is 200" || bad "$1: the start was refused: $(cat "$T/body")"
+    until_ok 150 calibrating && ok "$1: the flow-calibrate diagnostic runs under the check" || bad "$1: no diagnostic: $(cat "$T/diag.json")"
+    grep -qx 'cool_flow_heater_pct = 40' "$CONF" && ok "$1: the rung's duty 40 is in force" || bad "$1: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
+    expect 200 "$(post /wiz/cooling.flow/abort "$TOKEN")" "$1: POST /wiz/cooling.flow/abort is 200"
+    until_ok 300 stopped && ok "$1: the check stopped" || bad "$1: the check still runs: $(cat "$T/dark.json")"
+    expect 'True|True' "$(jget "$T/dark.json" '"%s|%s" % (bool(d["error"]), d["result"] is None)')" "$1: it ended in an error with no result"
+    until_ok 150 free || bad "$1: the lease is still held: $(holder)"
+    up || bad "$1: no controller after the abort"
+}
+cp "$CONF" "$T/conf.before"
+grep -q '^cool_flow_heater_pct' "$CONF" && bad "the conf file starts with a heater duty" || ok "no heater duty in the conf file to start"
+abort_at_rung1 unset
+grep -q '^cool_flow_heater_pct' "$CONF" && bad "unset: the conf file keeps '$(grep cool_flow_heater_pct "$CONF")' after the abort" \
+    || ok "unset: no heater duty in the conf file after the abort"
+cmp -s "$T/conf.before" "$CONF" && ok "unset: the settings file is byte for byte as it was" || bad "unset: the settings file changed"
+expect 200 "$(post /settings "$TOKEN" -d cool_flow_heater_pct=45)" "a heater duty of 45 is 200"
+cp "$CONF" "$T/conf.seeded"
+abort_at_rung1 seeded
+grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "seeded: the duty 45 is back after the abort" || bad "seeded: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
+cmp -s "$T/conf.seeded" "$CONF" && ok "seeded: the settings file is byte for byte as seeded" || bad "seeded: the settings file changed"
+expect 200 "$(post '/settings?cool_flow_heater_pct=' "$TOKEN")" "clearing the duty is 200"
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the duty was not cleared"
 
 echo "== the laser floor burn"
 cp "$CONF" "$T/conf.before"

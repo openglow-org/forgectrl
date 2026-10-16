@@ -1106,8 +1106,11 @@ static void run_cooling_flow(void)
     json_decref(applied);
     return;
 restore:
-    if (orig_pct[0])
-        settings_set("cool_flow_heater_pct", orig_pct);
+    /* The duty is written beside its threshold or not at all: an abort
+     * or a failure puts back what was there, and an unset key stays
+     * unset (an empty value removes it). */
+    if (settings_set("cool_flow_heater_pct", orig_pct) != 0)
+        wlog("cannot put cool_flow_heater_pct back to \"%s\"", orig_pct);
 }
 
 static void run_cooling_flow_verify(void)
