@@ -504,3 +504,28 @@ target_link_libraries(relcheck_test jansson)
 add_executable(fflog_e2e_test tests/fflog_e2e_test.c src/fflog.c)
 target_compile_options(fflog_e2e_test PRIVATE -Wall -Wextra)
 target_link_libraries(fflog_e2e_test pthread)
+
+# Every *_test target is a ctest case, so `ctest --test-dir build` runs
+# the set locally, from the repository root as build.yml runs each one.
+# CI keeps one step per test, because the forgefirm coverage lint reads
+# those steps to see which host tests CI runs: a *_test target with no
+# `run: ./build/<name>` step in build.yml stops the configure here.
+# fflog_e2e_test is the emitter half of tests/fflog_e2e.sh, which is the
+# test and the step.
+enable_testing()
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/build.yml CI_STEPS)
+get_directory_property(ALL_TARGETS BUILDSYSTEM_TARGETS)
+foreach(t ${ALL_TARGETS})
+  if(NOT t MATCHES "_test$")
+    continue()
+  endif()
+  if(t STREQUAL "fflog_e2e_test")
+    set(step "[^\n]*tests/fflog_e2e\\.sh")
+  else()
+    add_test(NAME ${t} COMMAND ${t} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set(step "\\./build/${t}([ \t\r\n]|$)")
+  endif()
+  if(NOT CI_STEPS MATCHES "run: ${step}")
+    message(FATAL_ERROR "${t} has no step that runs it in .github/workflows/build.yml")
+  endif()
+endforeach()
