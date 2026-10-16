@@ -1122,7 +1122,7 @@ function revokeToken(id, name) {
     })
     .catch(function () {});
 }
-/* The camera key: the URL another program (LightBurn, a viewer) uses to
+/* The camera key: the URL another program (a Grbl sender, a viewer) uses to
  * read the camera without a login, shown on request and rotated here. */
 function renderCamUrl(j) {
   var g = '';
@@ -1132,7 +1132,7 @@ function renderCamUrl(j) {
     "<div class='btns'><button class='btn btn-sm btn-outline-danger' data-nolock='1' onclick='rotateCamKey()'>New key</button>" +
     "<span class='msg' id='msg-camkey'></span></div>" +
     "<p class='hint'>The key lets a program read the cameras and the status without a login. " +
-    'Paste the stream URL into LightBurn. A new key stops every URL that carried the old one.</p>';
+    'Paste the stream URL into your Grbl sender or a stream viewer. A new key stops every URL that carried the old one.</p>';
   $('camurl').innerHTML = g;
 }
 function toggleCamUrl() {
