@@ -662,7 +662,9 @@ while rec['start'] == 200:
     time.sleep(0.2)
 json.dump(rec, open(out, 'w'))
 EOF
-check() { c=$1; shift; python3 "$T/drive.py" "$URL" "$TOKEN" "$c" "$T/run.json" "$@" 2>> "$T/out" || bad "the driver failed on $c"; }
+# the previous record goes first: a driver that fails leaves no record,
+# and every expectation of its check then fails on nothing
+check() { c=$1; shift; rm -f "$T/run.json" "$T"/run.json.*; python3 "$T/drive.py" "$URL" "$TOKEN" "$c" "$T/run.json" "$@" 2>> "$T/out" || bad "the driver failed on $c"; }
 # run <python expression over d, the driver's record>
 run() { jget "$T/run.json" "$1"; }
 # the record's version of a step, or nothing
