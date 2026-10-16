@@ -202,7 +202,10 @@ struct events_client {
 };
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t news = PTHREAD_COND_INITIALIZER;     /* an event, or the stop */
+/* The keep-alive wait is a timeout, and timeouts never ride the wall
+ * clock on this RTC-less board: events_init puts news on CLOCK_MONOTONIC
+ * before the first stream can wait on it. */
+static pthread_cond_t news;                                 /* an event, or the stop */
 static pthread_cond_t wanted = PTHREAD_COND_INITIALIZER;   /* the first listener */
 static char ring[RING][EVENT_TEXT];
 static unsigned long head = 1;                              /* the next sequence number */
@@ -304,7 +307,16 @@ static void *sampler_thread(void *arg)
 
 void events_init(void)
 {
+    static int news_ready;
     pthread_mutex_lock(&mu);
+    if (!news_ready) {
+        pthread_condattr_t ca;
+        pthread_condattr_init(&ca);
+        pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+        pthread_cond_init(&news, &ca);
+        pthread_condattr_destroy(&ca);
+        news_ready = 1;
+    }
     stopping = 0;
     if (!started && pthread_create(&sampler, NULL, sampler_thread, NULL) == 0)
         started = 1;
@@ -403,7 +415,7 @@ long events_next(events_client_t *c, char *buf, size_t max)
         goto out;
     }
     struct timespec until;
-    clock_gettime(CLOCK_REALTIME, &until);
+    clock_gettime(CLOCK_MONOTONIC, &until);
     until.tv_sec += KEEPALIVE_S;
     while (!stopping && slot_gen[c->slot] == c->gen && c->next == head) {
         if (pthread_cond_timedwait(&news, &mu, &until) != 0)
