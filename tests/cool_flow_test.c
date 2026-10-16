@@ -39,8 +39,9 @@
  *   N. the fail tiers:      FIRE and CRASH end the controller through the
  *                           supervisor's hook, once, after the kernel writes
  *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
- *   Q. the verdict file:    the contract's keys and types; the stamp to
- *                           the millisecond, never ahead of the clock
+ *   Q. the verdict file:    the contract's keys and types; the stamp on
+ *                           CLOCK_MONOTONIC to the millisecond, never
+ *                           ahead of the clock
  *
  * The fan writes: every duty the engine writes is read back, tried again
  * when the device did not take it, and held to the command once a tick.
@@ -159,9 +160,15 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
 
 static double fake_now = 1000.0;
 
+/* The engine's clock is CLOCK_MONOTONIC. Any other clock reads far from
+ * it, so a stamp or a timeout taken from another clock shows. */
 int fake_clock_gettime(clockid_t id, struct timespec *ts)
 {
-    (void)id;
+    if (id != CLOCK_MONOTONIC) {
+        ts->tv_sec = 2000000000;
+        ts->tv_nsec = 0;
+        return 0;
+    }
     ts->tv_sec = (time_t)fake_now;
     ts->tv_nsec = (long)((fake_now - (double)(time_t)fake_now) * 1e9);
     return 0;
@@ -1486,7 +1493,9 @@ int main(void)
 
     printf("Q. the verdict file: the contract's keys and types, the stamp to the millisecond and never ahead of the clock\n");
     open_session(&L);
-    fake_now = floor(fake_now) + 1.0006;    /* a fraction the nearest millisecond rounds up */
+    /* A fraction the nearest millisecond rounds up, and any coarser grid
+     * rounds down by more than 9 ms. */
+    fake_now = floor(fake_now) + 1.9996;
     run_tick(&L);
     json_t *doc = json_load_file(VERDICT_FILE, 0, NULL);
     CHECK(doc && json_is_object(doc), "the verdict file parses as an object");
