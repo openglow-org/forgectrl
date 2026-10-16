@@ -33,17 +33,20 @@ truth for this project. This README is an index card.
 ## Build and test
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror \
+  -DFORGEEXT_SRC=<forgeext checkout>/src
 cmake --build build
 ```
 
-Then run the host tests as `.github/workflows/build.yml` runs them:
+`FORGEEXT_SRC` names a `forgeext` checkout's `src` directory, from which
+`holds_wire_test` is built; without it the configure leaves that test
+out. Then run the host tests as `.github/workflows/build.yml` runs them:
 `ctest --test-dir build` for every test binary (`fflog_e2e_test` runs
 inside `tests/fflog_e2e.sh`), the bundled scripts' parse, the first-run
-page walk, the logging path, the `host_*.sh` scripts on the image's
-ulfius, and the route table. [AGENTS.md](AGENTS.md) lists each with its
-invocation, and the Test page of the site says what each proves. A
-warning is a failure.
+page walk, the logging path, `tests/host_start.sh`, the other `host_*.sh`
+scripts on the image's ulfius, and the route table.
+[AGENTS.md](AGENTS.md) lists each with its invocation, and the Test page
+of the site says what each proves. A warning is a failure.
 
 It builds with CMake and links against ulfius, libjpeg and zlib. The target
 needs Linux with imx-media, the coda VPU driver, and v4l-utils (`media-ctl`

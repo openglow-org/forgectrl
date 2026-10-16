@@ -18,28 +18,33 @@ engine has its own, at `.../cooling-engine/`.
 ### Build and test
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror \
+  -DFORGEEXT_SRC=<forgeext checkout>/src
 cmake --build build
 ```
 
-Then run every host test, which is what `.github/workflows/build.yml`
-runs, in its order. A warning is a failure.
+`FORGEEXT_SRC` names the `src` directory of a `forgeext` checkout, as the
+Configure step of `.github/workflows/build.yml` does: `holds_wire_test` is
+built from its `holdkeep.c`. A configure without it leaves that test out,
+and says so.
+
+Then run every host test that `.github/workflows/build.yml` runs. A
+warning is a failure.
 
 - `ctest --test-dir build` runs every test binary (`fflog_e2e_test` runs
   inside `tests/fflog_e2e.sh`). CI keeps one step per binary, because the
-  coverage lint in `forgefirm` reads those steps; the configure stops when
-  a `*_test` target has no `run: ./build/<name>` step there.
-- `python3 -B tools/check_ui_js.py build/ui`: every bundled script parses.
-- `python3 -B tests/wizard_walk.py build/ui`: the first-run page as
-  bundled, walked in headless Chrome (found at a usual path such as
-  `/usr/bin/google-chrome`) against the dev server's mock.
-  `tests/host_setup.sh` runs the walk again against the daemon it starts:
-  a renamed or re-typed `GET /wiz` field fails there.
-- `sudo sh tests/fflog_e2e.sh build <rsyslog.conf>`: the whole logging
-  path against a private rsyslogd, with the image's `rsyslog.conf` from a
-  `forgefirm` checkout (`meta-forgefirm/recipes-extended/rsyslog/rsyslog/`).
-- `sh tests/host_start.sh build`: the built daemon on a host, one read
-  answered, no controller started.
+  coverage lint in `forgefirm` reads those steps. Declare a new `*_test`
+  target above the ctest block at the end of `CMakeLists.txt`, and give it
+  a step in build.yml whose own `run:` line is `./build/<name>`, with no
+  `if:` or `continue-on-error:` on the step or its job. The configure
+  stops otherwise.
+- `python3 -B tools/check_ui_js.py build/ui`, with node on the PATH.
+- `python3 -B tests/wizard_walk.py build/ui`, with Google Chrome at a
+  usual path such as `/usr/bin/google-chrome`.
+- `sudo sh tests/fflog_e2e.sh build <rsyslog.conf>`, with rsyslogd and the
+  image's `rsyslog.conf` from a `forgefirm` checkout
+  (`meta-forgefirm/recipes-extended/rsyslog/rsyslog/`).
+- `sh tests/host_start.sh build`, unprivileged.
 - `sh tests/ulfius_image.sh <recipe dir> build/ulfius-image`: the image's
   ulfius, built from `meta-forgefirm/recipes-extended/ulfius` in that
   checkout. The other host scripts run on it, each as
@@ -47,13 +52,10 @@ runs, in its order. A warning is a failure.
   `host_ext.sh`, `host_setup.sh`, `host_lease.sh`, `host_guard.sh` and
   `host_update.sh` unprivileged, and `host_lan.sh` under `sudo` (it makes
   a network namespace and runs the daemon as the user who invoked sudo).
-- `python3 -B -m unittest -v tests/test_routes.py`: `src/main.c`'s route
-  table. Every route the panel calls is registered, every row carries its
-  capability column, and every page carries the page policy. It also holds
-  the daemon's list of environment variables, which its start notice
-  names, to the sources.
+  `host_setup.sh` also needs the Chrome above.
+- `python3 -B -m unittest -v tests/test_routes.py`.
 
-What each proves is on the Test page of the site:
+What each test proves is on the Test page of the site:
 <https://docs.forgefirm.org/developers/testing/>. The panel's dev-server
 mock (`tools/devserver.py`) is kept by hand: a new settings key, a new
 gate row or a new route needs its mock entry in the same change, and no
@@ -119,8 +121,8 @@ ForgeFIRM is open firmware for stock Glowforge lasers (Basic, Plus, Pro). It
 runs on the factory NXP i.MX6 control board with no hardware modification. It
 replaces the cloud-dependent factory userspace with an open Linux image that
 controls the machine locally. In GRBL mode the machine is a standard grblHAL
-controller for a Grbl sender on TCP port 23. Cloud mode runs the factory
-experience through the Glowforge web service, and it is a deliberate,
+controller for LightBurn and other senders on TCP port 23. Cloud mode runs the
+factory experience through the Glowforge web service, and it is a deliberate,
 maintained feature. The stack is hardware validated: GRBL mode cuts real jobs,
 and cloud mode runs end to end.
 
