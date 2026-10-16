@@ -74,10 +74,8 @@
  *   had; the band is the window the characterization found useful.
  * cool_flow_rise: the downstream rise that means stagnant coolant. Set
  *   from flow calibrate, which the setup requires: the bands differ from
- *   loop to loop (the bench's no-flow rise is about 16 C; an early Pro's
- *   flowing rise was 16 C and its no-flow rise 20.5 C at the same heater
- *   duty), so no band of one machine's judges another's value and the
- *   recommended band is the whole range. Not a gate of its own (flow
+ *   loop to loop, so no band of one machine's judges another's value and
+ *   the recommended band is the whole range. Not a gate of its own (flow
  *   is), so no off end.
  * cool_tach_*_min_rpm: the airflow floors, in rpm at run duty, 55
  *   percent of the steady speed the bench machine's fans reach at the

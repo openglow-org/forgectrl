@@ -57,9 +57,9 @@ static const setup_step_t image_steps[] = {
     { "preferences",       1, NULL, 1 },
     { "machine",           1, NULL, 1 },
     { "cloud",             1, NULL, 1 },
-    /* The coolant flow bands differ from loop to loop: the default
-     * threshold sits under the flowing rise of some (an early Pro rose
-     * 16 C with flow), so the calibration holds the gate. */
+    /* The coolant flow bands differ from loop to loop and the default
+     * threshold sits under the flowing rise of some, so the calibration
+     * holds the gate. */
     { "cooling.flow",      1, NULL, 1 },
     /* The dark validation: the machine checked with the laser locked. */
     { "switches",          1, NULL, 0 },
