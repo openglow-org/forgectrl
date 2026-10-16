@@ -26,17 +26,18 @@ The driver is a page of the walk's own that frames "/" from the same
 origin and works the frame's document as an operator would, so nothing
 is added to the pages under test and the walk follows the frame from
 the wizard to the panel. The steps are in STEPS below: GET /wiz carries
-every field the page reads and the page's required steps are the
-setup's; the welcome; each document read to its end and accepted (the
-typed phrase where it asks for one); the press step, which the button
-takes; the account; preferences; the machine; cloud mode left off; the
-intake fans shown counted and passed by; the coolant flow calibration
-run to its result (against the mock, through a prompt whose options are
-text, one shaped like code, one with quotes, each shown as written and
-the code-shaped one answered as written); the choice, where Start using
-the machine lands on the panel with the setup complete; one setting
-saved through the panel's save bar; and the login page, which refuses a
-wrong password and signs the account in.
+the first-run fields the page reads, each with its type, and the page's
+required steps are the setup's; the welcome; each document read to its
+end and accepted (the typed phrase where it asks for one); the press
+step, which the button takes; the account; preferences; the machine;
+cloud mode left off; the intake fans shown counted and passed by; the
+coolant flow calibration run to its result (against the mock, through a
+prompt whose options are text, one shaped like code, one with quotes,
+each shown as written and the code-shaped one answered as written); the
+choice, where Start using the machine lands on the panel with the setup
+complete; one setting saved through the panel's save bar; and the login
+page, which refuses a wrong password and signs the account in, the
+session read back from GET /wiz.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -98,15 +99,22 @@ var NAME = 'walker', PW = 'correct horse';
  * and whether the panel is signed out before the login (the daemon serves
  * the login page to no session). */
 var PLAN = __PLAN__, FLOW = PLAN.check.prompt;
-/* The fields the page reads from GET /wiz, each with its type. */
+/* The fields the page reads from GET /wiz on a first run, each with its
+ * type (document 0 is the typed one). The page reads two more that a
+ * first run's GET /wiz does not carry: users.extension_packages, sent
+ * only while an owner reset is pending, and machine.model_label, which
+ * neither backend sends. */
 var READS = [['documents', 'array'], ['documents.0.id', 'string'], ['documents.0.title', 'string'],
-  ['documents.0.consent', 'string'], ['documents.0.hash', 'string'], ['documents.0.accepted', 'boolean'],
+  ['documents.0.consent', 'string'], ['documents.0.phrase', 'string'], ['documents.0.hash', 'string'],
+  ['documents.0.accepted', 'boolean'],
   ['advisories_complete', 'boolean'], ['acceptance_done', 'boolean'], ['completed', 'boolean'],
   ['fans_counted', 'boolean'], ['first_run', 'boolean'], ['gate', 'string'], ['why', 'string'],
   ['versions', 'object'], ['missing', 'array'], ['recommended', 'array'], ['extensions', 'array'],
   ['wizards', 'array'], ['wizards.0.id', 'string'], ['wizards.0.title', 'string'], ['wizards.0.done', 'number'],
   ['users.exists', 'boolean'], ['users.reset_pending', 'boolean'], ['users.name', 'string'],
-  ['sheet_id', 'string'], ['clock.utc', 'string'], ['clock.set', 'boolean'], ['machine.firmware', 'string']];
+  ['sheet_id', 'string'], ['clock.utc', 'string'], ['clock.set', 'boolean'], ['machine.firmware', 'string'],
+  ['machine.build', 'string'], ['machine.camera', 'string'], ['machine.head.present', 'boolean'],
+  ['machine.head.hw_id', 'string'], ['machine.head.version', 'string']];
 function d() { return F.contentDocument; }
 function w() { return F.contentWindow; }
 function q(s) { var x = d(); return x ? x.querySelector(s) : null; }
@@ -139,7 +147,7 @@ function api(p) { return fetch(p).then(function (r) { return r.json(); }); }
 function at(o, dotted) { return dotted.split('.').reduce(function (x, k) { return x == null ? x : x[k]; }, o); }
 
 var STEPS = [
-  ['GET /wiz carries every field the page reads, and the page\'s required steps are the setup\'s', function () {
+  ['GET /wiz carries the first-run fields the page reads, each with its type, and the page\'s required steps are the setup\'s', function () {
     return until('the page', function () { return w().REQUIRED && w().W; })
       .then(function () { return api('/wiz'); })
       .then(function (s) {
@@ -267,7 +275,12 @@ var STEPS = [
       .then(function () { set('#name', NAME, 'input'); set('#password', 'not the password', 'input'); click('#go'); })
       .then(function () { return until('the refusal', function () { return q('#msg').classList.contains('bad') && !q('#go').disabled; }); })
       .then(function () { set('#password', PW, 'input'); click('#go'); })
-      .then(function () { return until('the panel again', function () { return path() === '/' && q('#savebar'); }); }); }]
+      .then(function () { return until('the panel again', function () { return path() === '/' && q('#savebar'); }); })
+      /* The daemon serves the panel to a loopback peer with no session,
+       * and the walk's relay is one: the session is read, not inferred. */
+      .then(function () { return api('/wiz'); })
+      .then(function (s) {
+        if (s.session !== true) throw new Error('the panel again, but GET /wiz reads no session: ' + JSON.stringify(s.session)); }); }]
 ];
 
 function run() {
