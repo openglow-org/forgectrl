@@ -21,13 +21,14 @@
 #     none of them for an idle machine or a closed gate
 #   the holder and the settings file are as they were
 #
-# The check is then aborted (and a diagnostic and the recorder stopped,
-# in case a refusal failed): the lease is free, the check is not running,
-# the same settings write is 200, and the event stream said
-# lease.changed for the hold and then for its end. Nothing posts
-# confirm=1, a reboot, /system/ssh, or an update. The daemon runs on the
-# image's ulfius (tests/ulfius_image.sh). Runs unprivileged; build.yml
-# runs it:
+# Once the event stream has named the hold (the sampler publishes a
+# lease change only from its next full snapshot, five a second), the
+# check is aborted (and a diagnostic and the recorder stopped, in case a
+# refusal failed): the lease is free, the check is not running, the same
+# settings write is 200, and the event stream said lease.changed for the
+# hold and then for its end. Nothing posts confirm=1, a reboot,
+# /system/ssh, or an update. The daemon runs on the image's ulfius
+# (tests/ulfius_image.sh). Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_lease.sh <build-dir> <ulfius-lib-dir>
 
@@ -222,6 +223,12 @@ expect wizard:switches "$(holder)" "the holder is unchanged"
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is unchanged" || bad "a refused write changed the settings file"
 
 echo "== the abort frees it"
+# The abort follows the snapshot that names the hold, because the sampler
+# publishes a lease change only from its next full snapshot (five a
+# second), and a hold that ends inside one interval leaves the stream
+# with no lease.changed at all.
+until_ok 25 grep -q '"owner":"wizard:switches"' "$T/events" && ok "the stream named the hold before the abort" \
+    || bad "the stream did not name the hold before the abort"
 expect 200 "$(post /wiz/switches/abort "$TOKEN")" "POST /wiz/switches/abort is 200"
 post /diag/abort "$TOKEN" > /dev/null
 post /curve/stop "$TOKEN" > /dev/null
