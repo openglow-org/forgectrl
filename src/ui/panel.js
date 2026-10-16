@@ -671,9 +671,9 @@ function renderMotion() {
   }
   if (typeof M.faults !== 'undefined' && M.faults > 0)
     g += txt('Stepper faults', 'mask ' + M.faults, 'b-bad');
-  if (M.lid_ir) g += kv('Lid IR', "<span class='mono'>" + M.lid_ir.join(' / ') + '</span>');
+  if (M.lid_ir) g += kv('Lid IR', "<span class='mono'>" + esc(M.lid_ir.join(' / ')) + '</span>');
   if (typeof M.hv_current_raw !== 'undefined')
-    g += kv('HV current', "<span class='mono'>" + M.hv_current_raw + ' raw</span>');
+    g += kv('HV current', "<span class='mono'>" + esc(M.hv_current_raw) + ' raw</span>');
   $('motion').innerHTML = g;
   renderPort();
 }
