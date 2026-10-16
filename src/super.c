@@ -82,7 +82,8 @@
  * at a directory of plain files. At run time GF_SYSFS_ROOT and
  * GF_PULSE_DEV override them, as FORGECTRL_GRBL_BIN and
  * FORGECTRL_CLOUD_BIN override the two controllers; unset, each is the
- * path below. */
+ * path below. GF_PULSE_DEV must be an absolute path, or the broker
+ * refuses it. */
 #ifndef GF_SYSFS
 #define GF_SYSFS "/sys/glowforge/"
 #endif
@@ -113,7 +114,18 @@ static const char *env_or(const char *name, const char *def)
 
 /* GF_SYSFS_ROOT ends with '/', as status.c reads it. */
 static const char *sysfs_root(void) { return env_or("GF_SYSFS_ROOT", GF_SYSFS); }
-static const char *pulse_dev(void)  { return env_or("GF_PULSE_DEV", PULSE_DEV); }
+
+/* The pulse device: GF_PULSE_DEV when it is set and an absolute path;
+ * NULL when it is set and is not, which the broker refuses (a relative
+ * path would be read against whatever directory the daemon was started
+ * in); else PULSE_DEV. */
+static const char *pulse_dev(void)
+{
+    const char *v = getenv("GF_PULSE_DEV");
+    if (v && *v)
+        return v[0] == '/' ? v : NULL;
+    return PULSE_DEV;
+}
 
 static const char *ctl_bin(ctl_t ctl)
 {
@@ -257,6 +269,13 @@ static void broker_open_locked(void)
     if (broker_fd >= 0)
         return;
     const char *dev = pulse_dev();
+    if (!dev) {
+        if (!broker_warned)
+            fflog(LOG_CRIT, "super: GF_PULSE_DEV is not an absolute path - no "
+                            "controller until it is");
+        broker_warned = 1;
+        return;
+    }
     /* A just-stopped legacy holder's close can lag its exit. O_CLOEXEC:
      * only the controller spawn clears the flag before exec, so helper
      * children (curl, fwup, media-ctl, pkill, ...) can never pin the
@@ -561,9 +580,10 @@ static char **build_child_env(ctl_t ctl, int pulse_fd)
             goto fail;
         k++;
     }
-    if (ctl == Ctl_Grbl) {
+    const char *dev = pulse_dev();
+    if (ctl == Ctl_Grbl && dev) {
         char sink[160];
-        snprintf(sink, sizeof(sink), "GFSINK=%s", pulse_dev());
+        snprintf(sink, sizeof(sink), "GFSINK=%s", dev);
         if (!(env[k] = strdup(sink)))
             goto fail;
         k++;

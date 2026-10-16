@@ -31,7 +31,8 @@
  *   H. a broker fd that cannot be locked refuses the spawn, and an
  *      open that fails keeps trying instead of a self-opening controller;
  *      GF_PULSE_DEV moves the device, and the refusal names the path
- *      it tried
+ *      it tried; one that is not an absolute path is refused by its
+ *      form, the device it would reach left unopened
  *   I. the engine's fail tier stops the controller and starts it again
  *      without a backoff
  *   J. a motor release is nobody's to end but the operator's: the probe
@@ -640,10 +641,17 @@ int main(void)
     CHECK(run_until_spawned(4.0), "the controller comes up once the device opens");
     /* The default device is there now: only the override can refuse. */
     reset_state();
-    setenv("GF_PULSE_DEV", "super-test/dev/elsewhere", 1);
+    char cwd[512], elsewhere[640];
+    snprintf(elsewhere, sizeof elsewhere, "%s/super-test/dev/elsewhere",
+             getcwd(cwd, sizeof cwd) ? cwd : ".");
+    setenv("GF_PULSE_DEV", elsewhere, 1);
     CHECK(!run_until_spawned(4.0), "a GF_PULSE_DEV that is not there starts no controller");
-    CHECK(strstr(logs, "super-test/dev/elsewhere") != NULL && crit_logs == 1,
-          "the refusal names the path it tried");
+    CHECK(strstr(logs, elsewhere) != NULL && crit_logs == 1, "the refusal names the path it tried");
+    reset_state();
+    setenv("GF_PULSE_DEV", "super-test/dev/glowforge", 1);  /* the device that is there, by a relative path */
+    CHECK(!run_until_spawned(4.0) && broker_fd < 0,
+          "a GF_PULSE_DEV that is not an absolute path starts no controller");
+    CHECK(strstr(logs, "not an absolute path") != NULL && crit_logs == 1, "the refusal names the rule, once");
     unsetenv("GF_PULSE_DEV");
 
     printf("I. the engine's fail tier stops the controller and starts it again\n");
