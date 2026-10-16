@@ -512,24 +512,171 @@ target_link_libraries(fflog_e2e_test pthread)
 # Every *_test target is a ctest case, so `ctest --test-dir build` runs
 # the set locally, from the repository root as build.yml runs each one.
 # CI keeps one step per test, because the forgefirm coverage lint reads
-# those steps to see which host tests CI runs: a *_test target with no
-# `run: ./build/<name>` step in build.yml stops the configure here.
-# fflog_e2e_test is the emitter half of tests/fflog_e2e.sh, which is the
-# test and the step.
+# those steps to see which host tests CI runs, and the configure reads
+# them as the lint counts a step: a comment is not read, and a step under
+# an if: other than true, or with a continue-on-error: other than false,
+# on the step or on its job, runs nothing. A *_test target stops the
+# configure here unless a step that counts has ./build/<name> as its own
+# run: line. fflog_e2e_test is the emitter half of tests/fflog_e2e.sh,
+# which is the test and the step. The loop sees only the targets declared
+# above it, so this block stays last: an add_executable() after it stops
+# the configure.
 enable_testing()
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/build.yml CI_STEPS)
+
+# The run: lines of the steps in a workflow that run on every run and fail
+# it when they fail, read by indentation as forgefirm's
+# forgetest/manifest.py reads a workflow: a step is a list item whose first
+# key is a step key, its keys are the lines at that key's column, and a
+# job's own keys are the lines at the first column under the job's name.
+function(ci_counted_runs file out)
+  file(READ "${file}" text)
+  # What a CMake list reads as a separator or a bracket is replaced before
+  # the text is split into its lines; no run: line the loop matches has one.
+  string(REPLACE "\\" "/" text "${text}")
+  string(REPLACE "[" "(" text "${text}")
+  string(REPLACE "]" ")" text "${text}")
+  string(REPLACE ";" "," text "${text}")
+  string(REPLACE "\r" "" text "${text}")
+  string(REPLACE "\n" ";" lines "${text}")
+  set(in_jobs FALSE)
+  set(job -1)
+  set(job_at "")
+  set(key_at "")
+  set(dash "")
+  set(key_col 0)
+  set(run "")
+  set(cond FALSE)
+  set(step_job -1)
+  set(cond_jobs "")
+  set(step_runs "")
+  set(step_jobs "")
+  foreach(line IN LISTS lines)
+    if(line MATCHES "^[ \t]*#")
+      continue()
+    endif()
+    string(REGEX REPLACE "[ \t]+#.*$" "" line "${line}")
+    if(NOT line MATCHES "[^ \t]")
+      continue()
+    endif()
+    string(REGEX MATCH "^ +" lead "${line}")
+    string(LENGTH "${lead}" ind)
+    set(in_step FALSE)
+    if(NOT dash STREQUAL "" AND ind GREATER dash)
+      set(in_step TRUE)
+    else()
+      # The line ends the step before it.
+      if(NOT dash STREQUAL "" AND NOT cond AND NOT run STREQUAL "")
+        list(APPEND step_runs "${run}")
+        list(APPEND step_jobs ${step_job})
+      endif()
+      set(dash "")
+      if(line MATCHES "^( *)-( +)(name|uses|run|id|if|with|env|working-directory|shell|continue-on-error|timeout-minutes)[ \t]*:")
+        # A step begins. Its dash reads as a space, so its first key is at
+        # the column of the others.
+        string(LENGTH "${CMAKE_MATCH_1}" dash)
+        string(LENGTH "${CMAKE_MATCH_2}" gap)
+        math(EXPR key_col "${dash} + 1 + ${gap}")
+        string(REGEX REPLACE "^( *)-" "\\1 " line "${line}")
+        set(ind ${key_col})
+        set(run "")
+        set(cond FALSE)
+        set(step_job ${job})
+        set(in_step TRUE)
+      endif()
+    endif()
+    if(NOT line MATCHES "^ *[\"']?([A-Za-z0-9_-]+)[\"']?[ \t]*:(.*)$")
+      continue()
+    endif()
+    set(key "${CMAKE_MATCH_1}")
+    string(STRIP "${CMAKE_MATCH_2}" val)
+    if(val MATCHES "^\"(.*)\"$")
+      set(val "${CMAKE_MATCH_1}")
+    elseif(val MATCHES "^'(.*)'$")
+      set(val "${CMAKE_MATCH_1}")
+    endif()
+    string(TOLOWER "${val}" low)
+    set(condition FALSE)
+    if((key STREQUAL "if" AND NOT low STREQUAL "true") OR
+       (key STREQUAL "continue-on-error" AND NOT low STREQUAL "false"))
+      set(condition TRUE)
+    endif()
+    if(in_step)
+      if(ind EQUAL key_col)
+        if(key STREQUAL "run")
+          set(run "${val}")
+        elseif(condition)
+          set(cond TRUE)
+        endif()
+      endif()
+    elseif(ind EQUAL 0)
+      set(in_jobs FALSE)
+      if(key STREQUAL "jobs")
+        set(in_jobs TRUE)
+      endif()
+      set(job_at "")
+      set(key_at "")
+    elseif(in_jobs AND (job_at STREQUAL "" OR ind EQUAL job_at))
+      # A job begins.
+      set(job_at ${ind})
+      set(key_at "")
+      math(EXPR job "${job} + 1")
+    elseif(in_jobs AND ind GREATER job_at AND (key_at STREQUAL "" OR ind EQUAL key_at))
+      # A key of the job itself, before its steps or after them.
+      set(key_at ${ind})
+      if(condition)
+        list(APPEND cond_jobs ${job})
+      endif()
+    endif()
+  endforeach()
+  if(NOT dash STREQUAL "" AND NOT cond AND NOT run STREQUAL "")
+    list(APPEND step_runs "${run}")
+    list(APPEND step_jobs ${step_job})
+  endif()
+  set(runs "")
+  list(LENGTH step_runs n)
+  if(n GREATER 0)
+    math(EXPR last "${n} - 1")
+    foreach(i RANGE ${last})
+      list(GET step_jobs ${i} j)
+      list(FIND cond_jobs "${j}" at)
+      if(at EQUAL -1)
+        list(GET step_runs ${i} r)
+        list(APPEND runs "${r}")
+      endif()
+    endforeach()
+  endif()
+  set(${out} "${runs}" PARENT_SCOPE)
+endfunction()
+
+ci_counted_runs(${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/build.yml CI_RUNS)
 get_directory_property(ALL_TARGETS BUILDSYSTEM_TARGETS)
 foreach(t ${ALL_TARGETS})
   if(NOT t MATCHES "_test$")
     continue()
   endif()
   if(t STREQUAL "fflog_e2e_test")
-    set(step "[^\n]*tests/fflog_e2e\\.sh")
+    set(want "tests/fflog_e2e.sh")
+    set(step "(^|[ \t])tests/fflog_e2e\\.sh([ \t]|$)")
   else()
     add_test(NAME ${t} COMMAND ${t} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    set(step "\\./build/${t}([ \t\r\n]|$)")
+    set(want "./build/${t}")
+    set(step "^\\./build/${t}([ \t]|$)")
   endif()
-  if(NOT CI_STEPS MATCHES "run: ${step}")
-    message(FATAL_ERROR "${t} has no step that runs it in .github/workflows/build.yml")
+  set(ran FALSE)
+  foreach(r IN LISTS CI_RUNS)
+    if(r MATCHES "${step}")
+      set(ran TRUE)
+    endif()
+  endforeach()
+  if(NOT ran)
+    message(FATAL_ERROR "${t} has no step that runs it in .github/workflows/build.yml: "
+                        "none runs ${want} on its own run: line with no if: or continue-on-error: "
+                        "on the step or its job")
   endif()
 endforeach()
+
+# A target declared below this point would be built and never checked.
+function(add_executable name)
+  message(FATAL_ERROR "add_executable(${name}) comes after the ctest block, the last in CMakeLists.txt: "
+                      "declare it above that block")
+endfunction()
