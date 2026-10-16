@@ -44,7 +44,8 @@
 #   the extension host's credential (FORGECTRL_EXT_HOST_TOKEN): a 0600
 #     file; a package's jog through it is taken as ext:<id>, and the
 #     same credential is refused a camera
-#   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT)
+#   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT),
+#     and one outside its form runs nothing
 #   the login over HTTPS: the lock, the cookie, the logout
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
@@ -110,7 +111,7 @@ start_daemon() {
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
-        FORGECTRL_SSHD_INIT="$T/bin/sshd-init" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
+        FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
         FORGECTRL_LICENSES="$T/licenses.tar.gz" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
@@ -571,6 +572,19 @@ until_ok 50 eval '! alive $CP' || bad "the controller's stand-in did not exit"
 expect 403 "$(report run "$SEC")" "the exited controller's secret is refused"
 until_ok 50 eval '[ "$(grbl_block)" = none ]' && ok "/status no longer carries the grbl block" \
     || bad "the grbl block outlived its controller: $(grbl_block)"
+
+echo "== an sshd init override outside its form runs nothing"
+stop_daemon
+cp "$T/bin/sshd-init" "$T/bin/sshd init"     # a runnable file, at a path with a space
+n=$(wc -l < "$T/sshd.log")
+SSHD_INIT="$T/bin/sshd init" start_daemon
+expect 200 "$(post /system/ssh "$TOKEN" -d enable=1)" "enable=1 is 200 with the init refused"
+[ -e "$FLAG" ] && ok "and the flag is written as before" || bad "no flag at $FLAG"
+expect "$n" "$(wc -l < "$T/sshd.log")" "and nothing was run"
+grep -q "FORGECTRL_SSHD_INIT is not an absolute path" "$T/out" && ok "the refusal names the variable, not the value" || bad "no refusal in the log"
+! grep -q "sshd init" "$T/out" && ok "the value is not in the log" || bad "the log carries the value"
+expect 200 "$(post /system/ssh "$TOKEN" -d enable=0)" "enable=0 is 200"
+expect "$n" "$(wc -l < "$T/sshd.log")" "and the stop ran nothing either"
 
 stop_daemon
 [ ! -e "$T/cloud.started" ] || bad "the cloud client's stand-in started"

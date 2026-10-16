@@ -85,6 +85,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <microhttpd.h>
@@ -3008,13 +3009,53 @@ static int cb_licenses_page(const struct _u_request *req,
  * daemon starts or stops sshd through it. */
 #define SSH_FLAG_NAME "ssh-enabled"
 
-/* sshd's init script start or stop, or a test's stand-in for it. */
+/* The override's form: an absolute path of letters, digits and / . _ -
+ * (the stand-in a host test names). Anything else runs nothing. */
+static int sshd_init_path_ok(const char *p)
+{
+    if (!p || p[0] != '/')
+        return 0;
+    for (; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (!(isalnum(c) || c == '/' || c == '.' || c == '_' || c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* sshd's init script start or stop, or a test's stand-in for it: run as
+ * a program with the action as its one argument, never through a shell,
+ * its output to /dev/null. -1 when it is not run or does not exit 0. */
 static int ssh_init(const char *action)
 {
     const char *v = getenv("FORGECTRL_SSHD_INIT");
-    char cmd[320];
-    snprintf(cmd, sizeof(cmd), "'%s' %s >/dev/null 2>&1", v && *v ? v : "/etc/init.d/sshd", action);
-    return system(cmd);
+    const char *path = v && *v ? v : "/etc/init.d/sshd";
+    if (!sshd_init_path_ok(path)) {
+        fflog(LOG_ERR, "ssh: FORGECTRL_SSHD_INIT is not an absolute path of letters, "
+                       "digits, / . _ and -: sshd's init is not run");
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, 0);
+            dup2(null, 1);
+            dup2(null, 2);
+        }
+        /* Nothing of forgectrl's goes along (extpkg.c does the same). */
+        if (close_range(3, ~0U, 0) != 0)
+            for (int fd = 3; fd < 1024; fd++)
+                close(fd);
+        execl(path, path, action, (char *)NULL);
+        _exit(127);
+    }
+    int st;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
 }
 
 static int ssh_running(void)
