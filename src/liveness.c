@@ -85,7 +85,8 @@ int liveness_enclosure_classify(unsigned sw, char *why, size_t wlen)
 /* The switch word from a file, for a host start: GF_SWITCH_WORD_FILE
  * names a file holding the word as a C integer (8, or 0x8), and
  * only when it is set is the device left unread. A file that cannot be
- * read, or holds anything else, is a failed read. */
+ * read, or holds anything else, is a failed read. The file is named by
+ * an absolute path; any other form is a failed read. */
 static int switch_word_file(const char *path, unsigned *sw)
 {
     char buf[32];
@@ -115,7 +116,7 @@ int liveness_enclosure(char *why, size_t wlen)
     int ok;
     const char *wf = getenv("GF_SWITCH_WORD_FILE");
     if (wf && *wf) {
-        ok = switch_word_file(wf, &word) == 0;
+        ok = wf[0] == '/' && switch_word_file(wf, &word) == 0;
     } else {
         uint8_t sw[2] = { 0 };
         int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
