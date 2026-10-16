@@ -27,9 +27,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libulfius-dev libjpeg-dev zlib1g-dev libjansson-dev libgnutls28-dev libcrypt-dev rsyslog
-          # wizard_walk's browser, at /usr/bin/google-chrome
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y -qq /tmp/chrome.deb
+          # wizard_walk's browser: the runner image's Google Chrome, at /usr/bin/google-chrome
+          google-chrome --version
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror -DFORGEEXT_SRC=forgeext-src/src
       - name: Build
