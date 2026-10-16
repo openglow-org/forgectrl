@@ -18,7 +18,9 @@
  * taken while the three are full and giving none of them up, and a
  * second host stream replacing the first. The button's own look: a
  * press that begins and ends between two of the 5 Hz gathers, with the
- * machine idle, reaches a stream as pressed and then released.
+ * machine idle, reaches a stream as pressed and then released. The
+ * keep-alive's clock: a quiet stream's keep-alive comes 5 s after its
+ * read began with the wall clock an hour behind.
  */
 #include "../src/events.h"
 
@@ -27,6 +29,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static int fails;
@@ -426,6 +429,89 @@ static void test_short_press(void)
     events_shutdown();
 }
 
+/* ---- the keep-alive's clock ---- */
+
+/* clock_gettime as events.c calls it (the target links with
+ * --wrap=clock_gettime): while wall_behind is set, CLOCK_REALTIME reads
+ * an hour behind, as after a backward step of the wall clock. Every
+ * other clock passes through. */
+int __real_clock_gettime(clockid_t clk, struct timespec *ts);
+static volatile int wall_behind;
+
+int __wrap_clock_gettime(clockid_t clk, struct timespec *ts)
+{
+    int rc = __real_clock_gettime(clk, ts);
+    if (rc == 0 && clk == CLOCK_REALTIME && wall_behind)
+        ts->tv_sec -= 3600;
+    return rc;
+}
+
+static double mono_now(void)
+{
+    struct timespec ts;
+    __real_clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+struct quiet_read {
+    events_client_t *c;
+    char buf[512];
+    long n;
+    double at;
+    volatile int done;
+};
+
+static void *quiet_reader(void *arg)
+{
+    struct quiet_read *r = arg;
+    r->n = events_next(r->c, r->buf, sizeof(r->buf));
+    r->at = mono_now();
+    r->done = 1;
+    return NULL;
+}
+
+/* A quiet stream's keep-alive comes 5 s after its read began, with the
+ * wall clock an hour behind: the wait and its deadline both ride
+ * CLOCK_MONOTONIC, and the wall clock moves neither. A deadline read
+ * from the wall clock is already past on a wall-clock condvar (the
+ * keep-alive at once) and decades away on a monotonic one (none at
+ * all: the shutdown ends that read). */
+static void test_keepalive_clock(void)
+{
+    char why[128];
+    events_gather = NULL;
+    events_switches = NULL;
+    events_init();
+    struct quiet_read r;
+    memset(&r, 0, sizeof(r));
+    r.c = events_open("10.0.0.8", why, sizeof(why));
+    CHECK(r.c != NULL, "the quiet stream was refused: %s", why);
+    if (!r.c) {
+        events_shutdown();
+        return;
+    }
+    events_next(r.c, r.buf, sizeof(r.buf));         /* its greeting */
+    wall_behind = 1;
+    double t0 = mono_now();
+    pthread_t th;
+    pthread_create(&th, NULL, quiet_reader, &r);
+    while (!r.done && mono_now() - t0 < 7.0)
+        usleep(50 * 1000);
+    int ended = r.done;
+    events_shutdown();                              /* a read still waiting ends here */
+    pthread_join(th, NULL);
+    wall_behind = 0;
+    double dt = ended ? r.at - t0 : 7.0;
+    char shown[64];
+    snprintf(shown, sizeof(shown), "%.60s", ended && r.n > 0 ? r.buf : "nothing");
+    shown[strcspn(shown, "\n")] = '\0';
+    printf("    the quiet stream's next read: '%s' after %.2f s\n", shown, dt);
+    CHECK(ended && r.n > 0 && !strcmp(r.buf, ": keep-alive\n\n") && dt >= 4.5 && dt <= 6.0,
+          "a quiet stream's keep-alive with the wall clock an hour behind: %s after %.2f s, want it after 5 s",
+          ended && r.n > 0 ? "read" : "nothing", dt);
+    events_close(r.c);
+}
+
 int main(void)
 {
     test_admit();
@@ -433,6 +519,7 @@ int main(void)
     test_button();
     test_stream();
     test_short_press();
+    test_keepalive_clock();
     printf(fails ? "events_test: %d FAILED\n" : "events_test: all passed\n", fails);
     return fails ? 1 : 0;
 }
