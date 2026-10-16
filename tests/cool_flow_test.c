@@ -1289,11 +1289,11 @@ int main(void)
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     logbuf[0] = '\0';
-    /* The tolerance side first: a report 4.5 s old is still fresh, so an
-     * engine stalled under that (its last report up to a second old when
-     * it stopped) comes back to an armed window it still acknowledges,
-     * and the controller's own stale-verdict hold (2 s) resumes with no
-     * press. */
+    /* The tolerance side first: a report 4.5 s old is still fresh. The
+     * controller reports every second, so an engine that stalls under
+     * 4 s comes back with its last report inside REPORT_TIMEOUT_S, to an
+     * armed window it still acknowledges, and the controller's own
+     * stale-verdict hold (2 s) resumes with no press. */
     fake_now += 4.5;
     loop_tick(&L);
     engine_tick();
