@@ -33,7 +33,9 @@
  *
  * Both run at the machine's configured heater duty and window so the
  * verdict applies to the check the cooling engine (cool.c) actually
- * runs; the engine suspends its own writes for the duration.
+ * runs; the engine suspends its own writes for the duration. The
+ * setup's calibration gives each rung's duty to its run alone
+ * (diag_start_duty) and writes it beside the threshold it finds.
  */
 #define _GNU_SOURCE
 #include "cool.h"
@@ -101,6 +103,7 @@ static char st_tool[24];
 static char st_phase[80];
 static time_t st_started;
 static double st_down, st_up;
+static double st_heater_pct;     /* this run's heater duty; 0 = cool_flow_heater_pct */
 
 #define LOG_LINES 48
 #define LOG_LEN   96
@@ -296,7 +299,10 @@ static void *runner(void *arg)
 {
     int calibrate = arg != NULL;
     double thr = cfg_num("cool_flow_rise", DEF_RISE_C);
-    double duty = cfg_num("cool_flow_heater_pct", DEF_HEATER_PCT);
+    pthread_mutex_lock(&mu);
+    double run_pct = st_heater_pct;
+    pthread_mutex_unlock(&mu);
+    double duty = run_pct > 0 ? run_pct : cfg_num("cool_flow_heater_pct", DEF_HEATER_PCT);
     int secs = (int)cfg_num("cool_flow_check_s", DEF_CHECK_S);
     if (secs <= 0)
         secs = (int)DEF_CHECK_S;    /* checks disabled: test the default */
@@ -669,6 +675,11 @@ int diag_running(void)
 
 int diag_start(const char *tool, char *why, size_t len)
 {
+    return diag_start_duty(tool, 0, why, len);
+}
+
+int diag_start_duty(const char *tool, double heater_pct, char *why, size_t len)
+{
     int calibrate;
     void *(*fn)(void *) = runner;
     if (!strcmp(tool, "flow-verify"))
@@ -679,6 +690,11 @@ int diag_start(const char *tool, char *why, size_t len)
         calibrate = 0;
         fn = runner_aa;
     } else
+        return -3;
+    /* A duty of the run's own is the calibration's alone, inside the
+     * setting's range: the flow check and the offset tool run as the
+     * machine is configured. */
+    if (heater_pct != 0 && (!calibrate || !(heater_pct > 0 && heater_pct <= 100)))
         return -3;
 
     pthread_mutex_lock(&mu);
@@ -706,6 +722,7 @@ int diag_start(const char *tool, char *why, size_t len)
     st_result[0] = '\0';
     st_phase[0] = '\0';
     st_started = time(NULL);
+    st_heater_pct = heater_pct;
     snprintf(st_tool, sizeof(st_tool), "%s", tool);
     pthread_mutex_unlock(&mu);
 

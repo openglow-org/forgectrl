@@ -970,12 +970,14 @@ out:
 /* ------------------------------------------- the cooling diagnostics */
 
 /* Run one of diag.c's tools to its end; the parsed result object, or
- * NULL after an abort. expect_s is the typical run time for the
- * progress estimate. */
-static json_t *run_diag(const char *tool, int expect_s, int pct_from, int pct_to)
+ * NULL after an abort. heater_pct above 0 is the run's own heater duty
+ * (a flow calibration's rung); 0 runs the tool as the machine is
+ * configured. expect_s is the typical run time for the progress
+ * estimate. */
+static json_t *run_diag(const char *tool, double heater_pct, int expect_s, int pct_from, int pct_to)
 {
     char why[128];
-    int rc = diag_start(tool, why, sizeof(why));
+    int rc = diag_start_duty(tool, heater_pct, why, sizeof(why));
     if (rc != 0) {
         finish_err("%s", rc == -2 ? "the machine is not idle, or the cooling engine is busy"
                        : rc == -4 ? why : "the diagnostic could not start");
@@ -1016,7 +1018,7 @@ static json_t *run_diag(const char *tool, int expect_s, int pct_from, int pct_to
 static void run_cooling_aa(void)
 {
     phase("the air-assist offset: settling the loop");
-    json_t *res = run_diag("aa-offset-calibrate", 360, 2, 95);
+    json_t *res = run_diag("aa-offset-calibrate", 0, 360, 2, 95);
     if (!res)
         return;
     const char *err = json_string_value(json_object_get(res, "error"));
@@ -1045,33 +1047,29 @@ static void run_cooling_aa(void)
     json_decref(applied);
 }
 
+/* The duty is written beside its threshold or not at all. Each rung's
+ * duty goes to its own diagnostic, never to the settings file, so a
+ * calibration that ends any other way (an abort, a failure, the
+ * daemon's death or a power loss mid-rung) leaves cool_flow_heater_pct
+ * as it was, with nothing to put back. */
 static void run_cooling_flow(void)
 {
-    char orig_pct[32] = "", orig_rise[32] = "";
-    settings_get("cool_flow_heater_pct", orig_pct, sizeof(orig_pct));
-    settings_get("cool_flow_rise", orig_rise, sizeof(orig_rise));
     double duty = wizcalc_next_duty(0.0);
     int rung = 0;
     json_t *res = NULL;
     while (duty > 0.0) {
         rung++;
-        char d[16];
-        snprintf(d, sizeof(d), "%.0f", duty);
-        if (settings_set("cool_flow_heater_pct", d) != 0) {
-            finish_err("cannot set the heater duty");
-            goto restore;
-        }
-        wlog("calibration at %s percent heater duty (rung %d)", d, rung);
-        phase("flow calibration at %s percent: settling the loop", d);
-        res = run_diag("flow-calibrate", 1200, 2 + (rung - 1) * 30, 2 + rung * 30);
+        wlog("calibration at %.0f percent heater duty (rung %d)", duty, rung);
+        phase("flow calibration at %.0f percent: settling the loop", duty);
+        res = run_diag("flow-calibrate", duty, 1200, 2 + (rung - 1) * 30, 2 + rung * 30);
         if (!res)
-            goto restore;
+            return;
         const char *err = json_string_value(json_object_get(res, "error"));
         if (!err)
             break;
         if (strstr(err, "bands too close")) {
-            wlog("gap %.1f C at %s percent: trying the next rung",
-                 json_number_value(json_object_get(res, "gap")), d);
+            wlog("gap %.1f C at %.0f percent: trying the next rung",
+                 json_number_value(json_object_get(res, "gap")), duty);
             json_decref(res);
             res = NULL;
             duty = wizcalc_next_duty(duty);
@@ -1079,32 +1077,27 @@ static void run_cooling_flow(void)
         }
         finish_err("%s", err);
         json_decref(res);
-        goto restore;
+        return;
     }
     if (!res) {
         finish_err("the flow bands did not separate at 40, 55, or 70 percent: check the pump "
                    "and the coolant level, then run again");
-        goto restore;
+        return;
     }
-    /* The threshold and the duty it was found at are one write; the
-     * duty is already in force, so its before value is the original. */
+    /* The threshold and the duty it was found at are one write. */
     double rec = json_number_value(json_object_get(res, "recommend"));
     char v_rise[24], v_pct[16];
     snprintf(v_rise, sizeof(v_rise), "%.1f", rec);
     snprintf(v_pct, sizeof(v_pct), "%.0f", duty);
     json_t *applied = json_object();
-    json_t *e = json_object();
-    json_object_set_new(e, "from", json_string(orig_pct));
-    json_object_set_new(e, "to", json_string(v_pct));
-    json_object_set_new(applied, "cool_flow_heater_pct", e);
-    const char *keys[] = { "cool_flow_rise" };
-    const char *vals[] = { v_rise };
+    const char *keys[] = { "cool_flow_heater_pct", "cool_flow_rise" };
+    const char *vals[] = { v_pct, v_rise };
     char err[96];
-    if (write_settings(keys, vals, 1, applied, err, sizeof(err)) != 0) {
+    if (write_settings(keys, vals, 2, applied, err, sizeof(err)) != 0) {
         finish_err("%s", err);
         json_decref(res);
         json_decref(applied);
-        goto restore;
+        return;
     }
     json_object_set_new(res, "heater_pct", json_real(duty));
     json_object_set_new(res, "threshold", json_real(rec));
@@ -1113,19 +1106,12 @@ static void run_cooling_flow(void)
     finish_ok(1, res, applied);
     json_decref(res);
     json_decref(applied);
-    return;
-restore:
-    /* The duty is written beside its threshold or not at all: an abort
-     * or a failure puts back what was there, and an unset key stays
-     * unset (an empty value removes it). */
-    if (settings_set("cool_flow_heater_pct", orig_pct) != 0)
-        wlog("cannot put cool_flow_heater_pct back to \"%s\"", orig_pct);
 }
 
 static void run_cooling_flow_verify(void)
 {
     phase("the flow check: settling the loop");
-    json_t *res = run_diag("flow-verify", 240, 2, 95);
+    json_t *res = run_diag("flow-verify", 0, 240, 2, 95);
     if (!res)
         return;
     const char *err = json_string_value(json_object_get(res, "error"));

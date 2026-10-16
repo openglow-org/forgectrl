@@ -42,8 +42,10 @@
 #     the flow check: the diagnostic's phases are the check's, its
 #       result the check's with pass true, and a thin margin flags the
 #       calibration in the record
-#     the flow calibration aborted at its first rung: the heater duty
-#       as it was (unset stays unset, a seeded one comes back)
+#     the flow calibration at its first rung: the rung's duty goes to its
+#       diagnostic alone, the settings file untouched while it runs,
+#       after an abort (unset stays unset, a seeded one stands), and
+#       after the daemon is killed mid-rung and started again
 #   the laser floor burn: refused before any prompt without Focus on the
 #     record; with it, the gantry stops asked, then the controller
 #     stopped and started again and the lens referenced before the home
@@ -847,20 +849,32 @@ cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "t
 restart "$T/seed.json"
 up || bad "no controller on the seeded record"
 
-echo "== the flow calibration aborted at its first rung"
+echo "== the flow calibration at its first rung: aborted, and the daemon killed"
 # The duty is written beside its threshold or not at all: the rung's
-# duty is in force while the diagnostic runs under the check, and an
-# abort puts back what was there.
+# duty goes to its diagnostic alone, so the settings file is untouched
+# while the diagnostic runs under the check, after an abort, and after
+# the daemon is killed mid-rung and started again.
 calibrating() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" -o "$T/diag.json" "$URL/diag/status" \
     && [ "$(jget "$T/diag.json" '"%s|%s" % (d.get("running"), d.get("tool"))')" = "True|flow-calibrate" ]; }
+# heats_at <duty>: the diagnostic's own log names the duty its trials heat at
+heats_at() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" -o "$T/diag.json" "$URL/diag/status" \
+    && grep -q "start: duty $1%" "$T/diag.json"; }
 holder() { curl -s -o "$T/status.json" "$URL/status"; jget "$T/status.json" '(d["lease"]["holder"] or {}).get("owner") or "none"'; }
 free() { [ "$(holder)" = none ]; }
 start_flow() { [ "$(post /wiz/cooling.flow/start "$TOKEN")" = 200 ]; }
-# abort_at_rung1 <label>: started, its diagnostic running, the duty 40 in force, aborted, ended, the machine handed back
-abort_at_rung1() {
+# at_rung1 <label> <the conf file as it stays>: started, its diagnostic
+# running at the rung's duty 40, the settings file untouched
+at_rung1() {
     until_ok 50 start_flow && ok "$1: POST /wiz/cooling.flow/start is 200" || bad "$1: the start was refused: $(cat "$T/body")"
     until_ok 150 calibrating && ok "$1: the flow-calibrate diagnostic runs under the check" || bad "$1: no diagnostic: $(cat "$T/diag.json")"
-    grep -qx 'cool_flow_heater_pct = 40' "$CONF" && ok "$1: the rung's duty 40 is in force" || bad "$1: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
+    until_ok 50 heats_at 40 && ok "$1: the diagnostic heats at the rung's duty 40" \
+        || bad "$1: the diagnostic's log is $(jget "$T/diag.json" 'd.get("log")')"
+    cmp -s "$2" "$CONF" && ok "$1: the settings file is untouched while the diagnostic runs" \
+        || bad "$1: the conf file has '$(grep cool_flow_heater_pct "$CONF")' while the diagnostic runs"
+}
+# abort_at_rung1 <label> <conf>: at the first rung, aborted, ended, the machine handed back
+abort_at_rung1() {
+    at_rung1 "$1" "$2"
     expect 200 "$(post /wiz/cooling.flow/abort "$TOKEN")" "$1: POST /wiz/cooling.flow/abort is 200"
     until_ok 300 stopped && ok "$1: the check stopped" || bad "$1: the check still runs: $(cat "$T/dark.json")"
     expect 'True|True' "$(jget "$T/dark.json" '"%s|%s" % (bool(d["error"]), d["result"] is None)')" "$1: it ended in an error with no result"
@@ -869,15 +883,32 @@ abort_at_rung1() {
 }
 cp "$CONF" "$T/conf.before"
 grep -q '^cool_flow_heater_pct' "$CONF" && bad "the conf file starts with a heater duty" || ok "no heater duty in the conf file to start"
-abort_at_rung1 unset
+abort_at_rung1 unset "$T/conf.before"
 grep -q '^cool_flow_heater_pct' "$CONF" && bad "unset: the conf file keeps '$(grep cool_flow_heater_pct "$CONF")' after the abort" \
     || ok "unset: no heater duty in the conf file after the abort"
 cmp -s "$T/conf.before" "$CONF" && ok "unset: the settings file is byte for byte as it was" || bad "unset: the settings file changed"
 expect 200 "$(post /settings "$TOKEN" -d cool_flow_heater_pct=45)" "a heater duty of 45 is 200"
 cp "$CONF" "$T/conf.seeded"
-abort_at_rung1 seeded
-grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "seeded: the duty 45 is back after the abort" || bad "seeded: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
+abort_at_rung1 seeded "$T/conf.seeded"
+grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "seeded: the duty 45 stands after the abort" || bad "seeded: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
 cmp -s "$T/conf.seeded" "$CONF" && ok "seeded: the settings file is byte for byte as seeded" || bad "seeded: the settings file changed"
+# The daemon killed with the rung's diagnostic running, as a crash or a
+# power loss ends it: nothing to put back, then or at the next start.
+at_rung1 killed "$T/conf.seeded"
+# The kill comes once the diagnostic holds the machine, its controller
+# stopped: a controller still running would hold the pulse device across
+# the kill, and the next start ends only a controller of its own name.
+until_ok 100 ctl_down || bad "killed: the controller still runs under the diagnostic"
+OLD=$(ctl_pid)
+kill -9 $PID
+wait $PID 2>/dev/null
+PID=
+cmp -s "$T/conf.seeded" "$CONF" && ok "killed: the settings file is byte for byte as seeded" \
+    || bad "killed: the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the kill"
+start_daemon
+up || bad "killed: no controller after the next start"
+cmp -s "$T/conf.seeded" "$CONF" && ok "killed: and after the daemon's next start" \
+    || bad "killed: the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the next start"
 expect 200 "$(post '/settings?cool_flow_heater_pct=' "$TOKEN")" "clearing the duty is 200"
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the duty was not cleared"
 
