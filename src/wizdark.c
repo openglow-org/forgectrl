@@ -82,7 +82,10 @@
 /* ------------------------------------------------------------- state */
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+/* A prompt's wait and the shutdown's are timeouts, and timeouts never
+ * ride the wall clock on this RTC-less board: wizdark_init puts the
+ * condvar on CLOCK_MONOTONIC, and every deadline is read from it. */
+static pthread_cond_t cv;
 
 static struct {
     char id[72];                        /* a package's check is pkg:<id>, 67 at most */
@@ -252,7 +255,7 @@ static int ask_t(const char *kind, const char *pid, const char *text,
     S.answer_seq = 0;
     S.answer[0] = '\0';
     struct timespec until;
-    clock_gettime(CLOCK_REALTIME, &until);
+    clock_gettime(CLOCK_MONOTONIC, &until);
     until.tv_sec += timeout_s;
     int rc = 0;
     while (S.answer_seq != seq && !S.abort_req) {
@@ -2419,6 +2422,11 @@ uint8_t *wizdark_shot(const char *cam, size_t *len)
 void wizdark_init(void)
 {
     memset(&S, 0, sizeof(S));
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&cv, &ca);
+    pthread_condattr_destroy(&ca);
 }
 
 void wizdark_shutdown(void)
@@ -2426,7 +2434,7 @@ void wizdark_shutdown(void)
     wizdark_abort(NULL);
     pthread_mutex_lock(&mu);
     struct timespec until;
-    clock_gettime(CLOCK_REALTIME, &until);
+    clock_gettime(CLOCK_MONOTONIC, &until);
     until.tv_sec += 10;
     while (S.running && pthread_cond_timedwait(&cv, &mu, &until) != ETIMEDOUT)
         ;

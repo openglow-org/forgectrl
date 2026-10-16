@@ -28,6 +28,8 @@
 #     the intake fans: both tachs turning count two, the setting written
 #       and the record carrying it, no question; intake 2 silent asks for
 #       the count, and the answer is written
+#     the intake-count prompt with the wall clock an hour behind: the
+#       prompt holds (its wait rides CLOCK_MONOTONIC) and takes the answer
 #     the cameras: an open lid is waited for; the lid shot, its question,
 #       the head shot, its question; each shot served as captured, and
 #       the result names the engine's sensor
@@ -66,6 +68,8 @@
 # loopback, which the preloaded stand-in points at a high port), the
 # lens's hall sensor a stand-in that follows the lens steps, and the
 # burn's witnesses files the controller's stand-in sets: no laser fires.
+# A second preloaded stand-in reads the wall clock an hour behind while
+# a flag file exists, for the prompt that must hold across the shift.
 # The record is read at start, so it is replaced only while the daemon
 # is stopped. Each case puts back what it changed. The daemon runs on
 # the image's ulfius (tests/ulfius_image.sh). Runs unprivileged;
@@ -134,11 +138,11 @@ setting() { curl -s -o "$T/settings.json" "$URL/settings"; jget "$T/settings.jso
 said() { grep -q "$1" "$T/body" && ok "and says $1" || bad "the body is $(cat "$T/body")"; }
 
 start_daemon() {
-    env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
+    env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 TIMESHIM_FLAG="$T/timeshift" \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" \
-        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" LD_PRELOAD="$T/swshim.so" \
+        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" LD_PRELOAD="$T/swshim.so $T/timeshim.so" \
         GF_LED_ROOT="$T/leds" FORGECTRL_WIZ_SHOTS="$T/shots" \
         GF_SYSFS_DIR="$LENS_SYS" GF_LENS_STEP_US=20000 HOST_GRBL_PORT=$GRBL_PORT \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
@@ -323,6 +327,33 @@ int ioctl(int fd, unsigned long req, ...)
 }
 EOF
 cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch stand-in did not build"
+# The clock stand-in: the daemon's own reading of CLOCK_REALTIME is an
+# hour behind while the file TIMESHIM_FLAG names exists. The kernel's
+# clock is not touched, so a condvar deadline computed from that
+# reading is already past for a condvar on CLOCK_REALTIME and untouched
+# for one on CLOCK_MONOTONIC.
+cat > "$T/timeshim.c" <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+    static int (*real)(clockid_t, struct timespec *);
+    if (!real)
+        real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime");
+    int rc = real(clk, ts);
+    if (rc == 0 && clk == CLOCK_REALTIME) {
+        const char *f = getenv("TIMESHIM_FLAG");
+        if (f && access(f, F_OK) == 0)
+            ts->tv_sec -= 3600;
+    }
+    return rc;
+}
+EOF
+cc -shared -fPIC -O2 -o "$T/timeshim.so" "$T/timeshim.c" -ldl || fatal "the clock stand-in did not build"
 cat > "$T/bin/grbl" <<EOF
 #!/bin/sh
 echo \$\$ >> "$T/ctl.pids"
@@ -675,6 +706,40 @@ grep -qx 'cool_intake_fans = 1' "$CONF" && ok "the setting reads 1" || bad "the 
 at_rest
 up || bad "no controller after the intake fans step"
 
+echo "== the intake-count prompt with the wall clock an hour behind"
+# The prompt's wait is a timeout, and a timeout rides CLOCK_MONOTONIC:
+# with the daemon's reading of CLOCK_REALTIME an hour behind (the clock
+# stand-in, while the flag file exists) the prompt stays open and takes
+# its answer. A wait on the wall clock ends the moment the prompt
+# opens, its deadline already past. Intake 2 silent makes the step ask.
+dark() { curl -s -o "$T/dark.json" "$URL/wiz/dark"; }
+stopped() { dark && [ "$(jget "$T/dark.json" 'd.get("running")')" = false ]; }
+asking() { dark && [ "$(jget "$T/dark.json" '(d.get("prompt") or {}).get("id", "")')" = intake-count ]; }
+# the step before has handed the machine back: the controller up, the
+# cooling engine out of its cooldown
+until_ok 150 settled || bad "the machine did not settle after the step: $(cat "$T/mode.json") $(cat "$T/cool.json")"
+echo 0 > "$SYS/thermal/tach_intake_2"
+: > "$T/timeshift"
+expect 200 "$(post /wiz/airflow.intakes/start "$TOKEN")" "POST /wiz/airflow.intakes/start is 200"
+n=200
+while ! asking && ! stopped; do n=$((n - 1)); [ $n -gt 0 ] || break; sleep 0.2; done
+if asking; then
+    ok "the prompt is open under the shift"
+    sleep 3
+    asking && ok "and still open 3 s later" || bad "the prompt closed within 3 s: $(cat "$T/dark.json")"
+    rm -f "$T/timeshift"
+    SEQ=$(jget "$T/dark.json" 'd["prompt"]["seq"]')
+    expect 200 "$(post /wiz/airflow.intakes/answer "$TOKEN" -d "seq=$SEQ" -d value=One)" "the answer One is 200"
+    until_ok 100 stopped && ok "the step ended" || bad "the step did not end: $(cat "$T/dark.json")"
+    expect '|operator|1' "$(jget "$T/dark.json" '"%s|%s|%s" % (d["error"], (d["result"] or {}).get("counted_by"), (d["result"] or {}).get("intake_fans"))')" \
+        "the answer is the count"
+else
+    rm -f "$T/timeshift"
+    bad "the prompt never stayed open: running $(jget "$T/dark.json" 'd.get("running")'), error '$(jget "$T/dark.json" 'd.get("error")')', result $(jget "$T/dark.json" 'd.get("result")'), log $(jget "$T/dark.json" 'd.get("log")')"
+fi
+at_rest
+up || bad "no controller after the shifted prompt"
+
 echo "== the cameras check"
 python3 -c 'import sys
 for cam in ("lid", "head"):
@@ -774,8 +839,6 @@ echo "== the flow calibration aborted at its first rung"
 # The duty is written beside its threshold or not at all: the rung's
 # duty is in force while the diagnostic runs under the check, and an
 # abort puts back what was there.
-dark() { curl -s -o "$T/dark.json" "$URL/wiz/dark"; }
-stopped() { dark && [ "$(jget "$T/dark.json" 'd.get("running")')" = false ]; }
 calibrating() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" -o "$T/diag.json" "$URL/diag/status" \
     && [ "$(jget "$T/diag.json" '"%s|%s" % (d.get("running"), d.get("tool"))')" = "True|flow-calibrate" ]; }
 holder() { curl -s -o "$T/status.json" "$URL/status"; jget "$T/status.json" '(d["lease"]["holder"] or {}).get("owner") or "none"'; }
