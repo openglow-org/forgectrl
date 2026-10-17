@@ -35,9 +35,10 @@ warning is a failure.
   inside `tests/fflog_e2e.sh`). CI keeps one step per binary, because the
   coverage lint in `forgefirm` reads those steps. Declare a new `*_test`
   target above the ctest block at the end of `CMakeLists.txt`, and give it
-  a step in build.yml whose own `run:` line is `./build/<name>`, with no
-  `if:` or `continue-on-error:` on the step or its job. The configure
-  stops otherwise.
+  a step in build.yml whose own `run:` line is `./build/<name>` and
+  nothing else, with no `if:` other than `true` and no
+  `continue-on-error:` other than `false` on the step or its job. The
+  configure stops otherwise.
 - `python3 -B tools/check_ui_js.py build/ui`, with node on the PATH.
 - `python3 -B tests/wizard_walk.py build/ui`, with Google Chrome at a
   usual path such as `/usr/bin/google-chrome`.
