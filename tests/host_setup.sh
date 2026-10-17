@@ -348,7 +348,7 @@ cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch s
 # touched: a condvar deadline computed from the wall clock's reading is
 # already past for a condvar on CLOCK_REALTIME and decades away for one
 # on CLOCK_MONOTONIC, and one computed from the monotonic reading is
-# 10 s short of the 600 s it names on the kernel's clock.
+# 10 s away on the kernel's clock, 590 s short of the 600 s it names.
 cat > "$T/timeshim.c" <<'EOF'
 #define _GNU_SOURCE
 #include <dlfcn.h>
