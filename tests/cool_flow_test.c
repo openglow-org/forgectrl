@@ -1296,11 +1296,12 @@ int main(void)
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     logbuf[0] = '\0';
-    /* The tolerance side first: a report 4.5 s old is still fresh. The
-     * controller reports every second, so an engine that stalls under
-     * 4 s comes back with its last report inside REPORT_TIMEOUT_S, to an
-     * armed window it still acknowledges, and the controller's own
-     * stale-verdict hold (2 s) resumes with no press. */
+    /* The tolerance side first: a report 4.5 s old is still fresh.
+     * Nothing is safed, and the armed window stays acknowledged. The
+     * case drives report silence: a silent controller, or the whole
+     * daemon stalled. A stall of the engine's own thread is not silence,
+     * because the route records each report. The cooling engine page's
+     * Silence bullet gives the rule. */
     fake_now += 4.5;
     loop_tick(&L);
     engine_tick();
