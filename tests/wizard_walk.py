@@ -47,8 +47,9 @@ refused once goes again a second later, and the page shows the diagnostic
 started and never the refusal. A start refused twice shows the refusal
 after the second start, and the page sends no third. A start refused
 for another reason (a diagnostic running) shows the refusal at once, and
-the page sends no second. A start refused once and pressed again starts once, and after the operator's Abort the
-first press's second start never goes.
+the page sends no second. A start refused once and pressed again starts
+once, and after the operator's Abort the first press's second start never
+goes.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
