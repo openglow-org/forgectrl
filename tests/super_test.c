@@ -92,6 +92,7 @@ extern int clock_gettime(clockid_t clk, struct timespec *ts);
 
 static double fake_now = 1000.0;
 static const char *create_on_sleep;     /* an attribute a sleep creates (G) */
+static const char *unlink_on_kill;      /* an attribute the first signal removes (G) */
 static int abort_on_sleep;              /* the lever lands this many sleeps on (F) */
 static unsigned real_sleep_us;          /* a real pause per fake sleep (F) */
 
@@ -137,6 +138,8 @@ static int forks;                       /* controller spawns (relay forks exclud
 static int kills[64];                   /* the signals sent, in order */
 static int nkills;
 static long kill_stop[64], kill_latch[64];  /* cnc/stop and cnc/laser_latch as each signal found them */
+static int crit_logs;                   /* the safing failures named (fflog at LOG_CRIT) */
+static int kill_crit[64];               /* ...as each signal found them */
 static int runner_alive;                /* pgrep -x gfhome.py answers 0 */
 static int runner_term_ignored;         /* ...and SIGTERM does not end it */
 static int flock_fails;
@@ -186,6 +189,13 @@ int fake_kill(pid_t pid, int sig)
          * the proof the safing pair came first. */
         kill_stop[nkills] = get_long("cnc/stop");
         kill_latch[nkills] = get_long("cnc/laser_latch");
+        kill_crit[nkills] = crit_logs;
+    }
+    if (unlink_on_kill) {
+        char path[160];
+        snprintf(path, sizeof(path), GF_SYSFS "%s", unlink_on_kill);
+        unlink(path);
+        unlink_on_kill = NULL;
     }
     nkills++;
     /* SIGTERM to the child: it dies, the next waitpid finds it. */
@@ -255,7 +265,6 @@ int fake_machine_is_idle(void)
 /* --- the stubs the supervisor links against ---------------------------- */
 
 static char last_log[256], logs[8192];
-static int crit_logs;
 
 void fflog(int prio, const char *fmt, ...)
 {
@@ -422,6 +431,7 @@ static void reset_state(void)
     flock_fails = 0;
     engine_stops = 0;
     crit_logs = 0;
+    unlink_on_kill = NULL;
     led_last = -1;
     calls[0] = '\0';
     logs[0] = '\0';
@@ -623,6 +633,7 @@ int main(void)
     bring_up();
     unlink(GF_SYSFS "cnc/laser_latch");
     crit_logs = 0;
+    unlink_on_kill = "cnc/stop";        /* the stop attribute goes at the first signal */
     pthread_mutex_lock(&mu);
     suspended = 1;
     stop_locked();
@@ -630,8 +641,13 @@ int main(void)
     CHECK(child_pid == 0 && nkills >= 2 && kills[0] == SIGTERM && kill_stop[0] == 1,
           "the stop signals and reaps the controller, motion stopped before the signal");
     CHECK(strstr(logs, "laser_latch failed") != NULL, "a latch write that keeps failing is named");
-    CHECK(crit_logs == 3, "the latch write is tried again after the signal: named before it, after it, and at the reap");
+    /* Five notices: the latch before the signal; the latch and the stop
+     * after it; the latch and the stop at the reap. */
+    printf("    notices: %d before the signal, %d in all\n", kill_crit[0], crit_logs);
+    CHECK(kill_crit[0] == 1 && crit_logs == 5,
+          "the pair is tried again after the signal: one notice before it, five in all");
     put("cnc/laser_latch", "0\n");
+    put("cnc/stop", "0\n");
 
     printf("H. the broker fails closed\n");
     reset_state();
