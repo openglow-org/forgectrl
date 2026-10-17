@@ -1494,8 +1494,8 @@ int main(void)
 
     printf("Q. the verdict file: the contract's keys and types, the stamp to the millisecond and never ahead of the clock\n");
     open_session(&L);
-    /* A fraction the nearest millisecond rounds up, and any coarser grid
-     * rounds down by more than 9 ms. */
+    /* A fraction the nearest millisecond rounds up, and any coarser
+     * decimal grid rounds down by more than 9 ms. */
     fake_now = floor(fake_now) + 1.9996;
     run_tick(&L);
     json_t *doc = json_load_file(VERDICT_FILE, 0, NULL);
