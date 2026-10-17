@@ -32,7 +32,7 @@
     },
     {
       "label": "tests (host)",
-      "detail": "Every test binary of the build, as ctest cases (holds_wire_test only with FORGEEXT_SRC)",
+      "detail": "Every ctest case of the build: each test binary but fflog_e2e_test, which runs inside tests/fflog_e2e.sh (holds_wire_test only with FORGEEXT_SRC)",
       "type": "shell",
       "command": "ctest --test-dir build --output-on-failure",
       "dependsOn": ["build (host)"],
