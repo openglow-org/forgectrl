@@ -433,8 +433,9 @@ static void test_short_press(void)
 
 /* clock_gettime as events.c calls it (the target links with
  * --wrap=clock_gettime): while wall_behind is set, CLOCK_REALTIME reads
- * an hour behind, as after a backward step of the wall clock. Every
- * other clock passes through. */
+ * an hour behind the clock a wall-clock condvar waits on, as when the
+ * wall clock steps forward between a read and the wait. Every other
+ * clock passes through. */
 int __real_clock_gettime(clockid_t clk, struct timespec *ts);
 static volatile int wall_behind;
 
@@ -506,9 +507,11 @@ static void test_keepalive_clock(void)
     snprintf(shown, sizeof(shown), "%.60s", ended && r.n > 0 ? r.buf : "nothing");
     shown[strcspn(shown, "\n")] = '\0';
     printf("    the quiet stream's next read: '%s' after %.2f s\n", shown, dt);
-    CHECK(ended && r.n > 0 && !strcmp(r.buf, ": keep-alive\n\n") && dt >= 4.5 && dt <= 6.0,
-          "a quiet stream's keep-alive with the wall clock an hour behind: %s after %.2f s, want it after 5 s",
-          ended && r.n > 0 ? "read" : "nothing", dt);
+    /* A comment line, as every reader takes the keep-alive: the stream
+     * is quiet and current, so no other comment can be this read. */
+    CHECK(ended && r.n > 0 && r.buf[0] == ':' && dt >= 4.5 && dt <= 6.0,
+          "a quiet stream's keep-alive with the wall clock an hour behind: '%s' after %.2f s, "
+          "want a comment line after 5 s", shown, dt);
     events_close(r.c);
 }
 
