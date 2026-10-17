@@ -231,9 +231,9 @@ int grblport_explain(const char *reply, char *why, size_t len)
     if (!strcmp(reply, "busy:released"))
         snprintf(why, len, "the X and Y motors are released: energize them first");
     else if (!strcmp(reply, "busy:sender"))
-        snprintf(why, len, "the Grbl client is sending: it goes first");
+        snprintf(why, len, "the Grbl sender is using the machine: it goes first");
     else if (!strcmp(reply, "busy:state"))
-        snprintf(why, len, "the controller is busy (a program, a hold, an alarm, or the client's own jog)");
+        snprintf(why, len, "the controller is busy (a program, a hold, an alarm, or the sender's own jog)");
     else if (!strcmp(reply, "busy:mcode"))
         snprintf(why, len, "a job waits at an extension's M-code");
     else if (!strcmp(reply, "error:saved"))
