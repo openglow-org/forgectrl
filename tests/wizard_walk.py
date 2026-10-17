@@ -46,7 +46,8 @@ before it. The walk has the mock refuse the next starts that way. A start
 refused once goes again a second later, and the page shows the diagnostic
 started and never the refusal. A start refused twice shows the refusal
 after the second start, and the page sends no third. A start refused
-once and pressed again starts once, and after the operator's Abort the
+for another reason (a diagnostic running) shows the refusal at once, and
+the page sends no second. A start refused once and pressed again starts once, and after the operator's Abort the
 first press's second start never goes.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
@@ -353,6 +354,24 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () {
         if (w().D.running || q('#msg-d').textContent !== REFUSAL)
           throw new Error('after the second refusal a diagnostic runs, or the panel shows ' + JSON.stringify(q('#msg-d').textContent)); }); }],
+  ['a start refused for another reason (a diagnostic running) shows the refusal at once, and the panel sends no second', function () {
+    var RUNNING = 'a diagnostic is already running';
+    return engineBusy(0)
+      .then(function () {
+        click(VERIFY);
+        return until('the diagnostic started', function () { return w().D.running && shown('#diagabort'); }, 10000); })
+      .then(function () { return engineBusy(0); })
+      .then(function () {
+        w().startDiag('flow-verify');
+        return until('the refusal', function () { return q('#msg-d').textContent === RUNNING; }, 10000); })
+      .then(function () { return startsWere([409]); })
+      .then(function () { return sleep(1500); })
+      .then(function () { return startsWere([409]); })
+      .then(function () {
+        if (q('#msg-d').textContent !== RUNNING)
+          throw new Error('1.5 s after the refusal the panel shows ' + JSON.stringify(q('#msg-d').textContent));
+        click('#diagabort');
+        return until('the diagnostic ended, the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
   ['a refused start pressed again starts once, and after the operator\'s Abort nothing starts again', function () {
     return engineBusy(1)
       .then(function () { click(VERIFY); return sleep(300); })
