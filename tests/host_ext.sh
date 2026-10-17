@@ -25,6 +25,10 @@
 #     gone
 #   bytes it takes: 200, tier unverified, consent button, and the staging
 #     file holds those bytes; the discard: 200, and the file gone
+#   an upload paused part way holds the staging file: with the daemon's
+#     wall clock an hour ahead (a preloaded clock stand-in) and no new
+#     chunk, a second upload beside it is still 409; the paused upload
+#     then ends 200 with its own bytes staged, and the discard takes them
 #   an install with nothing staged: 409, and the words name it
 #   a key with the token: 409, the button named, and no key written
 #   GET /ext/status and POST /ext/package without the token: 403, and the
@@ -126,6 +130,7 @@ record_wizards() { jget "$REC" '" ".join(sorted((d.get("wizards") or {}).keys())
 
 start_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
+        LD_PRELOAD="$T/wallshim.so" WALLSHIFT_FILE="$T/wallshift" \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
         FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
@@ -160,6 +165,55 @@ echo "cool_intake_fans = 1" > "$T/data/forgefirm.conf"
 command -v cc > /dev/null || fatal "no C compiler (cc): the host's stand-in is compiled here"
 cc -O2 -DRAN_FILE="\"$RAN\"" -DKEY_DIR="\"$T/keys\"" -o "$T/bin/forgeext" "$HERE/host_ext_forgeext.c" \
     || fatal "the host's stand-in did not compile"
+# The clock stand-in: the daemon's reading of the wall clock (time() and
+# CLOCK_REALTIME) runs ahead by the seconds the file WALLSHIFT_FILE names
+# holds, while it exists. The kernel's clocks are not touched.
+cat > "$T/wallshim.c" <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+static long shift(void)
+{
+    const char *f = getenv("WALLSHIFT_FILE");
+    int fd = f ? open(f, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0)
+        return 0;
+    char b[32];
+    ssize_t n = read(fd, b, sizeof(b) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    b[n] = 0;
+    return strtol(b, NULL, 10);
+}
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+    static int (*real)(clockid_t, struct timespec *);
+    if (!real)
+        real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime");
+    int rc = real(clk, ts);
+    if (rc == 0 && clk == CLOCK_REALTIME)
+        ts->tv_sec += shift();
+    return rc;
+}
+
+time_t time(time_t *t)
+{
+    static time_t (*real)(time_t *);
+    if (!real)
+        real = (time_t (*)(time_t *))dlsym(RTLD_NEXT, "time");
+    time_t now = real(NULL) + shift();
+    if (t)
+        *t = now;
+    return now;
+}
+EOF
+cc -shared -fPIC -O2 -o "$T/wallshim.so" "$T/wallshim.c" -ldl || fatal "the clock stand-in did not build"
 printf 'these bytes are refuse to the host\n' > "$T/refused.ffx"
 i=0
 while [ $i -lt 200 ]; do echo "line $i of an archive the stand-in takes"; i=$((i + 1)); done > "$T/taken.ffx"
@@ -219,6 +273,54 @@ cmp -s "$T/taken.ffx" "$STAGE" && ok "the staging file holds those bytes" \
     || bad "the staging file does not hold the bytes sent"
 expect 200 "$(post /ext/upload/discard "$TOKEN")" "the discard is 200"
 [ ! -e "$STAGE" ] && ok "the discard leaves no staging file" || bad "the discarded upload is still staged"
+
+# The minute of silence that holds a paused upload's staging file is on
+# CLOCK_MONOTONIC: a step of the daemon's wall clock does not end it for
+# a second upload. The paused upload sends its first quarter, then the
+# rest once $T/go exists.
+python3 -c 'import sys; sys.stdout.write("".join("line %d of a paused archive the stand-in takes\n" % i for i in range(5000)))' \
+    > "$T/paused.ffx"
+python3 - "$HTTP_PORT" "$TOKEN" "$T/paused.ffx" "$T/go" > "$T/paused.answer" 2>&1 <<'EOF' &
+import os, socket, sys, time
+port, token, path, go = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+data = open(path, 'rb').read()
+bnd = b'----host-ext-paused'
+pre = (b'--' + bnd + b'\r\nContent-Disposition: form-data; name="file"; filename="package.ffx"\r\n'
+       b'Content-Type: application/octet-stream\r\n\r\n')
+body = pre + data + b'\r\n--' + bnd + b'--\r\n'
+head = (b'POST /ext/upload HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-ForgeFIRM-Token: %s\r\n'
+        b'Content-Type: multipart/form-data; boundary=%s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'
+        % (port, token.encode(), bnd, len(body)))
+s = socket.create_connection(('127.0.0.1', port))
+s.settimeout(60)
+split = len(pre) + len(data) // 4
+s.sendall(head + body[:split])
+t0 = time.time()
+while not os.path.exists(go) and time.time() - t0 < 120:
+    time.sleep(0.1)
+s.sendall(body[split:])
+resp = b''
+try:
+    while True:
+        c = s.recv(65536)
+        if not c:
+            break
+        resp += c
+except socket.timeout:
+    pass
+sys.stdout.write(resp.decode('latin-1'))
+EOF
+UPID=$!
+until_ok 50 test -s "$STAGE" && ok "a paused upload's first part is staged" || bad "nothing of the paused upload was staged"
+expect 409 "$(upload "$TOKEN" "$T/taken.ffx")" "a second upload beside it is 409"
+echo 3600 > "$T/wallshift"
+expect 409 "$(upload "$TOKEN" "$T/taken.ffx")" "with the wall clock an hour ahead and no new chunk, a second upload is still 409"
+rm -f "$T/wallshift"
+touch "$T/go"
+wait $UPID
+expect 200 "$(awk 'NR == 1 { print $2 }' "$T/paused.answer")" "the paused upload then ends 200"
+cmp -s "$T/paused.ffx" "$STAGE" && ok "with its own bytes staged" || bad "the staged file is not the paused upload's"
+expect 200 "$(post /ext/upload/discard "$TOKEN")" "the discard is 200"
 
 echo "== the install and a key"
 expect 409 "$(post /ext/install "$TOKEN")" "an install with nothing staged is 409"

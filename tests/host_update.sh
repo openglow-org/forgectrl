@@ -33,11 +33,16 @@
 #     ForgeFIRM firmware is taken as the unsigned upload it is (200,
 #     signature unsigned, the bytes staged), and the staged file is then
 #     removed; fwup is never asked to apply
+#   an upload's minute of silence: an upload paused part way holds the
+#     staging file, and with the daemon's wall clock an hour ahead (a
+#     preloaded clock stand-in) and no new chunk, a second upload and a
+#     probe download beside it are still 409; the paused upload then
+#     ends 200 with its own archive staged, which is removed
 #
 # No firmware file is requested, nothing is applied, no slot is written,
 # and nothing posts confirm=1, a reboot, or /system/ssh. The daemon runs
-# on the image's ulfius (tests/ulfius_image.sh). Runs unprivileged;
-# build.yml runs it:
+# on the image's ulfius (tests/ulfius_image.sh). Needs a C compiler (cc).
+# Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_update.sh <build-dir> <ulfius-lib-dir>
 
@@ -96,6 +101,7 @@ get() { curl -s -o "$T/body" -w '%{http_code}' "$URL$1"; }
 
 start_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
+        LD_PRELOAD="$T/wallshim.so" WALLSHIFT_FILE="$T/wallshift" \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
@@ -163,6 +169,56 @@ case $op in
 esac
 EOF
 chmod +x "$T/path/fwup"
+# The clock stand-in: the daemon's reading of the wall clock (time() and
+# CLOCK_REALTIME) runs ahead by the seconds the file WALLSHIFT_FILE names
+# holds, while it exists. The kernel's clocks are not touched.
+command -v cc > /dev/null || fatal "no C compiler (cc): the clock stand-in is compiled here"
+cat > "$T/wallshim.c" <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+static long shift(void)
+{
+    const char *f = getenv("WALLSHIFT_FILE");
+    int fd = f ? open(f, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0)
+        return 0;
+    char b[32];
+    ssize_t n = read(fd, b, sizeof(b) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    b[n] = 0;
+    return strtol(b, NULL, 10);
+}
+
+int clock_gettime(clockid_t clk, struct timespec *ts)
+{
+    static int (*real)(clockid_t, struct timespec *);
+    if (!real)
+        real = (int (*)(clockid_t, struct timespec *))dlsym(RTLD_NEXT, "clock_gettime");
+    int rc = real(clk, ts);
+    if (rc == 0 && clk == CLOCK_REALTIME)
+        ts->tv_sec += shift();
+    return rc;
+}
+
+time_t time(time_t *t)
+{
+    static time_t (*real)(time_t *);
+    if (!real)
+        real = (time_t (*)(time_t *))dlsym(RTLD_NEXT, "time");
+    time_t now = real(NULL) + shift();
+    if (t)
+        *t = now;
+    return now;
+}
+EOF
+cc -shared -fPIC -O2 -o "$T/wallshim.so" "$T/wallshim.c" -ldl || fatal "the clock stand-in did not build"
 
 # The release server: the latest release, and the acceptance record late.
 python3 - "$REL_PORT" "$T/rel.log" <<'EOF' &
@@ -305,6 +361,56 @@ expect unsigned "$(jget "$T/body" 'd.get("signature")')" "its signature reads un
 cmp -s "$T/firmware.fw" "$STAGED" && ok "and its bytes are staged" || bad "the staged file is not the upload"
 rm -f "$STAGED"
 grep -q '^-a' "$T/path/fwup.log" && bad "fwup was asked to apply" || ok "fwup was never asked to apply"
+
+echo "== an upload's minute of silence"
+# The minute of silence that holds a paused upload's staging file is on
+# CLOCK_MONOTONIC: a step of the daemon's wall clock ends it for neither
+# a second upload nor a job. The paused upload sends its first quarter,
+# then the rest once $T/go exists.
+printf 'meta-product="ForgeFIRM firmware"\nmeta-version=0.0.0-paused\n' > "$T/paused.fw"
+python3 -c 'import sys; sys.stdout.write("# pad\n" * 20000)' >> "$T/paused.fw"
+python3 - "$HTTP_PORT" "$TOKEN" "$T/paused.fw" "$T/go" > "$T/paused.answer" 2>&1 <<'EOF' &
+import os, socket, sys, time
+port, token, path, go = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+data = open(path, 'rb').read()
+bnd = b'----host-update-paused'
+pre = (b'--' + bnd + b'\r\nContent-Disposition: form-data; name="file"; filename="paused.fw"\r\n'
+       b'Content-Type: application/octet-stream\r\n\r\n')
+body = pre + data + b'\r\n--' + bnd + b'--\r\n'
+head = (b'POST /update/upload HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-ForgeFIRM-Token: %s\r\n'
+        b'Content-Type: multipart/form-data; boundary=%s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n'
+        % (port, token.encode(), bnd, len(body)))
+s = socket.create_connection(('127.0.0.1', port))
+s.settimeout(60)
+split = len(pre) + len(data) // 4
+s.sendall(head + body[:split])
+t0 = time.time()
+while not os.path.exists(go) and time.time() - t0 < 120:
+    time.sleep(0.1)
+s.sendall(body[split:])
+resp = b''
+try:
+    while True:
+        c = s.recv(65536)
+        if not c:
+            break
+        resp += c
+except socket.timeout:
+    pass
+sys.stdout.write(resp.decode('latin-1'))
+EOF
+UPID=$!
+until_ok 50 test -s "$STAGED" && ok "a paused upload's first part is staged" || bad "nothing of the paused upload was staged"
+expect 409 "$(upload "$T/firmware.fw")" "a second upload beside it is 409"
+echo 3600 > "$T/wallshift"
+expect 409 "$(upload "$T/firmware.fw")" "with the wall clock an hour ahead and no new chunk, a second upload is still 409"
+expect 409 "$(post '/update/download?probe=1' "$TOKEN")" "and a probe download beside it is 409"
+rm -f "$T/wallshift"
+touch "$T/go"
+wait $UPID
+expect 200 "$(awk 'NR == 1 { print $2 }' "$T/paused.answer")" "the paused upload then ends 200"
+cmp -s "$T/paused.fw" "$STAGED" && ok "with its own archive staged" || bad "the staged file is not the paused upload's"
+rm -f "$STAGED"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

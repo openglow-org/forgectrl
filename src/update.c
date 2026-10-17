@@ -101,12 +101,21 @@ static int    job_probe;            /* the job is a probe download */
 static pthread_mutex_t up_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE  *up_fp;
 static const struct _u_request *up_owner;   /* the request streaming into up_fp */
-static time_t up_last;                      /* its last chunk */
+static double up_last;                      /* its last chunk, on mono_s()'s clock */
 static char   up_refusal[80];               /* why the sink refused, for the handler */
 static uint64_t up_bytes;
 static int    up_error;
 
 /* ----------------------------------------------------------- helpers */
+
+/* The clock for timeouts (an upload's minute of silence): CLOCK_MONOTONIC,
+ * which no step of the wall clock moves. */
+static double mono_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
 
 static int reply_json(struct _u_response *res, unsigned status,
                       const char *body)
@@ -428,14 +437,14 @@ static void job_finish(const char *fmt, ...)
  * somebody else's (the holder in why), -4 an upload is streaming. */
 static pthread_mutex_t up_mu;
 static FILE *up_fp;
-static time_t up_last;
+static double up_last;
 
 static int job_start(const char *kind, void *(*worker)(void *), void *arg, char *why, size_t len)
 {
     if (!machine_is_idle())
         return -2;
     pthread_mutex_lock(&up_mu);
-    int uploading = up_fp != NULL && time(NULL) - up_last < 60;
+    int uploading = up_fp != NULL && mono_s() - up_last < 60;
     pthread_mutex_unlock(&up_mu);
     if (uploading)
         return -4;
@@ -1253,7 +1262,7 @@ int update_upload_sink(const struct _u_request *req, const char *key,
         /* One upload at a time: a second one while the first still
          * streams is refused, not adopted. An upload whose sender went
          * away mid-stream is abandoned after a minute of silence. */
-        if (up_fp && up_owner != req && time(NULL) - up_last < 60) {
+        if (up_fp && up_owner != req && mono_s() - up_last < 60) {
             pthread_mutex_unlock(&up_mu);
             return U_OK;                /* the handler reports the refusal */
         }
@@ -1283,7 +1292,7 @@ int update_upload_sink(const struct _u_request *req, const char *key,
         }
     }
     if (up_fp && up_owner == req && !up_error) {
-        up_last = time(NULL);
+        up_last = mono_s();
         if (up_bytes + size > UPLOAD_MAX) {
             up_error = 1;
             snprintf(up_refusal, sizeof(up_refusal), "the archive exceeds the size limit");

@@ -1347,17 +1347,26 @@ static int cb_ext_package(const struct _u_request *req, struct _u_response *res,
     return cb_ext_status(req, res, NULL);
 }
 
+/* The clock for timeouts: CLOCK_MONOTONIC, which no step of the wall
+ * clock moves. */
+static double mono_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
 /* Installing a package: the archive is staged by the file sink, the host
  * says what it is, and the install carries the grants and the consent its
  * tier takes (extpkg.h). One upload at a time; one whose sender went away
- * is abandoned after a minute. The staging write is gated as the firmware
- * upload's is: the machine idle and no lease in the way. */
+ * is abandoned after a minute of silence. The staging write is gated as
+ * the firmware upload's is: the machine idle and no lease in the way. */
 static pthread_mutex_t extup_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE *extup_fp;
 static const struct _u_request *extup_owner;
 static uint64_t extup_bytes;
 static int extup_error;
-static time_t extup_last;
+static double extup_last;               /* the upload's last chunk, on mono_s()'s clock */
 static char extup_refusal[96];
 static int extcat_busy;                 /* a package is being fetched from the catalog into the staging file */
 
@@ -1370,7 +1379,7 @@ static int ext_upload_sink(const struct _u_request *req, const char *data, uint6
         return 1;                       /* unauthorized bytes touch nothing; the handler answers them */
     pthread_mutex_lock(&extup_mu);
     if (off == 0) {
-        if (extup_fp && extup_owner != req && time(NULL) - extup_last < 60) {
+        if (extup_fp && extup_owner != req && mono_s() - extup_last < 60) {
             pthread_mutex_unlock(&extup_mu);
             return 1;                   /* the handler reports the refusal */
         }
@@ -1402,7 +1411,7 @@ static int ext_upload_sink(const struct _u_request *req, const char *data, uint6
         extup_error = extup_refusal[0] != '\0';
     }
     if (extup_fp && extup_owner == req && !extup_error) {
-        extup_last = time(NULL);
+        extup_last = mono_s();
         if (extup_bytes + size > EXTPKG_UPLOAD_MAX) {
             extup_error = 1;
             snprintf(extup_refusal, sizeof(extup_refusal), "the archive exceeds the size limit");
@@ -1572,7 +1581,7 @@ static int cb_ext_catalog_get(const struct _u_request *req, struct _u_response *
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is not idle");
     pthread_mutex_lock(&extup_mu);
-    if ((extup_fp && time(NULL) - extup_last < 60) || extcat_busy) {
+    if ((extup_fp && mono_s() - extup_last < 60) || extcat_busy) {
         pthread_mutex_unlock(&extup_mu);
         return reply_error(res, 409, extcat_busy ? "a package is being fetched from the catalog already"
                                                  : "an upload is in progress");
