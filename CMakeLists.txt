@@ -518,11 +518,14 @@ target_link_libraries(fflog_e2e_test pthread)
 # them as the lint counts a step: a comment is not read, and a step under
 # an if: other than true, or with a continue-on-error: other than false,
 # on the step or on its job, runs nothing. A *_test target stops the
-# configure here unless a step that counts has ./build/<name> as its own
-# run: line. fflog_e2e_test is the emitter half of tests/fflog_e2e.sh,
-# which is the test and the step. The loop sees only the targets declared
-# above it, so this block stays last: an add_executable() after it stops
-# the configure.
+# configure here unless a step that counts has ./build/<name> as its whole
+# run: line, with nothing after the name (no || true, | tee or &).
+# fflog_e2e_test is the emitter half of tests/fflog_e2e.sh, which is the
+# test and the step: its run: line starts with the script, after sudo and
+# sh when given, and holds no | or &. The lint counts a test in any
+# command of a run: line; the configure counts these two forms alone. The
+# loop sees only the targets declared above it, so this block stays last:
+# an add_executable() after it stops the configure.
 enable_testing()
 
 # The run: lines of the steps in a workflow that run on every run and fail
@@ -657,23 +660,25 @@ foreach(t ${ALL_TARGETS})
     continue()
   endif()
   if(t STREQUAL "fflog_e2e_test")
-    set(want "tests/fflog_e2e.sh")
-    set(step "(^|[ \t])tests/fflog_e2e\\.sh([ \t]|$)")
+    set(want "a run: line that starts with tests/fflog_e2e.sh, after sudo and sh when given, and holds no | or &")
+    set(step "^(sudo[ \t]+)?(sh[ \t]+)?tests/fflog_e2e\\.sh([ \t]|$)")
   else()
     add_test(NAME ${t} COMMAND ${t} WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-    set(want "./build/${t}")
-    set(step "^\\./build/${t}([ \t]|$)")
+    set(want "./build/${t} as its whole run: line")
+    set(step "^\\./build/${t}$")
   endif()
   set(ran FALSE)
   foreach(r IN LISTS CI_RUNS)
-    if(r MATCHES "${step}")
+    # A | or an & can hide the test's exit status: || true, | tee, a job in
+    # the background.
+    if(r MATCHES "${step}" AND NOT r MATCHES "[|&]")
       set(ran TRUE)
     endif()
   endforeach()
   if(NOT ran)
     message(FATAL_ERROR "${t} has no step that runs it in .github/workflows/build.yml: "
-                        "none runs ${want} on its own run: line with no if: or continue-on-error: "
-                        "on the step or its job")
+                        "no step has ${want}, with no if: other than true and no "
+                        "continue-on-error: other than false on the step or its job")
   endif()
 endforeach()
 
