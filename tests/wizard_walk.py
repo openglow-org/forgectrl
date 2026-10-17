@@ -39,6 +39,14 @@ complete; one setting saved through the panel's save bar; and the login
 page, which refuses a wrong password and signs the account in, the
 session read back from GET /wiz.
 
+Against the mock, the walk then starts a diagnostic on the panel's Setup
+tab. The daemon refuses a start (409, "machine is not idle") until the
+cooling engine's tick takes the thermal hardware back from the diagnostic
+before it. The walk has the mock refuse the next starts that way. A start
+refused once goes again a second later, and the page shows the diagnostic
+started and never the refusal. A start refused twice shows the refusal
+after the second start, and the page sends no third.
+
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
 
@@ -96,8 +104,9 @@ var F = document.getElementById('f'), log = [];
 var NAME = 'walker', PW = 'correct horse';
 /* The walk's plan: the check the page opens after the forms and the prompt
  * it shows there (none against the daemon), how long its result may take,
- * and whether the panel is signed out before the login (the daemon serves
- * the login page to no session). */
+ * whether the panel is signed out before the login (the daemon serves
+ * the login page to no session), and whether the walk starts diagnostics
+ * on the panel (against the mock alone). */
 var PLAN = __PLAN__, FLOW = PLAN.check.prompt;
 /* The fields the first step holds GET /wiz to, each with its type
  * (document 0 is the typed one). The page reads each of them on a first
@@ -295,6 +304,47 @@ var STEPS = [
       .then(function (s) {
         if (s.session !== true) throw new Error('the panel again, but GET /wiz reads no session: ' + JSON.stringify(s.session)); }); }]
 ];
+/* The panel's diagnostic starts, against the mock alone. The walk sets how
+ * many starts the mock refuses (busy). The daemon refuses a start that way
+ * until the cooling engine's tick takes the thermal hardware back. The
+ * walk reads back the answer to each start the page sent, with its time in
+ * seconds after the first, as the mock took them. */
+var REFUSAL = 'machine is not idle', VERIFY = '#s-diag button[onclick*="flow-verify"]';
+function engineBusy(n) { return fetch('/__walk/diag?busy=' + n, { method: 'POST' }); }
+function answered(want) {
+  return api('/__walk/diag').then(function (s) {
+    var got = s.starts.map(function (x) { return x[0]; });
+    if (JSON.stringify(got) !== JSON.stringify(want))
+      throw new Error('the starts were answered ' + JSON.stringify(got) + ', not ' + JSON.stringify(want));
+    if (s.starts[1][1] < 0.9) throw new Error('the second start came ' + s.starts[1][1] + ' s after the first'); });
+}
+if (PLAN.diag) STEPS = STEPS.concat([
+  ['a diagnostic start the cooling engine refuses goes again a second later, and the panel shows the diagnostic started, never the refusal', function () {
+    click('#t-diag');
+    return until('the Setup tab, its controls free', function () { return on('s-diag') && !el(VERIFY).disabled; })
+      .then(function () { return engineBusy(1); })
+      .then(function () {
+        click(VERIFY);
+        return until('the diagnostic started, or a refusal', function () {
+          return (w().D.running && shown('#diagabort')) || q('#msg-d').textContent === REFUSAL; }, 10000); })
+      .then(function () {
+        if (q('#msg-d').textContent) throw new Error('the panel shows ' + JSON.stringify(q('#msg-d').textContent));
+        return answered([409, 202]); })
+      .then(function () {
+        click('#diagabort');
+        return until('the diagnostic ended, the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
+  ['a start the cooling engine refuses twice shows the refusal after the second start, and the panel sends no third', function () {
+    return engineBusy(2)
+      .then(function () {
+        click(VERIFY);
+        return until('the refusal', function () { return q('#msg-d').textContent === REFUSAL; }, 10000); })
+      /* A third start would go a second after the second answer. */
+      .then(function () { return sleep(1500); })
+      .then(function () { return answered([409, 409]); })
+      .then(function () {
+        if (w().D.running || q('#msg-d').textContent !== REFUSAL)
+          throw new Error('after the second refusal a diagnostic runs, or the panel shows ' + JSON.stringify(q('#msg-d').textContent)); }); }]
+]);
 
 function run() {
   var s = Promise.resolve();
@@ -321,9 +371,18 @@ class Walk(devserver.Handler):
     daemon = None
     result = None
     said = []
+    # The answers to the page's diagnostic starts since the walk last set
+    # the mock's engine refusals: (status, monotonic seconds) each.
+    starts = []
 
     def _say(self, msg):
         Walk.said.append(msg)
+
+    def _send(self, code, headers, body):
+        p = urlsplit(self.path).path
+        if self.command == "POST" and p.startswith("/diag/") and p != "/diag/abort":
+            Walk.starts.append((code, time.monotonic()))
+        devserver.Handler._send(self, code, headers, body)
 
     def _route(self):
         u = urlsplit(self.path)
@@ -334,6 +393,13 @@ class Walk(devserver.Handler):
         if u.path == "/__walk/result" and self.command == "POST":
             Walk.result = json.loads(self._read_body() or b"{}")
             return self._json(200, {"ok": True})
+        if u.path == "/__walk/diag" and Walk.mock:
+            if self.command == "POST":
+                with Walk.mock.lock:
+                    Walk.mock.diag_engine_busy = int(q.get("busy", "0"))
+                Walk.starts = []
+            t0 = Walk.starts[0][1] if Walk.starts else 0.0
+            return self._json(200, {"starts": [[c, round(t - t0, 3)] for c, t in Walk.starts]})
         if Walk.daemon:
             return self._proxy(u)
         if self.command in ("GET", "HEAD") and (u.path in ("/setup", "/login") or (u.path == "/" and "action" not in q)):
@@ -407,8 +473,10 @@ def main():
             print("--daemon takes HOST:PORT, the daemon's HTTPS listener")
             return 2
         # The daemon's own run of the flow calibration asks nothing; on a
-        # host its six windows take a few minutes.
-        Walk.plan = {"check": {"id": "cooling.flow", "prompt": None, "result_ms": 480000}, "logout": True}
+        # host its six windows take a few minutes. The diagnostic starts
+        # need the mock's engine refusals, which a daemon does not take.
+        Walk.plan = {"check": {"id": "cooling.flow", "prompt": None, "result_ms": 480000}, "logout": True,
+                     "diag": False}
         Walk.daemon = (host, int(port))
         Walk.cfg = types.SimpleNamespace(mock=False, token="",
                                          upstream=lambda: (host, int(port), "%s:%s" % (host, port)))
@@ -425,7 +493,7 @@ def main():
         os.environ["GF_MOCK_FIRST_RUN"] = "1"
         devserver.DARK_PROMPTS["cooling.flow"] = FLOW_PROMPT
         Walk.plan = {"check": {"id": "cooling.flow", "prompt": {"options": FLOW_OPTIONS, "hostile": FLOW_HOSTILE},
-                               "result_ms": 20000}, "logout": False}
+                               "result_ms": 20000}, "logout": False, "diag": True}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0
         Walk.cfg = types.SimpleNamespace(mock=True)

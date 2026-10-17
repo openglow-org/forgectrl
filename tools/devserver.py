@@ -931,6 +931,11 @@ class Mock:
             'result': DIAG_RESULTS['flow-calibrate'],
         }
         self.diag_t0 = 0.0
+        # At its next tick, once a second, the cooling engine takes the
+        # thermal hardware back from a diagnostic that ended. The daemon
+        # refuses a start before then as it refuses one on a busy machine.
+        # This many starts get that refusal here; a walk sets it.
+        self.diag_engine_busy = 0
         self.slots = {
             'booted': SLOT_TARGETS['a'],
             'env': {'mmcdev': '2', 'mmchwpart': '0', 'mmcpart': '1',
@@ -2984,6 +2989,9 @@ class Mock:
                 return T(409, 'machine is not idle')
             if self.lease_refusal():
                 return T(409, self.lease_refusal())
+            if self.diag_engine_busy:
+                self.diag_engine_busy -= 1
+                return T(409, 'machine is not idle')
             self.diag.update({'running': True, 'tool': tool, 'phase': '',
                               'elapsed_s': 0, 'log': [], 'result': None})
             self.diag_t0 = time.time()
