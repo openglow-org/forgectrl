@@ -139,7 +139,9 @@ static int kills[64];                   /* the signals sent, in order */
 static int nkills;
 static long kill_stop[64], kill_latch[64];  /* cnc/stop and cnc/laser_latch as each signal found them */
 static int crit_logs;                   /* the safing failures named (fflog at LOG_CRIT) */
+static char crit_named[64];             /* ...the write each names, in order: S cnc/stop, L cnc/laser_latch, ? another */
 static int kill_crit[64];               /* ...as each signal found them */
+static int reap_crit = -1;              /* ...as waitpid reported the death (-1: not yet) */
 static int runner_alive;                /* pgrep -x gfhome.py answers 0 */
 static int runner_term_ignored;         /* ...and SIGTERM does not end it */
 static int flock_fails;
@@ -176,6 +178,7 @@ pid_t fake_waitpid(pid_t pid, int *status, int flags)
     if (pid == death_pid) {
         *status = death_status;
         death_pid = 0;
+        reap_crit = crit_logs;          /* the notices named before the reap's own writes */
         return pid;
     }
     return 0;
@@ -272,11 +275,37 @@ void fflog(int prio, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
     va_end(ap);
-    if (prio == LOG_CRIT)
+    if (prio == LOG_CRIT) {
+        if (crit_logs < (int)sizeof(crit_named) - 1)
+            crit_named[crit_logs] = strstr(last_log, " cnc/stop ") ? 'S'
+                                  : strstr(last_log, " cnc/laser_latch ") ? 'L' : '?';
         crit_logs++;
+    }
     size_t n = strlen(logs);
     snprintf(logs + n, sizeof(logs) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
+}
+
+/* The notices from here on: none named yet, and no reap. */
+static void crit_reset(void)
+{
+    crit_logs = 0;
+    memset(crit_named, 0, sizeof(crit_named));
+    reap_crit = -1;
+}
+
+/* The write the notice at i names (0 past the record). */
+static char named_at(int i)
+{
+    return i >= 0 && i < (int)sizeof(crit_named) ? crit_named[i] : '\0';
+}
+
+/* The two notices from i name the safing pair, the stop and the latch,
+ * in either order. */
+static int pair_named(int i)
+{
+    char a = named_at(i), b = named_at(i + 1);
+    return (a == 'S' && b == 'L') || (a == 'L' && b == 'S');
 }
 
 static int engine_stops;
@@ -430,7 +459,7 @@ static void reset_state(void)
     runner_term_ignored = 0;
     flock_fails = 0;
     engine_stops = 0;
-    crit_logs = 0;
+    crit_reset();
     unlink_on_kill = NULL;
     led_last = -1;
     calls[0] = '\0';
@@ -626,13 +655,13 @@ int main(void)
     CHECK(wr_attr("cnc/stop", "1") == 0 && get_long("cnc/stop") == 1,
           "a write that fails once lands on its retry");
     unlink(GF_SYSFS "cnc/stop");
-    crit_logs = 0;
+    crit_reset();
     CHECK(wr_attr("cnc/stop", "1") == -1 && crit_logs == 1 && strstr(last_log, "3 times") != NULL,
           "three failures are named once, at the highest severity");
     put("cnc/stop", "0\n");
     bring_up();
     unlink(GF_SYSFS "cnc/laser_latch");
-    crit_logs = 0;
+    crit_reset();
     unlink_on_kill = "cnc/stop";        /* the stop attribute goes at the first signal */
     pthread_mutex_lock(&mu);
     suspended = 1;
@@ -641,11 +670,17 @@ int main(void)
     CHECK(child_pid == 0 && nkills >= 2 && kills[0] == SIGTERM && kill_stop[0] == 1,
           "the stop signals and reaps the controller, motion stopped before the signal");
     CHECK(strstr(logs, "laser_latch failed") != NULL, "a latch write that keeps failing is named");
-    /* Five notices: the latch before the signal; the latch and the stop
-     * after it; the latch and the stop at the reap. */
-    printf("    notices: %d before the signal, %d in all\n", kill_crit[0], crit_logs);
-    CHECK(kill_crit[0] == 1 && crit_logs == 5,
-          "the pair is tried again after the signal: one notice before it, five in all");
+    /* Each notice names its write: the latch before the signal; the
+     * stop and the latch after it, before the reap; the stop and the
+     * latch at the reap. Within a pair the order is free. */
+    int at_signal = kill_crit[0], at_reap = reap_crit;
+    printf("    notices: %s (%d before the signal, %d before the reap)\n", crit_named, at_signal, at_reap);
+    CHECK(at_signal == 1 && named_at(0) == 'L',
+          "the latch write before the signal is named, and no other write");
+    CHECK(at_reap - at_signal == 2 && pair_named(at_signal),
+          "the pair is tried again after the signal: the stop and the latch named before the reap");
+    CHECK(at_reap >= 0 && crit_logs - at_reap == 2 && pair_named(at_reap),
+          "and once more at the reap: the stop and the latch");
     put("cnc/laser_latch", "0\n");
     put("cnc/stop", "0\n");
 
