@@ -45,7 +45,9 @@ cooling engine's tick takes the thermal hardware back from the diagnostic
 before it. The walk has the mock refuse the next starts that way. A start
 refused once goes again a second later, and the page shows the diagnostic
 started and never the refusal. A start refused twice shows the refusal
-after the second start, and the page sends no third.
+after the second start, and the page sends no third. A start refused
+once and pressed again starts once, and after the operator's Abort the
+first press's second start never goes.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -311,11 +313,15 @@ var STEPS = [
  * seconds after the first, as the mock took them. */
 var REFUSAL = 'machine is not idle', VERIFY = '#s-diag button[onclick*="flow-verify"]';
 function engineBusy(n) { return fetch('/__walk/diag?busy=' + n, { method: 'POST' }); }
-function answered(want) {
+function startsWere(want) {
   return api('/__walk/diag').then(function (s) {
     var got = s.starts.map(function (x) { return x[0]; });
     if (JSON.stringify(got) !== JSON.stringify(want))
       throw new Error('the starts were answered ' + JSON.stringify(got) + ', not ' + JSON.stringify(want));
+    return s; });
+}
+function answered(want) {
+  return startsWere(want).then(function (s) {
     if (s.starts[1][1] < 0.9) throw new Error('the second start came ' + s.starts[1][1] + ' s after the first'); });
 }
 if (PLAN.diag) STEPS = STEPS.concat([
@@ -343,7 +349,26 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { return answered([409, 409]); })
       .then(function () {
         if (w().D.running || q('#msg-d').textContent !== REFUSAL)
-          throw new Error('after the second refusal a diagnostic runs, or the panel shows ' + JSON.stringify(q('#msg-d').textContent)); }); }]
+          throw new Error('after the second refusal a diagnostic runs, or the panel shows ' + JSON.stringify(q('#msg-d').textContent)); }); }],
+  ['a refused start pressed again starts once, and after the operator\'s Abort nothing starts again', function () {
+    return engineBusy(1)
+      .then(function () { click(VERIFY); return sleep(300); })
+      .then(function () {
+        click(VERIFY);
+        return until('the diagnostic started', function () { return w().D.running && shown('#diagabort'); }, 2000); })
+      /* The panel's poll of /diag/status can land between the Abort and
+       * the refused press's second start: the walk has it land there. */
+      .then(function () { click('#diagabort'); return sleep(100); })
+      .then(function () {
+        w().loadDiag();
+        return until('the diagnostic ended', function () { return !w().D.running; }, 2000); })
+      .then(function () { return sleep(1500); })
+      .then(function () { return startsWere([409, 202]); })
+      .then(function () { return api('/diag/status'); })
+      .then(function (s) {
+        if (s.running) throw new Error('1.5 s after the Abort, ' + s.tool + ' runs'); })
+      .then(function () {
+        return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }]
 ]);
 
 function run() {

@@ -1577,8 +1577,14 @@ $('fusewrap').onclick = function (e) {
  * hardware back from a diagnostic that ended. Until then the daemon
  * refuses a start as it refuses one on a busy machine: 409, "machine is
  * not idle". The panel sends that start once more after one second, and
- * shows the refusal only when the second start is refused too. */
+ * shows the refusal only when the second start is refused too. Each press
+ * of a start and each Abort counts in diagPress, and the second start goes
+ * only while the count is still the one its press took: a later press or
+ * an Abort cancels it. */
+var diagPress = 0;
 function startDiag(t, again) {
+  if (!again) diagPress++;
+  var press = diagPress;
   $('msg-d').textContent = 'starting\u2026';
   fx('/diag/' + t, { method: 'POST' })
     .then(function (r) {
@@ -1586,7 +1592,7 @@ function startDiag(t, again) {
         return r.text().then(function (x) {
           if (!again && r.status === 409 && x === 'machine is not idle') {
             setTimeout(function () {
-              startDiag(t, true);
+              if (press === diagPress) startDiag(t, true);
             }, 1000);
             return;
           }
@@ -1600,6 +1606,7 @@ function startDiag(t, again) {
     });
 }
 function abortDiag() {
+  diagPress++;
   fx('/diag/abort', { method: 'POST' });
 }
 function applyRec(v) {
