@@ -99,17 +99,25 @@ var NAME = 'walker', PW = 'correct horse';
  * and whether the panel is signed out before the login (the daemon serves
  * the login page to no session). */
 var PLAN = __PLAN__, FLOW = PLAN.check.prompt;
-/* The fields the page reads from GET /wiz on a first run, each with its
- * type (document 0 is the typed one). The page reads two more that a
- * first run's GET /wiz does not carry: users.extension_packages, sent
- * only while an owner reset is pending, and machine.model_label, which
- * neither backend sends. */
+/* The fields the first step holds GET /wiz to, each with its type
+ * (document 0 is the typed one). The page reads each of them on a first
+ * run, but for these:
+ *   first_run, gate and why: the walk reads them itself
+ *   wizards and its entries: the panel reads them when it loads
+ *   documents.0.hash: no page reads it (the page posts the ETag of
+ *     GET /advisories/<id>); the host tests seed their records with it
+ * The page also reads fields that a first run's GET /wiz does not carry:
+ *   users.extension_packages: sent only while an owner reset is pending
+ *   the extensions entries' id, title, done and unanswered: sent only
+ *     when a package adds a check
+ *   machine.model_label: neither backend sends it */
 var READS = [['documents', 'array'], ['documents.0.id', 'string'], ['documents.0.title', 'string'],
   ['documents.0.consent', 'string'], ['documents.0.phrase', 'string'], ['documents.0.hash', 'string'],
   ['documents.0.accepted', 'boolean'],
   ['advisories_complete', 'boolean'], ['acceptance_done', 'boolean'], ['completed', 'boolean'],
   ['fans_counted', 'boolean'], ['first_run', 'boolean'], ['gate', 'string'], ['why', 'string'],
-  ['versions', 'object'], ['missing', 'array'], ['recommended', 'array'], ['extensions', 'array'],
+  ['versions', 'object'], ['missing', 'array'], ['recommended', 'array'], ['recommended.0.id', 'string'],
+  ['extensions', 'array'],
   ['wizards', 'array'], ['wizards.0.id', 'string'], ['wizards.0.title', 'string'], ['wizards.0.done', 'number'],
   ['users.exists', 'boolean'], ['users.reset_pending', 'boolean'], ['users.name', 'string'],
   ['sheet_id', 'string'], ['clock.utc', 'string'], ['clock.set', 'boolean'], ['machine.firmware', 'string'],
