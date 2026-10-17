@@ -998,6 +998,25 @@ out:
 
 /* ------------------------------------------- the cooling diagnostics */
 
+/* The cooling engine publishes its phase at its tick, once a second: a
+ * diagnostic that has handed the thermal hardware back still reads
+ * "diag" until the next tick, and until the phase reads "idle" the
+ * engine refuses the next takeover. */
+#define ENGINE_IDLE_WAIT_S 5
+
+static int engine_idle(void *ctx)
+{
+    (void)ctx;
+    char st[COOL_STATUS_JSON_MAX];
+    if (cool_status_json(st, sizeof(st)) != 0)
+        return 0;
+    json_t *o = json_loads(st, 0, NULL);
+    const char *ph = json_string_value(json_object_get(o, "phase"));
+    int idle = ph && !strcmp(ph, "idle");
+    json_decref(o);
+    return idle;
+}
+
 /* Run one of diag.c's tools to its end; the parsed result object, or
  * NULL after an abort. heater_pct above 0 is the run's own heater duty
  * (a flow calibration's rung); 0 runs the tool as the machine is
@@ -1102,6 +1121,11 @@ static void run_cooling_flow(void)
             json_decref(res);
             res = NULL;
             duty = wizcalc_next_duty(duty);
+            /* The next rung asks for the hardware once the engine has
+             * taken it back from this one; past the wait, the rung's
+             * start says why it cannot run. */
+            if (duty > 0.0 && wait_for(engine_idle, NULL, ENGINE_IDLE_WAIT_S) == -1)
+                return;
             continue;
         }
         finish_err("%s", err);
