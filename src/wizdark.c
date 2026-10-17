@@ -218,11 +218,11 @@ static int aborted(void)
     return a;
 }
 
-/* Wait up to timeout_s for cond(ctx) to be true, polling at 100 ms;
- * -1 on abort, -2 on timeout, 0 when the condition held. */
-static int wait_for(int (*cond)(void *), void *ctx, int timeout_s)
+/* Wait until deadline (on wall_s()'s clock) for cond(ctx) to be true,
+ * polling at 100 ms; -1 on abort, -2 past the deadline, 0 when the
+ * condition held. */
+static int wait_until(int (*cond)(void *), void *ctx, double deadline)
 {
-    double deadline = wall_s() + timeout_s;
     for (;;) {
         if (aborted())
             return -1;
@@ -232,6 +232,12 @@ static int wait_for(int (*cond)(void *), void *ctx, int timeout_s)
             return -2;
         msleep(100);
     }
+}
+
+/* The same, for up to timeout_s from now. */
+static int wait_for(int (*cond)(void *), void *ctx, int timeout_s)
+{
+    return wait_until(cond, ctx, wall_s() + timeout_s);
 }
 
 /* Put a prompt up and block for the answer. kind: "continue" (one
@@ -289,8 +295,11 @@ static int ask(const char *kind, const char *pid, const char *text,
 
 /* A "wait" prompt: the page shows the text and the phase while the
  * machine itself answers (a switch edge, the press a job waits for).
- * wait_open puts it up; wait_close takes it down. */
-static void wait_open(const char *pid, const char *text, int timeout_s)
+ * wait_open puts it up and returns its deadline, read in the same lock
+ * hold: a wait on that deadline ends when the page's count does, and
+ * the prompt shows only after the deadline is read. wait_close takes it
+ * down. */
+static double wait_open(const char *pid, const char *text, int timeout_s)
 {
     pthread_mutex_lock(&mu);
     S.prompt_seq = ++seq_counter;
@@ -300,7 +309,9 @@ static void wait_open(const char *pid, const char *text, int timeout_s)
     S.prompt_nopt = 0;
     S.prompt_until = wall_s() + timeout_s;
     S.prompt_timeout = timeout_s;
+    double until = S.prompt_until;
     pthread_mutex_unlock(&mu);
+    return until;
 }
 
 static void wait_close(void)
@@ -429,10 +440,10 @@ static int edge(const char *pid, const char *text, unsigned bit, int want, int t
      * the button blinks amber until the lid answers. */
     int lid = bit == 3 && want == 1;
     phase("%s", text);
-    wait_open(pid, text, timeout_s);
+    double until = wait_open(pid, text, timeout_s);
     if (lid)
         wiz_led_attention(1);
-    int rc = wait_for(bit_is, &w, timeout_s);
+    int rc = wait_until(bit_is, &w, until);
     if (lid)
         wiz_led_attention(0);
     wait_close();
@@ -1988,23 +1999,31 @@ static int envelope_op(const char *what)
 }
 
 /* One port jog, relative, and its end: 0, 1 refused (the reason logged),
- * -1 aborted or the port gone. */
-static int envelope_jog(double dx, double dy, double feed)
+ * -1 aborted, -2 not ended: the port did not take the jog, or the jog
+ * did not end within 60 s, and reason says which. */
+static int envelope_jog(double dx, double dy, double feed, char *reason, size_t rlen)
 {
     char words[96], err[96], reply[64], why[128];
     if (grblport_jog_words(dx, dy, 0, feed, words, sizeof(words), err, sizeof(err)) != 0) {
         wlog("%s", err);
         return 1;
     }
-    if (grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_JOG, words, reply, sizeof(reply)) != GRBLPORT_OK)
-        return -1;
+    if (grblport_request(GRBLPORT_SET_PANEL, GRBLPORT_JOG, words, reply, sizeof(reply)) != GRBLPORT_OK) {
+        snprintf(reason, rlen, "the jog did not reach the controller: %s", reply);
+        return -2;
+    }
     if (grblport_explain(reply, why, sizeof(why)) != 0) {
         wlog("the jog was refused: %s", why);
         return 1;
     }
     port_state_t p;
-    if (wait_for(port_jog_done, &p, 60) != 0)
+    int rc = wait_for(port_jog_done, &p, 60);
+    if (rc == -1)
         return -1;
+    if (rc != 0) {
+        snprintf(reason, rlen, "the jog did not end within 60 s: the controller held it, or stopped answering");
+        return -2;
+    }
     kernel_wait_idle(3.0, NULL);
     return 0;
 }
@@ -2013,12 +2032,14 @@ static const char ENVELOPE_CLOSED[] = "a Grbl client sent a line, which closed t
                                       "again when nothing else is sending";
 
 /* Jogs toward one far end until the operator says it is the end: 0 with
- * the position then, -1 aborted, the envelope closed, or no answer. */
+ * the position then, -1 aborted, the envelope closed, no answer, or a
+ * jog that did not end. Each -1 but an abort has ended the step with its
+ * reason (the worker names an abort). */
 static int measure_end(char axis, const char *text, double *end_mm)
 {
     static const char *const x_opts[] = { "X+10", "X+1", "X+0.1", "X-0.1", "X-1", "X-10", "This is the end" };
     static const char *const y_opts[] = { "Y+10", "Y+1", "Y+0.1", "Y-0.1", "Y-1", "Y-10", "This is the end" };
-    char a[24];
+    char a[24], reason[128];
     port_state_t p;
     for (;;) {
         if (ask("jog", axis == 'X' ? "x-end" : "y-end", text, axis == 'X' ? x_opts : y_opts, 7, a, sizeof(a)) != 0)
@@ -2036,7 +2057,10 @@ static int measure_end(char axis, const char *text, double *end_mm)
             wlog("the lid is open: close it to jog");
             continue;
         }
-        if (envelope_jog(axis == 'X' ? d : 0, axis == 'Y' ? d : 0, ENVELOPE_JOG_FEED) < 0)
+        int rc = envelope_jog(axis == 'X' ? d : 0, axis == 'Y' ? d : 0, ENVELOPE_JOG_FEED, reason, sizeof(reason));
+        if (rc == -2 && !aborted())
+            finish_err("%s", reason);
+        if (rc < 0)
             return -1;
     }
     *end_mm = axis == 'X' ? p.x : p.y;
@@ -2098,7 +2122,8 @@ static void run_envelope(void)
     }
     opened = 0;
     /* Back toward the home, inside the new envelope, in the port's bounded
-     * steps. A refusal leaves the head where it is. */
+     * steps. A refusal, or a jog that does not end, leaves the head where
+     * it is: the measurement is written, so the step still ends with it. */
     phase("back toward the home");
     for (int i = 0; i < 12 && port_state(&p) == 0; i++) {
         double dx = 10.0 - p.x, dy = 10.0 - p.y;
@@ -2106,7 +2131,8 @@ static void run_envelope(void)
             break;
         dx = fmax(-GRBLPORT_JOG_MAX_XY_MM, fmin(GRBLPORT_JOG_MAX_XY_MM, dx));
         dy = fmax(-GRBLPORT_JOG_MAX_XY_MM, fmin(GRBLPORT_JOG_MAX_XY_MM, dy));
-        if (!machine_lid_closed() || envelope_jog(dx, dy, ENVELOPE_BACK_FEED) != 0)
+        char why[128];
+        if (!machine_lid_closed() || envelope_jog(dx, dy, ENVELOPE_BACK_FEED, why, sizeof(why)) != 0)
             break;
     }
     json_object_set_new(r, "x_end_mm", json_real(x_end));

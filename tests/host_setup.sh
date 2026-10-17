@@ -42,7 +42,9 @@
 #       a jog that offers This is the end, the ends are the home plus the
 #       jogs, the keys the ends less 1 mm, the envelope opened and
 #       applied; a Grbl client's line closing the envelope ends the next
-#       run at its answer with nothing written
+#       run at its answer with nothing written; a jog the port hangs up
+#       on, and a jog that holds past its wait, each end the check with
+#       its reason, nothing written and the envelope set back
 #     the flow check: the diagnostic's phases are the check's, its
 #       result the check's with pass true, and a thin margin flags the
 #       calibration in the record
@@ -443,21 +445,31 @@ EOF
 # position it reports, the envelope opened (refused, error:homed, until
 # $T/port.homed stands, as the controller refuses it before a home) and
 # applied. $T/port.sender is a Grbl client's line: it closes an open
-# envelope, as the controller does. The head starts at X10 Y10.
-python3 - "$T/run/grbl.ctl" "$T/port.log" "$T/port" <<'EOF' &
+# envelope, as the controller does. The head starts at X10 Y10. Two
+# jogs that do not end: while $T/port.hangup stands, the port hangs up
+# at a jog line before any answer; while $T/port.stall stands, a jog
+# holds (state reads Hold), and the clock stand-in's .mono flag stands
+# from the jog's answer to the next state read. The daemon reads its
+# deadline for the jog's end between the two, so that 60 s wait is past
+# when it is next checked.
+python3 - "$T/run/grbl.ctl" "$T/port.log" "$T/port" "$T/timeshift.mono" <<'EOF' &
 import json, os, socket, sys, threading
-path, log, ctl = sys.argv[1], sys.argv[2], sys.argv[3]
-st = {'x': 10.0, 'y': 10.0, 'open': False}
+path, log, ctl, mono = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+st = {'x': 10.0, 'y': 10.0, 'open': False, 'held': False}
 mu = threading.Lock()
 def answer(words):
     if os.path.exists(ctl + '.sender'):
         os.unlink(ctl + '.sender')
         st['open'] = False
+    if not os.path.exists(ctl + '.stall'):
+        st['held'] = False
     homed = 3 if os.path.exists(ctl + '.homed') else 0
     if words[:1] == ['state']:
-        return json.dumps({'state': 'Idle', 'sender': False, 'port_jog': False, 'released': False,
-                           'mpos': [round(st['x'], 3), round(st['y'], 3), 0.0], 'homed': homed,
-                           'envelope_open': st['open'], 'mcode': None, 'sender_out': False,
+        if st['held'] and os.path.exists(mono):
+            os.unlink(mono)
+        return json.dumps({'state': 'Hold' if st['held'] else 'Idle', 'sender': False, 'port_jog': False,
+                           'released': False, 'mpos': [round(st['x'], 3), round(st['y'], 3), 0.0],
+                           'homed': homed, 'envelope_open': st['open'], 'mcode': None, 'sender_out': False,
                            'tray': 'in'})
     if words[:2] == ['envelope', 'open']:
         if not homed:
@@ -469,11 +481,18 @@ def answer(words):
         for w in words[1:]:
             if w[:1] in ('X', 'Y'):
                 st[w[0].lower()] += float(w[1:])
+        if os.path.exists(ctl + '.stall'):
+            st['held'] = True
+            open(mono, 'w').close()
     return 'ok'
 def serve(c):
     for line in c.makefile('rb'):
         with open(log, 'ab') as o:
             o.write(line)
+        if line.split()[:1] == [b'jog'] and os.path.exists(ctl + '.hangup'):
+            c.shutdown(socket.SHUT_RDWR)
+            c.close()
+            return
         with mu:
             reply = answer(line.decode().split())
         c.sendall(reply.encode() + b'\n')
@@ -814,8 +833,9 @@ expect "|True|True|$SENSOR" "$(run '"%s|%s|%s|%s" % (d["dark"]["error"], d["dark
 expect 1 "$(recv cameras)" "the record carries cameras at version 1"
 sw 8
 # A lid nobody closes: the wait runs out and the check ends with its
-# reason. The clock stand-in's .mono flag, taken off as the wait opens,
-# puts the wait's deadline 10 s off on the kernel's clock.
+# reason. The clock stand-in's .mono flag puts the wait's deadline 10 s
+# off on the kernel's clock: the wait reads its deadline as it puts the
+# prompt up, and the flag comes off once the prompt shows.
 sw 0
 : > "$T/timeshift.mono"
 check cameras "on:lid-close=rm -f $T/timeshift.mono"
@@ -864,6 +884,21 @@ check motion.envelope "on:x-end=touch $T/port.sender" answer:x-end=X+1
 expect '200|True|1' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), len(d["prompts"]))')" \
     "a Grbl client's line closing the envelope ends the check at the answer, in an error"
 cmp -s "$T/conf.mid" "$CONF" && ok "and nothing is written" || bad "the closed check wrote a setting"
+# A jog that does not end ends the check with its reason, nothing
+# written and the envelope set back: the port hangs up at the jog line
+# (hangup), or the jog holds past its 60 s wait (stall).
+for how in hangup stall; do
+    : > "$T/port.log"
+    touch "$T/port.$how"
+    check motion.envelope answer:x-end=X+1
+    rm -f "$T/port.$how" "$T/timeshift.mono"
+    expect 'x-end|True|True|False' \
+        "$(run '"%s|%s|%s|%s" % ("|".join(p["id"] for p in d["prompts"]), bool(d["dark"]["error"]), d["dark"]["result"] is None, d["dark"].get("timed_out", False))')" \
+        "$how: a jog that does not end ends the check with its reason ($(run 'd["dark"]["error"]')), and no result"
+    expect 'envelope open|envelope apply' "$(grep '^envelope' "$T/port.log" | tr '\n' '|' | sed 's/|$//')" \
+        "$how: and the envelope is set back"
+    cmp -s "$T/conf.mid" "$CONF" && ok "$how: and nothing is written" || bad "$how: the check wrote a setting"
+done
 rm -f "$T/port.homed"
 expect 200 "$(post '/settings?envelope_x_mm=&envelope_y_mm=' "$TOKEN")" "clearing the keys is 200"
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the keys were not cleared"
