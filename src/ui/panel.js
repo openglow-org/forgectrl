@@ -1580,7 +1580,8 @@ $('fusewrap').onclick = function (e) {
  * shows the refusal only when the second start is refused too. Each press
  * of a start and each Abort counts in diagPress, and the second start goes
  * only while the count is still the one its press took: a later press or
- * an Abort cancels it. */
+ * an Abort cancels it. A later press writes its own text over the
+ * canceled press's "starting"; the Abort clears it. */
 var diagPress = 0;
 function startDiag(t, again) {
   if (!again) diagPress++;
@@ -1607,6 +1608,7 @@ function startDiag(t, again) {
 }
 function abortDiag() {
   diagPress++;
+  $('msg-d').textContent = '';
   fx('/diag/abort', { method: 'POST' });
 }
 function applyRec(v) {

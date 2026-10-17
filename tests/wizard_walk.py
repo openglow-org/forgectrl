@@ -50,7 +50,8 @@ for another reason (a diagnostic running) shows the refusal at once, and
 the page sends no second. A start refused once and pressed again starts
 once: the press cancels the first press's second start. A start refused
 once, where another client starts the diagnostic and the operator aborts
-it, never goes again: the Abort alone cancels the second start.
+it, never goes again: the Abort alone cancels the second start, and
+clears the press's "starting" text.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -393,7 +394,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
         if (s.running) throw new Error('1.5 s after the Abort, ' + s.tool + ' runs'); })
       .then(function () {
         return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
-  ['a refused start\'s second start is canceled by the operator\'s Abort alone: another client starts the diagnostic, the operator aborts it, and nothing starts again', function () {
+  ['a refused start\'s second start is canceled by the operator\'s Abort alone: another client starts the diagnostic, the operator aborts it, nothing starts again, and the Abort clears the press\'s starting text', function () {
     var t0;
     return engineBusy(1)
       .then(function () { t0 = Date.now(); click(VERIFY); return sleep(300); })
@@ -413,7 +414,8 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { return startsWere([409, 202]); })
       .then(function () { return api('/diag/status'); })
       .then(function (s) {
-        if (s.running) throw new Error('1.7 s after the refused press, ' + s.tool + ' runs'); })
+        if (s.running) throw new Error('1.7 s after the refused press, ' + s.tool + ' runs');
+        if (q('#msg-d').textContent) throw new Error('after the Abort the panel shows ' + JSON.stringify(q('#msg-d').textContent)); })
       .then(function () {
         return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }]
 ]);
