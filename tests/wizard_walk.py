@@ -261,7 +261,12 @@ var STEPS = [
         if (s.completed !== true || s.gate !== 'open') throw new Error('the setup reads ' + JSON.stringify({ completed: s.completed, gate: s.gate, why: s.why })); }); }],
   ['the panel saves a setting through its save bar', function () {
     var to;
-    return until('the units field read', function () { return q('#ui_units') && q('#ui_units').value; })
+    /* The panel's first GET /settings fills every field and takes it as
+     * the field's saved value, so an edit made before it is lost. The
+     * select has a value from its first option on, so the wait is for
+     * that fill. */
+    return until('the settings read into the panel', function () {
+      return q('#ui_units') && w().orig && w().orig.ui_units !== undefined; })
       .then(function () {
         to = q('#ui_units').value === 'imperial' ? 'metric' : 'imperial';
         set('#ui_units', to);
