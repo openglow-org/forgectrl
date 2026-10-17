@@ -102,8 +102,12 @@ The board binary is a cross-build, never a native one:
   CI goes red.
 - This repository's CI checks out `forgeext` at the head of its default
   branch, unpinned, and builds `holds_wire_test` from its
-  `src/holdkeep.c`. **When the hold files change, push `forgeext`
-  first**, then the change here that matches it.
+  `src/holdkeep.c`. The `holds-wire` job of the CI of `forgeext` builds
+  the same test against the head of this repository's default branch. A
+  change to the hold-file wire that needs both sides fails the CI of the
+  repository that is pushed first, until the other is pushed. **Push the
+  two together**
+  (<https://docs.forgefirm.org/developers/release-flow/#the-push-order>).
 
 ## Project-wide rules
 

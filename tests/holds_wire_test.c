@@ -9,8 +9,10 @@
  * from the host's own source: the file names, the field names and their
  * types, the write period against the reader's freshness window, the
  * holds directory literal, and the table sizes. The test reads the files
- * on CLOCK_MONOTONIC, so it also proves that the host stamps ts_mono on
- * that clock. cool_flow_test holds the engine to the same clock.
+ * on CLOCK_MONOTONIC, and the target wraps clock_gettime: every other
+ * clock reads 2000000000 s, as in cool_flow_test's fake clock. A host that
+ * stamps ts_mono on another clock writes files that read stale, and the
+ * test fails. cool_flow_test holds the engine to CLOCK_MONOTONIC.
  */
 #define _GNU_SOURCE
 #include "../src/holds.h"
@@ -24,6 +26,22 @@
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
+
+/* clock_gettime as this file, holds.c and holdkeep.c call it (the target
+ * links with --wrap=clock_gettime): CLOCK_MONOTONIC passes through, and
+ * every other clock reads 2000000000 s, so a stamp from another clock is
+ * far from the reader's time. */
+int __real_clock_gettime(clockid_t clk, struct timespec *ts);
+
+int __wrap_clock_gettime(clockid_t clk, struct timespec *ts)
+{
+    if (clk != CLOCK_MONOTONIC) {
+        ts->tv_sec = 2000000000;
+        ts->tv_nsec = 0;
+        return 0;
+    }
+    return __real_clock_gettime(clk, ts);
+}
 
 static double mono(void)
 {

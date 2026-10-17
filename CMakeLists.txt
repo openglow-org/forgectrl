@@ -236,7 +236,9 @@ target_link_libraries(holds_test jansson)
 # The extension host's real hold files, read by the engine's real reader:
 # the file names, the fields and their types, the monotonic stamp, the
 # write period inside the reader's window, the holds directory literal, and
-# a silent host's files going stale. Built from the host's own holdkeep.c
+# a silent host's files going stale. clock_gettime is wrapped so that
+# every clock but CLOCK_MONOTONIC reads far from it, and a stamp from
+# another clock reads stale. Built from the host's own holdkeep.c
 # when FORGEEXT_SRC names forgeext's src directory (build.yml checks that
 # repository out beside this one); a FORGEEXT_SRC without it is a mistake
 # and stops the configure, and a configure without FORGEEXT_SRC says that
@@ -249,7 +251,7 @@ if(FORGEEXT_SRC)
   add_executable(holds_wire_test tests/holds_wire_test.c src/holds.c "${FORGEEXT_SRC}/holdkeep.c")
   target_include_directories(holds_wire_test PRIVATE "${FORGEEXT_SRC}")
   target_compile_options(holds_wire_test PRIVATE -Wall -Wextra)
-  target_link_libraries(holds_wire_test jansson pthread)
+  target_link_libraries(holds_wire_test -Wl,--wrap=clock_gettime jansson pthread)
 else()
   message(STATUS "holds_wire_test is left out: -DFORGEEXT_SRC=<forgeext checkout>/src builds it, as build.yml does")
 endif()
