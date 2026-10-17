@@ -48,8 +48,9 @@ started and never the refusal. A start refused twice shows the refusal
 after the second start, and the page sends no third. A start refused
 for another reason (a diagnostic running) shows the refusal at once, and
 the page sends no second. A start refused once and pressed again starts
-once, and after the operator's Abort the first press's second start never
-goes.
+once: the press cancels the first press's second start. A start refused
+once, where another client starts the diagnostic and the operator aborts
+it, never goes again: the Abort alone cancels the second start.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -373,7 +374,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
           throw new Error('1.5 s after the refusal the panel shows ' + JSON.stringify(q('#msg-d').textContent));
         click('#diagabort');
         return until('the diagnostic ended, the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
-  ['a refused start pressed again starts once, and after the operator\'s Abort nothing starts again', function () {
+  ['a refused start pressed again starts once: the press cancels the first press\'s second start', function () {
     return engineBusy(1)
       .then(function () { click(VERIFY); return sleep(300); })
       .then(function () {
@@ -390,6 +391,29 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { return api('/diag/status'); })
       .then(function (s) {
         if (s.running) throw new Error('1.5 s after the Abort, ' + s.tool + ' runs'); })
+      .then(function () {
+        return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
+  ['a refused start\'s second start is canceled by the operator\'s Abort alone: another client starts the diagnostic, the operator aborts it, and nothing starts again', function () {
+    var t0;
+    return engineBusy(1)
+      .then(function () { t0 = Date.now(); click(VERIFY); return sleep(300); })
+      /* Another client starts the diagnostic the refused press would start:
+       * a start the panel did not press, so the Abort is the one cancel. */
+      .then(function () { return w().fx('/diag/flow-verify', { method: 'POST' }); })
+      .then(function (r) {
+        if (r.status !== 202) throw new Error('the other client\'s start was answered ' + r.status);
+        w().loadDiag();
+        return until('the diagnostic started', function () { return w().D.running && shown('#diagabort'); }, 2000); })
+      .then(function () { click('#diagabort'); return sleep(100); })
+      .then(function () {
+        w().loadDiag();
+        return until('the diagnostic ended', function () { return !w().D.running; }, 2000); })
+      /* The refused press's second start would go a second after the first. */
+      .then(function () { return sleep(Math.max(0, 1700 - (Date.now() - t0))); })
+      .then(function () { return startsWere([409, 202]); })
+      .then(function () { return api('/diag/status'); })
+      .then(function (s) {
+        if (s.running) throw new Error('1.7 s after the refused press, ' + s.tool + ' runs'); })
       .then(function () {
         return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }]
 ]);
