@@ -452,9 +452,12 @@ EOF
 # jogs that do not end: while $T/port.hangup stands, the port hangs up
 # at a jog line before any answer; while $T/port.stall stands, a jog
 # holds (state reads Hold), and the clock stand-in's .mono flag stands
-# from the jog's answer to the next state read. The daemon reads its
-# deadline for the jog's end between the two, so that 60 s wait is past
-# when it is next checked.
+# from the jog's answer to the next state read, so the daemon reads its
+# deadline for the jog's end with the flag up. At that state read the
+# port takes the flag off and hangs up before any answer, so the flag
+# never comes off inside a reply wait: grblport sends the read again on
+# a fresh connection (a kept connection that turns out dead earns its
+# second try), and the daemon reads Hold and finds its 60 s wait past.
 python3 - "$T/run/grbl.ctl" "$T/port.log" "$T/port" "$T/timeshift.mono" <<'EOF' &
 import json, os, socket, sys, threading
 path, log, ctl, mono = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -470,6 +473,7 @@ def answer(words):
     if words[:1] == ['state']:
         if st['held'] and os.path.exists(mono):
             os.unlink(mono)
+            return None
         return json.dumps({'state': 'Hold' if st['held'] else 'Idle', 'sender': False, 'port_jog': False,
                            'released': False, 'mpos': [round(st['x'], 3), round(st['y'], 3), 0.0],
                            'homed': homed, 'envelope_open': st['open'], 'mcode': None, 'sender_out': False,
@@ -498,6 +502,10 @@ def serve(c):
             return
         with mu:
             reply = answer(line.decode().split())
+        if reply is None:
+            c.shutdown(socket.SHUT_RDWR)
+            c.close()
+            return
         c.sendall(reply.encode() + b'\n')
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(path)
