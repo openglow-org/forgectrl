@@ -522,8 +522,9 @@ target_link_libraries(fflog_e2e_test pthread)
 # run: line, with nothing after the name (no || true, | tee or &).
 # fflog_e2e_test is the emitter half of tests/fflog_e2e.sh, which is the
 # test and the step: its run: line starts with the script, after sudo and
-# sh when given, and holds no | or &. The lint counts a test in any
-# command of a run: line; the configure counts these two forms alone. The
+# sh when given, and holds no | or &. The lint counts a test only on a
+# line of run text whose failure ends the step (forgefirm's
+# workflow_runs); the configure counts these two forms alone. The
 # loop sees only the targets declared above it, so this block stays last:
 # an add_executable() after it stops the configure.
 enable_testing()
