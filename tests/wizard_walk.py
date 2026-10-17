@@ -322,7 +322,10 @@ function startsWere(want) {
 }
 function answered(want) {
   return startsWere(want).then(function (s) {
-    if (s.starts[1][1] < 0.9) throw new Error('the second start came ' + s.starts[1][1] + ' s after the first'); });
+    /* "A second later": at least 0.9 s, and under the 1.5 s the
+     * twice-refused case waits for a third start. */
+    if (s.starts[1][1] < 0.9 || s.starts[1][1] >= 1.5)
+      throw new Error('the second start came ' + s.starts[1][1] + ' s after the first'); });
 }
 if (PLAN.diag) STEPS = STEPS.concat([
   ['a diagnostic start the cooling engine refuses goes again a second later, and the panel shows the diagnostic started, never the refusal', function () {
