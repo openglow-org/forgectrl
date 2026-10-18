@@ -28,11 +28,13 @@ import unittest
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 ROW = re.compile(r'\{\s*"(GET|POST)",\s*"([^"]+)",\s*\w+,\s*[^,{}]+,\s*[01],\s*(NULL|"[^"]*")\s*\}')
 ENV_NAME = r'"((?:GF|GFCOOL|FORGECTRL|FFLOG)_[A-Z0-9_]+)"'
-ENV_READ = re.compile(r'\b(?:getenv|env_or|url_from_env)\(\s*' + ENV_NAME)
+# a read is getenv or secure_getenv, with or without a space before the
+# parenthesis: every spelling the compiler takes is one the scan takes
+ENV_READ = re.compile(r'\b(?:(?:secure_)?getenv|env_or|url_from_env)\s*\(\s*' + ENV_NAME)
 ENV_TABLE_ROW = re.compile(r'\{\s*' + ENV_NAME)
-ENV_INDIRECT = re.compile(r'\bgetenv\(\s*(?!")([^)]+)\)')
-HOOK_READ = re.compile(r'\bff_test_hook\(\s*' + ENV_NAME)
-HOOK_INDIRECT = re.compile(r'\bff_test_hook\(\s*(?!")([^)]+)\)')
+ENV_INDIRECT = re.compile(r'\b(?:secure_)?getenv\s*\(\s*(?!")([^)]+)\)')
+HOOK_READ = re.compile(r'\bff_test_hook\s*\(\s*' + ENV_NAME)
+HOOK_INDIRECT = re.compile(r'\bff_test_hook\s*\(\s*(?!")([^)]+)\)')
 
 
 def read(rel):
@@ -109,8 +111,9 @@ def mock_refusal_text():
 
 
 def env_reads():
-    """Every environment variable src/ reads: getenv("X"), the env_or and
-    url_from_env wrappers, and the GFCOOL_* rows of cool.c's tunables;
+    """Every environment variable src/ reads: getenv("X") or
+    secure_getenv("X"), the env_or and url_from_env wrappers, and the
+    GFCOOL_* rows of cool.c's tunables;
     every test hook read through the gate, ff_test_hook("X"); and every
     getenv or gate call that does not name its variable, which must be
     one of those wrappers, that table's loop, the gate's own code, or
