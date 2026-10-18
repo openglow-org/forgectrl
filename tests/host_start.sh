@@ -8,16 +8,22 @@
 # directory (the data directory, the settings file, the run directory,
 # the sysfs root, the switch device) and a pulse device that is not
 # there, on high ports, with FORGECTRL_HOST_TEST=1. The two controllers
-# and `iw` are stand-ins that record a start. One unauthenticated read
-# must answer 200; then the daemon is stopped, and nothing may have
-# started a controller or run iw. The daemon's start notice names the
-# fourteen overrides set here (the three test hooks among them), names
-# only, and none that is not set. Then the daemon is started again with
-# FORGECTRL_HOST_TEST unset and the same three test hooks set: it must
-# answer the read on its machine paths (the sysfs tree and the switch
-# device absent, each read fail-closed), name no hook among the
-# overrides in force, and name the three as set and ignored. Runs
-# unprivileged; build.yml runs it:
+# and `iw` are stand-ins that record a start. The run directory holds a
+# motors.released marker. One unauthenticated read must answer 200 and
+# say the motors are released, from both run-dir readers behind it (the
+# daemon read the hook's run directory); then the daemon is stopped, and
+# nothing may have started a controller or run iw. The daemon's start
+# notice names the fourteen overrides set here (the three test hooks
+# among them), names only, and none that is not set. Then the daemon is
+# started again with FORGECTRL_HOST_TEST unset and the same three test
+# hooks set: it must answer the read on its machine paths (the sysfs
+# tree and the switch device absent, each read fail-closed; the run
+# directory /run/forgefirm, where no marker is, so the read says the
+# motors are not released, from both readers), name no hook among the
+# overrides in force, and name the three as set and ignored. The read
+# judges the run-dir readers on their own: the notice's two lines come
+# from the gate the readers take, and a reader past the gate would leave
+# both lines as they are. Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_start.sh <build-dir>
 set -e
@@ -35,7 +41,20 @@ for b in iw grblHAL_glowforge gfcloud.py; do
     printf '#!/bin/sh\necho "%s $*" >> "%s/started"\n' "$b" "$T" > "$T/bin/$b"
     chmod +x "$T/bin/$b"
 done
+# the marker the run-dir readers look for: the hook's directory has it,
+# the machine's does not
+: > "$T/run/motors.released"
 fail() { echo "FAIL: $1"; echo "--- the daemon's output"; cat "$T/out"; exit 1; }
+# /status says whether the motors are released twice, from the two
+# run-dir readers behind it: status.c's own run_dir (the top-level key)
+# and paths.h's ff_run_dir, through the lease's observed block; each is
+# judged by its own key
+motors() {
+    grep -q ",\"motors_released\":$2," "$T/$1" \
+        || fail "$3: the status's motors_released is not $2 (status.c's run-dir reader)"
+    grep -q "\"sender\":[a-z]*,\"motors_released\":$2}" "$T/$1" \
+        || fail "$3: the lease's observed motors_released is not $2 (paths.h's run-dir reader)"
+}
 # running, and not a zombie waiting to be reaped
 alive() { s=$(cut -d' ' -f3 /proc/$PID/stat 2>/dev/null); [ -n "$s" ] && [ "$s" != Z ]; }
 
@@ -53,7 +72,8 @@ PID=$!
 code=$(curl -s -o "$T/status.json" -w '%{http_code}' --retry 30 --retry-connrefused \
             --retry-delay 1 --max-time 10 "http://127.0.0.1:$HTTP_PORT/status") || true
 [ "$code" = 200 ] || fail "GET /status answered '$code', not 200"
-echo "  ok: GET /status answered 200"
+motors status.json true "the hook's run directory was not read"
+echo "  ok: GET /status answered 200, the motors released by the hook's run directory, both readers"
 
 kill $PID
 i=0
@@ -85,7 +105,7 @@ echo "  ok: no controller started, iw not run"
 # The test hooks are honored in a host-test run alone: with the gate
 # unset the daemon takes its machine paths and says which hooks it
 # ignored. iw's stand-in runs this time (the radio policy applies off a
-# host test) and records nothing that matters here.
+# host test), and the start record shows it once the daemon has stopped.
 mv "$T/out" "$T/out.host-test"
 env FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
     FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
@@ -120,4 +140,8 @@ for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV; do
     case "$named" in *" $v "*) ;; *) fail "off a host test, the ignored-hooks notice does not name $v" ;; esac
 done
 echo "  ok: off a host test, the three test hooks are named as ignored and none as in force"
+motors status2.json false "off a host test, the hook's run directory was read"
+echo "  ok: off a host test, the motors read as not released by both readers: the marker in the hook's run directory was not seen"
+grep -q '^iw reg reload' "$T/started" || fail "off a host test, iw was not run: $(cat "$T/started" 2>/dev/null)"
+echo "  ok: off a host test, iw's stand-in ran"
 echo "PASS: host_start"

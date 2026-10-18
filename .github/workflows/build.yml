@@ -81,7 +81,7 @@ jobs:
         run: ./build/logs_export_test
       - name: "fflog_e2e (the logging path: the image's rsyslog.conf and the rendered rules, each logger in its own file at its level, a stray tag in system/, the kern facility in kernel/)"
         run: sudo sh tests/fflog_e2e.sh build forgefirm-layer/meta-forgefirm/recipes-extended/rsyslog/rsyslog/rsyslog.conf
-      - name: "host_start (the built daemon on a host: its machine paths in a temporary directory, one read answered, no controller started, iw not run)"
+      - name: "host_start (the built daemon on a host: its machine paths in a temporary directory, one read answered from the hooks' paths, no controller started, iw not run; then with the host-test gate unset and the hooks still set, the read answered from its machine paths, the hooks named as ignored, and iw's stand-in run)"
         run: sh tests/host_start.sh build
       - name: "The image's ulfius for host_routes (the recipe's revision and patch: a request carries the whole peer address)"
         run: sh tests/ulfius_image.sh forgefirm-layer/meta-forgefirm/recipes-extended/ulfius build/ulfius-image
