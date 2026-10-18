@@ -6,9 +6,15 @@
  *
  * forgeext's holdkeep.c writes into a directory; forgectrl's holds.c reads
  * it. What the two daemons must agree on is proven here together, built
- * from the host's own source: the file names, the field names and their
- * types, the write period against the reader's freshness window, the
- * holds directory literal, and the table sizes. The test reads the files
+ * from the host's own source: the holds directory literal, the table
+ * sizes, the write period against the reader's freshness window, the
+ * files the host writes read as the holds it meant (their names, their
+ * fields, the host's own words), and a silent host's files going stale.
+ * The required-holds markers are the second agreement: the directory
+ * literal, install.h's against holds.h's, and a marker written as
+ * install.c writes it, one empty file named after the package, which
+ * holds alone when no hold file speaks for the package and is answered
+ * by the host's file of the same name. The test reads the files
  * on CLOCK_MONOTONIC, and the target wraps clock_gettime: every other
  * clock reads 2000000000 s, as in cool_flow_test's fake clock. A host that
  * stamps ts_mono on another clock writes files that read stale, and the
@@ -17,7 +23,9 @@
 #define _GNU_SOURCE
 #include "../src/holds.h"
 #include "holdkeep.h"
+#include "install.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +74,9 @@ int main(void)
     /* The holds directory literal: one home on each side. */
     CHECK(!strcmp(HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT), "the holds directory differs: host %s, engine %s",
           HOLDKEEP_DIR_DEFAULT, HOLDS_DIR_DEFAULT);
+    /* The required-holds marker directory literal: the host writes it (install.c), the engine reads it. */
+    CHECK(!strcmp(EXT_REQUIRED_HOLDS_DIR, HOLDS_REQUIRED_DIR), "the required-holds directory differs: host %s, engine %s",
+          EXT_REQUIRED_HOLDS_DIR, HOLDS_REQUIRED_DIR);
     /* The table sizes: the host never writes more files than the engine reads. */
     CHECK(HOLDKEEP_MAX <= HOLDS_MAX, "the host keeps %d holds, the engine reads %d", HOLDKEEP_MAX, HOLDS_MAX);
     /* The write period against the reader's window: a missed write still reads fresh. */
@@ -143,6 +154,35 @@ int main(void)
     holds_read(dir, req, mono(), &h);
     CHECK(h.standing && h.stale_required == 1 && !strcmp(h.reason, "org.example.badge: the extension host is not answering"),
           "the required file a stopped host left does not stand stale: %d %s", h.standing, h.reason);
+
+    /* The marker alone: the hold files are gone (a reboot takes the tmpfs) and the host has not
+       written any, and the operator marked the package's hold required. The marker is written as
+       install.c's ext_required_holds_sync writes it, one empty file named after the package, and
+       the hold stands in the engine's words with no file read. */
+    char path[400];
+    snprintf(path, sizeof(path), "%s/org.example.badge.json", dir);
+    CHECK(unlink(path) == 0, "the required file is not where the host wrote it: %s", path);
+    snprintf(path, sizeof(path), "%s/org.example.badge", req);
+    int fd = open(path, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+    CHECK(fd >= 0, "the marker could not be written: %s", path);
+    if (fd >= 0)
+        close(fd);
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && h.files == 0 && h.stale_required == 1 &&
+          !strcmp(h.reason, "org.example.badge: the extension host is not answering"),
+          "a marker with no hold file does not hold: standing %d, files %d, stale required %d, reason %s",
+          h.standing, h.files, h.stale_required, h.reason);
+
+    /* The host comes up and speaks for the package: its file answers the marker by the same name,
+       and nothing stands. */
+    CHECK(holdkeep_start(&k, dir, HOLDKEEP_MAIN_S, err, sizeof(err)) == 0, "the keeper did not start again: %s", err);
+    hold_decide("org.example.badge", 1, 1, 1, 0, NULL, &e[0]);
+    holdkeep_set(&k, e, 1);
+    holds_read(dir, req, mono(), &h);
+    CHECK(!h.standing && h.files == 1 && h.stale_required == 0,
+          "the host's file does not answer the marker of the same name: standing %d, files %d, stale required %d (%s)",
+          h.standing, h.files, h.stale_required, h.reason);
+    holdkeep_stop(&k);
 
     char cmd[600];
     snprintf(cmd, sizeof(cmd), "rm -rf %s %s", dir, req);

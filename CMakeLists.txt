@@ -235,8 +235,10 @@ target_link_libraries(holds_test jansson)
 
 # The extension host's real hold files, read by the engine's real reader:
 # the file names, the fields and their types, the monotonic stamp, the
-# write period inside the reader's window, the holds directory literal, and
-# a silent host's files going stale. clock_gettime is wrapped so that
+# write period inside the reader's window, the holds directory literal, a
+# silent host's files going stale, and the required-holds markers: their
+# directory literal, install.h's against holds.h's, and a marker with no
+# hold file holding alone. clock_gettime is wrapped so that
 # every clock but CLOCK_MONOTONIC reads far from it, and a stamp from
 # another clock reads stale. Built from the host's own holdkeep.c
 # when FORGEEXT_SRC names forgeext's src directory (build.yml checks that
