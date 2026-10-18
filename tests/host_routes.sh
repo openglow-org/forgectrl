@@ -194,14 +194,23 @@ path, log = sys.argv[1], sys.argv[2]
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(path)
 srv.listen(4)
-# state is answered in the controller's form (ctlport.c), every other line ok
+# state is answered in the controller's form (ctlport.c), with the sender
+# kept out as the last sender line said (the sender keeper pushes it again
+# when the state disagrees); every other line ok
 STATE = (b'{"state":"Idle","sender":false,"port_jog":false,"released":false,"mpos":[0.000,0.000,0.000],'
-         b'"homed":3,"envelope_open":false,"mcode":null,"sender_out":false,"tray":"in"}\n')
+         b'"homed":3,"envelope_open":false,"mcode":null,"sender_out":%s,"tray":"in"}\n')
+out = False
 def serve(c):
+    global out
     for line in c.makefile('rb'):
         with open(log, 'ab') as o:
             o.write(line)
-        c.sendall(STATE if line.strip() == b'state' else b'ok\n')
+        word = line.strip()
+        if word == b'sender out':
+            out = True
+        elif word == b'sender in':
+            out = False
+        c.sendall(STATE % (b'true' if out else b'false') if word == b'state' else b'ok\n')
 while True:
     c, _ = srv.accept()
     threading.Thread(target=serve, args=(c,), daemon=True).start()
@@ -278,8 +287,13 @@ for p in $EVS; do kill $p 2>/dev/null; done
 EVS=
 
 echo "== the motion routes"
-lines() { wc -l < "$T/port.log"; }
-last() { tail -1 "$T/port.log"; }
+# The daemon's own keepers speak on the port on their clock, whatever the
+# routes do: the M-code relay pushes its table (mcodes) and the sender
+# keeper reads the controller's state (state), each every 2 s. What the
+# routes sent is the port's log without those two lines.
+routed() { grep -v -e '^state$' -e '^mcodes ' "$T/port.log"; }
+lines() { routed | wc -l; }
+last() { routed | tail -1; }
 n=$(lines)
 expect 403 "$(post /motion/jog - -d x=1)" "an unauthenticated jog is refused"
 expect "$n" "$(lines)" "the port got nothing"
