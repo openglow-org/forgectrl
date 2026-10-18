@@ -56,6 +56,7 @@
 #include "status.h"
 #include "super.h"
 #include "update.h"
+#include "testhook.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -79,11 +80,11 @@
  * data directory. */
 #define GRBL_NVS_FILE "EEPROM-glowforge.DAT"
 /* The sysfs tree and the pulse device: the host unit test points both
- * at a directory of plain files. At run time GF_SYSFS_ROOT and
- * GF_PULSE_DEV override them, as FORGECTRL_GRBL_BIN and
- * FORGECTRL_CLOUD_BIN override the two controllers; unset, each is the
- * path below. GF_PULSE_DEV must be an absolute path, or the broker
- * refuses it. */
+ * at a directory of plain files. At run time the test hook GF_SYSFS_ROOT
+ * moves the tree in a host-test run (testhook.h) and GF_PULSE_DEV
+ * overrides the device, as FORGECTRL_GRBL_BIN and FORGECTRL_CLOUD_BIN
+ * override the two controllers; unset, each is the path below.
+ * GF_PULSE_DEV must be an absolute path, or the broker refuses it. */
 #ifndef GF_SYSFS
 #define GF_SYSFS "/sys/glowforge/"
 #endif
@@ -113,7 +114,11 @@ static const char *env_or(const char *name, const char *def)
 }
 
 /* GF_SYSFS_ROOT ends with '/', as status.c reads it. */
-static const char *sysfs_root(void) { return env_or("GF_SYSFS_ROOT", GF_SYSFS); }
+static const char *sysfs_root(void)
+{
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    return r ? r : GF_SYSFS;
+}
 
 /* The pulse device: GF_PULSE_DEV when it is set and an absolute path;
  * NULL when it is set and is not, which the broker refuses (a relative
@@ -133,13 +138,8 @@ static const char *ctl_bin(ctl_t ctl)
                            : env_or("FORGECTRL_CLOUD_BIN", CLOUD_BIN);
 }
 
-/* FORGECTRL_HOST_TEST=1: the daemon runs on a host, and no process it
- * starts writes its OOM score. */
-static int host_test(void)
-{
-    const char *v = getenv("FORGECTRL_HOST_TEST");
-    return v && strcmp(v, "1") == 0;
-}
+/* In a host-test run (FORGECTRL_HOST_TEST=1, testhook.h) no process the
+ * supervisor starts writes its OOM score. */
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
@@ -626,7 +626,7 @@ static void free_child_env(char **env)
 static int spawn_output_relay(const char *tag)
 {
     int p[2];
-    int oom = !host_test();
+    int oom = !ff_host_test();
     if (pipe2(p, O_CLOEXEC) != 0)
         return -1;
     pid_t pid = fork();
@@ -705,7 +705,7 @@ static void spawn_locked(ctl_t ctl)
     }
 
     const char *bin = ctl_bin(ctl);
-    int oom = !host_test();
+    int oom = !ff_host_test();
     int lfd = spawn_output_relay(ctl == Ctl_Grbl ? "grblhal" : "gfcloud");
     pid_t pid = fork();
     if (pid < 0) {

@@ -28,7 +28,9 @@
  * FORGECTRL_NO_VPU, FORGECTRL_NO_H264, FORGECTRL_NO_GPU,
  * FORGECTRL_NO_HW_SKIP, FORGECTRL_NO_CACHED_BUFS, FORGECTRL_NO_NEON.
  * The start notice names every variable of the list in ENV_OVERRIDES
- * that is set.
+ * that is set, and every test hook of TEST_HOOKS that is set in a
+ * host-test run (FORGECTRL_HOST_TEST=1), where the daemon honors it; a
+ * test hook set in any other run is named as ignored.
  *
  * ulfius runs libmicrohttpd in thread-per-connection mode, so each stream
  * callback may block waiting for the next frame.
@@ -73,6 +75,7 @@
 #include "users.h"
 #include "wiz.h"
 #include "wizdark.h"
+#include "testhook.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -917,21 +920,13 @@ static void record_snapshot(FILE *out)
     free(text);
 }
 
-/* FORGECTRL_HOST_TEST=1: the daemon runs on a host, and leaves the
- * radio and its OOM score alone. */
-static int host_test(void)
-{
-    const char *v = getenv("FORGECTRL_HOST_TEST");
-    return v && strcmp(v, "1") == 0;
-}
-
 /* WiFi radio policy, applied at startup and whenever the wifi_country
  * setting changes. The stored region (unset = "00", the world domain)
  * goes to cfg80211 as the user regulatory hint; power save is pinned
  * off - on a mains-powered machine it only adds latency. */
 void apply_wifi(int set_region)
 {
-    if (host_test())
+    if (ff_host_test())     /* a host-test run leaves the radio alone */
         return;
     char cc[8], cmd[48];
     if (settings_get("wifi_country", cc, sizeof(cc)) != 0 ||
@@ -3420,7 +3415,8 @@ static void mhd_log(void *cls, const char *fmt, va_list ap)
  * notice names the ones that are set (names only), and test_routes.py
  * holds this list to the sources. The camera and port knobs are on the
  * developer page; the rest are the host tests' seams and the cooling
- * engine's bench overrides, and nothing on a machine sets one. */
+ * engine's bench overrides, and nothing on a machine sets one. The
+ * three test hooks are listed apart, below. */
 static const char *const ENV_OVERRIDES[] = {
     "FFLOG_CONF", "FFLOG_LEVEL", "FFLOG_SOCK", "FFLOG_STDERR",
     "FORGECTRL_CLOUD_BIN", "FORGECTRL_CONF", "FORGECTRL_CURL", "FORGECTRL_DATA_DIR",
@@ -3441,27 +3437,54 @@ static const char *const ENV_OVERRIDES[] = {
     "GFCOOL_TEC_ON", "GFCOOL_TEC_PRESENT", "GFCOOL_TEMP_CRITICAL", "GFCOOL_TEMP_MAX",
     "GFCOOL_TEMP_MIN", "GFCOOL_TEMP_OFFSET_C", "GFCOOL_TEMP_RESUME", "GFCOOL_TEMP_START",
     "GF_FUSE_SERIAL", "GF_GRBL_PORT", "GF_LED_ROOT", "GF_LENS_STEP_US", "GF_LOGS_EFFECTIVE",
-    "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_RUN_DIR",
-    "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT",
+    "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE", "GF_PROC_STAT", "GF_PULSE_DEV",
+    "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
 };
 
+/* The test hooks, which the sources read only through ff_test_hook
+ * (testhook.h): the machine paths a host test moves. The daemon honors
+ * them in a host-test run alone, so the notice names the ones set there
+ * with the overrides, and the ones set in any other run as ignored.
+ * test_routes.py holds this list to the sources too. */
+static const char *const TEST_HOOKS[] = {
+    "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+};
+
+/* Adds a name to a notice line: 0 when the line has no room. */
+static int notice_add(char *line, size_t len, size_t *off, const char *name)
+{
+    int n = snprintf(line + *off, len - *off, "%s%s", *off ? " " : "", name);
+    if (n < 0 || (size_t)n >= len - *off)
+        return 0;
+    *off += (size_t)n;
+    return 1;
+}
+
 /* One line at start naming the overrides that are set, names only, never
- * a value. Nothing here calls setenv, so what is set at start is set for
- * the process, the lazily read ones included. Silent when none is. */
+ * a value, and the test hooks in force with them; a second line names
+ * the test hooks set and ignored, when the run is no host test. Nothing
+ * here calls setenv, so what is set at start is set for the process, the
+ * lazily read ones included. Silent when none is. */
 static void say_env_overrides(void)
 {
-    char line[2048];
-    size_t off = 0;
-    for (size_t i = 0; i < sizeof(ENV_OVERRIDES) / sizeof(*ENV_OVERRIDES); i++) {
-        if (!getenv(ENV_OVERRIDES[i]))
-            continue;
-        int n = snprintf(line + off, sizeof(line) - off, "%s%s", off ? " " : "", ENV_OVERRIDES[i]);
-        if (n < 0 || (size_t)n >= sizeof(line) - off)
-            break;
-        off += (size_t)n;
+    char line[2048], ignored[256];
+    size_t off = 0, ioff = 0;
+    int room = 1, iroom = 1;
+    for (size_t i = 0; room && i < sizeof(ENV_OVERRIDES) / sizeof(*ENV_OVERRIDES); i++)
+        if (getenv(ENV_OVERRIDES[i]))
+            room = notice_add(line, sizeof(line), &off, ENV_OVERRIDES[i]);
+    for (size_t i = 0; i < sizeof(TEST_HOOKS) / sizeof(*TEST_HOOKS); i++) {
+        if (ff_test_hook(TEST_HOOKS[i])) {
+            if (room)
+                room = notice_add(line, sizeof(line), &off, TEST_HOOKS[i]);
+        } else if (getenv(TEST_HOOKS[i]) && iroom) {
+            iroom = notice_add(ignored, sizeof(ignored), &ioff, TEST_HOOKS[i]);
+        }
     }
     if (off)
         fflog(LOG_NOTICE, "environment overrides in force: %s", line);
+    if (ioff)
+        fflog(LOG_WARNING, "test hooks set and ignored, not a host-test run: %s", ignored);
 }
 
 int main(int argc, char **argv)
@@ -3501,7 +3524,7 @@ int main(int argc, char **argv)
      * the processes it supervises. Controllers respawn at -500 (see
      * super.c), so they are reclaimed first and the daemon safes and
      * respawns them. */
-    int ofd = host_test() ? -1 : open("/proc/self/oom_score_adj", O_WRONLY);
+    int ofd = ff_host_test() ? -1 : open("/proc/self/oom_score_adj", O_WRONLY);
     if (ofd >= 0) {
         (void)!write(ofd, "-900", 4);
         close(ofd);

@@ -191,6 +191,7 @@ static int is_staged(void)
 int main(void)
 {
     char out[1024];
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     snprintf(rundir, sizeof(rundir), "/tmp/jobpost_test.XXXXXX");
     if (!mkdtemp(rundir)) {
         perror("mkdtemp");

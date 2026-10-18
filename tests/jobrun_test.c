@@ -703,6 +703,7 @@ static void test_sender_check(void)
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/jobrun_test.%d", (int)getpid());
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     mkdir(root, 0755);
     char sub[192];
     const char *dirs[] = { "pic", "head", "cnc" };

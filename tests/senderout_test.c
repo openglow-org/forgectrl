@@ -103,6 +103,7 @@ static int holds(const char *owner)
 int main(void)
 {
     char why[256], doc[512], id[80];
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     const char *A = "org.openglow.alignment", *B = "org.example.other";
 
     snprintf(dir, sizeof(dir), "/tmp/senderout-test.XXXXXX");

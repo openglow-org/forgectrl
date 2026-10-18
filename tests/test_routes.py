@@ -10,8 +10,10 @@ a capability the closed list in tokens.c resolves; serve_page sends
 PAGE_POLICY, the header that lets no frame navigate anywhere; and the
 dev-server mock serves the daemon's page, its policy and its panel's
 files, because the frame-isolation harness renders the mock's page;
-main.c's list of environment variables, the ones the daemon's
-start notice names, is held to every read in the sources; and the 409
+main.c's two lists of environment variables, the overrides and the
+test hooks, the ones the daemon's start notice names, are held to
+every read in the sources (a test hook is read only through the gate,
+ff_test_hook in testhook.h, and no getenv reads one); and the 409
 body the panel sends a refused diagnostic start once more on is the
 body cb_diag_start sends for the cooling engine's refusal, in the mock
 the walk plays the panel against too.
@@ -28,7 +30,9 @@ ROW = re.compile(r'\{\s*"(GET|POST)",\s*"([^"]+)",\s*\w+,\s*[^,{}]+,\s*[01],\s*(
 ENV_NAME = r'"((?:GF|GFCOOL|FORGECTRL|FFLOG)_[A-Z0-9_]+)"'
 ENV_READ = re.compile(r'\b(?:getenv|env_or|url_from_env)\(\s*' + ENV_NAME)
 ENV_TABLE_ROW = re.compile(r'\{\s*' + ENV_NAME)
-ENV_INDIRECT = re.compile(r'\bgetenv\(\s*(?!")([^)]*)\)')
+ENV_INDIRECT = re.compile(r'\bgetenv\(\s*(?!")([^)]+)\)')
+HOOK_READ = re.compile(r'\bff_test_hook\(\s*' + ENV_NAME)
+HOOK_INDIRECT = re.compile(r'\bff_test_hook\(\s*(?!")([^)]+)\)')
 
 
 def read(rel):
@@ -106,18 +110,22 @@ def mock_refusal_text():
 
 def env_reads():
     """Every environment variable src/ reads: getenv("X"), the env_or and
-    url_from_env wrappers, and the GFCOOL_* rows of cool.c's tunables; and
-    every getenv that does not name its variable, which must be one of
-    those wrappers, that table's loop, or the start notice's own loop."""
-    names, indirect = set(), set()
+    url_from_env wrappers, and the GFCOOL_* rows of cool.c's tunables;
+    every test hook read through the gate, ff_test_hook("X"); and every
+    getenv or gate call that does not name its variable, which must be
+    one of those wrappers, that table's loop, the gate's own code, or
+    the start notice's own loops."""
+    names, hooks, indirect, gate_indirect = set(), set(), set(), set()
     for name in sorted(os.listdir(os.path.join(ROOT, 'src'))):
         if name.endswith(('.c', '.h')):
             src = read(os.path.join('src', name))
             names.update(ENV_READ.findall(src))
+            hooks.update(HOOK_READ.findall(src))
             if name == 'cool.c':
                 names.update(ENV_TABLE_ROW.findall(src))
             indirect.update('%s:%s' % (name, m.strip()) for m in ENV_INDIRECT.findall(src))
-    return names, indirect
+            gate_indirect.update('%s:%s' % (name, m.strip()) for m in HOOK_INDIRECT.findall(src))
+    return names, hooks, indirect, gate_indirect
 
 
 class RouteTest(unittest.TestCase):
@@ -154,14 +162,21 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(mock_refusal_text(), text)
 
     def test_every_environment_override_is_named_at_start(self):
-        table = re.search(r'ENV_OVERRIDES\[\] = \{(.*?)\};', read('src/main.c'), re.S).group(1)
-        listed = re.findall(ENV_NAME, table)
-        names, indirect = env_reads()
+        src = read('src/main.c')
+        listed = re.findall(ENV_NAME, re.search(r'ENV_OVERRIDES\[\] = \{(.*?)\};', src, re.S).group(1))
+        hooks = re.findall(ENV_NAME, re.search(r'TEST_HOOKS\[\] = \{(.*?)\};', src, re.S).group(1))
+        names, gated, indirect, gate_indirect = env_reads()
         self.assertGreater(len(names), 50, 'environment reads parsed')
         self.assertEqual(sorted(listed), sorted(names))
         self.assertEqual(len(listed), len(set(listed)), 'a name listed twice')
+        # the test hooks: each read through the gate alone, each listed once
+        self.assertEqual(sorted(hooks), sorted(gated))
+        self.assertEqual(len(hooks), len(set(hooks)), 'a hook listed twice')
+        self.assertEqual(sorted(set(hooks) & set(names)), [], 'a test hook read past the gate')
         self.assertEqual(indirect, {'logs.c:name', 'relcheck.c:name', 'super.c:name',
-                                    'cool.c:tunables[i].env', 'main.c:ENV_OVERRIDES[i]'})
+                                    'cool.c:tunables[i].env', 'main.c:ENV_OVERRIDES[i]',
+                                    'main.c:TEST_HOOKS[i]', 'testhook.h:hook'})
+        self.assertEqual(gate_indirect, {'main.c:TEST_HOOKS[i]', 'testhook.h:const char *hook'})
 
 
 if __name__ == '__main__':

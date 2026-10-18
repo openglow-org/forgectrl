@@ -26,6 +26,7 @@
 #include "lens.h"
 #include "settings.h"
 #include "tray.h"
+#include "testhook.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -76,30 +77,31 @@ static void append(char *buf, size_t size, size_t *off, const char *fmt, ...)
 #define XY_MM_PER_FULL_STEP 0.15
 #define Z_MM_PER_FULL_STEP  (2.0 / LENS_STEPS_PER_MM)
 
-/* The sysfs root is fixed in production; GF_SYSFS_ROOT overrides it for
- * host unit tests (the same test-seam idiom as GF_VERDICT_FILE), letting
- * a test point the reader at a temp tree and exercise the fail-closed
- * path with no /sys/glowforge present. Must end with '/'. */
+/* The sysfs root is fixed in production; the test hook GF_SYSFS_ROOT
+ * moves it in a host-test run (testhook.h), letting a test point the
+ * reader at a temp tree and exercise the fail-closed path with no
+ * /sys/glowforge present. Must end with '/'. */
 static const char *gf_sysfs_root(void)
 {
     static const char *root;
     if (!root) {
-        const char *r = getenv("GF_SYSFS_ROOT");
-        root = (r && *r) ? r : GF_SYSFS;
+        const char *r = ff_test_hook("GF_SYSFS_ROOT");
+        root = r ? r : GF_SYSFS;
     }
     return root;
 }
 
-/* Same test seam for the switch device: GF_SWITCH_DEV lets a host test
- * point the reader at a path that is missing or is not an input device,
- * which is how the fail-closed contract of machine_lid_closed() is
- * proven without hardware. */
+/* The same test hook for the switch device: GF_SWITCH_DEV lets a host
+ * test point the reader at a path that is missing or is not an input
+ * device, which is how the fail-closed contract of machine_lid_closed()
+ * is proven without hardware; on a machine the device is the reader's
+ * whatever the environment says. */
 static const char *switch_dev(void)
 {
     static const char *dev;
     if (!dev) {
-        const char *d = getenv("GF_SWITCH_DEV");
-        dev = (d && *d) ? d : SWITCH_DEV;
+        const char *d = ff_test_hook("GF_SWITCH_DEV");
+        dev = d ? d : SWITCH_DEV;
     }
     return dev;
 }
@@ -559,11 +561,12 @@ static double mem_used_pct(void)
  * driver): one JSON object under the run dir, written atomically with a
  * ts_mono for age. Read whole and validated the way the controller
  * validates the cooling verdict file - a torn body (no closing brace)
- * reads as absent. GF_RUN_DIR overrides the directory for host tests. */
+ * reads as absent. The test hook GF_RUN_DIR moves the directory in a
+ * host-test run. */
 static const char *run_dir(void)
 {
-    const char *d = getenv("GF_RUN_DIR");
-    return d && *d ? d : "/run/forgefirm";
+    const char *d = ff_test_hook("GF_RUN_DIR");
+    return d ? d : "/run/forgefirm";
 }
 
 static int read_state_file(const char *name, char *buf, size_t len)

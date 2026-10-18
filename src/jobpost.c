@@ -14,6 +14,7 @@
 #include "auth.h"
 #include "jobrun.h"
 #include "lease.h"
+#include "testhook.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -42,8 +43,8 @@ static double mono_s(void)
 
 static void staging_path(char *buf, size_t len)
 {
-    const char *d = getenv("GF_RUN_DIR");
-    snprintf(buf, len, "%s/job.upload", d && *d ? d : "/run/forgefirm");
+    const char *d = ff_test_hook("GF_RUN_DIR");
+    snprintf(buf, len, "%s/job.upload", d ? d : "/run/forgefirm");
 }
 
 static int is_job_post(const struct _u_request *req)

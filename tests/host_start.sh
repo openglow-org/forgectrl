@@ -11,8 +11,13 @@
 # and `iw` are stand-ins that record a start. One unauthenticated read
 # must answer 200; then the daemon is stopped, and nothing may have
 # started a controller or run iw. The daemon's start notice names the
-# fourteen overrides set here, names only, and none that is not set.
-# Runs unprivileged; build.yml runs it:
+# fourteen overrides set here (the three test hooks among them), names
+# only, and none that is not set. Then the daemon is started again with
+# FORGECTRL_HOST_TEST unset and the same three test hooks set: it must
+# answer the read on its machine paths (the sysfs tree and the switch
+# device absent, each read fail-closed), name no hook among the
+# overrides in force, and name the three as set and ignored. Runs
+# unprivileged; build.yml runs it:
 #
 #   sh tests/host_start.sh <build-dir>
 set -e
@@ -76,4 +81,43 @@ echo "  ok: the start notice names the fourteen overrides, no others, no values"
 
 [ ! -e "$T/started" ] || fail "started: $(cat "$T/started")"
 echo "  ok: no controller started, iw not run"
+
+# The test hooks are honored in a host-test run alone: with the gate
+# unset the daemon takes its machine paths and says which hooks it
+# ignored. iw's stand-in runs this time (the radio policy applies off a
+# host test) and records nothing that matters here.
+mv "$T/out" "$T/out.host-test"
+env FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
+    FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
+    GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$T/sys/" GF_SWITCH_DEV="$T/no-switches" \
+    GF_PULSE_DEV="$T/no-pulse-device" \
+    FORGECTRL_GRBL_BIN="$T/bin/grblHAL_glowforge" FORGECTRL_CLOUD_BIN="$T/bin/gfcloud.py" \
+    FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT PATH="$T/bin:$PATH" \
+    "$BUILD/forgectrl" > "$T/out" 2>&1 &
+PID=$!
+code=$(curl -s -o "$T/status2.json" -w '%{http_code}' --retry 30 --retry-connrefused \
+            --retry-delay 1 --max-time 10 "http://127.0.0.1:$HTTP_PORT/status") || true
+[ "$code" = 200 ] || fail "off a host test, GET /status answered '$code', not 200"
+kill $PID
+i=0
+while alive; do
+    i=$((i + 1))
+    [ $i -le 75 ] || fail "off a host test, the daemon did not stop in 15 s"
+    sleep 0.2
+done
+wait $PID || fail "off a host test, the daemon exited $? on SIGTERM"
+PID=
+line=$(grep -m1 'environment overrides in force: ' "$T/out") || fail "off a host test, no start notice names the overrides"
+named=" ${line##*environment overrides in force: } "
+for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV; do
+    case "$named" in *" $v "*) fail "off a host test, the notice names the test hook $v as in force" ;; esac
+done
+case "$named" in *" FORGECTRL_DATA_DIR "*) ;; *) fail "off a host test, the notice does not name FORGECTRL_DATA_DIR" ;; esac
+line=$(grep -m1 'test hooks set and ignored' "$T/out") || fail "off a host test, no notice names the ignored hooks"
+case "$line" in *=*) fail "the ignored-hooks notice carries a value: $line" ;; esac
+named=" ${line##*: } "
+for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV; do
+    case "$named" in *" $v "*) ;; *) fail "off a host test, the ignored-hooks notice does not name $v" ;; esac
+done
+echo "  ok: off a host test, the three test hooks are named as ignored and none as in force"
 echo "PASS: host_start"

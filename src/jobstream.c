@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 #include "jobstream.h"
 #include "fflog.h"
+#include "testhook.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,10 +29,12 @@
 #include <time.h>
 #include <unistd.h>
 
+/* The sysfs tree and the run directory, or their test hooks in a
+ * host-test run (testhook.h). */
 static const char *sysfs_root(void)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
-    return r && *r ? r : "/sys/glowforge";
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    return r ? r : "/sys/glowforge";
 }
 
 static int grbl_port(void)
@@ -43,9 +46,9 @@ static int grbl_port(void)
 
 int jobstream_sender_connected(void)
 {
-    const char *d = getenv("GF_RUN_DIR");
+    const char *d = ff_test_hook("GF_RUN_DIR");
     char path[192], body[512];
-    snprintf(path, sizeof(path), "%s/grbl.state", d && *d ? d : "/run/forgefirm");
+    snprintf(path, sizeof(path), "%s/grbl.state", d ? d : "/run/forgefirm");
     FILE *f = fopen(path, "r");
     if (!f)
         return -1;

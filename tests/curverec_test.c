@@ -285,6 +285,7 @@ static void test_keys_restored(void)
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/curverec_test.%d", (int)getpid());
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     mkdir(root, 0755);
     setenv("GF_SYSFS_ROOT", root, 1);
     snprintf(marker, sizeof(marker), "%s/curverec.saved", root);

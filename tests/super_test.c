@@ -500,6 +500,7 @@ static void *stop_thread(void *arg)
 
 int main(void)
 {
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     make_tree();
 
     printf("A. a controller death is a signal\n");

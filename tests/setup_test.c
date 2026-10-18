@@ -85,6 +85,7 @@ static void accept_all(void)
 
 int main(void)
 {
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     if (!mkdtemp(data_dir) || !mkdtemp(run_dir)) {
         printf("FAIL mkdtemp\n");
         return 1;

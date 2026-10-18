@@ -46,6 +46,7 @@
 #include "status.h"
 #include "super.h"
 #include "wizdark.h"
+#include "testhook.h"
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -59,12 +60,13 @@
 #define GF_SYSFS   "/sys/glowforge/"
 #define MARKER     "/run/forgefirm-diag.active"
 
-/* GF_SYSFS_ROOT overrides the tree at run time, as status.c reads it
- * (it ends with '/'); unset, GF_SYSFS stands. */
+/* The test hook GF_SYSFS_ROOT moves the tree in a host-test run
+ * (testhook.h), as status.c reads it (it ends with '/'); else GF_SYSFS
+ * stands. */
 static const char *sysfs_root(void)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
-    return (r && *r) ? r : GF_SYSFS;
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    return r ? r : GF_SYSFS;
 }
 
 /* Check parameters come from cool.h - the same compiled defaults the

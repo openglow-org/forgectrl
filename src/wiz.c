@@ -39,6 +39,7 @@
 #include "wizdark.h"
 #include "wizpkg.h"
 #include "wizlive.h"
+#include "testhook.h"
 
 #include <ctype.h>
 #include <jansson.h>
@@ -218,9 +219,9 @@ static void head_info(char *hw_id, size_t hl, char *serial, size_t sl,
                       char *version, size_t vl)
 {
     hw_id[0] = serial[0] = version[0] = '\0';
-    const char *root = getenv("GF_SYSFS_ROOT");
+    const char *root = ff_test_hook("GF_SYSFS_ROOT");
     char path[256];
-    snprintf(path, sizeof(path), "%s/head/info", root && *root ? root : "/sys/glowforge");
+    snprintf(path, sizeof(path), "%s/head/info", root ? root : "/sys/glowforge");
     FILE *f = fopen(path, "r");
     if (!f)
         return;

@@ -100,6 +100,7 @@ int main(void)
 {
     char reply[128], words[96], err[96];
     pthread_t th;
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
 
     signal(SIGPIPE, SIG_IGN);
     snprintf(root, sizeof(root), "/tmp/grblport_test.%d", (int)getpid());

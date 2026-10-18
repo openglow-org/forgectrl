@@ -45,6 +45,7 @@
 #include "status.h"
 #include "vpu_h264.h"
 #include "vpu_jpeg.h"
+#include "testhook.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -92,8 +93,9 @@ static const struct camdef camdefs[2] = {
     [CAM_HEAD] = { "head", 3, 1, "head/white_led" },
 };
 
-/* The sysfs root is fixed in production; GF_SYSFS_ROOT overrides it for
- * host tests, read as status.c reads it. Must end with '/'. The lamp
+/* The sysfs root is fixed in production; the test hook GF_SYSFS_ROOT
+ * moves it in a host-test run (testhook.h), read as status.c reads it.
+ * Must end with '/'. The lamp
  * paths are resolved once, by cam_engine_init, before any lamp call; an
  * unresolved path opens nothing. */
 #define GF_SYSFS "/sys/glowforge/"
@@ -101,8 +103,8 @@ static char lamp_paths[2][160];
 
 static void lamp_paths_init(void)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
-    const char *root = (r && *r) ? r : GF_SYSFS;
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    const char *root = r ? r : GF_SYSFS;
     for (int i = 0; i < 2; i++)
         snprintf(lamp_paths[i], sizeof(lamp_paths[i]), "%s%s", root, camdefs[i].lamp);
 }

@@ -30,6 +30,7 @@
  */
 #define _GNU_SOURCE
 #include "liveness.h"
+#include "testhook.h"
 
 #include <fcntl.h>
 #include <linux/input.h>
@@ -49,23 +50,26 @@
 #define SW_BIT_DOORS     3
 #define SW_BIT_INTERLOCK 5
 
-/* The same test seam as status.c: GF_SWITCH_DEV lets a host test point
- * the read at a missing or a wrong device. */
+/* The same test hook as status.c: GF_SWITCH_DEV lets a host test point
+ * the read at a missing or a wrong device, and only a host-test run
+ * (testhook.h): on a machine the gate's input is the switch device
+ * whatever the environment says, the fail-closed direction. */
 static const char *switch_dev(void)
 {
-    const char *d = getenv("GF_SWITCH_DEV");
-    return (d && *d) ? d : SWITCH_DEV;
+    const char *d = ff_test_hook("GF_SWITCH_DEV");
+    return d ? d : SWITCH_DEV;
 }
 
-/* And the sysfs tree: GF_SYSFS_ROOT overrides it at run time, as
- * status.c reads it (it ends with '/'); unset, GF_SYSFS stands. */
+/* And the sysfs tree: the test hook GF_SYSFS_ROOT moves it in a
+ * host-test run, as status.c reads it (it ends with '/'); else GF_SYSFS
+ * stands. */
 #ifndef GF_SYSFS
 #define GF_SYSFS "/sys/glowforge/"
 #endif
 static const char *sysfs_root(void)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
-    return (r && *r) ? r : GF_SYSFS;
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    return r ? r : GF_SYSFS;
 }
 
 int liveness_enclosure_classify(unsigned sw, char *why, size_t wlen)

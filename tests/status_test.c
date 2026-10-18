@@ -512,6 +512,7 @@ static void grbl_block(void)
 
 int main(void)
 {
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     snprintf(dir, sizeof(dir), "/tmp/forgectrl-status-XXXXXX");
     if (!mkdtemp(dir)) {
         perror("mkdtemp");

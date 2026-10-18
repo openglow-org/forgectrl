@@ -14,6 +14,7 @@
  */
 #define _GNU_SOURCE
 #include "button.h"
+#include "testhook.h"
 
 #include <fcntl.h>
 #include <linux/input.h>
@@ -37,10 +38,12 @@ static volatile int cancel;
 static pthread_t th;
 static int th_live;
 
+/* The switch device, or the test hook GF_SWITCH_DEV in a host-test run
+ * (testhook.h). */
 static const char *switch_dev(void)
 {
-    const char *d = getenv("GF_SWITCH_DEV");
-    return d && *d ? d : "/dev/input/event0";
+    const char *d = ff_test_hook("GF_SWITCH_DEV");
+    return d ? d : "/dev/input/event0";
 }
 
 /* -1 unreadable, else 0/1. */

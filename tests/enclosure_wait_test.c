@@ -42,6 +42,7 @@ int main(void)
 {
     char why[96];
 
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     printf("the classification of the switch word\n");
     memset(why, 'x', sizeof(why));
     CHECK(liveness_enclosure_classify(DOORS_CLOSED, why, sizeof(why)) == 0 && why[0] == '\0',

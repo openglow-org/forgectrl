@@ -14,6 +14,7 @@
 #include "jobrun.h"
 #include "fflog.h"
 #include "lease.h"
+#include "testhook.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -385,10 +386,10 @@ static int program_gen(void *ctx, char *buf, size_t len)
  * second of it. "done" is said when the head has stopped. */
 static void kernel_idle_wait(double limit_s)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
     char path[192], text[24];
     struct timespec tick = { 0, 20 * 1000000L };
-    snprintf(path, sizeof(path), "%s/cnc/state", r && *r ? r : "/sys/glowforge");
+    snprintf(path, sizeof(path), "%s/cnc/state", r ? r : "/sys/glowforge");
     for (double t0 = mono_s(); mono_s() - t0 < limit_s; nanosleep(&tick, NULL)) {
         FILE *f = fopen(path, "r");
         if (!f)

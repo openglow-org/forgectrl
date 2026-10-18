@@ -38,6 +38,7 @@
 #include "grblport.h"
 #include "wizpkg.h"
 #include "wizrun.h"
+#include "testhook.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -125,10 +126,12 @@ static size_t shot_len[2];
 
 /* ------------------------------------------------------------- sysfs */
 
+/* The sysfs tree, or the test hook GF_SYSFS_ROOT in a host-test run
+ * (testhook.h). */
 static const char *sysfs_root(void)
 {
-    const char *r = getenv("GF_SYSFS_ROOT");
-    return r && *r ? r : "/sys/glowforge";
+    const char *r = ff_test_hook("GF_SYSFS_ROOT");
+    return r ? r : "/sys/glowforge";
 }
 
 static long rd_long(const char *attr, long fallback)

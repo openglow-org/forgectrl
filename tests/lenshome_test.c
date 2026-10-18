@@ -151,6 +151,7 @@ int main(void)
 {
     char detail[80];
     char run[256];
+    setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
 
     snprintf(root, sizeof(root), "/tmp/lenshome_test.%d", (int)getpid());
     mkdir(root, 0755);
