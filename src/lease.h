@@ -21,7 +21,7 @@
  * asking "why won't it start" is asking about these too: a Grbl sender on
  * the socket (it holds TCP 23 outside any grant, and cannot be revoked),
  * and the X and Y motors released. A hold of the sender kind is
- * refused while a client is connected.
+ * refused while a Grbl sender is connected.
  *
  * Every owner today is a thread of this daemon, whose every exit path
  * releases. There is no timeout: revoking a hold does not stop the thread
