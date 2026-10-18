@@ -104,7 +104,7 @@ var HELP = {
     t: 'X and Y motors',
     d: 'usage/homing/',
     p: [
-      'Release motors takes the holding current off X and Y so the head and the gantry can be pushed by hand, with the machine on. The position is gone the moment they are released: X and Y lose their home, and the controller raises an alarm and refuses every move, from the Grbl client and from this panel alike, so nothing can start the motors under your hands.',
+      'Release motors takes the holding current off X and Y so the head and the gantry can be pushed by hand, with the machine on. The position is gone the moment they are released: X and Y lose their home, and the controller raises an alarm and refuses every move, from the Grbl sender and from this panel alike, so nothing can start the motors under your hands.',
       'Two things bring the motors back, and both are yours: Energize motors here, or a manual home. After an energize the machine needs a home again. The lens is not released and keeps its reference.'
     ]
   },

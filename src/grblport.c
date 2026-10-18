@@ -239,7 +239,7 @@ int grblport_explain(const char *reply, char *why, size_t len)
     else if (!strcmp(reply, "error:saved"))
         snprintf(why, len, "the controller could not save the tray mode: nothing changed");
     else if (!strcmp(reply, "error:mode"))
-        snprintf(why, len, "the homing method is not manual: a home is the Grbl client's to start");
+        snprintf(why, len, "the homing method is not manual: a home is the Grbl sender's to start");
     else if (!strcmp(reply, "error:15"))
         snprintf(why, len, "the move would leave the work envelope");
     else if (!strcmp(reply, "error:9"))

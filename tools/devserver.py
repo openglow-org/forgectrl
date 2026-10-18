@@ -1279,7 +1279,7 @@ class Mock:
         if op == 'home':
             if self.settings.get('homing_mode') != 'manual':
                 return T(409, 'the homing method is not manual: a home is '
-                              "the Grbl client's to start")
+                              "the Grbl sender's to start")
             st['motors_released'] = False
             st['homed_axes'] |= 3
             st['homed'] = st['homed_axes'] == 7

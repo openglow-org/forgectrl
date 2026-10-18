@@ -18,9 +18,9 @@
  * the holder it runs under, and releases before it.
  *
  * What the lease does not hold it still reports, because an operator
- * asking "why won't it start" is asking about these too: a Grbl client on
- * the socket (a Grbl sender holds TCP 23 outside any grant, and cannot be
- * revoked), and the X and Y motors released. A hold of the sender kind is
+ * asking "why won't it start" is asking about these too: a Grbl sender on
+ * the socket (it holds TCP 23 outside any grant, and cannot be revoked),
+ * and the X and Y motors released. A hold of the sender kind is
  * refused while a client is connected.
  *
  * Every owner today is a thread of this daemon, whose every exit path

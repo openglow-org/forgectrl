@@ -601,7 +601,7 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
 }
 
 /* Stream the program as a job of the runner's, inside the wizard's own
- * hold of the machine (so a connected Grbl client refuses it, in the
+ * hold of the machine (so a connected Grbl sender refuses it, in the
  * lease's words); the run's outcome in `run`. */
 static int stream(gen_t *g, jobstream_run_t *run, double end_dark_s, char *err, size_t elen)
 {

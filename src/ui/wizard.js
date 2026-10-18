@@ -93,7 +93,7 @@ var DARK_TEXT = {
     'the witness and the crash watch armed. Keep the bed clear. About three minutes.',
   'motion.envelope': 'Optional. Run it only with the gantry stops installed. It measures how far the head can go ' +
     'from X0 Y0. Home first, then jog the head to the right end and to the front end while you watch it. Keep ' +
-    'your Grbl client quiet while it runs.',
+    'your Grbl sender quiet while it runs.',
   cameras: 'With the lid closed, one snapshot from the lid camera and one from the head ' +
     'camera. You confirm each view. About one minute.',
   'cooling.aa-offset': 'The loop settles, then the air-assist fan is switched while the coolant ' +

@@ -9,7 +9,7 @@
  * coordinates from X0 Y0, one 100 mm line per rung), and the machine
  * treats it as any job: the arm gates stand and the operator's button
  * press starts the fire. The runner takes the machine lease as a sender,
- * so the recording is refused while a Grbl client is connected and while
+ * so the recording is refused while a Grbl sender is connected and while
  * anything else holds the machine. While
  * the ladder plays the streamer samples the tube current
  * (pic/hv_current) and the head thermopile (head/beam_detect_analog, a
@@ -412,7 +412,7 @@ int curverec_start(char *err, size_t elen)
         return -1;
     }
     /* The runner takes the machine lease for the recorder as the sender
-     * of a job of its own: a connected Grbl client, a wizard, a
+     * of a job of its own: a connected Grbl sender, a wizard, a
      * diagnostic, an update job, or a log export refuses the recording,
      * and the refusal names it. */
     jobrun_cfg_t cfg = {

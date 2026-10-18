@@ -41,7 +41,7 @@
 #       check with its reason, the envelope never opened; every prompt is
 #       a jog that offers This is the end, the ends are the home plus the
 #       jogs, the keys the ends less 1 mm, the envelope opened and
-#       applied; a Grbl client's line closing the envelope ends the next
+#       applied; a Grbl sender's line closing the envelope ends the next
 #       run at its answer with nothing written; a jog the port hangs up
 #       on, and a jog that holds past its wait, each end the check with
 #       its reason, nothing written and the envelope set back
@@ -447,7 +447,7 @@ EOF
 # recorded, state answered in the controller's form, a jog moving the
 # position it reports, the envelope opened (refused, error:homed, until
 # $T/port.homed stands, as the controller refuses it before a home) and
-# applied. $T/port.sender is a Grbl client's line: it closes an open
+# applied. $T/port.sender is a Grbl sender's line: it closes an open
 # envelope, as the controller does. The head starts at X10 Y10. Two
 # jogs that do not end: while $T/port.hangup stands, the port hangs up
 # at a jog line before any answer; while $T/port.stall stands, a jog
@@ -893,7 +893,7 @@ expect 1 "$(recv motion.envelope)" "the record carries motion.envelope at versio
 cp "$CONF" "$T/conf.mid"
 check motion.envelope "on:x-end=touch $T/port.sender" answer:x-end=X+1
 expect '200|True|1' "$(run '"%s|%s|%d" % (d["start"], bool(d["dark"]["error"]), len(d["prompts"]))')" \
-    "a Grbl client's line closing the envelope ends the check at the answer, in an error"
+    "a Grbl sender's line closing the envelope ends the check at the answer, in an error"
 cmp -s "$T/conf.mid" "$CONF" && ok "and nothing is written" || bad "the closed check wrote a setting"
 # A jog that does not end ends the check with its reason, nothing
 # written and the envelope set back: the port hangs up at the jog line

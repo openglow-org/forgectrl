@@ -6,7 +6,7 @@
  *
  * jobstream is the sender; this is everything around one of its runs
  * that is the same whoever asks for it. A run takes the machine lease as
- * a sender (so it is refused while a Grbl client is on the socket, and
+ * a sender (so it is refused while a Grbl sender is on the socket, and
  * while anything else holds the machine, in the holder's words), plays
  * on a thread of the runner's or on the caller's, is visible to
  * GET /job while it plays and after, and gives the lease back on every

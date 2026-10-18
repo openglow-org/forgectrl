@@ -1977,7 +1977,7 @@ out:
  * for the measurement alone (the travel plus 30 mm; the port's envelope
  * open), and set from the keys again at the end and on every way out. The
  * jogs are the port's: an open envelope is the port's jogs' alone, and a
- * Grbl client's first line closes it (ctlport.c), which fails the check
+ * Grbl sender's first line closes it (ctlport.c), which fails the check
  * before anything is written. The machine must be homed: the bed is
  * measured from its home. */
 #define ENVELOPE_MARGIN_MM 1.0
@@ -2052,7 +2052,7 @@ static int envelope_jog(double dx, double dy, double feed, char *reason, size_t 
     return 0;
 }
 
-static const char ENVELOPE_CLOSED[] = "a Grbl client sent a line, which closed the check's envelope: run the check "
+static const char ENVELOPE_CLOSED[] = "a Grbl sender sent a line, which closed the check's envelope: run the check "
                                       "again when nothing else is sending";
 
 /* Jogs toward one far end until the operator says it is the end: 0 with

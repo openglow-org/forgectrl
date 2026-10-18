@@ -18,7 +18,7 @@
  * in M2 gets no second one; the runner's $X goes out first when asked
  * for, and never otherwise; a program is done when the kernel is idle,
  * not at its last ok; the abort sends the soft reset and frees the
- * lease; a connected Grbl client refuses the start with nothing sent; a
+ * lease; a connected Grbl sender refuses the start with nothing sent; a
  * run on the caller's thread stands inside a wizard's hold and gives the
  * machine back to the wizard, and is not the abort route's to stop; the
  * ready and done hooks of a started run, with the lease given back from
