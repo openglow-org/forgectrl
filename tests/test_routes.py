@@ -10,8 +10,11 @@ a capability the closed list in tokens.c resolves; serve_page sends
 PAGE_POLICY, the header that lets no frame navigate anywhere; and the
 dev-server mock serves the daemon's page, its policy and its panel's
 files, because the frame-isolation harness renders the mock's page;
-and main.c's list of environment variables, the ones the daemon's
-start notice names, is held to every read in the sources.
+main.c's list of environment variables, the ones the daemon's
+start notice names, is held to every read in the sources; and the 409
+body the panel sends a refused diagnostic start once more on is the
+body cb_diag_start sends for the cooling engine's refusal, in the mock
+the walk plays the panel against too.
 
 Run: python3 -B -m unittest -v tests/test_routes.py
 """
@@ -77,6 +80,30 @@ def panel_routes():
     return sorted(p for p in paths if p != '/' and not p.endswith('/'))
 
 
+def panel_retry_text():
+    """The 409 body the panel's startDiag (src/ui/panel.js) sends the
+    start once more on, a second later."""
+    body = re.search(r'function startDiag\(.*?\n\}', read(os.path.join('src', 'ui', 'panel.js')), re.S).group(0)
+    return re.search(r"r\.status === 409 && x === '([^']*)'", body).group(1)
+
+
+def daemon_refusal_text():
+    """The body cb_diag_start (src/main.c) sends for diag_start's -2, the
+    cooling engine's refusal."""
+    body = re.search(r'static int cb_diag_start\(.*?\n\}', read('src/main.c'), re.S).group(0)
+    return re.search(r'case -2:\s*return reply_error\(res, 409, "([^"]*)"\)', body).group(1)
+
+
+def mock_refusal_text():
+    """The body the dev server's mock (tools/devserver.py) sends for the
+    engine's refusal it is told to play (diag_engine_busy), which the
+    walk's diagnostic cases use."""
+    src = read(os.path.join('tools', 'devserver.py'))
+    block = src[src.index("if path.startswith('/diag/') and path != '/diag/abort':"):]
+    return re.search(r"if self\.diag_engine_busy:\s*self\.diag_engine_busy -= 1\s*return T\(409, '([^']*)'\)",
+                     block).group(1)
+
+
 def env_reads():
     """Every environment variable src/ reads: getenv("X"), the env_or and
     url_from_env wrappers, and the GFCOOL_* rows of cool.c's tunables; and
@@ -120,6 +147,11 @@ class RouteTest(unittest.TestCase):
                           read('src/ui/embed.cmake'))
         self.assertEqual(ds.PAGE_HEADERS['Content-Security-Policy'], policy)
         self.assertEqual((ds.CSS_FILES, ds.JS_FILES), (tuple(index.group(1).split()), tuple(index.group(2).split())))
+
+    def test_the_panels_retry_text_is_the_daemons_refusal_text(self):
+        text = daemon_refusal_text()
+        self.assertEqual(panel_retry_text(), text)
+        self.assertEqual(mock_refusal_text(), text)
 
     def test_every_environment_override_is_named_at_start(self):
         table = re.search(r'ENV_OVERRIDES\[\] = \{(.*?)\};', read('src/main.c'), re.S).group(1)
