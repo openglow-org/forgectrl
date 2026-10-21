@@ -56,6 +56,9 @@ int cool_quiet_pump_held(void);
 #define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
 #define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */
 #define COOL_SETTLE_WIN      15     /* 1 Hz samples */
+/* A check's end reading: the mean of its last samples (1 Hz), as its
+ * baseline is the mean of the settled window. */
+#define COOL_FLOW_END_WIN    5
 /* Factory run fan duties (pulse-header ground truth; also the
  * controllers' compiled-in emergency-fallback values per the
  * contract). */

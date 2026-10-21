@@ -916,16 +916,22 @@ cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "t
 
 echo "== the flow check"
 cp "$CONF" "$T/conf.before"
-expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=5 -d cool_flow_rise=6.0)" \
-    "a 5 s check window and a 6.0 C threshold are 200"
+expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=8 -d cool_flow_rise=6.0)" \
+    "an 8 s check window and a 6.0 C threshold are 200"
 # The loop as the diagnostic reads it: at 20 C at rest; with the heater
-# on the downstream sensor 5.0 C up with the pump on and 9.0 C up with it
-# off, so the threshold passes with a thin margin on the flowing side,
-# and the calibration finds its bands 4 C apart. plant_start <heater_pwm>
-# puts the pump-off rise at 6.0 C below that heater duty, where a
-# calibration rung finds its bands too close (1 C apart). The heater's
-# file is emptied at the start and as it is read: a shorter value written
-# over a longer one would keep the longer one's tail.
+# on the downstream sensor 9.0 C up with the pump off, and with it on
+# climbing 0.6 C a second from 2.0 C up, so the mean of an 8 s window's
+# last 5 s reads 5.0 C up and its last sample 6.2 C. Read as the check
+# reads it, from means, the threshold passes with a thin margin on the
+# flowing side and the calibration finds its bands 4 C apart; read from
+# the last sample alone, the flowing rise is over the threshold.
+# plant_start <heater_pwm> puts the pump-off rise at 6.0 C below that
+# heater duty, where a calibration rung finds its bands too close (1 C
+# apart). The air assist above its idle shifts both readings 1.2 C cold,
+# as the run airflow does on the machine: a baseline read under other
+# fans than its window's end reads 1.2 C off. The heater's file is
+# emptied at the start and as it is read: a shorter value written over a
+# longer one would keep the longer one's tail.
 plant_start() {
     : > "$SYS/thermal/heater_pwm"
     python3 - "$SYS" "${1:-0}" <<'EOF' &
@@ -938,20 +944,31 @@ def put(attr, v):
     open(os.path.join(sysfs, attr + '.new'), 'w').write('%d\n' % v)
     os.replace(os.path.join(sysfs, attr + '.new'), os.path.join(sysfs, attr))
 heater = 0
+on_at = None
 while True:
     with open(os.path.join(sysfs, 'thermal/heater_pwm'), 'r+') as f:
         v = f.read().strip()
         if v:
             heater = int(v)
             f.truncate(0)
+    now = time.time()
+    on_at = (on_at or now) if heater else None
     pump = open(os.path.join(sysfs, 'thermal/water_pump_on')).read().strip() != '0'
+    aa = open(os.path.join(sysfs, 'head/air_assist_pwm')).read().strip()
+    shift = -1.2 if aa.isdigit() and int(aa) > 256 else 0.0
     stagnant = 9.0 if heater >= ladder else 6.0
-    put('pic/water_temp_1', raw(20.0 + ((5.0 if pump else stagnant) if heater else 0.0)))
-    put('pic/water_temp_2', raw(20.0))
+    flowing = min(2.0 + 0.6 * (now - on_at), 7.0) if heater else 0.0
+    put('pic/water_temp_1', raw(20.0 + shift + ((flowing if pump else stagnant) if heater else 0.0)))
+    put('pic/water_temp_2', raw(20.0 + shift))
     time.sleep(0.05)
 EOF
     PLANT=$!
 }
+# The stand-in's files keep the tail of a longer value under a shorter one
+# (a write does not truncate them, as sysfs does): the engine's idle 204
+# over the airflow checks' 1023 reads 2043. The air assist is put back at
+# 204, as the machine reads it, so the check starts from the idle posture.
+echo 204 > "$SYS/head/air_assist_pwm"
 plant_start
 check cooling.flow-verify diag
 kill $PLANT
@@ -1303,10 +1320,11 @@ up || bad "no controller on the seeded record"
 echo "== the first run, walked in the browser"
 # The page the daemon serves, walked in headless Chrome as a new owner
 # walks it (tests/wizard_walk.py --daemon): no record and no account, the
-# intake fans counted, a 5 s flow window on the scripted loop, its
-# pump-off rise 6 C below 55 percent heater duty: the calibration finds
-# its first rung's bands too close, and its bands at the second, 55
-# percent, in twelve windows. The press is the switch word, held once
+# intake fans counted, an 8 s flow window on the scripted loop, its
+# pump-off rise 6 C below 45 percent heater duty: the calibration finds
+# its first rung's bands too close with room under the stop for the
+# next, and its bands at the second, 45 percent, in twelve windows. The
+# press is the switch word, held once
 # the daemon waits for it; after the walk the record, the settings and
 # GET /wiz are read beside the walk's verdict.
 OLD=$(ctl_pid)
@@ -1314,8 +1332,8 @@ stop_daemon
 cp "$CONF" "$T/conf.before"
 rm -f "$REC" "$T/data/users"
 start_daemon
-expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=5)" "a 5 s flow window is 200"
-plant_start 36044
+expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=8)" "an 8 s flow window is 200"
+plant_start 29490
 presser() {
     n=1500
     while [ $n -gt 0 ]; do
@@ -1348,7 +1366,7 @@ expect '1|1|1|1' "$(jget "$T/wiz.json" '"|".join(str(d["versions"].get(k, "")) f
 expect 4 "$(jget "$REC" 'len(d["advisories"])')" "the record holds the four documents"
 expect True "$(python3 -c 'import sys; v = float(sys.argv[1] or "nan"); print(6.5 <= v <= 7.5)' "$(setting cool_flow_rise)")" \
     "the calibration wrote the threshold between the bands (cool_flow_rise $(setting cool_flow_rise))"
-grep -qx 'cool_flow_heater_pct = 55' "$CONF" && ok "and beside it the duty its bands were found at (cool_flow_heater_pct 55)" \
+grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "and beside it the duty its bands were found at (cool_flow_heater_pct 45)" \
     || bad "the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the calibration"
 expect imperial "$(setting ui_units)" "the panel's save bar wrote ui_units"
 OLD=$(ctl_pid)

@@ -308,7 +308,7 @@ static const char *sysfs_root(void)
  * baseline is the mean of the settled window the gate has just verified
  * (FLOW_SETTLE_WIN samples); the end reading is the mean of the check's
  * last FLOW_END_WIN samples. */
-#define FLOW_END_WIN        5       /* 1 Hz samples */
+#define FLOW_END_WIN        COOL_FLOW_END_WIN   /* 1 Hz samples */
 
 /* The tube warms the same loop the heater does, and with a prompt press
  * the tube is lit for most of the arm-time window. Measured on the

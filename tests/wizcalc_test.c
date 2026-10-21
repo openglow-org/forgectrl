@@ -110,9 +110,23 @@ int main(void)
     CHECK(wizcalc_grace_s(3.6, 5.0, 60.0) == 8.6, "the grace is spin-up plus 5 s");
     CHECK(wizcalc_grace_s(0.0, 5.0, 60.0) == 5.0, "the grace clamps low");
 
-    CHECK(wizcalc_next_duty(0.0) == 40.0 && wizcalc_next_duty(40.0) == 55.0
-          && wizcalc_next_duty(55.0) == 70.0 && wizcalc_next_duty(70.0) < 0.0,
-          "the heater ladder is 40, 55, 70, then stop");
+    CHECK(wizcalc_next_duty(0.0) == 40.0 && wizcalc_next_duty(40.0) == 45.0
+          && wizcalc_next_duty(45.0) == 50.0 && wizcalc_next_duty(50.0) < 0.0,
+          "the heater ladder is 40, 45, 50, then stop");
+    /* A rung is taken only when every trial, its rise scaled by the duty,
+     * stays the margin under the stop: the bench reference's rises from
+     * 23 C at 40 percent have room at 45, a loop whose stagnant rise is
+     * 23 C from the same start does not. */
+    double base[6] = { 23.0, 23.0, 23.0, 23.0, 23.0, 23.0 };
+    double roomy[6] = { 11.5, 9.3, 10.1, 18.0, 16.0, 16.6 };
+    double hot[6] = { 19.1, 17.5, 19.2, 23.0, 22.1, 23.4 };
+    double peak = 0.0;
+    CHECK(wizcalc_rung_room(base, roomy, 6, 40.0, 45.0, 48.0, 3.0, &peak) == 1
+          && fabs(peak - 43.25) < 1e-9,
+          "a loop with room takes the next rung, its peak projected from the hottest trial");
+    CHECK(wizcalc_rung_room(base, hot, 6, 40.0, 45.0, 48.0, 3.0, &peak) == 0
+          && fabs(peak - 49.325) < 1e-9,
+          "a loop that would reach the stop's margin does not");
 
     wizcalc_sensors_t s = {
         .down_c = 22.4, .up_c = 21.9, .chassis_c = 28.0, .soc_c = 45.0,

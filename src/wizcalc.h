@@ -53,9 +53,17 @@ double wizcalc_floor(double steady, double frac, double lo, double hi);
 /* The fan grace: the slowest spin-up plus 5 s, inside [lo, hi]. */
 double wizcalc_grace_s(double spinup_s, double lo, double hi);
 
-/* The flow calibration's heater duty ladder: 40, then 55, then 70
+/* The flow calibration's heater duty ladder: 40, then 45, then 50
  * percent; -1 after the last rung. */
 double wizcalc_next_duty(double duty);
+
+/* Whether the next rung has room under the trials' stop. Each of a
+ * rung's n trials started at base[i] and rose rise[i] at duty; at next
+ * its rise is taken as scaled by next / duty. The rung has room (1) when
+ * every such projection stays margin_c under limit_c; *peak gets the
+ * highest projection. 0 for no room, and for no trials. */
+int wizcalc_rung_room(const double *base, const double *rise, int n, double duty,
+                      double next, double limit_c, double margin_c, double *peak);
 
 /* A sample at rest, as the sensors wizard sees it. A reading it could
  * not take is NAN (temperatures) or -1 (counts); those are skipped. */

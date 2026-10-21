@@ -1098,6 +1098,34 @@ static void run_cooling_aa(void)
     json_decref(applied);
 }
 
+/* A rung is taken only when its trials' projected peaks stay this far
+ * under the trials' stop (DIAG_ABORT_DOWN_C). The projection scales each
+ * rise with the duty, and on the bench reference the rise grew faster
+ * than the duty, by up to a quarter between 30 and 40 percent; the loop
+ * also warms over a calibration. A rung with no room would only end at
+ * the stop: the ladder ends with its reason instead. The stop still
+ * guards every trial of a rung that is taken. */
+#define FLOW_RUNG_ROOM_C 3.0
+
+/* Whether the rung after the one res reports has room (wizcalc). */
+static int flow_rung_room(json_t *res, double duty, double next, double *peak)
+{
+    static const char *const keys[2][2] = { { "flow_bases", "flow_rises" },
+                                            { "noflow_bases", "noflow_rises" } };
+    double base[6], rise[6];
+    int n = 0;
+    for (int c = 0; c < 2; c++) {
+        json_t *b = json_object_get(res, keys[c][0]), *r = json_object_get(res, keys[c][1]);
+        if (!json_is_array(b) || !json_is_array(r) || json_array_size(b) != 3 || json_array_size(r) != 3)
+            return 0;
+        for (size_t i = 0; i < 3; i++, n++) {
+            base[n] = json_number_value(json_array_get(b, i));
+            rise[n] = json_number_value(json_array_get(r, i));
+        }
+    }
+    return wizcalc_rung_room(base, rise, n, duty, next, DIAG_ABORT_DOWN_C, FLOW_RUNG_ROOM_C, peak);
+}
+
 /* The duty is written beside its threshold or not at all. Each rung's
  * duty goes to its own diagnostic, never to the settings file, so a
  * calibration that ends any other way (an abort, a failure, the
@@ -1119,11 +1147,21 @@ static void run_cooling_flow(void)
         if (!err)
             break;
         if (strstr(err, "bands too close")) {
-            wlog("gap %.1f C at %.0f percent: trying the next rung",
-                 json_number_value(json_object_get(res, "gap")), duty);
+            double gap = json_number_value(json_object_get(res, "gap"));
+            double next = wizcalc_next_duty(duty), peak = 0.0;
+            if (next > 0.0 && !flow_rung_room(res, duty, next, &peak)) {
+                wlog("gap %.1f C at %.0f percent; at %.0f percent the loop would reach "
+                     "about %.0f C: stopping", gap, duty, next, peak);
+                finish_err("the readings were too close at %.0f percent, and a stronger test "
+                           "would run this loop too hot: check the coolant level and look for "
+                           "air in the lines, then run again", duty);
+                json_decref(res);
+                return;
+            }
+            wlog("gap %.1f C at %.0f percent: trying the next rung", gap, duty);
             json_decref(res);
             res = NULL;
-            duty = wizcalc_next_duty(duty);
+            duty = next;
             /* The next rung asks for the hardware once the engine has
              * taken it back from this one; past the wait, the rung's
              * start says why it cannot run. */
@@ -1136,7 +1174,7 @@ static void run_cooling_flow(void)
         return;
     }
     if (!res) {
-        finish_err("the flow bands did not separate at 40, 55, or 70 percent: check the pump "
+        finish_err("the flow bands did not separate at 40, 45, or 50 percent: check the pump "
                    "and the coolant level, then run again");
         return;
     }

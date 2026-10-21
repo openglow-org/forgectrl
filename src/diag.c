@@ -33,7 +33,10 @@
  *
  * Both run at the machine's configured heater duty and window so the
  * verdict applies to the check the cooling engine (cool.c) actually
- * runs; the engine suspends its own writes for the duration. The
+ * runs; the engine suspends its own writes for the duration. They read
+ * the rise as the check does: the baseline is the mean of the settled
+ * window, the end the mean of the window's last COOL_FLOW_END_WIN
+ * samples, both under the cut-profile fans, never single samples. The
  * setup's calibration gives each rung's duty to its run alone
  * (diag_start_duty) and writes it beside the threshold it finds.
  */
@@ -83,10 +86,7 @@ static const char *sysfs_root(void)
 #define SETTLE_DRIFT_C   ((double)COOL_SETTLE_DRIFT_C)
 #define SETTLE_DT_C      ((double)COOL_SETTLE_DT_C)
 #define SETTLE_TIMEOUT_S 420
-
-/* Safety rails for the pump-off trials: the downstream sensor sits at
- * the heater element, so a stagnant window is hard-capped. */
-#define ABORT_DOWN_C     48.0
+#define END_WIN          COOL_FLOW_END_WIN
 
 #define CAL_TRIALS       3
 /* Below this flow/no-flow gap the midpoint cannot be trusted: the
@@ -227,11 +227,12 @@ static int aborted(void)
     return a;
 }
 
-/* Wait for a stationary loop (driver-equivalent gate). Returns 0, or
- * -1 on timeout, -2 on abort. */
-static int settle(double *down, double *up)
+/* Wait for a stationary loop (driver-equivalent gate). Returns 0 with
+ * base_down/base_up (when given) the means of the settled window, or -1
+ * on timeout, -2 on abort. */
+static int settle(double *down, double *up, double *base_down, double *base_up)
 {
-    double win[SETTLE_WIN];
+    double win[SETTLE_WIN], win_up[SETTLE_WIN];
     int n = 0;
 
     for (int t = 0; t < SETTLE_TIMEOUT_S; t++) {
@@ -239,6 +240,7 @@ static int settle(double *down, double *up)
             return -2;
         sample(down, up);
         win[n % SETTLE_WIN] = *down;
+        win_up[n % SETTLE_WIN] = *up;
         n++;
         if (n >= SETTLE_WIN) {
             double old_s = 0, new_s = 0;
@@ -251,26 +253,36 @@ static int settle(double *down, double *up)
             if (drift < 0)
                 drift = -drift;
             if (drift <= SETTLE_DRIFT_C &&
-                (*down > *up ? *down - *up : *up - *down) <= SETTLE_DT_C)
+                (*down > *up ? *down - *up : *up - *down) <= SETTLE_DT_C) {
+                double s_up = 0;
+                for (int i = 0; i < SETTLE_WIN; i++)
+                    s_up += win_up[i];
+                if (base_down)
+                    *base_down = (old_s + new_s) / SETTLE_WIN;
+                if (base_up)
+                    *base_up = s_up / SETTLE_WIN;
                 return 0;
+            }
         }
         sleep(1);
     }
     return -1;
 }
 
-/* One heater trial. Returns 0 with rise/dt filled, -1 on abort, -2 on
- * the safety ceiling. The pump is always restored. */
-static int trial(int flow, double duty, int secs,
+/* One heater trial from a settled loop whose downstream baseline is
+ * base_down. Returns 0 with rise (the mean of the window's last END_WIN
+ * samples over the baseline) and dt (the mean of their down - up)
+ * filled, -1 on abort, -2 on the safety ceiling. The pump is always
+ * restored. */
+static int trial(int flow, double duty, int secs, double base_down,
                  double *rise, double *dt)
 {
-    double down = 20, up = 20;
+    double down = base_down, up = base_down;
+    double end[END_WIN], end_dt[END_WIN];
+    int n_end = 0;
 
     cool_diag_pump(flow);
-    cool_diag_fans_run();
     sleep(3);
-    sample(&down, &up);
-    double base = down;
 
     cool_diag_heater_pct(duty);
     int rc = 0;
@@ -280,7 +292,10 @@ static int trial(int flow, double duty, int secs,
             break;
         }
         sample(&down, &up);
-        if (down >= ABORT_DOWN_C) {
+        end[n_end % END_WIN] = down;
+        end_dt[n_end % END_WIN] = down - up;
+        n_end++;
+        if (down >= DIAG_ABORT_DOWN_C) {
             dlog("safety: downstream %.1f C - trial aborted", down);
             rc = -2;
             break;
@@ -290,8 +305,14 @@ static int trial(int flow, double duty, int secs,
     cool_diag_heater_pct(0);
     cool_diag_pump(1);
 
-    *rise = down - base;
-    *dt = down - up;
+    int k = n_end < END_WIN ? n_end : END_WIN;
+    double s = 0, s_dt = 0;
+    for (int i = 0; i < k; i++) {
+        s += end[i];
+        s_dt += end_dt[i];
+    }
+    *rise = k ? s / k - base_down : 0.0;
+    *dt = k ? s_dt / k : 0.0;
     return rc;
 }
 
@@ -324,8 +345,14 @@ static void *runner(void *arg)
     }
     close(open(MARKER, O_CREAT | O_WRONLY, 0644));
 
-    double f_rise[CAL_TRIALS], f_dt[CAL_TRIALS];
-    double n_rise[CAL_TRIALS], n_dt[CAL_TRIALS];
+    /* The cut-profile fans for the whole run, ahead of the first settle:
+     * the run airflow shifts both coolant readings (cool.c), so a
+     * baseline compares with its window's end only under the same fans. */
+    cool_diag_fans_run();
+    sleep(3);
+
+    double f_rise[CAL_TRIALS], f_dt[CAL_TRIALS], f_base[CAL_TRIALS];
+    double n_rise[CAL_TRIALS], n_dt[CAL_TRIALS], n_base[CAL_TRIALS];
     int trials = calibrate ? CAL_TRIALS : 1;
 
     for (int t = 0; t < trials; t++) {
@@ -342,7 +369,8 @@ static void *runner(void *arg)
             pthread_mutex_unlock(&mu);
             set_phase("settling before trial %d/%d (%s)",
                       t + 1, trials, flow ? "pump on" : "pump off");
-            int rc = settle(&down, &up);
+            double *base = flow ? &f_base[t] : &n_base[t];
+            int rc = settle(&down, &up, base, NULL);
             if (rc == -1) {
                 set_result("{\"error\":\"loop would not settle within "
                            "%d s\"}", SETTLE_TIMEOUT_S);
@@ -356,16 +384,16 @@ static void *runner(void *arg)
                       flow ? "pump on" : "pump off");
             double *rise = flow ? &f_rise[t] : &n_rise[t];
             double *dt = flow ? &f_dt[t] : &n_dt[t];
-            rc = trial(flow, duty, secs, rise, dt);
+            rc = trial(flow, duty, secs, *base, rise, dt);
             if (rc == -1)
                 goto out_aborted;
             if (rc == -2) {
                 set_result("{\"error\":\"downstream sensor hit %.0f C - "
-                           "aborted for safety\"}", ABORT_DOWN_C);
+                           "aborted for safety\"}", DIAG_ABORT_DOWN_C);
                 goto out;
             }
-            dlog("trial %d/%d %s: rise %.1f C, dT %.1f C", t + 1, trials,
-                 flow ? "flow" : "no-flow", *rise, *dt);
+            dlog("trial %d/%d %s: from %.1f C, rise %.1f C, dT %.1f C", t + 1, trials,
+                 flow ? "flow" : "no-flow", *base, *rise, *dt);
         }
     }
 
@@ -393,23 +421,31 @@ static void *runner(void *arg)
                 n_min = n_rise[t];
         }
         double gap = n_min - f_max;
+        /* The trials' starting temperatures ride with their rises: the
+         * setup's ladder projects the next duty's peaks from both. */
+        char bases[160];
+        snprintf(bases, sizeof(bases),
+                 "\"duty\":%.0f,\"flow_bases\":[%.1f,%.1f,%.1f],"
+                 "\"noflow_bases\":[%.1f,%.1f,%.1f]",
+                 duty, f_base[0], f_base[1], f_base[2],
+                 n_base[0], n_base[1], n_base[2]);
         if (gap < CAL_MIN_GAP_C)
             set_result("{\"flow_rises\":[%.1f,%.1f,%.1f],"
-                       "\"noflow_rises\":[%.1f,%.1f,%.1f],"
+                       "\"noflow_rises\":[%.1f,%.1f,%.1f],%s,"
                        "\"flow_max\":%.1f,\"noflow_min\":%.1f,"
                        "\"gap\":%.1f,"
                        "\"error\":\"bands too close to separate at this "
                        "duty - raise cool_flow_heater_pct and rerun\"}",
                        f_rise[0], f_rise[1], f_rise[2],
-                       n_rise[0], n_rise[1], n_rise[2],
+                       n_rise[0], n_rise[1], n_rise[2], bases,
                        f_max, n_min, gap);
         else
             set_result("{\"flow_rises\":[%.1f,%.1f,%.1f],"
-                       "\"noflow_rises\":[%.1f,%.1f,%.1f],"
+                       "\"noflow_rises\":[%.1f,%.1f,%.1f],%s,"
                        "\"flow_max\":%.1f,\"noflow_min\":%.1f,"
                        "\"gap\":%.1f,\"recommend\":%.1f}",
                        f_rise[0], f_rise[1], f_rise[2],
-                       n_rise[0], n_rise[1], n_rise[2],
+                       n_rise[0], n_rise[1], n_rise[2], bases,
                        f_max, n_min, gap, (f_max + n_min) / 2.0);
         dlog("bands: flow <= %.1f, no-flow >= %.1f (gap %.1f)",
              f_max, n_min, gap);
@@ -584,7 +620,7 @@ static void *runner_aa(void *arg)
     set_phase("settling with the fans idle");
     {
         double d, u;
-        int rc = settle(&d, &u);
+        int rc = settle(&d, &u, NULL, NULL);
         if (rc == -1) {
             set_result("{\"error\":\"loop would not settle within %d s\"}",
                        SETTLE_TIMEOUT_S);

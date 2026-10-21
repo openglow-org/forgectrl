@@ -104,11 +104,25 @@ double wizcalc_next_duty(double duty)
 {
     if (duty < 40.0)
         return 40.0;
-    if (duty < 55.0)
-        return 55.0;
-    if (duty < 70.0)
-        return 70.0;
+    if (duty < 45.0)
+        return 45.0;
+    if (duty < 50.0)
+        return 50.0;
     return -1.0;
+}
+
+int wizcalc_rung_room(const double *base, const double *rise, int n, double duty,
+                      double next, double limit_c, double margin_c, double *peak)
+{
+    double top = -1e9;
+    for (int i = 0; i < n; i++) {
+        double p = base[i] + rise[i] * next / duty;
+        if (p > top)
+            top = p;
+    }
+    if (peak)
+        *peak = top;
+    return n > 0 && duty > 0.0 && top < limit_c - margin_c;
 }
 
 static void add_why(char *why, size_t len, int *n, const char *text)

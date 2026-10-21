@@ -9,6 +9,10 @@
 
 #include <stddef.h>
 
+/* The flow tools' safety rail: a heater trial stops the moment the
+ * downstream sensor reads this, pump on or off. */
+#define DIAG_ABORT_DOWN_C 48.0
+
 /* Startup recovery: if a diagnostic died mid-run (stale marker file),
  * stand the hardware down and restart the motion controller. */
 void diag_init(void);
