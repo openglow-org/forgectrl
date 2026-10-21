@@ -248,7 +248,7 @@ int users_create(const char *name, const char *password, char *reason,
         snprintf(reason, rlen, "cannot write the account record");
         return -1;
     }
-    fflog(LOG_NOTICE, "users: account '%s' created", name);
+    fflog(LOG_NOTICE, "users: account created");
     users_replay();
     return 0;
 }

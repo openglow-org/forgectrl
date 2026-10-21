@@ -11,7 +11,8 @@
  * logs.export lease, which the end drops. The archive holds the README,
  * the installer's directory with the addresses gone, and the extension
  * list as extpkg_status_json writes it; the token and the camera key are
- * nowhere in it.
+ * nowhere in it, nor the account's name, which a line written by a
+ * release that logged it carries.
  */
 #define _GNU_SOURCE
 #include "../src/auth.h"
@@ -34,6 +35,8 @@ unsigned long fuse_serial(void) { return 0; }
 void machine_id(char *buf, size_t len) { if (len) buf[0] = '\0'; }
 int fuse_password(char *buf, size_t len) { if (len) buf[0] = '\0'; return -1; }
 int users_exist(void) { return 0; }
+#define ACCOUNT "kerfmaker"
+int users_name(char *buf, size_t len) { snprintf(buf, len, "%s", ACCOUNT); return 0; }
 int session_valid(const char *id) { (void)id; return 0; }
 int session_from_cookie(const char *cookie, char *id, size_t len) { (void)cookie; (void)id; (void)len; return 0; }
 
@@ -156,7 +159,8 @@ int main(void)
     snprintf(p, sizeof(p), "%s/install", root);
     mkdir(p, 0755);
     snprintf(p, sizeof(p), "%s/install/install.log", root);
-    put(p, "install: probe token=" TOKEN " key=" CAMKEY " mac " MAC " ip " IP "\n");
+    put(p, "install: probe token=" TOKEN " key=" CAMKEY " mac " MAC " ip " IP "\n"
+           "users: account '" ACCOUNT "' created\n");
 
     char err[160] = "", owner[64] = "";
     logs_export_t *e = logs_export_begin(1, NULL, NULL, err, sizeof(err));
@@ -222,6 +226,9 @@ int main(void)
 
     CHECK(tar && !has(tar, len, TOKEN) && !has(tar, len, CAMKEY),
           "the token and the camera key are nowhere in the archive");
+    CHECK(tar && !has(tar, len, ACCOUNT) && install &&
+          has(install->data, install->size, "account '<ACCOUNT>' created"),
+          "the account's name is nowhere in the archive: the old line reads <ACCOUNT>");
 
     free(tar);
     nftw(dir, rm_cb, 16, FTW_DEPTH | FTW_PHYS);

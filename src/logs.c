@@ -31,6 +31,7 @@
 #include "lease.h"
 #include "sanitize.h"
 #include "settings.h"
+#include "users.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -627,6 +628,13 @@ static void load_known(sanitizer_t *san)
     const char *tok = auth_token();
     if (tok && *tok)
         san_add_known(san, "PANEL_TOKEN", tok);
+    /* The account's name: forgectrl does not log it, but a release
+     * before that did, and a name can reach a line some other way. A
+     * name that is a common word takes that word with it: the
+     * over-redaction this sanitizer accepts. */
+    char acct[USERS_NAME_MAX + 1];
+    if (users_name(acct, sizeof(acct)) == 0 && acct[0])
+        san_add_known(san, "ACCOUNT", acct);
     /* The camera key: a read secret that lands in sender logs as a URL
      * parameter. Known by value, not left to the hex pattern. */
     const char *ck = camkey_get();
@@ -950,10 +958,11 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                 san_report(san, r);
             fprintf(r, "\nThe sanitizer removes this machine's known"
                        " identifiers (serial, hostname, cloud\n"
-                       "credentials, panel token, WiFi network) and common"
-                       " patterns (network addresses,\n"
-                       "e-mail addresses, bearer tokens, key=value secrets,"
-                       " long hex/base64 blobs). It\n"
+                       "credentials, panel token, WiFi network, the account"
+                       " name in the setup record) and\n"
+                       "common patterns (network addresses, e-mail"
+                       " addresses, bearer tokens, key=value\n"
+                       "secrets, long hex/base64 blobs). It\n"
                        "cannot know everything a log line may carry - skim"
                        " the bundle before posting it\n"
                        "publicly. It knows this machine's own secrets and"

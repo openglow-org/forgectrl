@@ -920,6 +920,28 @@ static void record_snapshot(FILE *out)
     free(text);
 }
 
+/* The record for a sanitized export: the account's name is the owner's
+ * own and goes, as the machine's identifiers do. The sanitizer takes it
+ * as a known value across the bundle (logs.c), and it is taken out of
+ * the record by its key as well, which also covers a name too short
+ * for the known-value pass. A full export keeps it. */
+static void record_snapshot_sanitized(FILE *out)
+{
+    json_t *rec = setup_record_copy();
+    if (!rec)
+        return;
+    json_t *a = json_object_get(rec, "account");
+    if (json_is_object(a) && json_object_get(a, "name"))
+        json_object_set_new(a, "name", json_string("<ACCOUNT>"));
+    char *text = json_dumps(rec, JSON_INDENT(2) | JSON_SORT_KEYS);
+    json_decref(rec);
+    if (!text)
+        return;
+    fputs(text, out);
+    fputc('\n', out);
+    free(text);
+}
+
 /* WiFi radio policy, applied at startup and whenever the wifi_country
  * setting changes. The stored region (unset = "00", the world domain)
  * goes to cfg80211 as the user regulatory hint; power save is pinned
@@ -2735,7 +2757,7 @@ static int cb_login(const struct _u_request *req, struct _u_response *res,
         return reply_error(res, 500, "cannot create a session");
     session_cookie_set(sid, cookie, sizeof(cookie));
     ulfius_add_header_to_response(res, "Set-Cookie", cookie);
-    fflog(LOG_NOTICE, "login: %s from %s", name, peer[0] ? peer : "?");
+    fflog(LOG_NOTICE, "login from %s", peer[0] ? peer : "?");
     ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -3254,7 +3276,8 @@ static int cb_logs_export(const struct _u_request *req,
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is busy; export logs when it is idle");
     char err[160];
-    logs_export_t *e = logs_export_begin(sanitize, settings_snapshot, record_snapshot,
+    logs_export_t *e = logs_export_begin(sanitize, settings_snapshot,
+                                        sanitize ? record_snapshot_sanitized : record_snapshot,
                                         err, sizeof(err));
     if (!e)
         return reply_error(res, !strcmp(err, "busy") || strstr(err, "holds the machine") ? 409 : 500, err);

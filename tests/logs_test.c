@@ -25,6 +25,7 @@ unsigned long fuse_serial(void) { return 0; }
 void machine_id(char *buf, size_t len) { if (len) buf[0] = '\0'; }
 int fuse_password(char *buf, size_t len) { if (len) buf[0] = '\0'; return -1; }
 int users_exist(void) { return 0; }
+int users_name(char *buf, size_t len) { if (len) buf[0] = '\0'; return -1; }
 int session_valid(const char *id) { (void)id; return 0; }
 int session_from_cookie(const char *cookie, char *id, size_t len) { (void)cookie; (void)id; (void)len; return 0; }
 

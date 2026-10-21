@@ -276,6 +276,9 @@ fails += say(isinstance(rec, dict) and sid and rec.get('sheet_id') == sid, 'it p
 fails += say(isinstance(rec, dict) and sorted(rec.get('wizards') or {}) == sorted(record.get('wizards') or {}),
              "its wizards are the record's")
 fails += say(member is not None and b'$6$' not in text, 'it carries no password hash')
+fails += say(isinstance(rec, dict) and (rec.get('account') or {}).get('name') == '<ACCOUNT>'
+             and (record.get('account') or {}).get('name') == 'owner',
+             "the account's name is taken out of it ('owner' in the record, <ACCOUNT> here)")
 fails += say(token not in raw, 'the panel token is nowhere in the archive')
 sys.exit(1 if fails else 0)
 EOF
