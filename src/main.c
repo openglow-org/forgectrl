@@ -775,6 +775,9 @@ static int valid_xy_microsteps(const char *v)
 {
     return !strcmp(v, "8") || !strcmp(v, "16") || !strcmp(v, "32");
 }
+/* The mode an unset key runs at: the GRBL controller's
+ * XY_MICROSTEPS_DEFAULT (grblHAL-glowforge src/boards/glowforge.h). */
+#define XY_MICROSTEPS_UNSET "32"
 
 /* Two 0/1 switches. cloud_enabled: the owner's decision from the cloud
  * wizard; while it is 0 the cloud controller, the cloud homing method
@@ -1914,8 +1917,8 @@ static int cb_settings_post(const struct _u_request *req,
         if (xm) {
             char cur[16];
             const char *now = settings_get("xy_microsteps", cur, sizeof(cur)) == 0
-                              ? cur : "8";
-            const char *want = xm[0] ? xm : "8";
+                              ? cur : XY_MICROSTEPS_UNSET;
+            const char *want = xm[0] ? xm : XY_MICROSTEPS_UNSET;
             restart_grbl = strcmp(now, want) != 0 && super_grbl_running();
         }
     }

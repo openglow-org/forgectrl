@@ -1491,7 +1491,7 @@ function fill(force) {
    * to save: the setup's gate waits for it. */
   setF('cool_intake_fans', S.cool_intake_fans || '');
   setF('lid_policy', S.lid_policy || 'cancel');
-  setF('xy_microsteps', S.xy_microsteps || '8');
+  setF('xy_microsteps', S.xy_microsteps || '32');
   setF('rail_settle_s', S.rail_settle_s);
   setF('lid_lamp_idle', S.lid_lamp_idle);
   setF('wifi_country', S.wifi_country || '00');

@@ -35,6 +35,9 @@
 #   the settings' bounds, in the file FORGECTRL_CONF names: each refusal
 #     leaves the file byte for byte, a write changes its own key alone,
 #     and an empty value clears it
+#   the XY microstep mode: a write that changes the mode in force, an
+#     unset key running at x32, restarts the controller; one that does
+#     not leaves it running
 #   the page (its frame policy, the token, nothing external, the theme
 #     and the save bar), /status's switches and its grbl block only
 #     while the controller runs, /cam/status, the dose-curve reads, and
@@ -432,6 +435,37 @@ expect 400 "$(post /settings "$TOKEN" -d lid_lamp_idle=bright)" "lid_lamp_idle=b
 expect 100 "$(lamp)" "and pic/lid_led is as it was"
 expect 200 "$(post '/settings?lid_lamp_idle=' "$TOKEN")" "an empty lid_lamp_idle is 200"
 expect 236 "$(lamp)" "and pic/lid_led reads the default, 236"
+
+echo "== an XY microstep change restarts the controller"
+# An unset key runs at x32, the controller's own default. A write that
+# changes the mode in force restarts the idle controller before the reply
+# (the stop is waited for); one that does not leaves it running. Each
+# case reads the running controller's pid just before its write.
+up() { until_ok 150 eval 'alive "$(cat "$T/ctl.pid")"' || fatal "no controller running"; cat "$T/ctl.pid"; }
+# restarted <pid before> <what>: the controller that ran is gone, a new one runs
+restarted() {
+    if ! alive "$1" && until_ok 150 eval '[ "$(cat "$T/ctl.pid")" != "$1" ] && alive "$(cat "$T/ctl.pid")"'; then
+        ok "and the controller was restarted for $2 (pid $1 -> $(cat "$T/ctl.pid"))"
+    else
+        bad "the controller was not restarted for $2 (pid $1, now $(cat "$T/ctl.pid"))"
+    fi
+}
+P=$(up)
+expect 200 "$(post /settings "$TOKEN" -d xy_microsteps=32)" "xy_microsteps=32 over the unset key is 200"
+alive "$P" && expect "$P" "$(cat "$T/ctl.pid")" "and the controller runs on: x32 is the unset key's mode" \
+    || bad "x32 over the unset key stopped the controller"
+expect 200 "$(post '/settings?xy_microsteps=' "$TOKEN")" "clearing it again is 200"
+P=$(up)
+expect 200 "$(post /settings "$TOKEN" -d xy_microsteps=8)" "xy_microsteps=8 over the unset key is 200"
+restarted "$P" x8
+P=$(up)
+expect 200 "$(post '/settings?xy_microsteps=' "$TOKEN")" "clearing x8 is 200"
+restarted "$P" x32
+cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was before the writes" \
+    || bad "the microstep writes left the file as: $(cat "$CONF")"
+# The restarted controller was handed a new secret.
+until_ok 50 eval '[ "$(cat "$T/ctl.secret")" != "$SEC" ]' || bad "the restarted controller has its predecessor's secret"
+SEC=$(cat "$T/ctl.secret")
 
 echo "== the page and the reads beside it"
 expect 200 "$(curl -s -D "$T/page.h" -o "$T/page.html" -w '%{http_code}' "$URL/")" "GET / is 200"
