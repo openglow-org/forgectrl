@@ -2542,9 +2542,34 @@ static int cb_diag_status(const struct _u_request *req,
  * client could call) is what lets the origin checks keep it out of a
  * rebinding attacker's reach; and the panel and the wizard are served
  * only into a session (or before an account exists), so the token
- * travels only where the login did. The splice happens on the inflated
- * text, never inside the compressed stream. */
+ * travels only where the login did. A dev image's pages carry the dev
+ * bar in place of the <!--FFDEV--> mark at the top of each (embed.cmake
+ * holds the pages to it); a release image's pages lose the mark. The
+ * splices happen on the inflated text, never inside the compressed
+ * stream. */
 enum { PAGE_PANEL = 0, PAGE_WIZARD, PAGE_LOGIN, PAGE_COUNT };
+
+#define PAGE_DEV_MARK "<!--FFDEV-->"
+static const char PAGE_DEV_BAR[] =
+    "<div class=\"ff-devbar\" role=\"status\"><strong>DEVELOPMENT IMAGE</strong>: "
+    "root can log in over SSH with no password</div>";
+
+/* html with its first mark replaced by with, in a new string; NULL when
+ * html has no mark or there is no memory. */
+static char *page_splice(const char *html, const char *mark, const char *with)
+{
+    const char *at = strstr(html, mark);
+    if (!at)
+        return NULL;
+    size_t pre = (size_t)(at - html), mlen = strlen(mark), wlen = strlen(with);
+    char *out = malloc(strlen(html) - mlen + wlen + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, html, pre);
+    memcpy(out + pre, with, wlen);
+    strcpy(out + pre + wlen, at + mlen);
+    return out;
+}
 
 static const char *page_html(int which)
 {
@@ -2594,29 +2619,19 @@ static const char *page_html(int which)
     }
     html[n] = '\0';
 
-    const char *mark = strstr(html, "__FFTOKEN__");
+    char *s = page_splice(html, PAGE_DEV_MARK, auth_dev_image() ? PAGE_DEV_BAR : "");
+    if (s) {
+        free(html);
+        html = s;
+    }
     const char *tok = auth_token();
-    if (!mark || !tok[0]) {
-        pages[which] = html;            /* no token: serve the page inert */
-        pthread_mutex_unlock(&page_mu);
-        return pages[which];
+    if (tok[0] && (s = page_splice(html, "__FFTOKEN__", tok))) {
+        free(html);
+        html = s;
     }
-    size_t pre = (size_t)(mark - html);
-    size_t tlen = strlen(tok);
-    size_t total = n - strlen("__FFTOKEN__") + tlen + 1;
-    char *page = malloc(total);
-    if (!page) {
-        pages[which] = html;
-        pthread_mutex_unlock(&page_mu);
-        return pages[which];
-    }
-    memcpy(page, html, pre);
-    memcpy(page + pre, tok, tlen);
-    strcpy(page + pre + tlen, mark + strlen("__FFTOKEN__"));
-    free(html);
-    pages[which] = page;
+    pages[which] = html;                /* no token: the page is served inert */
     pthread_mutex_unlock(&page_mu);
-    return page;
+    return html;
 }
 
 /* A package's page renders in a frame of the panel's (src/ui/ext.js), and
@@ -3473,7 +3488,7 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+    "GF_DEV_MARKER", "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */

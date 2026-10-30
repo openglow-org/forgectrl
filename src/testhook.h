@@ -9,7 +9,7 @@
  * the test hooks are honored. A test hook moves a machine path for a
  * host test: GF_SYSFS_ROOT the sysfs tree of the kernel module (it ends
  * with '/'), GF_SWITCH_DEV the switch device, GF_RUN_DIR the run
- * directory. ff_test_hook() returns the hook's value in a host-test run
+ * directory, GF_DEV_MARKER the dev-image marker (/etc/forgefirm-dev). ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion
  * gate's and the privacy gate's input, and a moved device would be a

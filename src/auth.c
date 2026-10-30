@@ -57,6 +57,7 @@
 #include "peer.h"
 #include "session.h"
 #include "settings.h"
+#include "testhook.h"
 #include "tokens.h"
 #include "users.h"
 
@@ -283,7 +284,8 @@ int auth_dev_image(void)
 {
     static int checked, dev;
     if (!checked) {
-        dev = access("/etc/forgefirm-dev", F_OK) == 0;
+        const char *m = ff_test_hook("GF_DEV_MARKER");     /* a host test's marker */
+        dev = access(m ? m : "/etc/forgefirm-dev", F_OK) == 0;
         checked = 1;
     }
     return dev;

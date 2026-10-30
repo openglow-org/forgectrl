@@ -40,6 +40,12 @@ else()
 endif()
 
 file(READ "${UI_DIR}/${PAGE}.html" HTML)
+# main.c puts the dev-image bar in place of this mark, so a page without
+# it would hide a dev image.
+string(FIND "${HTML}" "<!--FFDEV-->" at)
+if(at EQUAL -1)
+  message(FATAL_ERROR "embed.cmake: ${PAGE}.html lacks the dev-image mark <!--FFDEV-->")
+endif()
 foreach(f ${CSS_FILES})
   set(tag "<link rel=\"stylesheet\" href=\"${f}\" />")
   string(FIND "${HTML}" "${tag}" at)

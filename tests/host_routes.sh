@@ -39,7 +39,7 @@
 #     unset key running at x32, restarts the controller; one that does
 #     not leaves it running
 #   the page (its frame policy, the token, nothing external, the theme
-#     and the save bar), /status's switches and its grbl block only
+#     and the save bar, no dev bar), /status's switches and its grbl block only
 #     while the controller runs, /cam/status, the dose-curve reads, and
 #     the controller's settings store in the data directory
 #   scoped tokens: each refused a route it was not given, and neither
@@ -50,6 +50,8 @@
 #   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT),
 #     and one outside its form runs nothing
 #   the login over HTTPS: the lock, the cookie, the logout
+#   a dev image (GF_DEV_MARKER): the login page, the panel and the setup
+#     each carry the dev bar above the header
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
 # distribution's library cuts the peer address that the loopback checks
@@ -115,7 +117,7 @@ start_daemon() {
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
-        FORGECTRL_LICENSES="$T/licenses.tar.gz" \
+        FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -478,6 +480,8 @@ grep -q -e '<link ' -e '<script src=' "$T/page.html" && bad "the page references
 for want in data-bs-theme 'id="savebar"'; do
     grep -qF "$want" "$T/page.html" && ok "the page carries $want" || bad "the page lacks $want"
 done
+grep -qF -e 'class="ff-devbar"' -e '<!--FFDEV-->' "$T/page.html" \
+    && bad "a release image's page carries the dev bar or its mark" || ok "no dev bar and no mark on a release image"
 curl -s -o "$T/status.json" "$URL/status"
 expect True "$(python3 -c 'import json, sys
 d = json.load(open(sys.argv[1]))
@@ -633,6 +637,29 @@ grep -q "FORGECTRL_SSHD_INIT is not an absolute path" "$T/out" && ok "the refusa
 ! grep -q "sshd init" "$T/out" && ok "the value is not in the log" || bad "the log carries the value"
 expect 200 "$(post /system/ssh "$TOKEN" -d enable=0)" "enable=0 is 200"
 expect "$n" "$(wc -l < "$T/sshd.log")" "and the stop ran nothing either"
+
+echo "== a dev image's pages carry the dev bar"
+stop_daemon
+: > "$T/forgefirm-dev"
+DEV_MARKER="$T/forgefirm-dev" start_daemon
+# devpage <path> <the page's own id> <what it is>: the bar between <body>
+# and the header, in the words the bar says
+devpage() {
+    expect 200 "$(curl -sk -o "$T/dev.html" -w '%{http_code}' "$TLS$1")" "GET $1 is 200"
+    if grep -qF "$2" "$T/dev.html" && python3 - "$T/dev.html" <<'EOF'
+import sys
+p = open(sys.argv[1], encoding='utf-8').read()
+bar = ('<div class="ff-devbar" role="status"><strong>DEVELOPMENT IMAGE</strong>: '
+       'root can log in over SSH with no password</div>')
+b = p.find('<body>')
+h = p.find('<header>', b)
+sys.exit(0 if 0 <= b < h and bar in p[b:h] and '<!--FFDEV-->' not in p else 1)
+EOF
+    then ok "$3 carries the dev bar above its header"; else bad "$3 lacks the dev bar above its header"; fi
+}
+devpage /login 'id="lg"' "the login page"
+devpage / 'id="savebar"' "the panel"
+devpage /setup 'id="rail"' "the setup"
 
 stop_daemon
 [ ! -e "$T/cloud.started" ] || bad "the cloud client's stand-in started"
