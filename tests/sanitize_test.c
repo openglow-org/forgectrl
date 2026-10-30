@@ -179,6 +179,25 @@ int main(void)
     CHECK(empty && !strcmp(empty, ""), "empty line");
     free(empty);
 
+    /* The sensors logger's records carry numbers only: every one of the
+     * golden records (senslog_test's) leaves the sanitizer as it came. */
+    FILE *g = fopen("tests/senslog_records.txt", "r");
+    char rec[4096];
+    int n = 0, kept = 0;
+    while (g && fgets(rec, sizeof(rec), g)) {
+        rec[strcspn(rec, "\n")] = '\0';
+        char *out = san_line(S, rec);
+        n++;
+        if (out && !strcmp(out, rec))
+            kept++;
+        else
+            printf("       changed: %s\n       into:    %s\n", rec, out ? out : "(null)");
+        free(out);
+    }
+    if (g)
+        fclose(g);
+    CHECK(n > 0 && kept == n, "the sensors records pass unchanged");
+
     printf("report:\n");
     san_report(S, stdout);
     san_free(S);

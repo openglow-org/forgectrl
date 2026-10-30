@@ -50,7 +50,7 @@
 #include <zlib.h>
 
 const char *const logs_names[] = {
-    "forgectrl", "grblhal", "gfcloud", "gfhome", "forgeext", "kernel", "system",
+    "forgectrl", "sensors", "grblhal", "gfcloud", "gfhome", "forgeext", "kernel", "system",
 };
 const size_t logs_count = sizeof(logs_names) / sizeof(*logs_names);
 
@@ -314,6 +314,7 @@ int logs_render(char *err, size_t errlen)
         fprintf(f, "\n# no remote syslog server configured\n");
     }
     render_logger(f, "forgectrl", "$programname == \"forgectrl\"", remote_on);
+    render_logger(f, "sensors",   "$programname == \"sensors\"",   remote_on);
     render_logger(f, "grblhal",   "$programname == \"grblhal\"",   remote_on);
     render_logger(f, "gfcloud",   "$programname == \"gfcloud\"",   remote_on);
     render_logger(f, "gfhome",    "$programname == \"gfhome\"",    remote_on);

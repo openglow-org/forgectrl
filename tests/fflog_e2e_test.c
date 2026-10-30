@@ -6,7 +6,8 @@
  *
  * Emits a fixed set of messages through the real fflog emitter under
  * ident "grblhal": one per severity, one with a trailing newline, one
- * long one. tests/fflog_e2e.sh drives it against a private rsyslogd
+ * long one; given a second name, one info line on a channel of that
+ * name (fflog_channel). tests/fflog_e2e.sh drives it against a private rsyslogd
  * running the shipped rsyslog.conf plus rules rendered by
  * `forgectrl --render-syslog`, then checks what landed on disk.
  */
@@ -29,6 +30,8 @@ int main(int argc, char **argv)
     memset(big, 'x', sizeof(big) - 1);
     big[sizeof(big) - 1] = '\0';
     fflog(LOG_INFO, "e2e long %s", big);
+    if (argc > 2)
+        fflog_ch(fflog_channel(argv[2]), LOG_INFO, "e2e channel line");
     printf("emitted; dropped=%lu level=%d\n", fflog_dropped(), fflog_level());
     return 0;
 }

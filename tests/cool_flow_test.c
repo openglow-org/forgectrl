@@ -79,7 +79,7 @@
  *   phases B.  a busy start takes the cooldown duties until the kernel is
  *              idle with no session, then the idle duties
  *   gates A.   the ceiling under the loop: OVERTEMP at the run start; at
- *              60 it is off, said so; the run's end names the board temps
+ *              60 it is off, said so
  *   gates B.   the start gate over the loop: WARMUP with the heater on and
  *              the fans idle, released on the minute's minimum, not on a
  *              slug; both low gates at 0 are off
@@ -222,6 +222,13 @@ static int log_has(const char *needle)
 
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
+
+/* The sensors logger's hooks, captured: the record the last flow verdict
+   wrote, and the flight recorder's arming counted. */
+static senslog_flow_t last_flow;
+static int flows, events;
+void senslog_flow(const senslog_flow_t *f) { last_flow = *f; flows++; }
+void senslog_event(const char *msg) { (void)msg; events++; }
 
 /* The faked crash watch hardware: armed on request, and the next poll
    reports what the test put in src1/src2. */
@@ -896,10 +903,6 @@ static void gate_ceiling(loop_t *L)
     CHECK(!strcmp(pub_verdict, "OK") && strstr(pub_gates_off, "\"coolant_max\""),
           "the ceiling at 60: OK, coolant_max in gates_off");
     CHECK(log_has("gate coolant_max OFF: cool_temp_max = 60"), "the run-start line names the gate off");
-    logbuf[0] = '\0';
-    session_end_tick(L);
-    const char *t = strstr(logbuf, "temps this job");
-    CHECK(t && strstr(t, "chassis 25.0") && strstr(t, "soc 38.0"), "the run's end names the board temperatures");
     kv[0] = NULL;
     close_session(L);
 }
@@ -1093,11 +1096,19 @@ int main(void)
     CHECK(strstr(last_log, "laser") == NULL, "no share is taken with the tube dark");
     CHECK(flow_base_set && fabs(flow_base_down - (BASE_C - 0.7)) < 0.15,
           "the baseline is the mean of the settled window, not one sample");
+    CHECK(flows > 0 && !strcmp(last_flow.src, "check") && !strcmp(last_flow.verdict, "verified") &&
+          last_flow.duty_pct == FLOW_HEATER_PCT && last_flow.base_down == flow_base_down,
+          "the sensors record names the check, its verdict, the duty and the judged baseline");
+    CHECK(fabs(last_flow.base_up - last_flow.base_down) < 0.15 &&
+          last_flow.end_up - last_flow.base_up < 0.15 * (last_flow.end_down - last_flow.base_down),
+          "and the upstream sensor beside it: level with the downstream at rest, barely moved by the heater");
 
     printf("B. dark, no flow\n");
     L.flow = 0;
     v = run_check(&L, 0, 200);
     CHECK(v == Flow_Suspect, "a dark check without flow is SUSPECT");
+    CHECK(!strcmp(last_flow.verdict, "suspect") && last_flow.rise > last_flow.limit_c,
+          "the record says suspect, with the rise over the limit it was judged on");
 
     printf("C. lit CW from the session open, flow\n");
     L.flow = 1;

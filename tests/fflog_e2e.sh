@@ -63,7 +63,7 @@ done
 [ -S "$T/log" ] || { echo "rsyslogd did not open $T/log"; cat "$T/rsyslogd.out"; exit 1; }
 
 FFLOG_CONF="$T/forgefirm.conf" FFLOG_SOCK="$T/log" "$BUILD/fflog_e2e_test" grblhal
-FFLOG_CONF="$T/forgefirm.conf" FFLOG_SOCK="$T/log" "$BUILD/fflog_e2e_test" forgectrl
+FFLOG_CONF="$T/forgefirm.conf" FFLOG_SOCK="$T/log" "$BUILD/fflog_e2e_test" forgectrl sensors
 FFLOG_CONF="$T/forgefirm.conf" FFLOG_SOCK="$T/log" "$BUILD/fflog_e2e_test" gfcloud
 echo "relay traceback line" | logger -u "$T/log" -t gfhome -p daemon.warning
 echo "stray tag line" | logger -u "$T/log" -t e2e-stray -p daemon.warning
@@ -80,6 +80,7 @@ C=$L/gfcloud/gfcloud.log
 H=$L/gfhome/gfhome.log
 S=$L/system/system.log
 K=$L/kernel/kernel.log
+N=$L/sensors/sensors.log
 echo "--- grblhal.log"; tail -8 "$G"
 check "grep -q ' grblhal\[[0-9]*\] DEBUG e2e debug line$' $G" "grblhal debug line, ff_line format"
 check "grep -q ' grblhal\[[0-9]*\] ERR e2e error line$' $G" "grblhal error line"
@@ -90,6 +91,8 @@ check "! grep -q 'e2e' $F || ! grep -q 'e2e info line' $F" "forgectrl info line 
 check "grep -q 'WARNING e2e warning line' $F" "forgectrl warning line kept"
 check "! grep -q 'e2e' $F || ! grep -q 'e2e debug line' $F" "forgectrl debug line filtered"
 check "[ ! -s $C ]" "gfcloud off: nothing written"
+check "grep -q ' sensors\[[0-9]*\] INFO e2e channel line$' $N && ! grep -q 'e2e channel line' $F" \
+    "a channel's line lands in its own logger at its own level (forgectrl's is warning)"
 check "grep -q ' gfhome\[[0-9-]*\] WARNING relay traceback line$' $H" "logger relay routed by tag"
 check "grep -q ' e2e-stray\[[0-9-]*\] WARNING stray tag line$' $S && ! grep -rq 'stray tag line' $L --exclude=system.log" \
     "a tag no logger names lands in system/, and only there"

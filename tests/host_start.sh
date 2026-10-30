@@ -37,6 +37,11 @@ T=$(mktemp -d)
 PID=
 trap 'rc=$?; set +e; [ -z "$PID" ] || { kill -9 $PID; wait $PID; } 2>/dev/null; rm -rf "$T"; exit $rc' EXIT
 mkdir "$T/data" "$T/run" "$T/sys" "$T/bin"
+# what the sensors logger reads through the sysfs root: a coolant count,
+# and the head's info with a serial line that must never reach a record
+mkdir "$T/sys/pic" "$T/sys/head"
+echo 694 > "$T/sys/pic/water_temp_1"
+printf 'id=044c\nserial=987654321\nversion=0bb13047\nreg5=00001000\nreg6=01111110\n' > "$T/sys/head/info"
 for b in iw grblHAL_glowforge gfcloud.py; do
     printf '#!/bin/sh\necho "%s $*" >> "%s/started"\n' "$b" "$T" > "$T/bin/$b"
     chmod +x "$T/bin/$b"
@@ -101,6 +106,15 @@ echo "  ok: the start notice names the fourteen overrides, no others, no values"
 
 [ ! -e "$T/started" ] || fail "started: $(cat "$T/started")"
 echo "  ok: no controller started, iw not run"
+
+# The sensors logger, under its own program name: its start records,
+# read through the sysfs root, and the head's serial in none of them.
+grep -q '^sensors: beat v=1 .* down_raw=694 ' "$T/out" || fail "no start beat with the planted coolant count"
+grep -q '^sensors: inv v=1 .* why=start .*head_id=044c head_fw=0bb13047' "$T/out" \
+    || fail "no start inventory with the head's id and firmware"
+grep -q '^sensors: cfg v=1 .* why=start .*cool_flow_heater_pct=' "$T/out" || fail "no start settings record"
+! grep '^sensors: ' "$T/out" | grep -q 987654321 || fail "a sensors record carries the head's serial"
+echo "  ok: the sensors logger's start records, read through the sysfs root, no serial"
 
 # The test hooks are honored in a host-test run alone: with the gate
 # unset the daemon takes its machine paths and says which hooks it

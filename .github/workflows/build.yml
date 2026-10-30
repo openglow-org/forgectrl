@@ -131,6 +131,10 @@ jobs:
         run: ./build/lenshome_test
       - name: Cooling status document
         run: ./build/coolfmt_test
+      - name: "senslog_test (the sensors logger's records: exactly the golden file the bundle reader parses, the widest within a datagram, the job summary, the flight recorder's window, the beat's cadence, the clock step)"
+        run: ./build/senslog_test
+      - name: "senslog_read_test (the bundle reader parses the golden records, re-dates a boot's lines from its clock record, and writes the per-type tables)"
+        run: python3 -B -m unittest -v tests/senslog_read_test.py
       - name: Fragmented-MP4 muxer
         run: ./build/mp4mux_test
       - name: Digest primitives (SHA-256, HMAC, constant-time compare)

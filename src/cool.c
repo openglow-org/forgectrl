@@ -137,6 +137,7 @@
 #include "fflog.h"
 #include "gates.h"
 #include "holds.h"
+#include "senslog.h"
 #include "settings.h"
 #include "status.h"
 #include "testhook.h"
@@ -394,6 +395,8 @@ static int pub_fire_ok, pub_hold;
 static int pub_armed_ack;           /* the acknowledgment as published */
 static double pub_down = -273.15, pub_up = -273.15;
 static const char *pub_phase = "idle";
+static char pub_inforce[1024];          /* every tunable as resolved at the last reload */
+static double tick_max_ms = NAN;        /* the slowest tick since cool_tick_max_ms read it */
 
 /* Engine-thread internals (no locking needed). */
 static cool_state_t cool_state = Cool_Idle;
@@ -438,14 +441,17 @@ static double flow_pending_since;
 static int flow_settle_warned = 0;
 static int flow_base_set = 0;
 static float down_hist[FLOW_SETTLE_WIN];
+static float up_hist[FLOW_SETTLE_WIN];  /* beside down_hist, for the record only */
 static uint32_t down_hist_n = 0;
 static float flow_base_down;
+static float flow_base_up;              /* the record's: the settled upstream mean */
 static double flow_establish_at, flow_check_end;
 static float flow_dt_sum;
 static uint32_t flow_dt_n;
 static double flow_suspect_since;
 static uint32_t flow_episodes = 0;  /* cleared suspicions this job */
 static float flow_end_hist[FLOW_END_WIN];
+static float flow_end_up_hist[FLOW_END_WIN];  /* beside flow_end_hist, for the record only */
 static uint32_t flow_end_n;
 static long hv_hist[FLOW_LAG_S];    /* pic/hv_current, the last FLOW_LAG_S ticks */
 static uint32_t hv_hist_n;
@@ -473,13 +479,6 @@ static uint32_t warmup_win_n = 0;
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
 static uint32_t sensor_fail_ticks = 0;  /* consecutive ticks with a coolant read failed */
 static int sensor_alarm = 0;        /* SENSOR: blind on the coolant, fire blocked, hold */
-/* The board temperatures, watched over the run session and named once
- * at its end; no gate behind them until the data says where one goes. */
-static double job_chassis_lo, job_chassis_hi;
-static double job_soc_lo, job_soc_hi;
-static long job_supply_lo, job_supply_hi;
-static int job_temps_seen = 0;
-static int job_throttled = 0;       /* ticks the CPU was throttled this job */
 static long throttle_state = 0;     /* the kernel's CPU cooling state last seen */
 static int critical_would_warned = 0;   /* off gate, would have tripped: once */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
@@ -500,11 +499,8 @@ static double last_armed_at = -1.0; /* last fresh armed report seen */
 static int emission_warned = 0;
 static int pgood_warned = 0;        /* once per run session */
 static long last_faults = 0;
-static long ir_base[4] = {-1, -1, -1, -1};  /* run-session baseline */
-static long ir_peak[4];
 static int ir_over_ticks = 0;
 static int fire_alarm = 0;          /* latched lid-IR fire signal */
-static long hv_lo = -1, hv_hi = -1; /* session hv_current range */
 static const char *pub_fire_watch = "watch";
 
 /* The head-accelerometer crash watch (accel.c): the LIS2HH12's own
@@ -1230,6 +1226,24 @@ static void conf_reload(void)
      * one the controller reports it is cutting with, else density, the
      * only model a machine runs. */
     laser_model_density = rep_model >= 0 ? rep_model : 1;
+    /* Every tunable as resolved, for the sensors logger's settings record. */
+    char inforce[sizeof(pub_inforce)];
+    size_t o = 0;
+    inforce[0] = '\0';
+    for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++) {
+        int n = tunables[i].f
+              ? snprintf(inforce + o, sizeof(inforce) - o, "%s%s=%g", o ? " " : "",
+                         tunables[i].key, (double)*tunables[i].f)
+              : snprintf(inforce + o, sizeof(inforce) - o, "%s%s=%u", o ? " " : "",
+                         tunables[i].key, (unsigned)*tunables[i].u);
+        if (n < 0 || (size_t)n >= sizeof(inforce) - o)
+            break;
+        o += (size_t)n;
+    }
+    inforce[o] = '\0';
+    pthread_mutex_lock(&mu);
+    snprintf(pub_inforce, sizeof(pub_inforce), "%s", inforce);
+    pthread_mutex_unlock(&mu);
     gates_apply();
     /* Named at every run start, as an off gate is. */
     if (intake_fans == 1)
@@ -1529,11 +1543,15 @@ static void flow_check_start(double now)
     /* The baseline: the mean of the settled window the gate has just
      * verified when there is one, the first in-check sample otherwise. */
     uint32_t n = down_hist_n < FLOW_SETTLE_WIN ? down_hist_n : FLOW_SETTLE_WIN;
+    flow_base_up = NAN;
     if (n) {
-        float sum = 0.0f;
-        for (uint32_t i = 0; i < n; i++)
+        float sum = 0.0f, usum = 0.0f;
+        for (uint32_t i = 0; i < n; i++) {
             sum += down_hist[(down_hist_n - n + i) % FLOW_SETTLE_WIN];
+            usum += up_hist[(down_hist_n - n + i) % FLOW_SETTLE_WIN];
+        }
         flow_base_down = sum / (float)n;
+        flow_base_up = usum / (float)n;
         flow_base_set = 1;
     }
     flow_end_n = 0;
@@ -1577,8 +1595,6 @@ static void flood_apply(int on, double now)
         memset(fan_margin_noted, 0, sizeof(fan_margin_noted));
         critical_alarm = 0;
         critical_would_warned = 0;
-        job_temps_seen = 0;
-        job_throttled = 0;
         fan_grace_until = now + (double)fan_grace_s;
         if (gate_flow_off)
             fflog(LOG_WARNING, "cool: coolant flow is not verified this "
@@ -1617,11 +1633,8 @@ static void flood_apply(int on, double now)
             flow_pending_since = now;
             flow_settle_warned = 0;
         }
-        /* New run session: fresh lid-IR baseline and hv range, and a
-         * standing fire alarm clears - a new job means the operator is
-         * back at the machine. */
-        for (int i = 0; i < 4; i++)
-            ir_base[i] = -1;
+        /* New run session: a standing fire alarm clears - a new job
+         * means the operator is back at the machine. */
         ir_over_ticks = 0;
         fire_alarm = 0;
         flame_alert = 0;
@@ -1629,7 +1642,6 @@ static void flood_apply(int on, double now)
         crash_reset(&crash_w);
         crash_poll_errs = 0;
         pgood_warned = 0;
-        hv_lo = hv_hi = -1;
     } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
         if (cool_state == Cool_Warmup) {
             heater_set_pct(0);
@@ -1684,33 +1696,8 @@ static void flood_apply(int on, double now)
             flow_check_active = 0;
             heater_set_pct(0);
         }
-        if (job_temps_seen) {
-            char msg[160];
-            snprintf(msg, sizeof(msg),
-                     "temps this job: chassis %.1f..%.1f C, soc %.1f..%.1f C, "
-                     "supply raw %ld..%ld%s",
-                     job_chassis_lo, job_chassis_hi, job_soc_lo, job_soc_hi,
-                     job_supply_lo, job_supply_hi,
-                     job_throttled ? ", CPU THROTTLED" : "");
-            if (job_throttled) {
-                char more[48];
-                snprintf(more, sizeof(more), " for %d s", job_throttled);
-                strncat(msg, more, sizeof(msg) - strlen(msg) - 1);
-            }
-            info(msg);
-        }
-        /* The setup dataset: one line per job of what the fire
-         * and HV sensors saw. */
-        if (ir_base[0] >= 0) {
-            char msg[160];
-            snprintf(msg, sizeof(msg),
-                     "run telemetry: lid IR %ld/%ld/%ld/%ld peak "
-                     "%ld/%ld/%ld/%ld, hv raw %ld..%ld",
-                     ir_base[0], ir_base[1], ir_base[2], ir_base[3],
-                     ir_peak[0], ir_peak[1], ir_peak[2], ir_peak[3],
-                     hv_lo, hv_hi);
-            info(msg);
-        }
+        /* What the job's sensors saw is the sensors logger's job record
+         * (senslog.h). */
     }
 }
 
@@ -1760,9 +1747,11 @@ static void engine_tick(void)
              * nothing, but nothing waits for a log line. */
             safing_write("cnc/stop", "1");
             safing_write("cnc/laser_latch", "1");
-            if (!silent_safed)
+            if (!silent_safed) {
                 warn("controller silent while armed/running - "
                      "stopping motion, locking laser");
+                senslog_event("controller silent while armed/running");
+            }
             silent_safed = 1;
         }
         mode = 0;
@@ -1847,9 +1836,11 @@ static void engine_tick(void)
     if (em > 0 && (last_armed_at < 0 || now - last_armed_at > 3.0)) {
         safing_write("cnc/stop", "1");
         safing_write("cnc/laser_latch", "1");
-        if (!emission_warned)
+        if (!emission_warned) {
             warn("LASER EMISSION SENSED with no armed window - "
                  "stopping motion, locking laser");
+            senslog_event("laser emission sensed with no armed window");
+        }
         emission_warned = 1;
     } else if (em == 0)
         emission_warned = 0;
@@ -1863,6 +1854,7 @@ static void engine_tick(void)
         if (pg >= 0 && pg < 128) {
             pgood_warned = 1;
             warn("laser supply power-good dropped during the armed window");
+            senslog_event("laser supply power-good dropped during the armed window");
         }
     }
 
@@ -1874,6 +1866,7 @@ static void engine_tick(void)
         snprintf(msg, sizeof(msg),
                  "stepper driver fault reported (mask %ld)", faults);
         warn(msg);
+        senslog_event(msg);
     }
     if (faults >= 0)
         last_faults = faults;
@@ -1890,16 +1883,6 @@ static void engine_tick(void)
         ir[i] = rd_long(attr);
         if (ir[i] < 0)
             have_ir = 0;
-    }
-    if (have_ir && cool_state == Cool_Run) {
-        if (ir_base[0] < 0) {
-            for (int i = 0; i < 4; i++)
-                ir_base[i] = ir_peak[i] = ir[i];
-        } else {
-            for (int i = 0; i < 4; i++)
-                if (ir[i] > ir_peak[i])
-                    ir_peak[i] = ir[i];
-        }
     }
     if (have_ir && (cool_state == Cool_Run || cool_state == Cool_Smoke ||
                     cool_state == Cool_Thermal)) {
@@ -1952,16 +1935,9 @@ static void engine_tick(void)
         flame_alert = 0;        /* the session is over; nothing to hold */
         flame_clear_ticks = 0;
     }
-    if (cool_state == Cool_Run) {
-        long hv = rd_long("pic/hv_current");
-        hv_last = hv;
-        if (hv >= 0) {
-            if (hv_lo < 0 || hv < hv_lo)
-                hv_lo = hv;
-            if (hv > hv_hi)
-                hv_hi = hv;
-        }
-    } else
+    if (cool_state == Cool_Run)
+        hv_last = rd_long("pic/hv_current");
+    else
         hv_last = -1;
     /* The tube current of the last FLOW_LAG_S ticks, for a flow check
      * that starts inside a lit run (flow_check_start). */
@@ -2369,6 +2345,7 @@ static void engine_tick(void)
                      "SoC throttled: CPU cooling state %ld (die %.1f C)",
                      thr, soc_degc());
             fflog(LOG_WARNING, "cool: %s", msg);
+            senslog_event(msg);
         } else if (thr == 0 && throttle_state > 0) {
             char msg[64];
             snprintf(msg, sizeof(msg),
@@ -2376,32 +2353,6 @@ static void engine_tick(void)
             info(msg);
         }
         throttle_state = thr;
-        if (cool_state == Cool_Run && thr > 0)
-            job_throttled++;
-    }
-
-    /* The board temperatures over the session, for the run-end line. */
-    if (cool_state == Cool_Run) {
-        double ch = chassis_degc();
-        double soc = soc_degc();
-        long sp = supply_temp_raw();
-        if (ch > -100 && sp >= 0) {
-            if (soc <= -100)
-                soc = job_temps_seen ? job_soc_hi : -273.15;
-            if (!job_temps_seen) {
-                job_chassis_lo = job_chassis_hi = ch;
-                job_soc_lo = job_soc_hi = soc;
-                job_supply_lo = job_supply_hi = sp;
-                job_temps_seen = 1;
-            } else {
-                if (ch < job_chassis_lo) job_chassis_lo = ch;
-                if (ch > job_chassis_hi) job_chassis_hi = ch;
-                if (soc < job_soc_lo) job_soc_lo = soc;
-                if (soc > job_soc_hi) job_soc_hi = soc;
-                if (sp < job_supply_lo) job_supply_lo = sp;
-                if (sp > job_supply_hi) job_supply_hi = sp;
-            }
-        }
     }
 
     /* The critical tier: the upstream coolant at or over
@@ -2436,9 +2387,11 @@ static void engine_tick(void)
     if (flow_check_active && have_down && have_up) {
         if (!flow_base_set) {
             flow_base_down = down;
+            flow_base_up = up;
             flow_base_set = 1;
         }
         flow_end_hist[flow_end_n % FLOW_END_WIN] = down;
+        flow_end_up_hist[flow_end_n % FLOW_END_WIN] = up;
         flow_end_n++;
         /* The tube's heat lags the sensor by FLOW_LAG_S: emission in the
          * window's last FLOW_LAG_S seconds has not arrived by its end. */
@@ -2450,9 +2403,11 @@ static void engine_tick(void)
         }
         if (now >= flow_check_end) {
             uint32_t n_end = flow_end_n < FLOW_END_WIN ? flow_end_n : FLOW_END_WIN;
-            float end_sum = 0.0f;
-            for (uint32_t i = 0; i < n_end; i++)
+            float end_sum = 0.0f, end_up_sum = 0.0f;
+            for (uint32_t i = 0; i < n_end; i++) {
                 end_sum += flow_end_hist[i];
+                end_up_sum += flow_end_up_hist[i];
+            }
             float rise_raw = end_sum / (float)n_end - flow_base_down;
             float k = laser_model_density ? laser_heat_density : laser_heat_cw;
             flow_laser_c = (float)(flow_hv_dose * (double)k);
@@ -2472,7 +2427,18 @@ static void engine_tick(void)
             /* Schedule the next interrogation if the run is still on. */
             flow_next_check = now + (double)flow_recheck_s;
 
+            /* The sensors logger's record of this verdict: what the check
+             * judged and the readings around it (senslog.h). */
+            senslog_flow_t rec = {
+                .src = "check", .rise = rise, .rise_raw = rise_raw,
+                .laser_c = flow_laser_c, .limit_c = flow_fault_rise,
+                .duty_pct = (long)flow_heater_pct, .window_s = (double)flow_check_s,
+                .base_down = flow_base_down, .base_up = flow_base_up,
+                .end_down = end_sum / (float)n_end, .end_up = end_up_sum / (float)n_end,
+                .dt = dt, .hv_dose = flow_hv_dose,
+            };
             if (rise > flow_fault_rise) {
+                rec.verdict = flow_verdict == Flow_Normal ? "suspect" : "fault";
                 if (flow_verdict == Flow_Normal) {
                     /* First over-limit: open a suspicion and re-check
                      * as soon as the loop settles instead of waiting
@@ -2494,6 +2460,7 @@ static void engine_tick(void)
                 }
                 warn(msg);
             } else if (flow_verdict != Flow_Normal) {
+                rec.verdict = flow_verdict == Flow_Suspect ? "cleared" : "recovered";
                 snprintf(msg, sizeof(msg),
                          flow_verdict == Flow_Suspect
                            ? "coolant flow suspicion cleared (heater rise %.1f C, dT %.1f C%s)"
@@ -2512,11 +2479,13 @@ static void engine_tick(void)
                     warn(msg);
                 }
             } else {
+                rec.verdict = "verified";
                 snprintf(msg, sizeof(msg),
                          "coolant flow verified (heater rise %.1f C, dT %.1f C%s)",
                          rise, dt, laser);
                 info(msg);
             }
+            senslog_flow(&rec);
         }
     } else if (cool_state == Cool_Run && flow_check_s > 0 && flow_recheck_s > 0
                && !flow_check_pending && now >= flow_next_check) {
@@ -2549,6 +2518,7 @@ static void engine_tick(void)
             down_hist_n = 0;
         else {
             down_hist[down_hist_n % FLOW_SETTLE_WIN] = down;
+            up_hist[down_hist_n % FLOW_SETTLE_WIN] = have_up ? up : NAN;
             down_hist_n++;
         }
     }
@@ -2618,8 +2588,10 @@ static void engine_tick(void)
         if ((recovered || now >= phase_until) && cnc_is_running()) {
             phase_until = now + (double)cooldown_max_s;  /* ring still live */
         } else if (recovered || now >= phase_until) {
-            if (!recovered)
+            if (!recovered) {
                 warn("thermal cooldown timed out above the resume gate");
+                senslog_event("thermal cooldown timed out above the resume gate");
+            }
             cool_state = Cool_Idle;
             fans_idle();
             flow_episodes = 0;
@@ -2735,10 +2707,12 @@ static void *engine_main(void *arg)
         clock_gettime(CLOCK_MONOTONIC, &t0);
         engine_tick();
         clock_gettime(CLOCK_MONOTONIC, &t1);
+        double took = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
         pthread_mutex_lock(&mu);
         tick_busy = 0;
+        if (isnan(tick_max_ms) || took * 1000.0 > tick_max_ms)
+            tick_max_ms = took * 1000.0;
         pthread_mutex_unlock(&mu);
-        double took = (double)(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
         if (took > 0.5 && !slow_named) {
             slow_named = 1;
             fflog(LOG_WARNING, "cool: an engine tick took %.2f s (budget 1 s)", took);
@@ -2921,4 +2895,41 @@ int cool_gates_off_json(char *buf, size_t len)
     snprintf(buf, len, "%s", pub_gates_off);
     pthread_mutex_unlock(&mu);
     return 0;
+}
+
+void cool_view(cool_view_t *v)
+{
+    pthread_mutex_lock(&mu);
+    double age = rep_at < 0 ? -1 : wall_s() - rep_at;
+    snprintf(v->phase, sizeof(v->phase), "%s", pub_phase);
+    snprintf(v->verdict, sizeof(v->verdict), "%s", pub_verdict);
+    snprintf(v->reason, sizeof(v->reason), "%s", pub_reason);
+    v->hold = pub_hold;
+    v->fire_ok = pub_fire_ok;
+    v->armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S);
+    pthread_mutex_unlock(&mu);
+}
+
+double cool_coolant_c(long raw)
+{
+    /* read_temp's conversion, the air-assist shift and the per-machine
+     * correction included. */
+    long raw_c = raw - cool_coolant_offset_counts();
+    return coolant_degc(raw_c > 0 ? raw_c : raw) + (double)temp_offset_c;
+}
+
+double cool_tick_max_ms(void)
+{
+    pthread_mutex_lock(&mu);
+    double v = tick_max_ms;
+    tick_max_ms = NAN;
+    pthread_mutex_unlock(&mu);
+    return v;
+}
+
+void cool_settings_in_force(char *buf, size_t len)
+{
+    pthread_mutex_lock(&mu);
+    snprintf(buf, len, "%s", pub_inforce);
+    pthread_mutex_unlock(&mu);
 }

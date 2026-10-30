@@ -153,4 +153,20 @@ long cool_coolant_offset_counts(void);
  * settings reply's per-key state. */
 int cool_gates_off_json(char *buf, size_t len);
 
+/* The engine as the sensors logger samples it (senslog.h): the phase,
+ * the verdict and its reason as published, and the armed window. */
+typedef struct {
+    char phase[12], verdict[12], reason[112];
+    int hold, fire_ok, armed;
+} cool_view_t;
+void cool_view(cool_view_t *v);
+/* A raw coolant count in degrees, converted as the engine converts its
+ * own readings. */
+double cool_coolant_c(long raw);
+/* The slowest engine tick, in ms, since the last call (NAN: none). */
+double cool_tick_max_ms(void);
+/* Every cool_* tunable as resolved at the last settings reload, as
+ * space-separated key=value pairs. */
+void cool_settings_in_force(char *buf, size_t len);
+
 #endif

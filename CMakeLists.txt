@@ -90,6 +90,8 @@ add_executable(forgectrl
   src/logs.c
   src/mp4mux.c
   src/sanitize.c
+  src/senslog.c
+  src/senslogfmt.c
   src/settings.c
   src/status.c
   src/curverec.c
@@ -285,6 +287,15 @@ target_compile_options(lenshome_test PRIVATE -Wall -Wextra)
 add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
 target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
 target_link_libraries(coolfmt_test m jansson)
+
+# Host unit test for the sensors logger's records: the formatters write
+# exactly tests/senslog_records.txt, the file the bundle reader's own test
+# parses (tools/senslog_read.py); the widest records fit one log datagram;
+# the job summary, the flight recorder's window, the beat's cadence and
+# the clock step.
+add_executable(senslog_test tests/senslog_test.c src/senslogfmt.c)
+target_compile_options(senslog_test PRIVATE -Wall -Wextra)
+target_link_libraries(senslog_test m)
 
 
 # Host unit test for the fragmented-MP4 muxer behind /cam/h264: the init

@@ -45,6 +45,7 @@
 #include "diag.h"
 #include "fflog.h"
 #include "lease.h"
+#include "senslog.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -52,6 +53,7 @@
 #include "testhook.h"
 
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -370,7 +372,8 @@ static void *runner(void *arg)
             set_phase("settling before trial %d/%d (%s)",
                       t + 1, trials, flow ? "pump on" : "pump off");
             double *base = flow ? &f_base[t] : &n_base[t];
-            int rc = settle(&down, &up, base, NULL);
+            double base_up = NAN;
+            int rc = settle(&down, &up, base, &base_up);
             if (rc == -1) {
                 set_result("{\"error\":\"loop would not settle within "
                            "%d s\"}", SETTLE_TIMEOUT_S);
@@ -394,6 +397,18 @@ static void *runner(void *arg)
             }
             dlog("trial %d/%d %s: from %.1f C, rise %.1f C, dT %.1f C", t + 1, trials,
                  flow ? "flow" : "no-flow", *base, *rise, *dt);
+            /* The same record the engine's checks write, the end readings
+             * from the trial's means (dt is the mean of down - up). */
+            senslog_flow_t rec = {
+                .src = calibrate ? "cal" : "verify",
+                .verdict = flow ? "pump-on" : "pump-off",
+                .rise = *rise, .rise_raw = *rise, .laser_c = NAN, .limit_c = thr,
+                .duty_pct = (long)duty, .window_s = (double)secs,
+                .base_down = *base, .base_up = base_up,
+                .end_down = *base + *rise, .end_up = *base + *rise - *dt,
+                .dt = *dt, .hv_dose = NAN, .trial = t + 1, .trials = trials,
+            };
+            senslog_flow(&rec);
         }
     }
 

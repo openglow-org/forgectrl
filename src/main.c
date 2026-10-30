@@ -62,6 +62,7 @@
 #include "led.h"
 #include "logs.h"
 #include "paths.h"
+#include "senslog.h"
 #include "session.h"
 #include "settings.h"
 #include "sheetid.h"
@@ -867,6 +868,8 @@ static const struct {
     { "panel_open_reads",       valid_bool,        0 },
     { "log_forgectrl_disk",     logs_valid_level,  0 },
     { "log_forgectrl_remote",   logs_valid_level,  0 },
+    { "log_sensors_disk",       logs_valid_level,  0 },
+    { "log_sensors_remote",     logs_valid_level,  0 },
     { "log_grblhal_disk",       logs_valid_level,  0 },
     { "log_grblhal_remote",     logs_valid_level,  0 },
     { "log_gfcloud_disk",       logs_valid_level,  0 },
@@ -3633,6 +3636,7 @@ int main(int argc, char **argv)
     curverec_init();
     cool_init();
     cool_fail_tier_stop = super_controller_restart;
+    senslog_start();        /* samples the engine: after it */
     super_init();
     diag_init();            /* its marker recovery drives the supervisor: after it */
     wizdark_init();
@@ -3897,6 +3901,7 @@ int main(int argc, char **argv)
     char none[8];
     jobrun_program_abort(none, sizeof(none));
     super_shutdown();
+    senslog_stop();
     cool_shutdown();
     cam_engine_shutdown();
     return 0;
