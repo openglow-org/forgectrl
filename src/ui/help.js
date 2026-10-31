@@ -400,6 +400,15 @@ var HELP = {
       'A development image keeps SSH on at every boot, with root login, for the bench.'
     ]
   },
+  reset: {
+    t: 'Reset all settings',
+    d: 'usage/control-panel/#system',
+    p: [
+      'Puts ForgeFIRM back as it was just after the install. The machine restarts, and early in the next boot, before anything reads them, your account, the settings, the setup record, the API tokens, the camera key and every extension package are removed. The setup then runs again, as after an install.',
+      'The factory firmware archive stays, so a factory restore still works. So do the logs, the SSH host keys and the certificate, so your browser and your SSH client still know the machine. The machine must be idle, and the machine button must be held while you confirm.',
+      'Booted from an SD card that carries its own data partition, the reset clears the card\'s settings and leaves the eMMC\'s alone.'
+    ]
+  },
   setup: {
     t: 'Setup',
     d: 'usage/setup/',

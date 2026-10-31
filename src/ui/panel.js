@@ -27,7 +27,8 @@
  *             reboot), remote syslog target, live log viewer, and the
  *             sanitized tar.gz export for issue reports
  *   #system   firmware slots (A/B boot selection), ForgeFIRM updates,
- *             image install/restore, wireless regulatory region, reboot
+ *             image install/restore, wireless regulatory region, reboot,
+ *             and the reset of every setting
  *
  * State flows through GET/POST /settings, GET /status (machine
  * telemetry), GET /cam/status and GET /logs. The design intent: every
@@ -1905,6 +1906,71 @@ function doReboot() {
     .then(function (j) {
       $('msg-slot').textContent = j.rebooting ? 'rebooting\u2026' : j.error || '?';
     });
+}
+/* Every setting back to a fresh install: the daemon leaves the request
+ * and restarts the machine, and the boot carries it out. It takes the
+ * machine button held while OK is pressed. */
+function doReset() {
+  if (
+    !confirm(
+      'Reset all settings and restart?\n\nYour account, every setting, the setup record, the API tokens and every extension package are removed, and the setup runs again.\n\nHold the machine button, then press OK.'
+    )
+  )
+    return;
+  fx('/system/reset?confirm=1', { method: 'POST' })
+    .then(function (r) {
+      return r.json();
+    })
+    .then(function (j) {
+      if (!j.rebooting) {
+        $('msg-reset').textContent = j.error || '?';
+        return;
+      }
+      $('msg-reset').textContent = 'restarting\u2026 the setup opens when the machine is back';
+      waitBack($('msg-reset'));
+    });
+}
+/* The machine goes down, then comes back: then the browser opens "/",
+ * which serves what the machine now wants (after a reset, the setup).
+ * A restart faster than the polling is caught by opening "/" after
+ * three minutes regardless. */
+function waitBack(el) {
+  var t0 = Date.now(),
+    down = false;
+  var open = function (why) {
+    el.textContent = why;
+    setTimeout(function () {
+      location.replace('/');
+    }, 1500);
+  };
+  var tick = function () {
+    var age = Date.now() - t0;
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = ctl
+      ? setTimeout(function () {
+          ctl.abort();
+        }, 2500)
+      : null;
+    fetch('/status', { cache: 'no-store', signal: ctl ? ctl.signal : undefined })
+      .then(function (r) {
+        if (timer) clearTimeout(timer);
+        if (!r.ok) throw new Error('down');
+        if (down) open('the machine is back; opening the page');
+        else if (age > 3 * 60000) open('opening the page');
+        else setTimeout(tick, 2000);
+      })
+      .catch(function () {
+        if (timer) clearTimeout(timer);
+        down = true;
+        if (age > 8 * 60000) {
+          el.textContent =
+            'the machine has not come back after eight minutes; check the machine, then reload this page';
+          return;
+        }
+        setTimeout(tick, 3000);
+      });
+  };
+  setTimeout(tick, 2000);
 }
 /* ---- The ForgeFIRM release ------------------------------------------
  * The daemon checks the published release once a day, and on the Check

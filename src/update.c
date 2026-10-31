@@ -806,6 +806,57 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
     return reply_json(res, 200, "{\"rebooting\":true}");
 }
 
+/* Every setting back to a fresh install: the request is left in the data
+ * directory (reset-requested) and the machine reboots. forgefirm-data
+ * carries it out at the next boot, before anything reads the directory,
+ * and keeps what an install keeps (the factory archive, the sshd host
+ * keys, the TLS key and certificate, the boot state); the setup then runs
+ * as after an install. It takes the machine button held, as the other
+ * changes that need an operator at the machine do, an idle machine, and
+ * no update job or lease. */
+int cb_system_reset(const struct _u_request *req, struct _u_response *res,
+                    void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *c = param(req, "confirm");
+    if (!c || strcmp(c, "1"))
+        return reply_err(res, 400, "confirm=1 required");
+    if (!operator_present())
+        return reply_err(res, 403, "hold the machine button to reset every setting");
+    char held[128];
+    if (lease_refusal(held, sizeof(held)))
+        return reply_err(res, 409, held);
+    if (!machine_is_idle())
+        return reply_err(res, 409, "machine is not idle");
+    if (update_job_running())
+        return reply_err(res, 409, "an update job is running");
+    char path[256], ts[32], line[64];
+    snprintf(path, sizeof(path), "%s/reset-requested", ff_data_dir());
+    time_t now = time(NULL);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    int n = snprintf(line, sizeof(line), "requested %s\n", ts);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    int ok = fd >= 0 && write(fd, line, (size_t)n) == n && fsync(fd) == 0;
+    if (fd >= 0)
+        close(fd);
+    if (!ok) {
+        fflog(LOG_ERR, "update: the reset request could not be written: %s", strerror(errno));
+        unlink(path);
+        return reply_err(res, 500, "cannot write the reset request");
+    }
+    fflog(LOG_WARNING, "update: every setting is reset at the next boot; rebooting (the button was held)");
+    sync();
+    if (system("(sleep 1; reboot) >/dev/null 2>&1 &") != 0) {
+        unlink(path);
+        return reply_err(res, 500, "cannot schedule reboot");
+    }
+    return reply_json(res, 200, "{\"rebooting\":true,\"reset\":true}");
+}
+
 /* ------------------------------------------------------ release check */
 
 /* The last answer of the release check, and when it was had. The

@@ -323,7 +323,8 @@ char *record_html(const json_t *rec, const json_t *docs, const json_t *wizards,
         if (a) {
             sb_esc(&b, sget(a, "accepted"));
             sb_put(&b, " <span class=\"meta\">(");
-            sb_esc(&b, !strcmp(sget(a, "method"), "typed") ? "typed" : "checked");
+            const char *m = sget(a, "method");
+            sb_esc(&b, !strcmp(m, "typed") ? "typed" : !strcmp(m, "seed") ? "seeded" : "checked");
             sb_put(&b, ", hash <span class=\"mono\">");
             const char *h = sget(a, "hash");
             char shorth[17];

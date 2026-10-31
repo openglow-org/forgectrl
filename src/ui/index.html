@@ -884,6 +884,19 @@
             every check with its numbers and the settings it set. The log export carries it too.
           </p>
         </div>
+        <div class="card">
+          <h2>Reset all settings<button class="hlp" data-help="reset" data-nolock="1" type="button">?</button></h2>
+          <p class="hint">
+            Puts ForgeFIRM back as it was just after the install: the machine restarts and the setup
+            runs again. Your account, every setting, the setup record, the API tokens and every
+            extension package are removed. The factory firmware archive, the logs, the SSH host keys
+            and the certificate stay. Hold the machine button while you confirm.
+          </p>
+          <div class="btns">
+            <button class="btn btn-sm btn-outline-danger" onclick="doReset()">Reset all settings…</button
+            ><span class="msg" id="msg-reset"></span>
+          </div>
+        </div>
       </section>
     </main>
     <div id="savebar">

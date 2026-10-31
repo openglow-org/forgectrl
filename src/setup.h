@@ -64,6 +64,19 @@ int setup_set_head(json_t *head);
 /* Load the record and evaluate the gate. Idempotent; call once at
  * startup after sheetid_init() and users_init(). */
 void setup_init(void);
+/* The seed: setup.seed in the data directory (the dev image's SD card
+ * carries one). With no record on disk, the record is written as a
+ * finished first run leaves it, in this build's terms: every first-run
+ * document accepted at its current hash (method "seed") with the press,
+ * the account (name and uid, as the account record holds it; none when
+ * the name is empty), the consent and account steps and the table's
+ * required steps done at the table's versions, and the run complete. The
+ * recommended steps stay recommended. The record carries "seeded" with
+ * the time. The seed is removed once read, a record made or one already
+ * there; a record that cannot be written keeps it for the next start.
+ * Call before setup_init(). Returns 1 when the record was seeded, 0 when
+ * nothing was, -1 when it could not be written. */
+int setup_seed(const char *account, long uid);
 /* Replace the step table (host tests). The default is the image's
  * table. */
 void setup_set_steps(const setup_step_t *s, size_t n);

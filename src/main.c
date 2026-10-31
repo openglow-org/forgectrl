@@ -2553,9 +2553,42 @@ static int cb_diag_status(const struct _u_request *req,
 enum { PAGE_PANEL = 0, PAGE_WIZARD, PAGE_LOGIN, PAGE_COUNT };
 
 #define PAGE_DEV_MARK "<!--FFDEV-->"
-static const char PAGE_DEV_BAR[] =
-    "<div class=\"ff-devbar\" role=\"status\"><strong>DEVELOPMENT IMAGE</strong>: "
-    "root can log in over SSH with no password</div>";
+#define PAGE_DEV_BAR_HEAD \
+    "<div class=\"ff-devbar\" role=\"status\"><strong>DEVELOPMENT IMAGE</strong>: " \
+    "root can log in over SSH with no password"
+
+/* The dev bar's second line: where this boot's settings, extensions and
+ * logs are, as forgefirm-data found it at boot (one word in
+ * /run/forgefirm-data.state). A bench boot from the SD card is the
+ * card's own configuration only when the card's data partition is
+ * mounted; the line says so either way, and from an eMMC slot too. */
+static const char *page_dev_data_line(void)
+{
+    const char *hook = ff_test_hook("GF_DATA_STATE");
+    char w[32] = "";
+    FILE *f = fopen(hook ? hook : "/run/forgefirm-data.state", "r");
+    if (f) {
+        if (!fgets(w, sizeof(w), f))
+            w[0] = '\0';
+        w[strcspn(w, "\r\n")] = '\0';
+        fclose(f);
+    }
+    if (!strcmp(w, "card"))
+        return "<strong>Settings, extensions and logs</strong>: the SD card's. "
+               "Its data partition is mounted";
+    if (!strcmp(w, "emmc"))
+        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
+               "Booted from an eMMC slot";
+    if (!strcmp(w, "card-none"))
+        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
+               "Booted from the SD card, which has <strong>no data partition</strong>";
+    if (!strcmp(w, "card-failed"))
+        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
+               "Booted from the SD card, but its data partition is <strong>not mounted</strong> "
+               "(the boot log says why)";
+    return "<strong>Settings, extensions and logs</strong>: not known. "
+           "The boot step that mounts them left no record";
+}
 
 /* html with its first mark replaced by with, in a new string; NULL when
  * html has no mark or there is no memory. */
@@ -2622,7 +2655,10 @@ static const char *page_html(int which)
     }
     html[n] = '\0';
 
-    char *s = page_splice(html, PAGE_DEV_MARK, auth_dev_image() ? PAGE_DEV_BAR : "");
+    char bar[640] = "";
+    if (auth_dev_image())
+        snprintf(bar, sizeof(bar), "%s<br>%s</div>", PAGE_DEV_BAR_HEAD, page_dev_data_line());
+    char *s = page_splice(html, PAGE_DEV_MARK, bar);
     if (s) {
         free(html);
         html = s;
@@ -3491,7 +3527,7 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_DEV_MARKER", "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
@@ -3615,6 +3651,14 @@ int main(int argc, char **argv)
      * before any thread reads them: an unset hook reads as satisfied. */
     setup_fact_hook = setup_fact;
     setup_fans_hook = setup_fans_counted;
+    /* The dev image's SD card starts as a finished first run: its seed
+     * becomes the record once, with the account its record holds. */
+    {
+        char acct[USERS_NAME_MAX + 1] = "";
+        if (users_name(acct, sizeof(acct)) != 0)
+            acct[0] = '\0';
+        setup_seed(acct, USERS_UID);
+    }
     /* The account reset: the button held through the daemon's start,
      * for ten seconds, with the LED blinking amber while it counts.
      * The old password stops working at once; the wizard's account
@@ -3723,6 +3767,7 @@ int main(int argc, char **argv)
         { "GET",  "/slots",                cb_slots,            NULL, 1, NULL },
         { "POST", "/boot",                 cb_boot_select,      NULL, 0, NULL },
         { "POST", "/system/reboot",        cb_system_reboot,    NULL, 0, NULL },
+        { "POST", "/system/reset",         cb_system_reset,     NULL, 0, NULL },
         { "GET",  "/system/ssh",           cb_ssh_get,          NULL, 0, NULL },
         { "POST", "/system/ssh",           cb_ssh_post,         NULL, 0, NULL },
         { "GET",  "/system/camera-key",    cb_camkey_get,       NULL, 0, NULL },

@@ -6,7 +6,7 @@
  *
  * One JSON document, written whole and atomically on every change:
  *
- *   schema, created, completed, sheet_id
+ *   schema, created, completed, sheet_id, seeded (a seed's record)
  *   advisories: { <doc id>: { hash, accepted, method } }
  *   acceptance: { pressed_at }
  *   account:    { name, uid, created }
@@ -341,6 +341,82 @@ static void load_locked(void)
                            "record", path, err.text);
     }
     rec = fresh_record();
+}
+
+/* The seed's record: what a finished first run leaves, in this build's
+ * terms. Every first-run document accepted at its current hash, by the
+ * seed, with the press; the account; the consent and the account steps
+ * and the table's required steps done at the table's versions; the run
+ * complete. The recommended steps stay recommended, so no check reads a
+ * measurement nobody made. Called with mu held (it reads the table). */
+static json_t *seeded_record_locked(const char *account, long uid)
+{
+    char ts[32];
+    now_iso(ts, sizeof(ts));
+    json_t *r = fresh_record();
+    json_object_set_new(r, "seeded", json_string(ts));
+    json_object_set_new(r, "completed", json_string(ts));
+    size_t n;
+    const advisory_t *docs = advisories_list(&n);
+    json_t *acc = json_object_get(r, "advisories");
+    for (size_t i = 0; i < n; i++)
+        json_object_set_new(acc, docs[i].id,
+                            json_pack("{s:s,s:s,s:s}", "hash", docs[i].hash,
+                                      "accepted", ts, "method", "seed"));
+    json_object_set_new(r, "acceptance", json_pack("{s:s}", "pressed_at", ts));
+    int have_account = account && *account;
+    if (have_account)
+        json_object_set_new(r, "account", json_pack("{s:s,s:I,s:s}", "name", account,
+                                                    "uid", (json_int_t)uid, "created", ts));
+    json_t *w = json_object_get(r, "wizards");
+    for (size_t i = 0; i < nsteps; i++) {
+        int consent = !strcmp(steps[i].id, "advisories");
+        int acct = !strcmp(steps[i].id, "account");
+        if (!steps[i].required && !consent && !(acct && have_account))
+            continue;
+        json_object_set_new(w, steps[i].id,
+                            json_pack("{s:i,s:s,s:{s:b},s:{}}", "version", steps[i].version,
+                                      "completed", ts, "result", "seeded", 1, "applied"));
+    }
+    return r;
+}
+
+int setup_seed(const char *account, long uid)
+{
+    char seed[256], path[256];
+    snprintf(seed, sizeof(seed), "%s/setup.seed", ff_data_dir());
+    if (access(seed, F_OK) != 0)
+        return 0;
+    record_path(path, sizeof(path));
+    int rc = 0;
+    pthread_mutex_lock(&mu);
+    if (access(path, F_OK) != 0) {
+        json_t *was = rec;
+        rec = seeded_record_locked(account, uid);
+        if (save_locked() == 0) {
+            rc = 1;
+            if (was)
+                json_decref(was);
+            evaluate_locked();
+        } else {
+            rc = -1;
+            json_decref(rec);
+            rec = was;
+        }
+    }
+    pthread_mutex_unlock(&mu);
+    if (rc < 0) {
+        fflog(LOG_ERR, "setup: the seed's record could not be written; the seed stays for the next start");
+        return -1;
+    }
+    if (unlink(seed) != 0)
+        fflog(LOG_WARNING, "setup: cannot remove %s: %s", seed, strerror(errno));
+    if (rc)
+        fflog(LOG_NOTICE, "setup: the record is the seed's: a finished first run, account %s",
+              account && *account ? account : "(none)");
+    else
+        fflog(LOG_NOTICE, "setup: a seed beside a record was set aside; the record stands");
+    return rc;
 }
 
 void setup_init(void)

@@ -496,6 +496,53 @@ int main(void)
           !setup_cloud_homing_ok("Manual") && !setup_cloud_homing_ok(NULL),
           "the cloud step refuses anything else");
 
+    /* 12. The seed (the dev image's SD card): with no record, it becomes
+     * a finished first run in this build's terms - the gate open, the
+     * first run over, the account, every document accepted by the seed,
+     * and the recommended steps still recommended. It goes once read;
+     * beside a record it is set aside and the record stands. */
+    {
+        char seed[300];
+        snprintf(seed, sizeof(seed), "%s/setup.seed", data_dir);
+        unlink(path);
+        setup_set_steps(NULL, 0);
+        setup_fans_hook = fans_known;
+        CHECK(setup_seed("forgefirm", 1000) == 0, "no seed: nothing is seeded");
+        f = fopen(seed, "w");
+        if (f)
+            fclose(f);
+        CHECK(setup_seed("forgefirm", 1000) == 1 && access(seed, F_OK) != 0,
+              "the seed becomes the record and goes");
+        setup_init();
+        CHECK(!setup_first_run() && setup_gate_open(why, sizeof(why)),
+              "the seeded record is a finished first run: the gate is open");
+        json_t *sst = status();
+        json_t *sr = sst ? json_object_get(sst, "recommended") : NULL;
+        CHECK(sst && json_array_size(json_object_get(sst, "missing")) == 0 &&
+                  json_is_true(json_object_get(sst, "account")) && json_array_size(sr) == 8 &&
+                  !strcmp(sget(json_array_get(sr, 0), "id"), "switches"),
+              "the seed holds the account and the required steps; the checks stay recommended");
+        json_decref(sst);
+        json_t *sc = setup_record_copy();
+        json_t *sd = sc ? json_object_get(json_object_get(sc, "advisories"), "safety-and-risk") : NULL;
+        CHECK(sc && json_is_string(json_object_get(sc, "seeded")) &&
+                  !strcmp(sget(json_object_get(sc, "account"), "name"), "forgefirm") &&
+                  !strcmp(sget(sd, "method"), "seed"),
+              "the record says it was seeded, by whom the documents were accepted, and the account");
+        json_decref(sc);
+        f = fopen(seed, "w");
+        if (f)
+            fclose(f);
+        CHECK(setup_seed("other", 1000) == 0 && access(seed, F_OK) != 0,
+              "a seed beside a record is set aside");
+        setup_init();
+        sc = setup_record_copy();
+        CHECK(sc && !strcmp(sget(json_object_get(sc, "account"), "name"), "forgefirm"),
+              "the record stands");
+        json_decref(sc);
+        setup_set_steps(steps, 3);
+    }
+
     /* Clean up. */
     unlink(path);
     snprintf(path, sizeof(path), "%s/sheet.salt", data_dir);

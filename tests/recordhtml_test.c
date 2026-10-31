@@ -27,7 +27,8 @@ static const char record_text[] =
     "\"sheet_id\":\"ABCDE-FGHIJ\","
     "\"advisories\":{\"safety-and-risk\":{\"hash\":\"0123456789abcdef0123456789abcdef\","
     "\"accepted\":\"2026-09-04T20:01:00Z\",\"method\":\"typed\"},"
-    "\"licenses\":{\"hash\":\"ffff\",\"accepted\":\"2026-09-04T20:02:00Z\",\"method\":\"check\"}},"
+    "\"licenses\":{\"hash\":\"ffff\",\"accepted\":\"2026-09-04T20:02:00Z\",\"method\":\"check\"},"
+    "\"terms\":{\"hash\":\"eeee\",\"accepted\":\"2026-09-04T20:02:30Z\",\"method\":\"seed\"}},"
     "\"acceptance\":{\"pressed_at\":\"2026-09-04T20:03:00Z\"},"
     "\"account\":{\"name\":\"owner\",\"uid\":1000,\"created\":\"2026-09-04T20:04:00Z\"},"
     "\"machine\":{\"model\":\"pro\",\"tec\":true,\"camera\":\"ov5648\",\"firmware\":\"0.0.1\","
@@ -66,13 +67,13 @@ static long at(const char *page, const char *a)
 
 int main(void)
 {
-    static const char *const doc_ids[] = { "safety-and-risk", "licenses", "privacy" };
-    static const char *const doc_titles[] = { "Safety and risk", "Licenses", "Privacy" };
+    static const char *const doc_ids[] = { "safety-and-risk", "licenses", "terms", "privacy" };
+    static const char *const doc_titles[] = { "Safety and risk", "Licenses", "Terms", "Privacy" };
     static const char *const wiz_ids[] = { "sensors", "airflow", "laser.focus", "laser.dose-curve",
                                            "cooling.flow-load" };
     static const char *const wiz_titles[] = { "Sensors", "Airflow", "Focus", "Dose curve",
                                               "Flow under load" };
-    json_t *docs = pairs(doc_ids, doc_titles, 3), *wiz = pairs(wiz_ids, wiz_titles, 5);
+    json_t *docs = pairs(doc_ids, doc_titles, 4), *wiz = pairs(wiz_ids, wiz_titles, 5);
     json_error_t err;
     json_t *rec = json_loads(record_text, 0, &err);
     CHECK(rec != NULL, "the fixture parses");
@@ -91,6 +92,7 @@ int main(void)
     CHECK(strstr(page, "Safety and risk") && strstr(page, "0123456789abcdef") &&
           strstr(page, "typed") && strstr(page, "checked") && strstr(page, "2026-09-04T20:03:00Z"),
           "the acknowledgment with the press");
+    CHECK(strstr(page, "Terms") && strstr(page, "(seeded"), "a document the SD card's seed accepted says so");
     CHECK(strstr(page, "Privacy") && strstr(page, "not accepted"), "a document not in the record says so");
 
     /* the steps in catalog order, only the ones in the record */

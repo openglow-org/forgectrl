@@ -50,8 +50,11 @@
 #   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT),
 #     and one outside its form runs nothing
 #   the login over HTTPS: the lock, the cookie, the logout
+#   the reset of every setting: confirm=1 and the machine button held, or
+#     nothing is requested
 #   a dev image (GF_DEV_MARKER): the login page, the panel and the setup
-#     each carry the dev bar above the header
+#     each carry the dev bar above the header, with where the boot's
+#     settings are (GF_DATA_STATE, the boot step's record)
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
 # distribution's library cuts the peer address that the loopback checks
@@ -118,6 +121,7 @@ start_daemon() {
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
+        GF_DATA_STATE="${DATA_STATE:-}" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -350,7 +354,7 @@ else bad "the menu GET /wiz carries names a step the wizard list does not have";
 echo "== the write routes without the token"
 n=$(lines)
 for p in /controller/stop /controller/start /mode /settings /diag/flow-verify /diag/abort \
-         /update/apply /boot /update/check /update/dismiss /system/reboot /restore/factory \
+         /update/apply /boot /update/check /update/dismiss /system/reboot /system/reset /restore/factory \
          /restore/factory-return /system/ssh /wiz/advisories/accept /wiz/account /wiz/complete; do
     code=$(post $p -)
     if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
@@ -638,24 +642,37 @@ grep -q "FORGECTRL_SSHD_INIT is not an absolute path" "$T/out" && ok "the refusa
 expect 200 "$(post /system/ssh "$TOKEN" -d enable=0)" "enable=0 is 200"
 expect "$n" "$(wc -l < "$T/sshd.log")" "and the stop ran nothing either"
 
+echo "== the reset of every setting"
+expect 400 "$(post /system/reset "$TOKEN")" "POST /system/reset without confirm=1 is 400"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+if [ "$code" = 403 ] && grep -q 'hold the machine button' "$T/body"; then
+    ok "confirm=1 without the machine button held: 403, hold the machine button"
+else bad "confirm=1 without the button -> $code $(cat "$T/body")"; fi
+[ ! -e "$T/data/reset-requested" ] && ok "and no reset is requested" || bad "a refused reset left data/reset-requested"
+
 echo "== a dev image's pages carry the dev bar"
 stop_daemon
 : > "$T/forgefirm-dev"
-DEV_MARKER="$T/forgefirm-dev" start_daemon
+echo card-failed > "$T/data-state"
+DEV_MARKER="$T/forgefirm-dev" DATA_STATE="$T/data-state" start_daemon
 # devpage <path> <the page's own id> <what it is>: the bar between <body>
-# and the header, in the words the bar says
+# and the header, in the words the bar says, with the boot's data line:
+# a card boot whose data partition is not mounted says so
 devpage() {
     expect 200 "$(curl -sk -o "$T/dev.html" -w '%{http_code}' "$TLS$1")" "GET $1 is 200"
     if grep -qF "$2" "$T/dev.html" && python3 - "$T/dev.html" <<'EOF'
 import sys
 p = open(sys.argv[1], encoding='utf-8').read()
-bar = ('<div class="ff-devbar" role="status"><strong>DEVELOPMENT IMAGE</strong>: '
-       'root can log in over SSH with no password</div>')
+head = ('<div class="ff-devbar" role="status"><strong>DEVELOPMENT IMAGE</strong>: '
+        'root can log in over SSH with no password<br>')
 b = p.find('<body>')
 h = p.find('<header>', b)
-sys.exit(0 if 0 <= b < h and bar in p[b:h] and '<!--FFDEV-->' not in p else 1)
+bar = p[b:h]
+sys.exit(0 if 0 <= b < h and head in bar and "the eMMC's" in bar and
+         '<strong>not mounted</strong>' in bar and '<!--FFDEV-->' not in p else 1)
 EOF
-    then ok "$3 carries the dev bar above its header"; else bad "$3 lacks the dev bar above its header"; fi
+    then ok "$3 carries the dev bar above its header, with the card's data not mounted"
+    else bad "$3 lacks the dev bar above its header, or its data line"; fi
 }
 devpage /login 'id="lg"' "the login page"
 devpage / 'id="savebar"' "the panel"
