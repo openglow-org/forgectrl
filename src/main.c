@@ -2555,7 +2555,7 @@ enum { PAGE_PANEL = 0, PAGE_WIZARD, PAGE_LOGIN, PAGE_COUNT };
 #define PAGE_DEV_MARK "<!--FFDEV-->"
 #define PAGE_DEV_BAR_HEAD \
     "<div class=\"ff-devbar\" role=\"status\"><strong>DEVELOPMENT IMAGE</strong>: " \
-    "root can log in over SSH with no password"
+    "SSH open with passwordless root logon"
 
 /* The dev bar's second line: where this boot's settings, extensions and
  * logs are, as forgefirm-data found it at boot (one word in
@@ -2574,20 +2574,14 @@ static const char *page_dev_data_line(void)
         fclose(f);
     }
     if (!strcmp(w, "card"))
-        return "<strong>Settings, extensions and logs</strong>: the SD card's. "
-               "Its data partition is mounted";
+        return "<strong>DATA Mount</strong>: SD Card";
     if (!strcmp(w, "emmc"))
-        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
-               "Booted from an eMMC slot";
+        return "<strong>DATA Mount</strong>: eMMC";
     if (!strcmp(w, "card-none"))
-        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
-               "Booted from the SD card, which has <strong>no data partition</strong>";
+        return "<strong>DATA Mount</strong>: eMMC";
     if (!strcmp(w, "card-failed"))
-        return "<strong>Settings, extensions and logs</strong>: the eMMC's. "
-               "Booted from the SD card, but its data partition is <strong>not mounted</strong> "
-               "(the boot log says why)";
-    return "<strong>Settings, extensions and logs</strong>: not known. "
-           "The boot step that mounts them left no record";
+        return "<strong>DATA Mount</strong>: eMMC (SD mount error - see logs)";
+    return "<strong>DATA Mount</strong>: UNKNOWN (error - see logs)";
 }
 
 /* html with its first mark replaced by with, in a new string; NULL when
