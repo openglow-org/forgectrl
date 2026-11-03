@@ -664,12 +664,13 @@ devpage() {
 import sys
 p = open(sys.argv[1], encoding='utf-8').read()
 head = ('<div class="ff-devbar" role="status"><strong>DEVELOPMENT IMAGE</strong>: '
-        'root can log in over SSH with no password<br>')
+        'SSH open with passwordless root logon<br>')
 b = p.find('<body>')
 h = p.find('<header>', b)
 bar = p[b:h]
-sys.exit(0 if 0 <= b < h and head in bar and "the eMMC's" in bar and
-         '<strong>not mounted</strong>' in bar and '<!--FFDEV-->' not in p else 1)
+sys.exit(0 if 0 <= b < h and head in bar and
+         '<strong>DATA Mount</strong>: eMMC (SD mount error - see logs)' in bar and
+         '<!--FFDEV-->' not in p else 1)
 EOF
     then ok "$3 carries the dev bar above its header, with the card's data not mounted"
     else bad "$3 lacks the dev bar above its header, or its data line"; fi
