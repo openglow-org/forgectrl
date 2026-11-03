@@ -651,8 +651,8 @@ static int valid_range(const char *v, double lo, double hi)
     return end != v && *end == '\0' && f >= lo && f <= hi;
 }
 
-/* The gate settings (the coolant ceiling and its resume gate, the flow
- * window and its fault rise) validate against the one table in gates.c:
+/* The gate settings (the coolant ceiling and its resume gate, the
+ * floors and the watches) validate against the one table in gates.c:
  * a wide legal range whose far end turns the gate off by value, and a
  * recommended band the panel warns outside of. The rest of the cooling
  * keys are bounded to what the engine can mean by them. */
@@ -660,8 +660,6 @@ static int valid_gate(const char *key, const char *v)
 {
     return gate_parse(gate_setting_find(key), v, NULL);
 }
-static int valid_rise_c(const char *v)     { return valid_gate("cool_flow_rise", v); }
-static int valid_check_s(const char *v)    { return valid_gate("cool_flow_check_s", v); }
 static int valid_temp_max(const char *v)   { return valid_gate("cool_temp_max", v); }
 static int valid_temp_resume(const char *v){ return valid_gate("cool_temp_resume", v); }
 static int valid_temp_critical(const char *v){ return valid_gate("cool_temp_critical_c", v); }
@@ -692,11 +690,6 @@ static int valid_intake_rpm(const char *v)  { return valid_gate("cool_tach_intak
 static int valid_air_rpm(const char *v)     { return valid_gate("cool_tach_air_assist_min_rpm", v); }
 static int valid_purge_cur(const char *v)   { return valid_gate("cool_purge_min_current", v); }
 static int valid_grace_s(const char *v)     { return valid_gate("cool_fan_grace_s", v); }
-static int valid_heater_pct(const char *v) { return valid_range(v, 0, 100); }
-static int valid_recheck_s(const char *v)  { return valid_range(v, 0, 3600); }
-static int valid_confirm_s(const char *v)  { return valid_range(v, 60, 3600); }
-/* C per raw-second of pic/hv_current; the bench measured 3.06e-5. */
-static int valid_laser_heat(const char *v) { return valid_range(v, 0, 2e-4); }
 /* ADC counts at the air-assist run duty; the bench measured about 20. */
 static int valid_aa_offset(const char *v)  { return valid_range(v, 0, 60); }
 static int valid_cool_s(const char *v)     { return valid_range(v, 0, 1800); }
@@ -810,13 +803,6 @@ static const struct {
     { "gf_password",            valid_password,    1 },
     { "ui_units",               valid_units,       0 },
     { "wifi_country",           valid_country,     0 },
-    { "cool_flow_rise",         valid_rise_c,      0 },
-    { "cool_flow_heater_pct",   valid_heater_pct,  0 },
-    { "cool_flow_check_s",      valid_check_s,     0 },
-    { "cool_recheck_s",         valid_recheck_s,   0 },
-    { "cool_confirm_max_s",     valid_confirm_s,   0 },
-    { "cool_laser_heat_cw",     valid_laser_heat,  0 },
-    { "cool_laser_heat_density", valid_laser_heat, 0 },
     { "cool_aa_offset_counts",  valid_aa_offset,   0 },
     { "cool_temp_max",          valid_temp_max,    0 },
     { "cool_temp_resume",       valid_temp_resume, 0 },
@@ -2400,11 +2386,6 @@ static int cb_cool_state(const struct _u_request *req,
 
     const char *v = setting_param(req, "armed");
     int armed = v && atoi(v) != 0;
-    /* The dose model the controller is cutting with, when it says.
-     * Density is the only model on a machine; the analog value is kept
-     * for the host-test builds that still exercise the reference mode. */
-    v = setting_param(req, "model");
-    cool_state_model(!v ? -1 : !strcmp(v, "density") ? 1 : !strcmp(v, "analog") ? 0 : -1);
     long duty[3] = {-1, -1, -1};
     static const char *duty_key[3] = {"air_assist", "exhaust", "intake"};
     for (int i = 0; i < 3; i++)
@@ -3503,10 +3484,9 @@ static const char *const ENV_OVERRIDES[] = {
     "FORGECTRL_SSHD_INIT", "FORGECTRL_STREAM_FPS", "FORGECTRL_STREAM_Q", "FORGECTRL_TLS_PORT",
     "FORGECTRL_WIZ_SHOTS",
     "GFCOOL_AA_OFFSET_COUNTS", "GFCOOL_ACCEL_ABORT", "GFCOOL_ACCEL_X_ALERT", "GFCOOL_ACCEL_Y_ALERT",
-    "GFCOOL_CONFIRM_MAX_S", "GFCOOL_COOLDOWN_MAX_S", "GFCOOL_COOLDOWN_S", "GFCOOL_FAN_GRACE_S",
+    "GFCOOL_COOLDOWN_MAX_S", "GFCOOL_COOLDOWN_S", "GFCOOL_FAN_GRACE_S",
     "GFCOOL_FIRE_Q1_ALERT", "GFCOOL_FIRE_Q1_CRIT", "GFCOOL_FIRE_Q2_ALERT", "GFCOOL_FIRE_Q2_CRIT",
-    "GFCOOL_FLOW_CHECK_S", "GFCOOL_FLOW_HEATER_PCT", "GFCOOL_FLOW_RISE", "GFCOOL_INTAKE_FANS",
-    "GFCOOL_LASER_HEAT_CW", "GFCOOL_LASER_HEAT_DENSITY", "GFCOOL_PURGE_MIN", "GFCOOL_RECHECK_S",
+    "GFCOOL_INTAKE_FANS", "GFCOOL_PURGE_MIN",
     "GFCOOL_TACH_AIR_MIN", "GFCOOL_TACH_EXHAUST_MIN", "GFCOOL_TACH_INTAKE_MIN", "GFCOOL_TEC_OFF",
     "GFCOOL_TEC_ON", "GFCOOL_TEC_PRESENT", "GFCOOL_TEMP_CRITICAL", "GFCOOL_TEMP_MAX",
     "GFCOOL_TEMP_MIN", "GFCOOL_TEMP_OFFSET_C", "GFCOOL_TEMP_RESUME", "GFCOOL_TEMP_START",
@@ -3753,8 +3733,6 @@ int main(int argc, char **argv)
         { "POST", "/cool/state",           cb_cool_state,       NULL, 0, NULL },
         { "GET",  "/cool/status",          cb_cool_status,      NULL, 1, "machine.read" },
         { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0, NULL },
-        { "POST", "/diag/flow-verify",     cb_diag_start,       "flow-verify", 0, NULL },
-        { "POST", "/diag/flow-calibrate",  cb_diag_start,       "flow-calibrate", 0, NULL },
         { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0, NULL },
         { "POST", "/diag/abort",           cb_diag_abort,       NULL, 0, NULL },
         { "GET",  "/diag/status",          cb_diag_status,      NULL, 1, NULL },

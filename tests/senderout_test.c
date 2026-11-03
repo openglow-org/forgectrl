@@ -158,11 +158,11 @@ int main(void)
     running = 0;
     CHECK(senderout_claim(A, why, sizeof(why)) == 409 && strstr(why, "not running"), "no controller: %s", why);
     running = 1;
-    CHECK(lease_take("diag:flow-verify", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "a diagnostic holds the machine");
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "a diagnostic holds the machine");
     before = nsent;
     CHECK(senderout_claim(A, why, sizeof(why)) == 409 && strstr(why, "a diagnostic") && nsent == before,
           "another holder of the machine refuses it before the controller is asked: %s", why);
-    lease_release("diag:flow-verify");
+    lease_release("diag:aa-offset-calibrate");
 
     printf("A claim its keeper stops keeping:\n");
     CHECK(senderout_claim(A, why, sizeof(why)) == 0, "granted");

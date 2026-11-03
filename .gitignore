@@ -3,5 +3,5 @@ build-arm/
 .env
 build-host/
 __pycache__/
-/cool-flow-test/
+/cool-engine-test/
 /super-test/

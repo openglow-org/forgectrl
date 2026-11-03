@@ -53,7 +53,7 @@ static int running = 0;
 static int ch = -1;                 /* the fflog channel */
 static senslog_ctx_t ctx;
 
-/* Shared with senslog_event / senslog_flow (under mu). */
+/* Shared with senslog_event (under mu). */
 static senslog_jobs_t jobs;
 static unsigned long ev_seq = 0;
 static int fr_pending = 0;
@@ -392,7 +392,7 @@ static int fr_verdict(const char *v)
 {
     static const char *const set[] = {
         "FIRE", "CRASH", "FLAME", "BUMP", "AIRFLOW", "CRITICAL", "SENSOR",
-        "OVERTEMP", "COLD", "FAULT", "SUSPECT",
+        "OVERTEMP", "COLD",
     };
     for (size_t i = 0; i < sizeof(set) / sizeof(*set); i++)
         if (!strcmp(v, set[i]))
@@ -572,15 +572,4 @@ void senslog_event(const char *msg)
         }
     }
     pthread_mutex_unlock(&mu);
-}
-
-void senslog_flow(const senslog_flow_t *f)
-{
-    char line[LINE_MAX_B];
-    emit(line, senslog_fmt_flow(line, sizeof(line), &ctx, mono_s(), f));
-    if (f->src && !strcmp(f->src, "check")) {
-        pthread_mutex_lock(&mu);
-        senslog_job_flow(&jobs, f->rise);
-        pthread_mutex_unlock(&mu);
-    }
 }

@@ -15,7 +15,7 @@
 #
 #   /status names the holder wizard:switches, of kind hardware, and
 #     observes sender and motors_released beside it
-#   POST /diag/flow-verify, /curve/record, /logs/export, /mode with the
+#   POST /diag/aa-offset-calibrate, /curve/record, /logs/export, /mode with the
 #     mode in force, /controller/start, and /settings with the current
 #     ui_units are each 409 in the holder's name (settings are locked),
 #     none of them for an idle machine or a closed gate
@@ -209,7 +209,7 @@ by_holder() {
         *) bad "$1 is not refused in the holder's name: $words" ;;
     esac
 }
-for req in "/diag/flow-verify" "/curve/record" "/logs/export" "/mode controller=$MODE" "/controller/start"; do
+for req in "/diag/aa-offset-calibrate" "/curve/record" "/logs/export" "/mode controller=$MODE" "/controller/start"; do
     set -- $req
     if [ $# -gt 1 ]; then code=$(post $1 "$TOKEN" -d "$2"); else code=$(post $1 "$TOKEN"); fi
     expect 409 "$code" "POST $req under the check's hold is 409"

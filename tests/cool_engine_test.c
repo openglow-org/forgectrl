@@ -1,25 +1,17 @@
 /*
- * cool_flow_test.c - host unit test for the cooling engine, tick by tick
+ * cool_engine_test.c - host unit test for the cooling engine, tick by tick
  * Copyright 2026 514 LLC d/b/a OpenGlow
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * The flow check heats the loop for a window and judges the downstream
- * rise. Two things the bench found put an ordinary job's check within
- * tenths of the limit: the coolant ADC's common-mode offset (about 1 C,
- * stepping in with the run airflow and toggling between two levels), and
- * the tube's own heat (about 1.5 C over a lit CW window). The engine now
- * reads the baseline and the end as means and takes the tube's share off
- * the rise, bounded. This test drives the engine tick by tick against a
- * fake sysfs tree and a fake clock, with a loop model that carries the
- * offset, the heater's rise (flow or no flow) and the tube's lagged heat:
+ * The cooling engine, driven tick by tick against a fake sysfs tree and
+ * a fake clock, with a loop model that carries the run airflow's ADC
+ * offset (about 1 C, stepping in with the run airflow and toggling
+ * between two levels):
  *
- *   A. dark, flow:          verified, no share taken
- *   B. dark, no flow:       SUSPECT
- *   C. lit CW, flow:        verified, the share about 1.5 C
- *   D. lit CW, no flow:     SUSPECT (the share never masks a stopped pump)
- *   E. absurd coefficient:  the share is bounded, no flow still SUSPECT
- *   F. density model:       the density coefficient applies (0.77 of CW)
+ *   G. the air-assist offset: taken off both readings in counts while
+ *                           the fan runs, in part at a part duty,
+ *                           bounded, nothing at idle
  *
  * The same harness drives the verdict a coolant sensor read failure
  * produces (a sysfs error, not a rail value): the engine is blind on
@@ -28,8 +20,6 @@
  *   H. blind mid-run:       one failed read tolerated, two are SENSOR
  *                           (fire blocked, hold, heater off), released
  *                           the moment the reading is back
- *   I. blind in a check:    the heater goes off, the check is abandoned
- *                           and asked for again once the sensors read
  *   J. blind under the floor: COLD keeps its state through SENSOR
  *   K. blind in a warm-up:  the heater goes off and comes back
  *   M. the hang dead-man:   a report under the timeout is still fresh and
@@ -92,8 +82,8 @@
  *   TEC.       fitted: on with the run airflow, off at idle, a dwell before
  *              it comes on again; not fitted: never
  */
-#define GF_SYSFS    "cool-flow-test/sys/"
-#define VERDICT_DIR "cool-flow-test/run"
+#define GF_SYSFS    "cool-engine-test/sys/"
+#define VERDICT_DIR "cool-engine-test/run"
 #define clock_gettime fake_clock_gettime
 /* The head accelerometer's interrupt generators, faked: the engine's
    calls land here (the real ones open an i2c bus this host lacks). */
@@ -190,7 +180,7 @@ int settings_get(const char *key, char *val, size_t len)
 static void ext_hold_file(const char *id, int required, int raised, const char *reason, double ts)
 {
     char path[160];
-    snprintf(path, sizeof(path), "cool-flow-test/holds/%s.json", id);
+    snprintf(path, sizeof(path), "cool-engine-test/holds/%s.json", id);
     FILE *f = fopen(path, "w");
     if (!f)
         return;
@@ -223,11 +213,9 @@ static int log_has(const char *needle)
 int diag_running(void) { return 0; }
 int status_json(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 
-/* The sensors logger's hooks, captured: the record the last flow verdict
-   wrote, and the flight recorder's arming counted. */
-static senslog_flow_t last_flow;
-static int flows, events;
-void senslog_flow(const senslog_flow_t *f) { last_flow = *f; flows++; }
+/* The sensors logger's hook, captured: the flight recorder's arming
+   counted. */
+static int events;
 void senslog_event(const char *msg) { (void)msg; events++; }
 
 /* The faked crash watch hardware: armed on request, and the next poll
@@ -330,8 +318,8 @@ static long get_long(const char *attr)
 
 static void make_tree(void)
 {
-    mkdir("cool-flow-test", 0755);
-    mkdir("cool-flow-test/run", 0755);
+    mkdir("cool-engine-test", 0755);
+    mkdir("cool-engine-test/run", 0755);
     mkdir(GF_SYSFS, 0755);
     mkdir(GF_SYSFS "pic", 0755);
     mkdir(GF_SYSFS "thermal", 0755);
@@ -361,37 +349,17 @@ static void make_tree(void)
 static const double BASE_C = 22.3;
 
 typedef struct {
-    int flow;                       /* pump running */
-    int lit;                        /* tube at full current from the open */
     int dead_down, dead_up;         /* a sensor whose read fails */
-    double k_true;                  /* the tube's real C per raw-second */
     int session;                    /* ticks since the session opened */
-    int heater_ticks;               /* ticks the heater has been on */
-    double tube_c;                  /* tube heat arrived at the sensor */
     double bulk_c;                  /* the bulk warmed past its base (a warm-up) */
 } loop_t;
 
 static void loop_tick(loop_t *L)
 {
-    /* The engine's own view of the heater: the fake tree is not sysfs,
-       and a short write does not truncate what a longer one left. */
-    long heater = flow_check_active ? 1 : 0;
-    if (heater > 0)
-        L->heater_ticks++;
-    else
-        L->heater_ticks = 0;
-    double th = L->heater_ticks ? (double)(L->heater_ticks - 1) : 0.0;
-    double heater_c = 0.0;
-    if (L->heater_ticks)
-        heater_c = L->flow ? 12.0 * (1.0 - exp(-th / 12.0)) : 0.4 * th;
-    /* The tube's heat arrives 15 s after emission. */
-    long hv = L->lit && L->session > 0 ? 970 : 0;
-    if (L->lit && L->session > 15)
-        L->tube_c += L->k_true * 970.0;
     /* The run airflow's ADC offset: in from the session open, toggling. */
     double offset = L->session > 0 ? -1.0 + ((L->session & 1) ? 0.6 : 0.0) : 0.0;
-    double down = BASE_C + L->bulk_c + offset + heater_c + L->tube_c;
-    double up = BASE_C + L->bulk_c + offset + 0.07 * heater_c + L->tube_c;
+    double down = BASE_C + L->bulk_c + offset;
+    double up = BASE_C + L->bulk_c + offset;
     if (L->dead_down)
         unlink(GF_SYSFS "pic/water_temp_1");
     else
@@ -400,7 +368,6 @@ static void loop_tick(loop_t *L)
         unlink(GF_SYSFS "pic/water_temp_2");
     else
         put_long("pic/water_temp_2", raw_for(up));
-    put_long("pic/hv_current", hv);
     if (L->session > 0)
         L->session++;
 }
@@ -408,57 +375,21 @@ static void loop_tick(loop_t *L)
 /* --- driving the engine ----------------------------------------------- */
 
 /* Close the session the way a job's end does: report idle and tick
-   through the cooldown phases until the engine is idle with the heater
-   off, then clear the verdict a previous case left. */
+   through the cooldown phases until the engine is idle, then take the
+   heater off. */
 static void close_session(loop_t *L)
 {
     L->session = 0;
-    L->lit = 0;
     for (int i = 0; i < 900; i++) {
         loop_tick(L);
         fake_now += 1.0;
         cool_state_report("idle", 0, -1, -1, -1, NULL);
         engine_tick();
-        if (cool_state == Cool_Idle && !flow_check_active)
+        if (cool_state == Cool_Idle)
             break;
     }
-    flow_verdict = Flow_Normal;
-    flow_episodes = 0;
-    flow_check_pending = 0;
     heater_set_pct(0);
     conf_reload();
-}
-
-/* Open a run session and tick until the check has run and judged.
-   Returns the verdict; the engine's line is in last_log. */
-static flow_verdict_t run_check(loop_t *L, int lit, int max_ticks)
-{
-    close_session(L);
-    L->lit = lit;
-    L->heater_ticks = 0;
-    L->tube_c = 0.0;
-    /* A settled loop before the job: history for the gate. */
-    for (int i = 0; i < 20; i++) {
-        loop_tick(L);
-        fake_now += 1.0;
-        cool_state_report("idle", 0, -1, -1, -1, NULL);
-        engine_tick();
-    }
-    L->session = 1;
-    int saw_check = 0;
-    for (int i = 0; i < max_ticks; i++) {
-        loop_tick(L);
-        fake_now += 1.0;
-        cool_state_report("run", 1, -1, -1, -1, NULL);
-        engine_tick();
-        if (flow_check_active)
-            saw_check = 1;
-        else if (saw_check)
-            return flow_verdict;
-    }
-    printf("    (the check never completed in %d ticks; active=%d pending=%d)\n",
-           max_ticks, flow_check_active, flow_check_pending);
-    return Flow_Fault;
 }
 
 /* One tick of an open run session. */
@@ -475,9 +406,6 @@ static void run_tick(loop_t *L)
  * after close_session sees them take effect here. */
 static void settle_and_open(loop_t *L)
 {
-    L->lit = 0;
-    L->heater_ticks = 0;
-    L->tube_c = 0.0;
     for (int i = 0; i < 20; i++) {
         loop_tick(L);
         fake_now += 1.0;
@@ -1078,79 +1006,22 @@ static void tec(loop_t *L)
 int main(void)
 {
     make_tree();
-    /* The coefficient is selected by the model the controller reports
-     * (the config key is gone; density is the only product model, and
-     * the analog value survives for the host-test reference builds). */
-    cool_state_model(0);
     /* The fan writes and the intakes fitted run on a loop at rest; the
-     * flow check's tree is laid again after them. */
+     * tree is laid again after them. */
     fan_writes();
     intakes();
     make_tree();
     kv[0] = NULL;
-    loop_t L = { .flow = 1, .lit = 0, .k_true = LASER_HEAT_CW };
-
-    printf("A. dark, flow\n");
-    flow_verdict_t v = run_check(&L, 0, 200);
-    CHECK(v == Flow_Normal, "a dark check with flow is verified");
-    CHECK(strstr(last_log, "laser") == NULL, "no share is taken with the tube dark");
-    CHECK(flow_base_set && fabs(flow_base_down - (BASE_C - 0.7)) < 0.15,
-          "the baseline is the mean of the settled window, not one sample");
-    CHECK(flows > 0 && !strcmp(last_flow.src, "check") && !strcmp(last_flow.verdict, "verified") &&
-          last_flow.duty_pct == FLOW_HEATER_PCT && last_flow.base_down == flow_base_down,
-          "the sensors record names the check, its verdict, the duty and the judged baseline");
-    CHECK(fabs(last_flow.base_up - last_flow.base_down) < 0.15 &&
-          last_flow.end_up - last_flow.base_up < 0.15 * (last_flow.end_down - last_flow.base_down),
-          "and the upstream sensor beside it: level with the downstream at rest, barely moved by the heater");
-
-    printf("B. dark, no flow\n");
-    L.flow = 0;
-    v = run_check(&L, 0, 200);
-    CHECK(v == Flow_Suspect, "a dark check without flow is SUSPECT");
-    CHECK(!strcmp(last_flow.verdict, "suspect") && last_flow.rise > last_flow.limit_c,
-          "the record says suspect, with the rise over the limit it was judged on");
-
-    printf("C. lit CW from the session open, flow\n");
-    L.flow = 1;
-    v = run_check(&L, 1, 200);
-    CHECK(v == Flow_Normal, "a lit check with flow is verified");
-    CHECK(flow_laser_c > 1.2f && flow_laser_c < 1.8f,
-          "the tube's share taken off is about 1.5 C");
-    CHECK(strstr(last_log, "laser") != NULL, "the line carries the share");
-
-    printf("D. lit CW, no flow\n");
-    L.flow = 0;
-    v = run_check(&L, 1, 200);
-    CHECK(v == Flow_Suspect, "a lit check without flow is still SUSPECT");
-
-    printf("E. an absurd coefficient cannot subtract the check away\n");
-    kv[0] = "cool_laser_heat_cw"; kv[1] = "1e-3"; kv[2] = NULL;
-    v = run_check(&L, 1, 200);
-    CHECK(flow_laser_c <= LASER_HEAT_MAX_C + 0.001f, "the share is bounded");
-    CHECK(v == Flow_Suspect, "no flow is still SUSPECT under the bound");
-    kv[0] = NULL;
-
-    printf("F. the density model takes its own coefficient\n");
-    cool_state_model(1);
-    L.flow = 1;
-    L.k_true = LASER_HEAT_DENSITY;
-    v = run_check(&L, 1, 200);
-    CHECK(v == Flow_Normal, "a lit density check with flow is verified");
-    CHECK(flow_laser_c > 0.9f && flow_laser_c < 1.4f,
-          "the share is the density coefficient's (0.77 of CW)");
+    loop_t L = { 0 };
 
     printf("G. the air-assist offset is taken off in counts while the fan runs\n");
     /* The fan's ground lift raises the raw counts, and more counts read
        colder. The model writes raw counts with no such lift in them, so
        with the setting at 20 the engine must read both sensors 20 counts
        LOWER than the raw (warmer) while the run profile is on, and the raw
-       when it is not. The flow check must not care (both ends shift
-       alike). */
+       when it is not. */
     kv[0] = "cool_aa_offset_counts"; kv[1] = "20"; kv[2] = NULL;
-    L.flow = 1;
-    L.lit = 0;
-    v = run_check(&L, 0, 200);
-    CHECK(v == Flow_Normal, "the check still verifies flow with the offset setting in force");
+    open_session(&L);
     CHECK(cool_coolant_offset_counts() == 20, "the run profile commands the fan: 20 counts added");
     {
         long raw = get_long("pic/water_temp_2");            /* the model's last raw upstream */
@@ -1175,13 +1046,9 @@ int main(void)
     conf_reload();
 
     printf("H. a coolant sensor that stops reading mid-run\n");
-    cool_state_model(0);
-    L.flow = 1;
-    L.lit = 0;
-    L.k_true = LASER_HEAT_CW;
-    v = run_check(&L, 0, 200);
-    CHECK(v == Flow_Normal && pub_fire_ok && !strcmp(pub_verdict, "OK"),
-          "the loop verified: fire permitted");
+    open_session(&L);
+    run_tick(&L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "a settled session: fire permitted");
     L.dead_up = 1;
     run_tick(&L);
     CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "one failed read is tolerated");
@@ -1203,61 +1070,6 @@ int main(void)
     CHECK(!pub_fire_ok && !strcmp(pub_verdict, "SENSOR") && strstr(last_log, "downstream") != NULL,
           "the downstream sensor alone is enough to blind the engine");
     L.dead_down = 0;
-
-    printf("H2. a held flow check does not start; the release lets it\n");
-    close_session(&L);
-    for (int i = 0; i < 5; i++)
-        run_tick(&L);
-    open_session(&L);           /* the run's start requests a check; the hold keeps it pending */
-    cool_flow_check_hold(1);
-    for (int i = 0; i < 60 && !flow_check_active; i++)
-        run_tick(&L);
-    CHECK(!flow_check_active && heater_pct == 0 && flow_check_pending,
-          "the check stays pending under the hold");
-    CHECK(pub_fire_ok, "the hold is not a gate: fire stays permitted");
-    cool_flow_check_hold(0);
-    for (int i = 0; i < 200 && !flow_check_active; i++)
-        run_tick(&L);
-    CHECK(flow_check_active && heater_pct > 0, "the released check starts");
-    close_session(&L);
-    for (int i = 0; i < 30; i++)
-        run_tick(&L);
-    cool_flow_check_hold(1);
-    fake_now += COOL_FLOW_HOLD_MAX_S + 5;
-    run_tick(&L);
-    CHECK(!flow_check_held, "a forgotten hold runs out of time");
-
-    printf("I. blind during a flow check: the heater goes off, the check is asked for again\n");
-    open_session(&L);
-    for (int i = 0; i < 200 && !flow_check_active; i++)
-        run_tick(&L);
-    CHECK(flow_check_active && heater_pct > 0,
-          "a check is under way with the heater on");
-    L.dead_down = 1;
-    run_tick(&L);
-    run_tick(&L);
-    CHECK(!strcmp(pub_verdict, "SENSOR") && !flow_check_active && heater_pct == 0,
-          "blind: SENSOR, the check abandoned, the heater off");
-    L.dead_down = 0;
-    run_tick(&L);
-    printf("    verdict=%s pending=%d active=%d heater=%u\n", pub_verdict,
-           flow_check_pending, flow_check_active, (unsigned)heater_pct);
-    CHECK(!strcmp(pub_verdict, "OK") && flow_check_pending,
-          "reading again: OK, and the check is asked for again");
-    {
-        int saw = 0;
-        flow_verdict_t vv = Flow_Fault;
-        for (int i = 0; i < 300; i++) {
-            run_tick(&L);
-            if (flow_check_active)
-                saw = 1;
-            else if (saw) {
-                vv = flow_verdict;
-                break;
-            }
-        }
-        CHECK(saw && vv == Flow_Normal, "the re-asked check runs and verifies flow");
-    }
 
     printf("J. blind under the floor: COLD keeps its state\n");
     kv[0] = "cool_temp_min"; kv[1] = "30"; kv[2] = NULL;   /* the loop at 22.3 C is under it */
@@ -1440,11 +1252,11 @@ int main(void)
     close_session(&L);
 
     printf("P. an extension's hold joins the pause tier, under every verdict of the engine's own\n");
-    mkdir("cool-flow-test/holds", 0755);
-    holds_dir = "cool-flow-test/holds";
-    mkdir("cool-flow-test/required-holds", 0755);
-    holds_required_dir = "cool-flow-test/required-holds";
-    ext_safe_file = "cool-flow-test/ext-safe";
+    mkdir("cool-engine-test/holds", 0755);
+    holds_dir = "cool-engine-test/holds";
+    mkdir("cool-engine-test/required-holds", 0755);
+    holds_required_dir = "cool-engine-test/required-holds";
+    ext_safe_file = "cool-engine-test/ext-safe";
     unlink(ext_safe_file);
     stops = 0;
     open_session(&L);
@@ -1492,13 +1304,13 @@ int main(void)
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off ends the hold at the next tick");
     /* a fail tier is a fail tier under a hold too */
     kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
-    unlink("cool-flow-test/holds/org.example.badge.json");
+    unlink("cool-engine-test/holds/org.example.badge.json");
     ext_hold_file("org.example.filter", 0, 1, "filter life under 5 percent", fake_now + 1.0);
     crash_src2 = 0x40 | 0x02;
     run_tick(&L);
     CHECK(!strcmp(pub_verdict, "CRASH") && stops == 1, "CRASH under a hold: CRASH, and the controller is ended");
     crash_src2 = 0;
-    unlink("cool-flow-test/holds/org.example.filter.json");
+    unlink("cool-engine-test/holds/org.example.filter.json");
     kv[0] = NULL;
     close_session(&L);
     cool_fail_tier_stop = NULL;
@@ -1536,9 +1348,8 @@ int main(void)
     tec(&L);
 
     printf(failures ? "FAIL: %d check(s) failed\n"
-                    : "PASS: the flow check reads means, takes the tube's share off, "
-                      "bounds it, still sees a stopped pump under a lit tube, takes "
-                      "the air-assist offset off while the fan runs, and says SENSOR "
+                    : "PASS: the engine takes the air-assist offset off while the fan "
+                      "runs and says SENSOR "
                       "rather than fire blind; every fan duty is read back and held, "
                       "and one intake fan fitted leaves the second tach unjudged; the "
                       "gates trip past the loop and are off at their far ends, the "

@@ -40,7 +40,7 @@
  *   Zero is the gate off.
  * cool_temp_start: the warm-up gate. A run session that opens with the
  *   coolant under it holds with the loop heater on and the fans idle
- *   until the reading reaches the gate, then runs and verifies flow.
+ *   until the reading reaches the gate, then runs.
  *   Zero is the gate off. Kept between the floor and the ceiling by the
  *   settings cross-check.
  * cool_fire_q1_alert .. cool_fire_q2_critical: the lid-IR fire watch,
@@ -69,14 +69,6 @@
  *   values (x 132 ~2.06 g, y 112 ~1.75 g, abort 133 ~2.08 g); normal
  *   commanded motion reads under 0.2 g and a rail strike 1.8 g and
  *   up. Z is never armed: gravity rides it. Zero is that tier off.
- * cool_flow_check_s: the flow interrogation window. Zero is no
- *   interrogation at all, the one off-by-value the engine has always
- *   had; the band is the window the characterization found useful.
- * cool_flow_rise: the downstream rise that means stagnant coolant. Set
- *   from flow calibrate, which the setup requires: the bands differ from
- *   loop to loop, so no band of one machine's judges another's value and
- *   the recommended band is the whole range. Not a gate of its own (flow
- *   is), so no off end.
  * cool_tach_*_min_rpm: the airflow floors, in rpm at run duty, 55
  *   percent of the steady speed the bench machine's fans reach at the
  *   run profile (exhaust 11640, the intakes 4160, the air assist
@@ -86,9 +78,6 @@
  * cool_purge_min_current: the purge-air fan has no tachometer; its
  *   current reads about 1 off and about 630 on, and the floor sits
  *   between. Zero is the gate off.
- * cool_recheck_s: how often the flow check repeats during a job. Zero
- *   is the gate off: a pump that stops mid-job is then undetected until
- *   the next job start.
  * cool_fan_grace_s: the spin-up window after the run profile is
  *   written, during which no floor counts. Not a gate, so no off end. */
 static const gate_setting_t table[] = {
@@ -106,9 +95,6 @@ static const gate_setting_t table[] = {
     { "cool_accel_x_alert",         "crash_x_alert", 132.0, 0.0, 255.0, 100.0, 170.0, -1 },
     { "cool_accel_y_alert",         "crash_y_alert", 112.0, 0.0, 255.0,  85.0, 145.0, -1 },
     { "cool_accel_abort",           "crash_abort",   133.0, 0.0, 255.0, 100.0, 170.0, -1 },
-    { "cool_flow_check_s",          "flow",        50.0,  0.0,   300.0, 30.0, 120.0, -1 },
-    { "cool_recheck_s",             "recheck",    150.0,  0.0,  3600.0, 60.0, 600.0, -1 },
-    { "cool_flow_rise",             NULL,          14.4,  1.0,    40.0,  1.0,  40.0,  0 },
     { "cool_tach_exhaust_min_rpm",  "exhaust",   6400.0,  0.0, 20000.0, 5800.0, 7000.0, -1 },
     { "cool_tach_intake_min_rpm",   "intake",    2290.0,  0.0, 20000.0, 2100.0, 2500.0, -1 },
     { "cool_tach_air_assist_min_rpm", "air_assist", 6000.0, 0.0, 30000.0, 5500.0, 6600.0, -1 },

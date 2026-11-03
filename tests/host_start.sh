@@ -112,7 +112,7 @@ echo "  ok: no controller started, iw not run"
 grep -q '^sensors: beat v=1 .* down_raw=694 ' "$T/out" || fail "no start beat with the planted coolant count"
 grep -q '^sensors: inv v=1 .* why=start .*head_id=044c head_fw=0bb13047' "$T/out" \
     || fail "no start inventory with the head's id and firmware"
-grep -q '^sensors: cfg v=1 .* why=start .*cool_flow_heater_pct=' "$T/out" || fail "no start settings record"
+grep -q '^sensors: cfg v=1 .* why=start .*cool_temp_max=' "$T/out" || fail "no start settings record"
 ! grep '^sensors: ' "$T/out" | grep -q 987654321 || fail "a sensors record carries the head's serial"
 echo "  ok: the sensors logger's start records, read through the sysfs root, no serial"
 

@@ -63,11 +63,6 @@ var S = {},
   locked = false;
 var TOK = '__FFTOKEN__';
 var CK = [
-  'cool_flow_rise',
-  'cool_flow_heater_pct',
-  'cool_flow_check_s',
-  'cool_recheck_s',
-  'cool_confirm_max_s',
   'cool_temp_max',
   'cool_temp_resume',
   'cool_temp_critical_c',
@@ -138,7 +133,6 @@ var FT = {
   lens_park_z_mm: 'len',
   lens_hall_edge_z_mm: 'len',
   tray_offset_mm: 'len',
-  cool_flow_rise: 'td',
   cool_temp_max: 'ta',
   cool_temp_resume: 'ta',
   cool_temp_critical_c: 'ta',
@@ -148,7 +142,6 @@ var FT = {
   cool_tec_off_c: 'ta'
 };
 var PH = {
-  cool_flow_rise: [14.4, 'td'],
   cool_temp_max: [33, 'ta'],
   cool_temp_resume: [31, 'ta'],
   cool_temp_critical_c: [38, 'ta'],
@@ -177,8 +170,6 @@ var GN = {
   cool_accel_x_alert: 'Crash X alert',
   cool_accel_y_alert: 'Crash Y alert',
   cool_accel_abort: 'Crash abort',
-  cool_flow_check_s: 'Flow check window',
-  cool_flow_rise: 'Flow fault rise',
   cool_tach_exhaust_min_rpm: 'Exhaust floor',
   cool_tach_intake_min_rpm: 'Intake floor',
   cool_tach_air_assist_min_rpm: 'Air assist floor',
@@ -196,7 +187,6 @@ var GG = {
   crash_x_alert: 'the crash alert (X axis)',
   crash_y_alert: 'the crash alert (Y axis)',
   crash_abort: 'the crash abort',
-  flow: 'coolant flow verification',
   exhaust: 'the exhaust fan',
   intake: 'the intake fans',
   air_assist: 'the air assist',
@@ -286,8 +276,8 @@ function renderGatesBanner() {
     '\u26A0 Cooling gate off: ' +
     esc(names.join(', ')) +
     '. The laser will fire without this protection' +
-    (off.indexOf('flow') >= 0 || off.indexOf('coolant_max') >= 0
-      ? ', so a stopped pump or an overheating loop will not hold a job'
+    (off.indexOf('coolant_max') >= 0
+      ? ', so an overheating loop will not hold a job'
       : '') +
     (off.indexOf('exhaust') >= 0 || off.indexOf('intake') >= 0 ||
     off.indexOf('air_assist') >= 0 || off.indexOf('purge') >= 0
@@ -1612,9 +1602,6 @@ function abortDiag() {
   $('msg-d').textContent = '';
   fx('/diag/abort', { method: 'POST' });
 }
-function applyRec(v) {
-  postNow({ cool_flow_rise: String(v) }, 'msg-d');
-}
 function applyAa(v) {
   postNow({ cool_aa_offset_counts: String(v) }, 'msg-d');
 }
@@ -1648,68 +1635,6 @@ function renderDiag() {
     lg.scrollTop = lg.scrollHeight;
   } else lg.style.display = 'none';
   if (r && !D.running) {
-    if (typeof r.pass !== 'undefined') {
-      g += txt('Result', r.pass ? 'PASS' : 'FAIL', r.pass ? 'bigpass' : 'bigfail');
-      g += txt(
-        'Flow rise',
-        dTd(r.flow_rise).toFixed(1) + ' ' + uT() + ' (dT ' + dTd(r.flow_dt).toFixed(1) + ')'
-      );
-      g += txt(
-        'No-flow rise',
-        dTd(r.noflow_rise).toFixed(1) + ' ' + uT() + ' (dT ' + dTd(r.noflow_dt).toFixed(1) + ')'
-      );
-      g += txt('Threshold', dTd(r.threshold).toFixed(1) + ' ' + uT());
-      g += txt(
-        'Margins',
-        'flow ' +
-          dTd(r.margin_flow).toFixed(1) +
-          ' / no-flow ' +
-          dTd(r.margin_noflow).toFixed(1) +
-          ' ' +
-          uT(),
-        r.thin_margin ? 'b-warn' : 'b-ok'
-      );
-      if (r.thin_margin)
-        g += txt(
-          'Note',
-          'margin under ' + fnum(dTd(1.5), 1) + ' ' + uT() + ' \u2014 run Calibrate',
-          'b-warn'
-        );
-      if (!r.pass && !r.error)
-        g += txt('Note', 'check pump and coolant, or run Calibrate', 'b-warn');
-    }
-    if (typeof r.gap !== 'undefined') {
-      var f1 = function (x) {
-        return dTd(x).toFixed(1);
-      };
-      g += txt(
-        'Flow band',
-        '\u2264 ' + f1(r.flow_max) + ' ' + uT() + '  (' + r.flow_rises.map(f1).join(', ') + ')'
-      );
-      g += txt(
-        'No-flow band',
-        '\u2265 ' +
-          f1(r.noflow_min) +
-          ' ' +
-          uT() +
-          '  (' +
-          r.noflow_rises.map(f1).join(', ') +
-          ')'
-      );
-      g += txt('Gap', f1(r.gap) + ' ' + uT(), r.recommend ? 'b-ok' : 'b-warn');
-      if (r.recommend)
-        g += kv(
-          'Recommended threshold',
-          "<span class='mono'>" +
-            f1(r.recommend) +
-            ' ' +
-            uT() +
-            '</span> ' +
-            "<button class='btn btn-sm btn-primary' onclick='applyRec(" +
-            r.recommend +
-            ")'>Apply</button>"
-        );
-    }
     if (typeof r.offset_counts !== 'undefined') {
       g += txt(
         'Air-assist offset',

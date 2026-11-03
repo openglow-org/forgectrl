@@ -16,9 +16,7 @@
  *
  * The gate is the advisories (accepted, and the press), the account,
  * the table's required steps (preferences, the machine facts, the cloud
- * decision, the coolant flow calibration: a loop whose coolant rises
- * past the default threshold with flow faults every job's flow check
- * until it is calibrated), and the intake fan count (a machine built
+ * decision), and the intake fan count (a machine built
  * with one intake fan faults every job on the second intake until the
  * airflow gate knows): it is evaluated on every change and reported to the
  * supervisor, which spawns no controller for a sender while it is
@@ -57,10 +55,6 @@ static const setup_step_t image_steps[] = {
     { "preferences",       1, NULL, 1 },
     { "machine",           1, NULL, 1 },
     { "cloud",             1, NULL, 1 },
-    /* The coolant flow bands differ from loop to loop and the default
-     * threshold sits under the flowing rise of some, so the calibration
-     * holds the gate. */
-    { "cooling.flow",      1, NULL, 1 },
     /* The dark validation: the machine checked with the laser locked. */
     { "switches",          1, NULL, 0 },
     { "sensors",           1, NULL, 0 },
@@ -80,17 +74,12 @@ int (*setup_fans_hook)(void);
 
 /* The what-changed menu (the panel's Setup tab). The settings a step
  * measured belong to the part it measured them on: a new tube has its
- * own floor; a new pump or coolant its own flow bands; a new fan its
- * own floor; a new head its own free travel and focus height (and the
+ * own floor; a new fan its own floor; a new head its own free travel and focus height (and the
  * record's head facts, which the boot check also flags). Each change
  * recommends the steps that measure or prove the new part. */
 static const setup_change_t changes[] = {
     { "tube", "The laser tube was replaced", "the tube was replaced",
       { "laser.floor" } },
-    { "pump", "The coolant pump was replaced", "the pump was replaced",
-      { "cooling.flow" } },
-    { "coolant", "The coolant was changed", "the coolant was changed",
-      { "cooling.flow" } },
     { "fan", "A fan was replaced", "a fan was replaced",
       { "airflow" } },
     { "head", "The head was replaced", "the head was replaced",

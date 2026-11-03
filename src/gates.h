@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: MIT
  *
  * A gate is a comparison the cooling engine makes against a setting: a
- * ceiling the coolant must stay under, a window the flow check runs
- * for. Every such setting is a plain number on the Machine tab with a
+ * ceiling the coolant must stay under, a floor a fan must stay over.
+ * Every such setting is a plain number on the Machine tab with a
  * wide legal range, and the far end of that range turns the gate off by
  * value: a floor of zero never trips, a ceiling at its maximum never
  * trips. There is no separate switch. Around the shipped default sits a
@@ -31,7 +31,7 @@ typedef struct {
     const char *key;       /* settings key (cool_*) */
     const char *gate;      /* gate name as /status reports it, or NULL
                             * for a key that tunes a gate without being
-                            * one (the resume gate, the flow rise) */
+                            * one (the resume gate, the grace) */
     double def;            /* compiled default */
     double lo, hi;         /* legal range, inclusive */
     double band_lo;        /* recommended band, inclusive */
@@ -85,7 +85,7 @@ typedef double (*gate_value_fn)(const gate_setting_t *g, void *ctx);
  * Returns the length written, or -1 if it did not fit. */
 int gates_json(char *buf, size_t len, gate_value_fn value_of, void *ctx);
 
-/* ["coolant_max","flow"]: the gates whose setting is at its off end.
+/* ["coolant_max","exhaust"]: the gates whose setting is at its off end.
  * Returns the count of gates off, or -1 if the buffer did not fit. */
 int gates_off_json(char *buf, size_t len, gate_value_fn value_of, void *ctx);
 

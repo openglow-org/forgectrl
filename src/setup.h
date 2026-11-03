@@ -12,12 +12,12 @@
  * The gate: no controller runs for a sender until the advisories are
  * accepted, the button was pressed, an account exists, the required
  * steps of the table (preferences, the machine facts, the cloud
- * decision, the coolant flow calibration) are done at their versions,
- * and the intake fans are
+ * decision) are done at their versions, and the intake fans are
  * counted. Every other step is recommended, never required: a step not
- * run, or
- * run at an older version than this image's table, and every flag, fill
- * the recommended list the panel shows.
+ * run, or run at an older version than this image's table, and every
+ * flag, fill the recommended list the panel shows. A step a stored
+ * record carries that the table no longer has is kept in the record and
+ * judges nothing.
  */
 #ifndef FORGECTRL_SETUP_H
 #define FORGECTRL_SETUP_H

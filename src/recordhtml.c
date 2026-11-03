@@ -240,6 +240,17 @@ static void put_row(sb_t *b, const char *k, const char *v)
     sb_put(b, "</td></tr>");
 }
 
+/* Whether an id is in a {id, title} array. */
+static int listed(const json_t *list, const char *id)
+{
+    size_t i;
+    json_t *e;
+    json_array_foreach(list, i, e)
+        if (!strcmp(sget(e, "id"), id))
+            return 1;
+    return 0;
+}
+
 /* The title of an id from a {id, title} array, or the id itself. */
 static const char *title_of(const json_t *list, const char *id)
 {
@@ -412,12 +423,13 @@ char *record_html(const json_t *rec, const json_t *docs, const json_t *wizards,
     if (!any)
         sb_put(&b, "<p class=\"meta\">No step has completed yet.</p>\n");
 
-    /* Flags on wizards that never ran (a change reported before the run) */
+    /* Flags on wizards that never ran (a change reported before the run);
+     * a flag on a step the catalog no longer has names nothing to run */
     int flagged_unrun = 0;
     const char *k;
     json_t *f;
     json_object_foreach((json_t *)flags, k, f) {
-        if (json_is_object(json_object_get(wz, k)))
+        if (json_is_object(json_object_get(wz, k)) || !listed(wizards, k))
             continue;
         if (!flagged_unrun) {
             sb_put(&b, "<h2>Asked for</h2>\n<table class=\"facts\">");

@@ -11,7 +11,7 @@
  * the refusal names the holder. Every route that must not act under
  * somebody else's feet asks it too, and /status shows the holder.
  *
- * An owner is a short name, "<what>:<which>": diag:flow-verify,
+ * An owner is a short name, "<what>:<which>": diag:aa-offset-calibrate,
  * wizard:motion, update:apply, job:panel, recorder, logs.export. A holder
  * may let one owner in under itself (the cooling wizards run a diagnostic
  * inside their own hold, the sheet wizards a job): the inner owner names
@@ -78,7 +78,7 @@ int lease_holder(char *owner, size_t len);
 int lease_json(char *buf, size_t len);
 
 /* An owner in words, for a refusal or a panel: "a diagnostic
- * (flow-verify)", "the dose-curve recorder". */
+ * (aa-offset-calibrate)", "the dose-curve recorder". */
 void lease_words(const char *owner, char *buf, size_t len);
 
 /* What is observed outside the lease; each may be NULL. Set at start. */

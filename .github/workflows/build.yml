@@ -35,7 +35,7 @@ jobs:
         run: cmake --build build -j"$(nproc)"
       - name: "The served pages' scripts parse (node --check on every bundled script), and index.html carries the extension card with loadExt defined before its call"
         run: python3 -B tools/check_ui_js.py build/ui
-      - name: "wizard_walk (the first-run page as bundled, walked in headless Chrome against the dev server's mock: the documents, the press, the account, preferences, machine, cloud, the intake fans counted, the flow check's prompt options shown and answered as text, the choice onto the panel, a diagnostic start the cooling engine refuses sent once more a second later, and not after a later press or the operator's Abort, which clears the press's starting text, a start refused for another reason shown at once and not sent again)"
+      - name: "wizard_walk (the first-run page as bundled, walked in headless Chrome against the dev server's mock: the documents, the press, the account, preferences, machine, cloud, the intake fans check with its prompt options shown and answered as text, the choice onto the panel, a diagnostic start the cooling engine refuses sent once more a second later, and not after a later press or the operator's Abort, which clears the press's starting text, a start refused for another reason shown at once and not sent again)"
         run: python3 -B tests/wizard_walk.py build/ui
       - name: "status_test (the lid and idle reads fail closed; the sys, grbl and lens blocks of /status)"
         run: ./build/status_test
@@ -89,7 +89,7 @@ jobs:
         run: sh tests/host_routes.sh build build/ulfius-image/lib
       - name: "host_ext (the extension host's routes on a host, against a compiled stand-in that is a live host: the upload sink, the install and a key without the button, the package routes and their 403s, a package's check run with the lease free and the setup record untouched, one session driving it and another following until it takes over)"
         run: sh tests/host_ext.sh build build/ulfius-image/lib
-      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off, the flow calibration leaving the heater duty as it was through an abort and through the daemon's death mid-rung; the first-run page the daemon serves, walked in headless Chrome: the documents, the press, the account, the forms, the flow calibration on the scripted loop, the choice onto the panel, a save, the login)"
+      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off; the first-run page the daemon serves, walked in headless Chrome: the documents, the press, the account, the forms, the counted intake fans passed by, the choice onto the panel, a save, the login)"
         run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: "host_lease (the machine lease on a host: a waiting switches check holds it, six requests are refused in its name, the abort frees it, and the event stream says both)"
         run: sh tests/host_lease.sh build build/ulfius-image/lib
@@ -109,8 +109,8 @@ jobs:
         run: ./build/camhealth_test
       - name: Gate settings table
         run: ./build/cool_gate_test
-      - name: "cool_flow_test (the cooling engine: the flow check, the tiers, extension holds, the verified fan writes, the intakes fitted, the gates past the loop and off, the phases' duties, the TEC)"
-        run: ./build/cool_flow_test
+      - name: "cool_engine_test (the cooling engine: the air-assist offset, the tiers, extension holds, the verified fan writes, the intakes fitted, the gates past the loop and off, the phases' duties, the TEC)"
+        run: ./build/cool_engine_test
       - name: "holds_test (an extension package's holds as the engine reads them: what stands, what is dropped, what reaches the verdict)"
         run: ./build/holds_test
       - name: "holds_wire_test (the extension host's real hold files, read by the engine's real reader: the names, the fields and their types, the monotonic stamp, the write period inside the window, stale on a silent host)"

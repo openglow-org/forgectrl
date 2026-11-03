@@ -15,8 +15,6 @@
  *          diagnostics, every 60 s at idle, and on every phase change
  *   job    one per job, from the session's opening to the machine's
  *          return to idle
- *   flow   one per flow verdict, the engine's checks and the
- *          calibration's trials alike
  *   inv    the machine's inventory; cfg the settings in force: at start,
  *          when the clock is set, when either changes, and daily
  *   clock  the wall clock stepped (the record that re-dates the lines
@@ -42,9 +40,5 @@ void senslog_stop(void);
 /* A warning from the cooling engine: arms the flight recorder (its dump
  * follows SENSLOG_FR_POST_S later). Safe from any thread. */
 void senslog_event(const char *msg);
-
-/* A flow verdict, written at once and counted in the open job. Safe
- * from any thread. */
-void senslog_flow(const senslog_flow_t *f);
 
 #endif

@@ -77,21 +77,6 @@ typedef struct {
 int senslog_fmt_beat(char *buf, size_t len, const senslog_ctx_t *c,
                      const senslog_sample_t *s);
 
-/* A flow verdict: the engine's check (src "check") or a calibration
- * trial (src "cal", trial i of n). */
-typedef struct {
-    const char *src;
-    const char *verdict;
-    double rise, rise_raw, laser_c, limit_c;
-    long duty_pct;
-    double window_s;
-    double base_down, base_up, end_down, end_up, dt;
-    double hv_dose;
-    int trial, trials;
-} senslog_flow_t;
-int senslog_fmt_flow(char *buf, size_t len, const senslog_ctx_t *c,
-                     double mono, const senslog_flow_t *f);
-
 /* The clock stepped: from and to are wall-clock seconds (UTC). */
 int senslog_fmt_clock(char *buf, size_t len, const senslog_ctx_t *c,
                       double mono, double from, double to);
@@ -126,8 +111,6 @@ typedef struct {
     long ir_base[4], ir_peak[4];
     senslog_stat_t beam_dark;
     long beam_peak;
-    int flow_checks;
-    double flow_worst;
     char verdicts[96];              /* the distinct verdicts other than OK */
 } senslog_job_t;
 
@@ -142,8 +125,6 @@ void senslog_jobs_init(senslog_jobs_t *j);
 /* Feed a sample. Returns 1 when a job finished on it: the finished job is
  * in j->done, and a session opening on the same sample has begun. */
 int senslog_job_feed(senslog_jobs_t *j, const senslog_sample_t *s);
-/* A flow verdict lands in the open job. */
-void senslog_job_flow(senslog_jobs_t *j, double rise);
 int senslog_fmt_job(char *buf, size_t len, const senslog_ctx_t *c,
                     double mono, const senslog_job_t *job);
 

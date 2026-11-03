@@ -178,32 +178,6 @@ int senslog_fmt_beat(char *buf, size_t len, const senslog_ctx_t *c,
     return done(&o);
 }
 
-int senslog_fmt_flow(char *buf, size_t len, const senslog_ctx_t *c,
-                     double mono, const senslog_flow_t *f)
-{
-    out_t o = {buf, len, 0, 0};
-    prefix(&o, "flow", c, mono);
-    put_s(&o, "src", f->src);
-    put_s(&o, "verdict", f->verdict);
-    if (f->trials > 0)
-        put(&o, " trial=%d/%d", f->trial, f->trials);
-    put_d(&o, "rise", f->rise, 2);
-    put_d(&o, "rise_raw", f->rise_raw, 2);
-    put_d(&o, "laser", f->laser_c, 2);
-    put_d(&o, "limit", f->limit_c, 2);
-    put_l(&o, "duty", f->duty_pct);
-    put_d(&o, "window_s", f->window_s, 0);
-    put_d(&o, "base_down", f->base_down, 2);
-    put_d(&o, "base_up", f->base_up, 2);
-    put_d(&o, "rest_dt", isnan(f->base_down) || isnan(f->base_up)
-                         ? NAN : f->base_down - f->base_up, 2);
-    put_d(&o, "end_down", f->end_down, 2);
-    put_d(&o, "end_up", f->end_up, 2);
-    put_d(&o, "dt", f->dt, 2);
-    put_d(&o, "hv_dose", f->hv_dose, 0);
-    return done(&o);
-}
-
 static void iso_utc(double t, char *buf, size_t len)
 {
     time_t s = (time_t)t;
@@ -288,7 +262,6 @@ static void job_start(senslog_jobs_t *j, const senslog_sample_t *s)
     c->down_start = s->down_c;
     c->up_start = s->up_c;
     c->down_end = c->up_end = c->down_last = c->up_last = NAN;
-    c->flow_worst = NAN;
     for (int i = 0; i < 4; i++)
         c->ir_base[i] = c->ir_peak[i] = -1;
     c->beam_peak = -1;
@@ -396,15 +369,6 @@ int senslog_job_feed(senslog_jobs_t *j, const senslog_sample_t *s)
     return finished;
 }
 
-void senslog_job_flow(senslog_jobs_t *j, double rise)
-{
-    if (!j->active)
-        return;
-    j->cur.flow_checks++;
-    if (!isnan(rise) && (isnan(j->cur.flow_worst) || rise > j->cur.flow_worst))
-        j->cur.flow_worst = rise;
-}
-
 int senslog_fmt_job(char *buf, size_t len, const senslog_ctx_t *c,
                     double mono, const senslog_job_t *job)
 {
@@ -443,8 +407,6 @@ int senslog_fmt_job(char *buf, size_t len, const senslog_ctx_t *c,
     put_d(&o, "beam_rise", job->beam_peak >= 0 && job->beam_dark.n
                            ? (double)job->beam_peak - job->beam_dark.sum / (double)job->beam_dark.n
                            : NAN, 0);
-    put_l(&o, "flow_checks", job->flow_checks);
-    put_d(&o, "flow_worst", job->flow_worst, 2);
     put_s(&o, "verdicts", job->verdicts);
     return done(&o);
 }

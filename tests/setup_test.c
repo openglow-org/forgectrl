@@ -437,8 +437,8 @@ int main(void)
     unlink(old);
 
     /* 10b. The image's own table: the required steps after the account
-     * are preferences, the machine facts, the cloud decision, and the
-     * coolant flow calibration, named in that order. */
+     * are preferences, the machine facts and the cloud decision, named in
+     * that order. */
     {
         FILE *fr = fopen(path, "w");
         if (fr) {
@@ -449,12 +449,12 @@ int main(void)
         setup_set_steps(NULL, 0);
         json_t *ist = status();
         json_t *im = ist ? json_object_get(ist, "missing") : NULL;
-        static const char *const want[] = { "preferences", "machine", "cloud", "cooling.flow" };
-        int same = json_array_size(im) == 4;
-        for (size_t i = 0; same && i < 4; i++)
+        static const char *const want[] = { "preferences", "machine", "cloud" };
+        int same = json_array_size(im) == 3;
+        for (size_t i = 0; same && i < 3; i++)
             same = !strcmp(json_string_value(json_array_get(im, i)) ? json_string_value(json_array_get(im, i)) : "",
                            want[i]);
-        CHECK(same, "the image requires preferences, machine, cloud, cooling.flow, in that order");
+        CHECK(same, "the image requires preferences, machine, cloud, in that order");
         /* The other half: on a record with nothing run, the image's steps
          * after the gate are recommended, each not run yet - the dark
          * checks, the lens, the focus burn (cloud.header only with the
@@ -529,7 +529,24 @@ int main(void)
                   !strcmp(sget(json_object_get(sc, "account"), "name"), "forgefirm") &&
                   !strcmp(sget(sd, "method"), "seed"),
               "the record says it was seeded, by whom the documents were accepted, and the account");
+        json_t *sw = sc ? json_object_get(sc, "wizards") : NULL;
+        CHECK(json_object_size(sw) == 5 && json_object_get(sw, "advisories") &&
+                  json_object_get(sw, "account") && json_object_get(sw, "preferences") &&
+                  json_object_get(sw, "machine") && json_object_get(sw, "cloud"),
+              "the seed records the consent, the account and the table's required steps, nothing else");
         json_decref(sc);
+        /* A stored record keeps a step the table no longer has (a seed or
+         * a run from an older build): it judges nothing, and the gate
+         * stays open on the steps the table does have. */
+        setup_wizard_done("retired.step", 1, NULL, NULL);
+        setup_init();
+        sst = status();
+        sr = sst ? json_object_get(sst, "recommended") : NULL;
+        CHECK(setup_gate_open(why, sizeof(why)) && setup_wizard_version("retired.step") == 1 &&
+                  sst && json_array_size(json_object_get(sst, "missing")) == 0 &&
+                  json_array_size(sr) == 8 && !strcmp(sget(json_array_get(sr, 0), "id"), "switches"),
+              "a record with a step the table no longer has: the gate open, the list unchanged");
+        json_decref(sst);
         f = fopen(seed, "w");
         if (f)
             fclose(f);

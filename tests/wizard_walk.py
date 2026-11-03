@@ -7,8 +7,8 @@
 The setup wizard as embed.cmake bundles it (build/ui/wizard.html, with
 the panel and the login page beside it) runs against the dev server's
 mock backend (tools/devserver.py), started as a first run
-(GF_MOCK_FIRST_RUN=1) with the intake fans counted, the machine's
-setting a first run behind the checks keeps. The pages are served as
+(GF_MOCK_FIRST_RUN=1) with the intake fans not yet counted, so the
+page opens their check after the forms. The pages are served as
 main.c serves them: "/" is the wizard while the first run is incomplete
 and the panel after it, /setup the wizard, /login the login page, each
 with the token spliced and the daemon's page policy; every other request
@@ -30,11 +30,11 @@ the first-run fields the page reads, each with its type, and the page's
 required steps are the setup's; the welcome; each document read to its
 end and accepted (the typed phrase where it asks for one); the press
 step, which the button takes; the account; preferences; the machine;
-cloud mode left off; the intake fans shown counted and passed by; the
-coolant flow calibration run to its result (against the mock, through a
-prompt whose options are text, one shaped like code, one with quotes,
-each shown as written and the code-shaped one answered as written); the
-choice, where Start using the machine lands on the panel with the setup
+cloud mode left off; against the mock, the intake fans check run to its
+result (through a prompt whose options are text, one shaped like code,
+one with quotes, each shown as written and the code-shaped one answered
+as written), and against the daemon, which the harness gives its fan
+count, the intake fans shown counted and passed by; the choice, where Start using the machine lands on the panel with the setup
 complete; one setting saved through the panel's save bar; and the login
 page, which refuses a wrong password and signs the account in, the
 session read back from GET /wiz.
@@ -81,14 +81,14 @@ import devserver  # noqa: E402
 
 PAGES = ("index", "wizard", "login")
 
-# The prompt the walk puts on the coolant flow check (the daemon's own has
-# none): the options a step offers are text, and a package's check writes
-# its own. One is shaped like the code the page would run if it built a
-# button's handler from the option, one carries quotes and markup; the
-# page shows each as written and posts the code-shaped one as written.
-FLOW_HOSTILE = "No'); window.__ran = 1; ('"
-FLOW_OPTIONS = ["Yes", FLOW_HOSTILE, 'He said "go" <b>&amp;</b>']
-FLOW_PROMPT = ("choice", "flow-text", "Does the loop look full? An option is text.", FLOW_OPTIONS)
+# The prompt the walk puts on the intake fans check: the options a step
+# offers are text, and a package's check writes its own. One is shaped
+# like the code the page would run if it built a button's handler from
+# the option, one carries quotes and markup; the page shows each as
+# written and posts the code-shaped one as written.
+PROMPT_HOSTILE = "No'); window.__ran = 1; ('"
+PROMPT_OPTIONS = ["Yes", PROMPT_HOSTILE, 'He said "go" <b>&amp;</b>']
+CHECK_PROMPT = ("choice", "intake-text", "How many intake fans run? An option is text.", PROMPT_OPTIONS)
 BROWSERS = {
     "chrome": [r"C:\Program Files\Google\Chrome\Application\chrome.exe", "/usr/bin/google-chrome",
                "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"],
@@ -109,11 +109,12 @@ var F = document.getElementById('f'), log = [];
 /* The account the walk makes: the mock's login takes this password alone. */
 var NAME = 'walker', PW = 'correct horse';
 /* The walk's plan: the check the page opens after the forms and the prompt
- * it shows there (none against the daemon), how long its result may take,
+ * it shows there (null against the daemon, whose fans the harness counts),
+ * how long its result may take,
  * whether the panel is signed out before the login (the daemon serves
  * the login page to no session), and whether the walk starts diagnostics
  * on the panel (against the mock alone). */
-var PLAN = __PLAN__, FLOW = PLAN.check.prompt;
+var PLAN = __PLAN__, PROMPT = PLAN.check && PLAN.check.prompt;
 /* The fields the first step holds GET /wiz to, each with its type
  * (document 0 is the typed one). The page reads each of them on a first
  * run, but for these:
@@ -241,25 +242,30 @@ var STEPS = [
     return until('the cloud choice read', function () { return q('#st-cloud input[name=cloud][value="0"]').checked; })
       .then(function () { click('[onclick="saveCloud()"]'); })
       .then(function () { return until('the step after the cloud', function () { return !on('st-cloud') && q('.wz-step.on'); }); }); }],
-  ['the intake fans show counted, and the page passes them by', function () {
+  [PLAN.check ? 'the intake fans not yet counted: the page opens their check'
+              : 'the intake fans show counted, and the page passes them by', function () {
+    if (PLAN.check)
+      return until('the intake fans check', function () { return on('st-dark') && w().K.id === PLAN.check.id; });
     var title = w().TITLES['airflow.intakes'];
     var row = [].filter.call(d().querySelectorAll('#rail li'), function (e) { return e.textContent.indexOf(title) === 0; })[0];
     if (!row || !row.classList.contains('done'))
       throw new Error('the rail does not show the intake fans counted: ' + (row ? row.outerHTML : 'no such row'));
     if (on('st-dark') && w().K.id === 'airflow.intakes') throw new Error('the page opened the intake fans check'); }],
-  ['the coolant flow calibration runs to its result' + (FLOW ? '; its prompt shows each option as text and takes the code-shaped one as written' : ''), function () {
-    return until('the coolant flow check', function () { return on('st-dark') && w().K.id === PLAN.check.id; })
-      .then(function () { click('#k-start'); })
+  [PLAN.check ? 'the intake fans check runs to its result' + (PROMPT ? '; its prompt shows each option as text and takes the code-shaped one as written' : '')
+              : 'no check opens between the forms and the choice', function () {
+    if (!PLAN.check) return;
+    click('#k-start');
+    return Promise.resolve()
       .then(function () {
-        if (!FLOW) return;
+        if (!PROMPT) return;
         return until('its prompt', function () { return shown('#k-prompt') && q('#k-pbtns button'); }, 20000)
           .then(function () {
             var bs = [].slice.call(d().querySelectorAll('#k-pbtns button'));
             var got = bs.map(function (b) { return b.textContent; });
-            if (JSON.stringify(got) !== JSON.stringify(FLOW.options)) throw new Error('the prompt offers ' + JSON.stringify(got));
+            if (JSON.stringify(got) !== JSON.stringify(PROMPT.options)) throw new Error('the prompt offers ' + JSON.stringify(got));
             var inline = bs.filter(function (b) { return b.getAttributeNames().some(function (n) { return n.indexOf('on') === 0; }); });
             if (inline.length) throw new Error('a prompt button carries inline script: ' + inline[0].outerHTML);
-            var hit = bs.filter(function (b) { return b.getAttribute('data-v') === FLOW.hostile; })[0];
+            var hit = bs.filter(function (b) { return b.getAttribute('data-v') === PROMPT.hostile; })[0];
             if (!hit) throw new Error('no button carries the code-shaped option as written: ' +
               JSON.stringify(bs.map(function (b) { return b.getAttribute('data-v'); })));
             hit.click();
@@ -269,7 +275,7 @@ var STEPS = [
       })
       .then(function () { return until('its result', function () { return shown('#k-result') && shown('#k-next'); }, PLAN.check.result_ms); })
       .then(function () {
-        if (FLOW && w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
+        if (PROMPT && w().__ran !== undefined) throw new Error('the code-shaped option ran as script');
         click('#k-next'); }); }],
   ['the choice offers Start using the machine', function () {
     return until('the choice', function () { return on('st-choice'); })
@@ -315,7 +321,7 @@ var STEPS = [
  * until the cooling engine's tick takes the thermal hardware back. The
  * walk reads back the answer to each start the page sent, with its time in
  * seconds after the first, as the mock took them. */
-var REFUSAL = 'machine is not idle', VERIFY = '#s-diag button[onclick*="flow-verify"]';
+var REFUSAL = 'machine is not idle', VERIFY = '#s-diag button[onclick*="aa-offset-calibrate"]';
 function engineBusy(n) { return fetch('/__walk/diag?busy=' + n, { method: 'POST' }); }
 function startsWere(want) {
   return api('/__walk/diag').then(function (s) {
@@ -365,7 +371,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
         return until('the diagnostic started', function () { return w().D.running && shown('#diagabort'); }, 10000); })
       .then(function () { return engineBusy(0); })
       .then(function () {
-        w().startDiag('flow-verify');
+        w().startDiag('aa-offset-calibrate');
         return until('the refusal', function () { return q('#msg-d').textContent === RUNNING; }, 10000); })
       .then(function () { return startsWere([409]); })
       .then(function () { return sleep(1500); })
@@ -400,7 +406,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { t0 = Date.now(); click(VERIFY); return sleep(300); })
       /* Another client starts the diagnostic the refused press would start:
        * a start the panel did not press, so the Abort is the one cancel. */
-      .then(function () { return w().fx('/diag/flow-verify', { method: 'POST' }); })
+      .then(function () { return w().fx('/diag/aa-offset-calibrate', { method: 'POST' }); })
       .then(function (r) {
         if (r.status !== 202) throw new Error('the other client\'s start was answered ' + r.status);
         w().loadDiag();
@@ -546,11 +552,10 @@ def main():
         if not host or not port.isdigit():
             print("--daemon takes HOST:PORT, the daemon's HTTPS listener")
             return 2
-        # The daemon's own run of the flow calibration asks nothing; on a
-        # host its six windows take a few minutes. The diagnostic starts
-        # need the mock's engine refusals, which a daemon does not take.
-        Walk.plan = {"check": {"id": "cooling.flow", "prompt": None, "result_ms": 480000}, "logout": True,
-                     "diag": False}
+        # The harness counts the daemon's intake fans, so no check opens
+        # between the forms and the choice. The diagnostic starts need
+        # the mock's engine refusals, which a daemon does not take.
+        Walk.plan = {"check": None, "logout": True, "diag": False}
         Walk.daemon = (host, int(port))
         Walk.cfg = types.SimpleNamespace(mock=False, token="",
                                          upstream=lambda: (host, int(port), "%s:%s" % (host, port)))
@@ -565,8 +570,9 @@ def main():
         for k in ("GF_MOCK_BUTTON", "GF_MOCK_MIRROR", "GF_MOCK_REQUIRED_AGAIN"):
             os.environ.pop(k, None)
         os.environ["GF_MOCK_FIRST_RUN"] = "1"
-        devserver.DARK_PROMPTS["cooling.flow"] = FLOW_PROMPT
-        Walk.plan = {"check": {"id": "cooling.flow", "prompt": {"options": FLOW_OPTIONS, "hostile": FLOW_HOSTILE},
+        devserver.DARK_PROMPTS["airflow.intakes"] = CHECK_PROMPT
+        Walk.plan = {"check": {"id": "airflow.intakes", "prompt": {"options": PROMPT_OPTIONS,
+                                                                "hostile": PROMPT_HOSTILE},
                                "result_ms": 20000}, "logout": False, "diag": True}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0
@@ -577,10 +583,6 @@ def main():
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
 
-    # The intake fans counted: the setting a first run behind the checks
-    # keeps (the harness writes it for the daemon).
-    if not a.daemon:
-        call(a.port, "POST", "/settings?cool_intake_fans=2", devserver.MOCK_TOKEN)
     try:
         w = call(a.port, "GET", "/wiz")
     except OSError as e:
@@ -588,10 +590,13 @@ def main():
         print("\n".join(Walk.said[-5:]))
         srv.shutdown()
         return 2
-    if not (w.get("first_run") is True and w.get("fans_counted") is True and w.get("gate") == "closed"
-            and not w.get("account")):
-        print("the %s is not a first run with its intake fans counted: %s"
-              % ("daemon" if a.daemon else "mock", {k: w.get(k) for k in ("first_run", "fans_counted", "gate", "account")}))
+    # The daemon's harness counts its intake fans; the mock leaves them
+    # for their check.
+    if not (w.get("first_run") is True and w.get("fans_counted") is bool(a.daemon)
+            and w.get("gate") == "closed" and not w.get("account")):
+        print("the %s is not a first run with its intake fans %s: %s"
+              % ("daemon" if a.daemon else "mock", "counted" if a.daemon else "not yet counted",
+                 {k: w.get(k) for k in ("first_run", "fans_counted", "gate", "account")}))
         srv.shutdown()
         return 2
 
@@ -627,8 +632,8 @@ def main():
     # The answer the page posted for the code-shaped option, as the mock took it.
     if Walk.mock:
         answer = (Walk.mock.dark or {}).get("answer")
-        if ok and answer != FLOW_HOSTILE:
-            print("FAIL the flow prompt's answer reached the mock as %r, not the option as written" % (answer,))
+        if ok and answer != PROMPT_HOSTILE:
+            print("FAIL the intake prompt's answer reached the mock as %r, not the option as written" % (answer,))
             ok = False
     if not ok:
         print("--- the last requests")

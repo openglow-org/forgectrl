@@ -69,7 +69,7 @@ The board binary is a cross-build, never a native one:
 
 - **This daemon is the single writer of the thermal hardware** in both
   controller modes. Nothing else writes the fans, the pump, the TEC or the
-  flow-check heater. The one sanctioned exception is a controller's
+  loop heater. The one sanctioned exception is a controller's
   compiled-in fallback when the engine is provably absent.
 - **Never poll the Grbl socket on TCP port 23 for machine state.** A
   connection there displaces the sender's session. Position comes from the
@@ -89,7 +89,7 @@ The board binary is a cross-build, never a native one:
 - **A fail-tier verdict stops the controller through the supervisor.** The
   kernel writes come first; they are never the only action.
 - `super.c` and `cool.c` are unit-tested by inclusion (`tests/super_test.c`,
-  `tests/cool_flow_test.c`). A new supervisor or engine path gets a case
+  `tests/cool_engine_test.c`). A new supervisor or engine path gets a case
   there.
 - The control panel under `src/ui/` is bundled into the binary by
   `embed.cmake`. `tools/devserver.py` serves it against a live board or the

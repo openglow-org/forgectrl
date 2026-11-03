@@ -45,14 +45,6 @@
 #       run at its answer with nothing written; a jog the port hangs up
 #       on, and a jog that holds past its wait, each end the check with
 #       its reason, nothing written and the envelope set back
-#     the flow check: the diagnostic's phases are the check's, its
-#       result the check's with pass true, and a thin margin flags the
-#       calibration in the record
-#     the flow calibration at its first rung: the rung's duty goes to its
-#       diagnostic alone, whose first trial heats at it (a seeded duty
-#       set aside), the settings file untouched while it runs, after an
-#       abort (unset stays unset, a seeded one stands), and after the
-#       daemon is killed mid-rung and started again
 #   the laser floor burn: refused before any prompt without Focus on the
 #     record; with it, the gantry stops asked, then the controller
 #     stopped and started again and the lens referenced before the home
@@ -70,10 +62,8 @@
 #     the intake fan count opening the gate, and the run completed
 #   the first run, walked in the browser: the page the daemon serves,
 #     in headless Chrome (tests/wizard_walk.py --daemon), from the
-#     documents and the press to the flow calibration on the scripted
-#     loop (its bands found at the second rung, whose duty is written
-#     beside the threshold), the choice onto the panel, a save and the
-#     login
+#     documents and the press past the counted intake fans to the
+#     choice onto the panel, a save and the login
 #
 # The switch device is a plain file: a preloaded stand-in answers the
 # readers' switch-state request from the switch word, so the lid, the
@@ -110,13 +100,12 @@ LENS_SYS=$T/no-head
 GRBL_PORT=18471
 PID=
 LPID=
-PLANT=
 HALL=
 PRESSER=
 cleanup() {
     if [ -n "$PID" ]; then kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null; fi
     [ -z "$LPID" ] || kill $LPID 2>/dev/null
-    for p in $PLANT $HALL $PRESSER; do kill $p 2>/dev/null; done
+    for p in $HALL $PRESSER; do kill $p 2>/dev/null; done
     [ ! -f "$T/ctl.pids" ] || kill $(cat "$T/ctl.pids") 2>/dev/null
     chmod 755 "$T/data" 2>/dev/null
     rm -rf "$T"
@@ -531,7 +520,7 @@ held "the advisories are not accepted"
 restart "$T/no-account.json"
 held "no account exists"
 restart "$T/no-steps.json"
-held "setup required: preferences, machine, cloud, cooling.flow"
+held "setup required: preferences, machine, cloud"
 restart "$T/seed.json"
 up && ok "the record whole: the controller is back" || bad "no controller with the record whole"
 wiz
@@ -914,144 +903,6 @@ rm -f "$T/port.homed"
 expect 200 "$(post '/settings?envelope_x_mm=&envelope_y_mm=' "$TOKEN")" "clearing the keys is 200"
 cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the keys were not cleared"
 
-echo "== the flow check"
-cp "$CONF" "$T/conf.before"
-expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=8 -d cool_flow_rise=6.0)" \
-    "an 8 s check window and a 6.0 C threshold are 200"
-# The loop as the diagnostic reads it: at 20 C at rest; with the heater
-# on the downstream sensor 9.0 C up with the pump off, and with it on
-# climbing 0.6 C a second from 2.0 C up, so the mean of an 8 s window's
-# last 5 s reads 5.0 C up and its last sample 6.2 C. Read as the check
-# reads it, from means, the threshold passes with a thin margin on the
-# flowing side and the calibration finds its bands 4 C apart; read from
-# the last sample alone, the flowing rise is over the threshold.
-# plant_start <heater_pwm> puts the pump-off rise at 6.0 C below that
-# heater duty, where a calibration rung finds its bands too close (1 C
-# apart). The air assist above its idle shifts both readings 1.2 C cold,
-# as the run airflow does on the machine: a baseline read under other
-# fans than its window's end reads 1.2 C off. The heater's file is
-# emptied at the start and as it is read: a shorter value written over a
-# longer one would keep the longer one's tail.
-plant_start() {
-    : > "$SYS/thermal/heater_pwm"
-    python3 - "$SYS" "${1:-0}" <<'EOF' &
-import math, os, sys, time
-sysfs, ladder = sys.argv[1], int(sys.argv[2])
-def raw(t):
-    r = 10000 * math.exp(-3380 / 298.15) * math.exp(3380 / (t + 273.15))
-    return round(1024 * 1.3 / (10000 / r + 1))
-def put(attr, v):
-    open(os.path.join(sysfs, attr + '.new'), 'w').write('%d\n' % v)
-    os.replace(os.path.join(sysfs, attr + '.new'), os.path.join(sysfs, attr))
-heater = 0
-on_at = None
-while True:
-    with open(os.path.join(sysfs, 'thermal/heater_pwm'), 'r+') as f:
-        v = f.read().strip()
-        if v:
-            heater = int(v)
-            f.truncate(0)
-    now = time.time()
-    on_at = (on_at or now) if heater else None
-    pump = open(os.path.join(sysfs, 'thermal/water_pump_on')).read().strip() != '0'
-    aa = open(os.path.join(sysfs, 'head/air_assist_pwm')).read().strip()
-    shift = -1.2 if aa.isdigit() and int(aa) > 256 else 0.0
-    stagnant = 9.0 if heater >= ladder else 6.0
-    flowing = min(2.0 + 0.6 * (now - on_at), 7.0) if heater else 0.0
-    put('pic/water_temp_1', raw(20.0 + shift + ((flowing if pump else stagnant) if heater else 0.0)))
-    put('pic/water_temp_2', raw(20.0 + shift))
-    time.sleep(0.05)
-EOF
-    PLANT=$!
-}
-# The stand-in's files keep the tail of a longer value under a shorter one
-# (a write does not truncate them, as sysfs does): the engine's idle 204
-# over the airflow checks' 1023 reads 2043. The air assist is put back at
-# 204, as the machine reads it, so the check starts from the idle posture.
-echo 204 > "$SYS/head/air_assist_pwm"
-plant_start
-check cooling.flow-verify diag
-kill $PLANT
-PLANT=
-expect '200||True|True' "$(run '"%s|%s|%s|%s" % (d["start"], d["dark"]["error"], d["dark"]["result"]["pass"], d["dark"]["result"]["thin_margin"])')" \
-    "the diagnostic's result is the check's: pass true, a thin margin"
-expect True "$(run 'str(len(set(d["phases"]) & set(d["diag_phases"])) >= 4)')" \
-    "the diagnostic's phases show as the check's ($(run 'str(len(set(d["phases"]) & set(d["diag_phases"])))') shared)"
-expect '1|True' "$(jget "$REC" '"%s|%s" % (d["wizards"]["cooling.flow-verify"]["version"], "cooling.flow" in d.get("flags", {}))')" \
-    "the record carries cooling.flow-verify at version 1, and the thin margin flags the calibration"
-at_rest
-expect 200 "$(post '/settings?cool_flow_check_s=&cool_flow_rise=' "$TOKEN")" "clearing the window and the threshold is 200"
-cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the flow settings were not cleared"
-restart "$T/seed.json"
-up || bad "no controller on the seeded record"
-
-echo "== the flow calibration at its first rung: aborted, and the daemon killed"
-# The duty is written beside its threshold or not at all: the rung's
-# duty goes to its diagnostic alone, whose first trial heats at it (a
-# seeded duty set aside), so the settings file is untouched while the
-# diagnostic runs under the check, after an abort, and after the daemon
-# is killed mid-rung and started again.
-calibrating() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" -o "$T/diag.json" "$URL/diag/status" \
-    && [ "$(jget "$T/diag.json" '"%s|%s" % (d.get("running"), d.get("tool"))')" = "True|flow-calibrate" ]; }
-# heats <heater_pwm>: the heater's file reads what a trial writes for its
-# duty (that percent of 65535)
-heats() { [ "$(cat "$SYS/thermal/heater_pwm")" = "$1" ]; }
-holder() { curl -s -o "$T/status.json" "$URL/status"; jget "$T/status.json" '(d["lease"]["holder"] or {}).get("owner") or "none"'; }
-free() { [ "$(holder)" = none ]; }
-start_flow() { [ "$(post /wiz/cooling.flow/start "$TOKEN")" = 200 ]; }
-# at_rung1 <label> <the conf file as it stays>: started, its diagnostic's
-# first trial heating at the rung's duty 40 (heater_pwm 26214, where a
-# seeded 45 writes 29490), the settings file untouched. The heater's file
-# is emptied first, as plant_start empties it.
-at_rung1() {
-    : > "$SYS/thermal/heater_pwm"
-    until_ok 50 start_flow && ok "$1: POST /wiz/cooling.flow/start is 200" || bad "$1: the start was refused: $(cat "$T/body")"
-    until_ok 150 calibrating && ok "$1: the flow-calibrate diagnostic runs under the check" || bad "$1: no diagnostic: $(cat "$T/diag.json")"
-    until_ok 300 heats 26214 && ok "$1: the diagnostic's trial heats at the rung's duty 40 (heater_pwm 26214)" \
-        || bad "$1: the heater reads '$(cat "$SYS/thermal/heater_pwm")' with the diagnostic running"
-    cmp -s "$2" "$CONF" && ok "$1: the settings file is untouched while the diagnostic runs" \
-        || bad "$1: the conf file has '$(grep cool_flow_heater_pct "$CONF")' while the diagnostic runs"
-}
-# abort_at_rung1 <label> <conf>: at the first rung, aborted, ended, the machine handed back
-abort_at_rung1() {
-    at_rung1 "$1" "$2"
-    expect 200 "$(post /wiz/cooling.flow/abort "$TOKEN")" "$1: POST /wiz/cooling.flow/abort is 200"
-    until_ok 300 stopped && ok "$1: the check stopped" || bad "$1: the check still runs: $(cat "$T/dark.json")"
-    expect 'True|True' "$(jget "$T/dark.json" '"%s|%s" % (bool(d["error"]), d["result"] is None)')" "$1: it ended in an error with no result"
-    until_ok 150 free || bad "$1: the lease is still held: $(holder)"
-    up || bad "$1: no controller after the abort"
-}
-cp "$CONF" "$T/conf.before"
-grep -q '^cool_flow_heater_pct' "$CONF" && bad "the conf file starts with a heater duty" || ok "no heater duty in the conf file to start"
-abort_at_rung1 unset "$T/conf.before"
-grep -q '^cool_flow_heater_pct' "$CONF" && bad "unset: the conf file keeps '$(grep cool_flow_heater_pct "$CONF")' after the abort" \
-    || ok "unset: no heater duty in the conf file after the abort"
-cmp -s "$T/conf.before" "$CONF" && ok "unset: the settings file is byte for byte as it was" || bad "unset: the settings file changed"
-expect 200 "$(post /settings "$TOKEN" -d cool_flow_heater_pct=45)" "a heater duty of 45 is 200"
-cp "$CONF" "$T/conf.seeded"
-abort_at_rung1 seeded "$T/conf.seeded"
-grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "seeded: the duty 45 stands after the abort" || bad "seeded: the conf file has '$(grep cool_flow_heater_pct "$CONF")'"
-cmp -s "$T/conf.seeded" "$CONF" && ok "seeded: the settings file is byte for byte as seeded" || bad "seeded: the settings file changed"
-# The daemon killed with the rung's diagnostic running, as a crash or a
-# power loss ends it: nothing to put back, then or at the next start.
-at_rung1 killed "$T/conf.seeded"
-# The kill comes once the diagnostic holds the machine, its controller
-# stopped: a controller still running would hold the pulse device across
-# the kill, and the next start ends only a controller of its own name.
-until_ok 100 ctl_down || bad "killed: the controller still runs under the diagnostic"
-OLD=$(ctl_pid)
-kill -9 $PID
-wait $PID 2>/dev/null
-PID=
-cmp -s "$T/conf.seeded" "$CONF" && ok "killed: the settings file is byte for byte as seeded" \
-    || bad "killed: the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the kill"
-start_daemon
-up || bad "killed: no controller after the next start"
-cmp -s "$T/conf.seeded" "$CONF" && ok "killed: and after the daemon's next start" \
-    || bad "killed: the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the next start"
-expect 200 "$(post '/settings?cool_flow_heater_pct=' "$TOKEN")" "clearing the duty is 200"
-cmp -s "$T/conf.before" "$CONF" && ok "the settings file is as it was" || bad "the duty was not cleared"
-
 echo "== the laser floor burn"
 cp "$CONF" "$T/conf.before"
 : > "$T/burn.log"
@@ -1320,20 +1171,14 @@ up || bad "no controller on the seeded record"
 echo "== the first run, walked in the browser"
 # The page the daemon serves, walked in headless Chrome as a new owner
 # walks it (tests/wizard_walk.py --daemon): no record and no account, the
-# intake fans counted, an 8 s flow window on the scripted loop, its
-# pump-off rise 6 C below 45 percent heater duty: the calibration finds
-# its first rung's bands too close with room under the stop for the
-# next, and its bands at the second, 45 percent, in twelve windows. The
-# press is the switch word, held once
-# the daemon waits for it; after the walk the record, the settings and
-# GET /wiz are read beside the walk's verdict.
+# intake fans counted. The press is the switch word, held once the
+# daemon waits for it; after the walk the record, the settings and GET
+# /wiz are read beside the walk's verdict.
 OLD=$(ctl_pid)
 stop_daemon
 cp "$CONF" "$T/conf.before"
 rm -f "$REC" "$T/data/users"
 start_daemon
-expect 200 "$(post /settings "$TOKEN" -d cool_flow_check_s=8)" "an 8 s flow window is 200"
-plant_start 29490
 presser() {
     n=1500
     while [ $n -gt 0 ]; do
@@ -1353,21 +1198,16 @@ else
     bad "the walk failed ($?)"
 fi
 sed 's/^/      /' "$T/walk.out"
-kill $PRESSER $PLANT 2>/dev/null
-wait $PRESSER $PLANT 2>/dev/null
+kill $PRESSER 2>/dev/null
+wait $PRESSER 2>/dev/null
 PRESSER=
-PLANT=
 wiz
 expect 'true|open|true|true|walker' \
     "$(jget "$T/wiz.json" '"%s|%s|%s|%s|%s" % (json.dumps(d["completed"]), d["gate"], json.dumps(d["acceptance_done"]), json.dumps(d["users"]["exists"]), d["users"]["name"])')" \
     "GET /wiz after the walk: complete, the gate open, the press taken, the account walker"
-expect '1|1|1|1' "$(jget "$T/wiz.json" '"|".join(str(d["versions"].get(k, "")) for k in ("preferences", "machine", "cloud", "cooling.flow"))')" \
+expect '1|1|1' "$(jget "$T/wiz.json" '"|".join(str(d["versions"].get(k, "")) for k in ("preferences", "machine", "cloud"))')" \
     "the required steps are recorded at version 1"
 expect 4 "$(jget "$REC" 'len(d["advisories"])')" "the record holds the four documents"
-expect True "$(python3 -c 'import sys; v = float(sys.argv[1] or "nan"); print(6.5 <= v <= 7.5)' "$(setting cool_flow_rise)")" \
-    "the calibration wrote the threshold between the bands (cool_flow_rise $(setting cool_flow_rise))"
-grep -qx 'cool_flow_heater_pct = 45' "$CONF" && ok "and beside it the duty its bands were found at (cool_flow_heater_pct 45)" \
-    || bad "the conf file has '$(grep cool_flow_heater_pct "$CONF")' after the calibration"
 expect imperial "$(setting ui_units)" "the panel's save bar wrote ui_units"
 OLD=$(ctl_pid)
 stop_daemon

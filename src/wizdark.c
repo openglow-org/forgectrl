@@ -1001,34 +1001,13 @@ out:
 
 /* ------------------------------------------- the cooling diagnostics */
 
-/* The cooling engine publishes its phase at its tick, once a second: a
- * diagnostic that has handed the thermal hardware back still reads
- * "diag" until the next tick, and until the phase reads "idle" the
- * engine refuses the next takeover. */
-#define ENGINE_IDLE_WAIT_S 5
-
-static int engine_idle(void *ctx)
-{
-    (void)ctx;
-    char st[COOL_STATUS_JSON_MAX];
-    if (cool_status_json(st, sizeof(st)) != 0)
-        return 0;
-    json_t *o = json_loads(st, 0, NULL);
-    const char *ph = json_string_value(json_object_get(o, "phase"));
-    int idle = ph && !strcmp(ph, "idle");
-    json_decref(o);
-    return idle;
-}
-
 /* Run one of diag.c's tools to its end; the parsed result object, or
- * NULL after an abort. heater_pct above 0 is the run's own heater duty
- * (a flow calibration's rung); 0 runs the tool as the machine is
- * configured. expect_s is the typical run time for the progress
- * estimate. */
-static json_t *run_diag(const char *tool, double heater_pct, int expect_s, int pct_from, int pct_to)
+ * NULL after an abort. expect_s is the typical run time for the
+ * progress estimate. */
+static json_t *run_diag(const char *tool, int expect_s, int pct_from, int pct_to)
 {
     char why[128];
-    int rc = diag_start_duty(tool, heater_pct, why, sizeof(why));
+    int rc = diag_start(tool, why, sizeof(why));
     if (rc != 0) {
         finish_err("%s", rc == -2 ? "the machine is not idle, or the cooling engine is busy"
                        : rc == -4 ? why : "the diagnostic could not start");
@@ -1069,7 +1048,7 @@ static json_t *run_diag(const char *tool, double heater_pct, int expect_s, int p
 static void run_cooling_aa(void)
 {
     phase("the air-assist offset: settling the loop");
-    json_t *res = run_diag("aa-offset-calibrate", 0, 360, 2, 95);
+    json_t *res = run_diag("aa-offset-calibrate", 360, 2, 95);
     if (!res)
         return;
     const char *err = json_string_value(json_object_get(res, "error"));
@@ -1096,140 +1075,6 @@ static void run_cooling_aa(void)
     finish_ok(1, res, applied);
     json_decref(res);
     json_decref(applied);
-}
-
-/* A rung is taken only when its trials' projected peaks stay this far
- * under the trials' stop (DIAG_ABORT_DOWN_C). The projection scales each
- * rise with the duty, and on the bench reference the rise grew faster
- * than the duty, by up to a quarter between 30 and 40 percent; the loop
- * also warms over a calibration. A rung with no room would only end at
- * the stop: the ladder ends with its reason instead. The stop still
- * guards every trial of a rung that is taken. */
-#define FLOW_RUNG_ROOM_C 3.0
-
-/* Whether the rung after the one res reports has room (wizcalc). */
-static int flow_rung_room(json_t *res, double duty, double next, double *peak)
-{
-    static const char *const keys[2][2] = { { "flow_bases", "flow_rises" },
-                                            { "noflow_bases", "noflow_rises" } };
-    double base[6], rise[6];
-    int n = 0;
-    for (int c = 0; c < 2; c++) {
-        json_t *b = json_object_get(res, keys[c][0]), *r = json_object_get(res, keys[c][1]);
-        if (!json_is_array(b) || !json_is_array(r) || json_array_size(b) != 3 || json_array_size(r) != 3)
-            return 0;
-        for (size_t i = 0; i < 3; i++, n++) {
-            base[n] = json_number_value(json_array_get(b, i));
-            rise[n] = json_number_value(json_array_get(r, i));
-        }
-    }
-    return wizcalc_rung_room(base, rise, n, duty, next, DIAG_ABORT_DOWN_C, FLOW_RUNG_ROOM_C, peak);
-}
-
-/* The duty is written beside its threshold or not at all. Each rung's
- * duty goes to its own diagnostic, never to the settings file, so a
- * calibration that ends any other way (an abort, a failure, the
- * daemon's death or a power loss mid-rung) leaves cool_flow_heater_pct
- * as it was, with nothing to put back. */
-static void run_cooling_flow(void)
-{
-    double duty = wizcalc_next_duty(0.0);
-    int rung = 0;
-    json_t *res = NULL;
-    while (duty > 0.0) {
-        rung++;
-        wlog("calibration at %.0f percent heater duty (rung %d)", duty, rung);
-        phase("flow calibration at %.0f percent: settling the loop", duty);
-        res = run_diag("flow-calibrate", duty, 1200, 2 + (rung - 1) * 30, 2 + rung * 30);
-        if (!res)
-            return;
-        const char *err = json_string_value(json_object_get(res, "error"));
-        if (!err)
-            break;
-        if (strstr(err, "bands too close")) {
-            double gap = json_number_value(json_object_get(res, "gap"));
-            double next = wizcalc_next_duty(duty), peak = 0.0;
-            if (next > 0.0 && !flow_rung_room(res, duty, next, &peak)) {
-                wlog("gap %.1f C at %.0f percent; at %.0f percent the loop would reach "
-                     "about %.0f C: stopping", gap, duty, next, peak);
-                finish_err("the readings were too close at %.0f percent, and a stronger test "
-                           "would run this loop too hot: check the coolant level and look for "
-                           "air in the lines, then run again", duty);
-                json_decref(res);
-                return;
-            }
-            wlog("gap %.1f C at %.0f percent: trying the next rung", gap, duty);
-            json_decref(res);
-            res = NULL;
-            duty = next;
-            /* The next rung asks for the hardware once the engine has
-             * taken it back from this one; past the wait, the rung's
-             * start says why it cannot run. */
-            if (duty > 0.0 && wait_for(engine_idle, NULL, ENGINE_IDLE_WAIT_S) == -1)
-                return;
-            continue;
-        }
-        finish_err("%s", err);
-        json_decref(res);
-        return;
-    }
-    if (!res) {
-        finish_err("the flow bands did not separate at 40, 45, or 50 percent: check the pump "
-                   "and the coolant level, then run again");
-        return;
-    }
-    /* The threshold and the duty it was found at are one write. */
-    double rec = json_number_value(json_object_get(res, "recommend"));
-    char v_rise[24], v_pct[16];
-    snprintf(v_rise, sizeof(v_rise), "%.1f", rec);
-    snprintf(v_pct, sizeof(v_pct), "%.0f", duty);
-    json_t *applied = json_object();
-    const char *keys[] = { "cool_flow_heater_pct", "cool_flow_rise" };
-    const char *vals[] = { v_pct, v_rise };
-    char err[96];
-    if (write_settings(keys, vals, 2, applied, err, sizeof(err)) != 0) {
-        finish_err("%s", err);
-        json_decref(res);
-        json_decref(applied);
-        return;
-    }
-    json_object_set_new(res, "heater_pct", json_real(duty));
-    json_object_set_new(res, "threshold", json_real(rec));
-    wlog("flow threshold %s C at %s percent heater duty", v_rise, v_pct);
-    progress(100);
-    finish_ok(1, res, applied);
-    json_decref(res);
-    json_decref(applied);
-}
-
-static void run_cooling_flow_verify(void)
-{
-    phase("the flow check: settling the loop");
-    json_t *res = run_diag("flow-verify", 0, 240, 2, 95);
-    if (!res)
-        return;
-    const char *err = json_string_value(json_object_get(res, "error"));
-    if (err) {
-        finish_err("%s", err);
-        json_decref(res);
-        return;
-    }
-    int pass = json_is_true(json_object_get(res, "pass"));
-    int thin = json_is_true(json_object_get(res, "thin_margin"));
-    if (!pass) {
-        finish_err("the flow check does not separate flow from no-flow at the threshold: run the "
-                   "calibration");
-        setup_flag("cooling.flow", "the flow check failed to separate the bands");
-        json_decref(res);
-        return;
-    }
-    if (thin) {
-        wlog("the margin is thin: a calibration is recommended");
-        setup_flag("cooling.flow", "the flow check margin is thin");
-    }
-    progress(100);
-    finish_ok(1, res, NULL);
-    json_decref(res);
 }
 
 /* ---------------------------------------------------------- the motion */
@@ -1964,7 +1809,7 @@ static void run_cloud_header(void)
     json_t *mine = json_object();
     static const char *const keys[] = {
         "cool_tach_exhaust_min_rpm", "cool_tach_intake_min_rpm", "cool_tach_air_assist_min_rpm",
-        "cool_purge_min_current", "cool_temp_max", "cool_temp_min", "cool_flow_rise",
+        "cool_purge_min_current", "cool_temp_max", "cool_temp_min",
         "cool_fire_q1_alert", "cool_fire_q2_alert", "cool_accel_x_alert", "cool_accel_y_alert",
     };
     for (size_t i = 0; i < sizeof(keys) / sizeof(*keys); i++) {
@@ -2226,8 +2071,6 @@ static const wiz_entry_t wizards[] = {
     { "sensors",             run_sensors,             1 },
     { "airflow",             run_airflow,             1 },
     { "cooling.aa-offset",   run_cooling_aa,          1 },
-    { "cooling.flow",        run_cooling_flow,        1 },
-    { "cooling.flow-verify", run_cooling_flow_verify, 1 },
     { "motion",              run_motion,              1 },
     { "cameras",             run_cameras,             1 },
     { "motion.envelope",     run_envelope,            1 },

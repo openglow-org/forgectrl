@@ -57,50 +57,50 @@ int main(void)
           "the empty document: %s", doc);
 
     /* One holder, and the refusal names it. */
-    CHECK(lease_take("diag:flow-verify", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "the first take: %s", why);
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "the first take: %s", why);
     CHECK(lease_take("update:apply", LEASE_SYSTEM, NULL, why, sizeof(why)) != 0 &&
-          strstr(why, "flow-verify"), "a second owner, refused by name: '%s'", why);
-    CHECK(lease_take("diag:flow-verify", LEASE_HARDWARE, NULL, why, sizeof(why)) != 0, "the holder taking it twice");
-    CHECK(lease_refusal(why, sizeof(why)) == 1 && strstr(why, "flow-verify"), "the route's refusal: '%s'", why);
-    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:flow-verify"), "the holder: '%s'", who);
+          strstr(why, "aa-offset-calibrate"), "a second owner, refused by name: '%s'", why);
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) != 0, "the holder taking it twice");
+    CHECK(lease_refusal(why, sizeof(why)) == 1 && strstr(why, "aa-offset-calibrate"), "the route's refusal: '%s'", why);
+    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:aa-offset-calibrate"), "the holder: '%s'", who);
     lease_release("update:apply");
     CHECK(lease_holder(who, sizeof(who)) == 1, "somebody else's release took the lease away");
-    lease_release("diag:flow-verify");
+    lease_release("diag:aa-offset-calibrate");
     CHECK(lease_holder(who, sizeof(who)) == 0, "the holder's release did not");
 
     /* Under a holder: only under the one named, one deep, inner first out. */
-    CHECK(lease_take("diag:flow-calibrate", LEASE_HARDWARE, "wizard:cooling.flow", why, sizeof(why)) != 0 &&
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, "wizard:cooling.aa-offset", why, sizeof(why)) != 0 &&
           strstr(why, "does not hold"), "under a holder that is not there: '%s'", why);
-    CHECK(lease_take("wizard:cooling.flow", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "the wizard: %s", why);
-    CHECK(lease_take("diag:flow-calibrate", LEASE_HARDWARE, "wizard:motion", why, sizeof(why)) != 0 &&
-          strstr(why, "a setup wizard (cooling.flow) holds"), "under the wrong holder: '%s'", why);
-    CHECK(lease_take("diag:flow-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) != 0, "inside without saying so");
-    CHECK(lease_take("diag:flow-calibrate", LEASE_HARDWARE, "wizard:cooling.flow", why, sizeof(why)) == 0,
+    CHECK(lease_take("wizard:cooling.aa-offset", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0, "the wizard: %s", why);
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, "wizard:motion", why, sizeof(why)) != 0 &&
+          strstr(why, "a setup wizard (cooling.aa-offset) holds"), "under the wrong holder: '%s'", why);
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) != 0, "inside without saying so");
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, "wizard:cooling.aa-offset", why, sizeof(why)) == 0,
           "the diagnostic under its wizard: %s", why);
-    CHECK(lease_take("recorder", LEASE_SENDER, "diag:flow-calibrate", why, sizeof(why)) != 0 &&
-          strstr(why, "a diagnostic (flow-calibrate) holds"), "a third level: '%s'", why);
-    CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"owner\":\"diag:flow-calibrate\"") &&
-          strstr(doc, "\"kind\":\"hardware\"") && strstr(doc, "\"under\":\"wizard:cooling.flow\"") &&
-          strstr(doc, "\"words\":\"a diagnostic (flow-calibrate)\""), "the nested document: %s", doc);
-    lease_release("wizard:cooling.flow");
-    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:flow-calibrate"),
+    CHECK(lease_take("recorder", LEASE_SENDER, "diag:aa-offset-calibrate", why, sizeof(why)) != 0 &&
+          strstr(why, "a diagnostic (aa-offset-calibrate) holds"), "a third level: '%s'", why);
+    CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"owner\":\"diag:aa-offset-calibrate\"") &&
+          strstr(doc, "\"kind\":\"hardware\"") && strstr(doc, "\"under\":\"wizard:cooling.aa-offset\"") &&
+          strstr(doc, "\"words\":\"a diagnostic (aa-offset-calibrate)\""), "the nested document: %s", doc);
+    lease_release("wizard:cooling.aa-offset");
+    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:aa-offset-calibrate"),
           "the outer owner released from under the inner one: '%s'", who);
-    lease_release("diag:flow-calibrate");
-    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "wizard:cooling.flow"), "after the inner release: '%s'", who);
+    lease_release("diag:aa-offset-calibrate");
+    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "wizard:cooling.aa-offset"), "after the inner release: '%s'", who);
     CHECK(lease_json(doc, sizeof(doc)) > 0 && !strstr(doc, "\"under\""), "the document after it: %s", doc);
-    lease_release("wizard:cooling.flow");
+    lease_release("wizard:cooling.aa-offset");
     CHECK(lease_holder(who, sizeof(who)) == 0, "not empty at the end of the nesting");
 
     /* A sender hold and a connected client. */
     client = 1;
     CHECK(lease_take("recorder", LEASE_SENDER, NULL, why, sizeof(why)) != 0 && strstr(why, "a sender is connected"),
           "a sender hold beside a client: '%s'", why);
-    CHECK(lease_take("diag:flow-verify", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0,
+    CHECK(lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0,
           "a hardware hold was refused for the client: %s", why);
     released = 1;
     CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"observed\":{\"sender\":true,\"motors_released\":true}"),
           "what is observed: %s", doc);
-    lease_release("diag:flow-verify");
+    lease_release("diag:aa-offset-calibrate");
     client = released = 0;
     CHECK(lease_take("recorder", LEASE_SENDER, NULL, why, sizeof(why)) == 0, "the sender hold with no client: %s", why);
     CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"kind\":\"sender\""), "its kind: %s", doc);

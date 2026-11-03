@@ -9,16 +9,7 @@
 
 #include <stddef.h>
 
-/* Flow-check parameters, shared between the engine (cool.c) and the
- * diagnostics runner (diag.c) so the tools always test the check the
- * engine actually runs. The measured rationale for every value is in
- * cool.c. Configured cool_* keys override the defaults at run time in
- * both consumers. */
-#define COOL_FLOW_RISE_C     14.4f  /* fault threshold: downstream rise */
-#define COOL_FLOW_HEATER_PCT 40     /* check heater duty */
-#define COOL_FLOW_CHECK_S    50     /* check window; 0 disables */
-/* Settle gate: baseline capture only from a stationary loop. */
-/* Diagnostic ownership: a flow or aa tool takes the thermal hardware
+/* Diagnostic ownership: a diagnostic tool takes the thermal hardware
  * for a bounded takeover and writes only through the guarded helpers.
  * Take succeeds only from an idle engine; release reasserts the idle
  * posture in one place. */
@@ -30,22 +21,14 @@ void cool_diag_fans_run(void);
 void cool_diag_fans_idle(void);
 void cool_diag_aa(long duty);
 void cool_diag_purge(int on);       /* the head's purge fan */
-/* Hold the flow check: a pending check does not start while held (the
- * setup sheet's flow-load card measures the tube's own heat,
- * which the check's heater would swamp). The hold clears itself when the
- * run ends and after COOL_FLOW_HOLD_MAX_S, so a card that dies cannot
- * leave it. Every other gate stands. */
-#define COOL_FLOW_HOLD_MAX_S 600
-void cool_flow_check_hold(int on);
 /* The quiet hold for a listening to the head accelerometer. cool_quiet_hold
  * (the lens stop finder): every fan off, and while held the engine's own
  * fan writes go to zero as well. cool_quiet_hold_ex with with_pump (the
  * bench's tools through POST /cool/quiet?pump=1): the coolant pump and
  * the TEC off too, so the machine is silent; dry by construction (idle
- * only, the laser latched), the one pump-off state besides the
- * heater-only flow diagnostics. The release puts the phase's posture
- * back. The engine releases the hold itself when a run session opens (a
- * job never runs with the machine held quiet) and after
+ * only, the laser latched), the one pump-off state. The release puts the
+ * phase's posture back. The engine releases the hold itself when a run
+ * session opens (a job never runs with the machine held quiet) and after
  * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. */
 #define COOL_QUIET_HOLD_MAX_S 600
 void cool_quiet_hold(int on);
@@ -53,12 +36,6 @@ void cool_quiet_hold_ex(int on, int with_pump);
 int cool_quiet_held(void);
 int cool_quiet_pump_held(void);
 
-#define COOL_SETTLE_DT_C     1.5f   /* |downstream - upstream| */
-#define COOL_SETTLE_DRIFT_C  0.4f   /* split-half mean difference */
-#define COOL_SETTLE_WIN      15     /* 1 Hz samples */
-/* A check's end reading: the mean of its last samples (1 Hz), as its
- * baseline is the mean of the settled window. */
-#define COOL_FLOW_END_WIN    5
 /* Factory run fan duties (pulse-header ground truth; also the
  * controllers' compiled-in emergency-fallback values per the
  * contract). */
@@ -91,19 +68,13 @@ typedef struct {
 
 /* Job-state report from the active controller (POST /cool/state).
  * mode is "idle", "run" or "cooldown"; armed = laser armed (forces the
- * run profile and flow interrogation whatever mode says). The duty
+ * run profile whatever mode says). The duty
  * arguments override the run fan profile for this job; pass -1 to use
  * the configured/factory values. lim carries the job's limits, or
  * NULL for none. Returns 0, or -1 on a bad mode. */
 int cool_state_report(const char *mode, int armed,
                       long air_assist, long exhaust, long intake,
                       const cool_limits_t *lim);
-
-/* The dose model the controller reports it is cutting with: 1 density,
- * 0 analog (the host-test reference mode; density is the only model a
- * machine runs), -1 not said (density is assumed). Read when a run's
- * tunables load, so the tube-heat share follows the model in force. */
-void cool_state_model(int density);
 
 /* Engine state as JSON (verdict, temps, phase, last report age, the
  * effective limits and the per-fan gate states) for the UI and bench

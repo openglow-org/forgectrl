@@ -216,17 +216,16 @@ add_executable(cool_gate_test tests/cool_gate_test.c src/gates.c)
 target_compile_options(cool_gate_test PRIVATE -Wall -Wextra)
 target_link_libraries(cool_gate_test m)
 
-# Host unit test for the cooling engine, tick by tick: the flow check's
-# reading (the means, the tube's share bounded, a stopped pump still read
-# as stopped under a lit tube), SENSOR, COLD, warm-up, the fan
-# acknowledgment, the hang dead-man, the fail and pause tiers, extension
-# holds, the verified fan writes, the intakes fitted, the gates moved past
-# the loop and at their off ends, the phases' duties, and the TEC. Includes the
+# Host unit test for the cooling engine, tick by tick: the air-assist
+# offset, SENSOR, COLD, warm-up, the fan acknowledgment, the hang
+# dead-man, the fail and pause tiers, extension holds, the verified fan
+# writes, the intakes fitted, the gates moved past the loop and at their
+# off ends, the phases' duties, and the TEC. Includes the
 # engine source against a fake sysfs tree whose writes can be dropped or
 # refused, and a fake clock; CI runs it after the build.
-add_executable(cool_flow_test tests/cool_flow_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
-target_compile_options(cool_flow_test PRIVATE -Wall -Wextra)
-target_link_libraries(cool_flow_test m pthread jansson)
+add_executable(cool_engine_test tests/cool_engine_test.c src/gates.c src/airflow.c src/accel.c src/coolfmt.c src/holds.c)
+target_compile_options(cool_engine_test PRIVATE -Wall -Wextra)
+target_link_libraries(cool_engine_test m pthread jansson)
 
 # An extension package's holds as the engine reads them: what stands, what
 # is dropped, what an unreadable file means, what of a package's words

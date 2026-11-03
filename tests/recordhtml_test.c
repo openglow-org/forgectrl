@@ -9,7 +9,8 @@
  * sentence, the settings written with their values before, the
  * numbers (a table for the dose points), the flags; every value is
  * escaped; an empty record renders too; nothing the record does not
- * hold appears.
+ * hold appears, and a step the catalog no longer has (a record kept
+ * across an update that dropped it) renders as nothing.
  */
 #include "../src/recordhtml.h"
 
@@ -70,9 +71,9 @@ int main(void)
     static const char *const doc_ids[] = { "safety-and-risk", "licenses", "terms", "privacy" };
     static const char *const doc_titles[] = { "Safety and risk", "Licenses", "Terms", "Privacy" };
     static const char *const wiz_ids[] = { "sensors", "airflow", "laser.focus", "laser.dose-curve",
-                                           "cooling.flow-load" };
+                                           "cooling.aa-offset" };
     static const char *const wiz_titles[] = { "Sensors", "Airflow", "Focus", "Dose curve",
-                                              "Flow under load" };
+                                              "Coolant offset" };
     json_t *docs = pairs(doc_ids, doc_titles, 4), *wiz = pairs(wiz_ids, wiz_titles, 5);
     json_error_t err;
     json_t *rec = json_loads(record_text, 0, &err);
@@ -98,7 +99,7 @@ int main(void)
     /* the steps in catalog order, only the ones in the record */
     long s = at(page, "<h3>Sensors"), f = at(page, "<h3>Focus"), d = at(page, "<h3>Dose curve");
     CHECK(s >= 0 && f > s && d > f, "the steps follow the catalog order");
-    CHECK(at(page, "<h3>Airflow") < 0 && at(page, "<h3>Flow under load") < 0,
+    CHECK(at(page, "<h3>Airflow") < 0 && at(page, "<h3>Coolant offset") < 0,
           "a wizard the record lacks has no section");
     CHECK(strstr(page, "the focus &lt;sits&gt; 3.48 mm up"), "the sentence, escaped");
     CHECK(strstr(page, "lens_hall_edge_z_mm") && strstr(page, "(was 3.35)"),
@@ -126,6 +127,26 @@ int main(void)
           "an empty record renders with nothing invented");
     free(page);
     json_decref(empty);
+
+    /* a step the catalog no longer has, done and flagged, and one only
+     * flagged: the page renders and names neither */
+    json_t *gone = json_pack("{s:{s:{s:i,s:s,s:{s:f},s:{}},s:{s:i,s:s,s:{},s:{}}},"
+                             "s:{s:{s:s,s:s},s:{s:s,s:s}}}",
+                             "wizards",
+                             "retired.step", "version", 1, "completed", "2026-09-05T10:00:00Z",
+                             "result", "rise", 10.6, "applied",
+                             "sensors", "version", 1, "completed", "2026-09-05T11:00:00Z",
+                             "result", "applied",
+                             "flags",
+                             "retired.step", "level", "recommended", "reason", "a fault twice",
+                             "retired.other", "level", "recommended", "reason", "a part replaced");
+    page = record_html(gone, docs, wiz, "");
+    CHECK(page && strstr(page, "<h3>Sensors") && !strstr(page, "retired") &&
+          !strstr(page, "a fault twice") && !strstr(page, "a part replaced") &&
+          !strstr(page, "10.6"),
+          "a step the catalog no longer has renders as nothing");
+    free(page);
+    json_decref(gone);
 
     /* a record whose values carry markup */
     json_t *hostile = json_pack("{s:s,s:{s:{s:i,s:s,s:{s:s}}}}", "sheet_id", "<b>x</b>",

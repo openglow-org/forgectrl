@@ -411,9 +411,7 @@ SETTINGS_KEYS = (
     'envelope_x_mm', 'envelope_y_mm',
     'gfcloud_home_timeout_s', 'gf_serial', 'gf_password', 'ui_units',
     'wifi_country',
-    'cool_flow_rise', 'cool_flow_heater_pct', 'cool_flow_check_s',
-    'cool_recheck_s', 'cool_confirm_max_s', 'cool_laser_heat_cw',
-    'cool_laser_heat_density', 'cool_aa_offset_counts',
+    'cool_aa_offset_counts',
     'cool_temp_max', 'cool_temp_resume', 'cool_temp_critical_c',
     'cool_temp_min', 'cool_temp_start', 'cool_tec_present',
     'cool_temp_offset_c',
@@ -467,7 +465,7 @@ LOGS_ROOT = '/data/log/forgefirm'
 FAN_NAMES = ('exhaust', 'intake_1', 'intake_2', 'air_assist', 'purge')
 FIRE_GATES = ('cool_fire_q1_alert', 'cool_fire_q1_critical',
               'cool_fire_q2_alert', 'cool_fire_q2_critical')
-DIAG_TOOLS = ('flow-verify', 'flow-calibrate', 'aa-offset-calibrate')
+DIAG_TOOLS = ('aa-offset-calibrate',)
 SLOT_TARGETS = {'sd': '/dev/mmcblk1p1', 'a': '/dev/mmcblk2p1',
                 'b': '/dev/mmcblk2p2', 'legacy': '/dev/mmcblk2p4'}
 MOCK_VERSION = '20260101000000 (mock)'
@@ -513,32 +511,27 @@ ADVISORY_META = {
 WIZARDS = (('advisories', 'Advisories'), ('account', 'Your account'),
            ('preferences', 'Preferences'), ('machine', 'Your machine'),
            ('cloud', 'Cloud mode'), ('airflow.intakes', 'Intake fans'),
-           ('cooling.flow', 'Coolant flow'),
            ('switches', 'Switches'), ('sensors', 'Sensors'), ('airflow', 'Airflow'),
            ('motion', 'Motion'), ('cameras', 'Cameras'),
            ('cooling.aa-offset', 'Coolant offset'),
-           ('cooling.flow-verify', 'Flow check'),
            ('cloud.header', 'Cloud header'), ('motion.envelope', 'Bed size'),
            ('lens.travel', 'Lens travel'),
            ('laser.focus', 'Focus'), ('laser.floor', 'Laser floor'))
 DARK = ('airflow.intakes', 'switches', 'sensors', 'airflow', 'motion', 'cameras',
-        'cooling.aa-offset', 'cooling.flow', 'cooling.flow-verify', 'cloud.header',
-        'motion.envelope', 'lens.travel')
+        'cooling.aa-offset', 'cloud.header', 'motion.envelope', 'lens.travel')
 # The burns run on the same mock runner; the daemon's previews are stood
 # in for by a drawing of the card's box on its scrap.
 LIVE = ('laser.focus', 'laser.floor')
 # The image's step table (setup.c): the required steps hold the gate;
 # the others are recommended until they have run. The cloud header joins
 # only with cloud mode on.
-REQUIRED_STEPS = ('preferences', 'machine', 'cloud', 'cooling.flow')
+REQUIRED_STEPS = ('preferences', 'machine', 'cloud')
 STEPS = ('switches', 'sensors', 'airflow', 'cooling.aa-offset', 'motion',
          'cameras', 'lens.travel', 'laser.focus')
 # The what-changed menu (setup.c): a change, its title, its reason, and
 # the steps it recommends again.
 CHANGES = (
     ('tube', 'The laser tube was replaced', 'the tube was replaced', ('laser.floor',)),
-    ('pump', 'The coolant pump was replaced', 'the pump was replaced', ('cooling.flow',)),
-    ('coolant', 'The coolant was changed', 'the coolant was changed', ('cooling.flow',)),
     ('fan', 'A fan was replaced', 'a fan was replaced', ('airflow',)),
     ('head', 'The head was replaced', 'the head was replaced',
      ('machine', 'lens.travel', 'laser.focus', 'motion', 'cameras')),
@@ -628,10 +621,6 @@ DARK_RESULTS = {
                         'summary': 'The head travels to X 506.4 mm and Y 290.8 mm from its home; the envelope ends '
                                    '1.0 mm short of both, and a job past it is refused.'},
     'cooling.aa-offset': {'offset_counts': 16.0, 'spread_counts': 1.2, 'recommend': 16.0},
-    'cooling.flow': {'flow_max': 6.1, 'noflow_min': 18.9, 'gap': 12.8, 'recommend': 12.5,
-                     'heater_pct': 40, 'threshold': 12.5},
-    'cooling.flow-verify': {'pass': True, 'threshold': 12.5, 'flow_rise': 6.0, 'noflow_rise': 18.8,
-                            'thin_margin': False},
     'cloud.header': {'captured': '2026-01-01T00:00:00Z', 'job_id': 'mock', 'tag_count': 548,
                      'calibration_tags': {'EFrd': 65535, 'IFrd': 43278, 'AArd': 1023, 'CMrx': 33000,
                                           'XScr': 135, 'YScr': 135},
@@ -667,25 +656,6 @@ JOB_PHASES = {
 # A mock diagnostic walks these phases (the daemon's own phase strings)
 # by elapsed second, then ends with the canned result for its tool.
 DIAG_PLANS = {
-    'flow-verify': (
-        (3, 'stopping the motion controller'),
-        (10, 'settling before trial 1/1 (pump on)'),
-        (20, 'trial 1/1: heater 40% for 50 s (pump on)'),
-        (27, 'settling before trial 1/1 (pump off)'),
-        (37, 'trial 1/1: heater 40% for 50 s (pump off)'),
-        (40, 'standing down'),
-    ),
-    'flow-calibrate': (
-        (3, 'stopping the motion controller'),
-        (8, 'settling before trial 1/3 (pump on)'),
-        (14, 'trial 1/3: heater 40% for 50 s (pump on)'),
-        (20, 'trial 1/3: heater 40% for 50 s (pump off)'),
-        (26, 'trial 2/3: heater 40% for 50 s (pump on)'),
-        (32, 'trial 2/3: heater 40% for 50 s (pump off)'),
-        (38, 'trial 3/3: heater 40% for 50 s (pump on)'),
-        (44, 'trial 3/3: heater 40% for 50 s (pump off)'),
-        (47, 'standing down'),
-    ),
     'aa-offset-calibrate': (
         (3, 'stopping the motion controller'),
         (10, 'settling with the fans idle'),
@@ -699,14 +669,6 @@ DIAG_PLANS = {
     ),
 }
 DIAG_RESULTS = {
-    'flow-verify': {'pass': True, 'threshold': 14.4, 'flow_rise': 11.8,
-                    'flow_dt': 2.1, 'noflow_rise': 17.6, 'noflow_dt': 7.9,
-                    'margin_flow': 2.6, 'margin_noflow': 3.2,
-                    'thin_margin': False},
-    'flow-calibrate': {'flow_rises': [11.6, 12.0, 12.0],
-                       'noflow_rises': [17.6, 17.7, 18.1],
-                       'flow_max': 12.0, 'noflow_min': 17.6, 'gap': 5.6,
-                       'recommend': 14.8},
     'aa-offset-calibrate': {'steps': [[-19.5, -20.1], [20.3, 19.8],
                                       [-19.9, -20.4], [20.0, 19.6],
                                       [-20.2, -19.7], [19.8, 20.3]],
@@ -815,9 +777,6 @@ class Mock:
         ('cool_accel_x_alert', 'crash_x_alert', 132.0, 0.0, 255.0, 100.0, 170.0, 'low'),
         ('cool_accel_y_alert', 'crash_y_alert', 112.0, 0.0, 255.0, 85.0, 145.0, 'low'),
         ('cool_accel_abort', 'crash_abort', 133.0, 0.0, 255.0, 100.0, 170.0, 'low'),
-        ('cool_flow_check_s', 'flow', 50.0, 0.0, 300.0, 30.0, 120.0, 'low'),
-        ('cool_recheck_s', 'recheck', 150.0, 0.0, 3600.0, 60.0, 600.0, 'low'),
-        ('cool_flow_rise', None, 14.4, 1.0, 40.0, 1.0, 40.0, 'none'),
         ('cool_tach_exhaust_min_rpm', 'exhaust', 6400.0, 0.0, 20000.0, 5800.0, 7000.0, 'low'),
         ('cool_tach_intake_min_rpm', 'intake', 2290.0, 0.0, 20000.0, 2100.0, 2500.0, 'low'),
         ('cool_tach_air_assist_min_rpm', 'air_assist', 6000.0, 0.0, 30000.0, 5500.0, 6600.0, 'low'),
@@ -921,14 +880,12 @@ class Mock:
             'driver': '260809',
         }
         self.diag = {
-            'running': False, 'tool': 'flow-calibrate', 'phase': 'done',
+            'running': False, 'tool': 'aa-offset-calibrate', 'phase': 'done',
             'elapsed_s': 0, 'down_c': 24.1, 'up_c': 23.9,
-            'log': ['  0:00  start: duty 40%, window 50 s, '
-                    'threshold 14.4 C',
-                    '  8:44  bands: flow <= 12.0, no-flow >= 17.6 '
-                    '(gap 5.6)',
-                    '  8:47  done'],
-            'result': DIAG_RESULTS['flow-calibrate'],
+            'log': ['  0:00  start: air assist 204 <-> 1023, 3 cycles',
+                    '  0:49  offset 19.9 counts (spread 0.8) over 6 edges',
+                    '  0:49  done'],
+            'result': DIAG_RESULTS['aa-offset-calibrate'],
         }
         self.diag_t0 = 0.0
         # At its next tick, once a second, the cooling engine takes the

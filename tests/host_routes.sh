@@ -353,7 +353,7 @@ else bad "the menu GET /wiz carries names a step the wizard list does not have";
 
 echo "== the write routes without the token"
 n=$(lines)
-for p in /controller/stop /controller/start /mode /settings /diag/flow-verify /diag/abort \
+for p in /controller/stop /controller/start /mode /settings /diag/aa-offset-calibrate /diag/abort \
          /update/apply /boot /update/check /update/dismiss /system/reboot /system/reset /restore/factory \
          /restore/factory-return /system/ssh /wiz/advisories/accept /wiz/account /wiz/complete; do
     code=$(post $p -)

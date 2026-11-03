@@ -15,11 +15,10 @@
  *
  * Steps: welcome, advisories (the four documents, then the press),
  * account, preferences, machine, cloud, the intake fans (counted), the
- * coolant flow (calibrated), the choice (continue the setup, or start
- * using the machine), the checks (the dark wizards), the burns (Focus,
- * and the optional Laser floor: one press each, on a scrap of their
- * own), done. Every step up to the coolant flow holds the machine
- * (REQUIRED); every one after them is
+ * choice (continue the setup, or start using the machine), the checks
+ * (the dark wizards), the burns (Focus, and the optional Laser floor:
+ * one press each, on a scrap of their own), done. Every step up to the
+ * intake fans holds the machine (REQUIRED); every one after them is
  * recommended, and the footer's Finish later ends the guided run from
  * any of them. The footer's exit runs the factory return and shows its
  * progress.
@@ -32,8 +31,7 @@ var W = null,
   pressTimer = null,
   returnTimer = null;
 var DARK_IDS = ['airflow.intakes', 'switches', 'sensors', 'airflow', 'motion', 'cameras',
-  'cooling.aa-offset', 'cooling.flow', 'cooling.flow-verify', 'cloud.header', 'lens.travel',
-  'motion.envelope'];
+  'cooling.aa-offset', 'cloud.header', 'lens.travel', 'motion.envelope'];
 /* The steps the setup never asks for: they are listed and run from the
  * rail, and never opened as the next step. */
 var OPTIONAL = ['laser.floor', 'motion.envelope'];
@@ -43,13 +41,12 @@ var LIVE_IDS = ['laser.focus', 'laser.floor'];
 var CHECK_IDS = DARK_IDS.concat(LIVE_IDS);
 /* The steps that hold the machine: the guided run cannot end before
  * every one of them is done. */
-var REQUIRED = ['advisories', 'account', 'preferences', 'machine', 'cloud', 'airflow.intakes',
-  'cooling.flow'];
+var REQUIRED = ['advisories', 'account', 'preferences', 'machine', 'cloud', 'airflow.intakes'];
 /* The checks a machine may not need: the cloud header with cloud mode
  * off. They show only while required or done. */
 var CONDITIONAL = ['cloud.header'];
 var ORDER = ['welcome', 'advisories', 'account', 'preferences', 'machine', 'cloud',
-  'airflow.intakes', 'cooling.flow', 'choice',
+  'airflow.intakes', 'choice',
   'switches', 'sensors', 'airflow', 'motion', 'cameras', 'cooling.aa-offset',
   'cloud.header', 'lens.travel', 'laser.focus', 'laser.floor', 'motion.envelope', 'done'];
 var TITLES = {
@@ -68,8 +65,6 @@ var TITLES = {
   cameras: 'Cameras',
   'motion.envelope': 'Bed size',
   'cooling.aa-offset': 'Coolant offset',
-  'cooling.flow': 'Coolant flow',
-  'cooling.flow-verify': 'Flow check',
   'cloud.header': 'Cloud header',
   'lens.travel': 'Lens travel',
   'laser.focus': 'Focus',
@@ -99,11 +94,6 @@ var DARK_TEXT = {
   'cooling.aa-offset': 'The loop settles, then the air-assist fan is switched while the coolant ' +
     'sensors are read: the ground shift it causes becomes the offset. About six minutes; ' +
     'the pump and the heater run, the motion controller stops.',
-  'cooling.flow': 'Three heater windows with the pump on and three with it off give the flow ' +
-    'bands; the threshold sits between them. If the bands are too close, the heater duty ' +
-    'steps up and the trial repeats. Fifteen to twenty-five minutes.',
-  'cooling.flow-verify': 'One heater window with the pump on and one with it off: the ' +
-    'threshold must separate them. About three minutes.',
   'cloud.header': 'The machine starts in cloud mode. You place any small design in the ' +
     'Glowforge app and press Print there. The wizard takes the numbers the service sends ' +
     'for this machine, cancels the print before it arms, and returns to GRBL mode. Nothing ' +

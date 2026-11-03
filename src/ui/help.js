@@ -154,19 +154,11 @@ var HELP = {
     d: 'usage/cooling-and-fans/',
     p: [
       'The coolant ceiling pauses a job until the loop is back under the resume gate. The critical line above it is a fault that holds the job with no resume, like a stopped fan.',
-      'The coolant floor blocks fire under it and clears a degree above it. A job that starts under the warm-up gate holds with the loop heater on and the fans idle until the coolant reaches the gate, then runs and verifies flow; a loop that stops warming keeps holding and says so. A floor or a warm-up gate of 0 is off.',
+      'The coolant floor blocks fire under it and clears a degree above it. A job that starts under the warm-up gate holds with the loop heater on and the fans idle until the coolant reaches the gate, then runs; a loop that stops warming keeps holding and says so. A floor or a warm-up gate of 0 is off.',
       'A Pro has a thermoelectric cooler; set TEC to fitted and the engine drives it on its own hysteresis (on above, off below), only while the fans run (its heat sink needs their airflow) and never at the coolant floor. The line has no readback, so leave it not fitted on a Basic or a Plus.',
       'The flame watch judges the four lid IR channels sorted low to high (the quartiles, as the factory does) through a job and its cooldown. A first or second quartile over its alert holds the job and blocks fire until the signal clears; over its critical it stops motion, locks the laser and holds the smoke airflow with no resume that job. The defaults are the factory thresholds and sit far above the lid lamp; 0 turns a tier off.',
       'The crash watch arms the head accelerometer\'s own interrupt generators while the laser is armed, as the factory does. A knock past an X or Y alert holds the job and blocks fire until the head sits quiet; past the abort it stops motion and locks the laser for the rest of the job. The values are the sensor\'s register units (about 64 per g); the defaults are the factory\'s own, about 2 g, far above normal motion. 0 turns a tier off.',
       'Smoke clear is how long the fans keep running after a job; the cooldown limit caps that run.'
-    ]
-  },
-  flow: {
-    t: 'Flow verification',
-    d: 'usage/cooling-and-fans/',
-    p: [
-      'Each running job periodically verifies coolant flow by running the loop heater at the check duty for the check window and reading how far the downstream sensor climbs: past the fault rise means stagnant coolant.',
-      'A suspicious reading is re-checked every re-check interval until the suspicion budget runs out, at which point the job is held.'
     ]
   },
   gates: {
@@ -199,7 +191,7 @@ var HELP = {
     p: [
       'Pressing the button during a cloud print pauses it: the head stops and retraces this many pulse ticks with the laser off; the next press resumes, moving forward with the laser off for the resume lead before it re-enables.',
       'The factory values are 2000 and 1950 (about 0.2 s at 10 kHz); 0 to 30000.',
-      'The cooling engine pauses a print the same way (a warm-up, coolant over the ceiling, a suspected flow fault) and resumes it when the verdict clears. The cooling hold limit is how long such a hold may stand before the print is canceled instead: 60 to 7200 s, 1800 by default.'
+      'The cooling engine pauses a print the same way (a warm-up, coolant over the ceiling) and resumes it when the verdict clears. The cooling hold limit is how long such a hold may stand before the print is canceled instead: 60 to 7200 s, 1800 by default.'
     ]
   },
   jobsize: {
@@ -270,16 +262,15 @@ var HELP = {
     d: 'usage/setup/',
     p: [
       'The setup runs the checks once: switches, sensors, airflow, motion, cameras, the coolant loop, and the lens, then the focus burn. Each writes its result to the setup record, and the ones that measure write the settings they found. Every one is recommended; none holds the machine.',
-      'A check runs again from the setup, from its entry in the rail. The machine itself recommends one again when something changed: a fan near its floor recommends the airflow check, a coolant flow fault twice in a row recommends the flow calibration, a different head recommends the machine facts, the lens travel, and the focus.',
-      'What changed: name a part you replaced (the tube, the pump, the coolant, a fan, the head, the tray) or a service with a cover off. The checks that measured the old part, or prove the new one, are recommended again.'
+      'A check runs again from the setup, from its entry in the rail. The machine itself recommends one again when something changed: a fan near its floor recommends the airflow check, a different head recommends the machine facts, the lens travel, and the focus.',
+      'What changed: name a part you replaced (the tube, a fan, the head, the tray) or a service with a cover off. The checks that measured the old part, or prove the new one, are recommended again.'
     ]
   },
   diag: {
     t: 'Cooling system diagnostics',
     d: 'usage/diagnostics/',
     p: [
-      'Verify (about 10 minutes): one flow check with the pump running and one with it stopped, judged against the configured fault rise. It proves the threshold separates the two on this machine and coolant.',
-      'Calibrate (about 30 minutes): three trials per case; measures both bands and recommends a threshold at the midpoint. Run it after replacing the coolant (a different blend carries heat differently), swapping the pump, or a failed verify.'
+      'Calibrate coolant offset (about 6 minutes): the air assist fan steps between idle and run three times, the tube dark and the heater off, and the tool measures how far it shifts both coolant readings. Apply writes the result as the coolant offset, which the engine takes off the readings while the fan runs.'
     ]
   },
   log_levels: {

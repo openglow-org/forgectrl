@@ -16,9 +16,9 @@
  * holds alone when no hold file speaks for the package and is answered
  * by the host's file of the same name. The test reads the files
  * on CLOCK_MONOTONIC, and the target wraps clock_gettime: every other
- * clock reads 2000000000 s, as in cool_flow_test's fake clock. A host that
+ * clock reads 2000000000 s, as in cool_engine_test's fake clock. A host that
  * stamps ts_mono on another clock writes files that read stale, and the
- * test fails. cool_flow_test holds the engine to CLOCK_MONOTONIC.
+ * test fails. cool_engine_test holds the engine to CLOCK_MONOTONIC.
  */
 #define _GNU_SOURCE
 #include "../src/holds.h"

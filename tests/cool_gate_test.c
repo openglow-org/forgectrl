@@ -74,20 +74,12 @@ int main(void)
     }
     const gate_setting_t *tmax = gate_setting_find("cool_temp_max");
     const gate_setting_t *tres = gate_setting_find("cool_temp_resume");
-    const gate_setting_t *fcs = gate_setting_find("cool_flow_check_s");
-    const gate_setting_t *rise = gate_setting_find("cool_flow_rise");
-    CHECK(tmax && tres && fcs && rise, "every key resolves");
-    CHECK(!gate_setting_find("cool_confirm_max_s"), "a non-gate key does not resolve");
+    CHECK(tmax && tres, "every key resolves");
+    CHECK(!gate_setting_find("cool_cooldown_s"), "a non-gate key does not resolve");
     CHECK(!gate_setting_find(NULL), "NULL does not resolve");
     CHECK(tmax->gate && !strcmp(tmax->gate, "coolant_max") && tmax->off_end > 0,
           "the coolant ceiling is the coolant_max gate, off at its top");
-    CHECK(fcs->gate && !strcmp(fcs->gate, "flow") && fcs->off_end < 0 && fcs->lo == 0.0,
-          "the flow window is the flow gate, off at zero");
     CHECK(!tres->gate && tres->off_end == 0, "the resume gate is not a gate of its own");
-    CHECK(!rise->gate && rise->off_end == 0, "the flow rise is not a gate of its own");
-    CHECK(gate_state(rise, 18.4) == Gate_Ok && gate_state(rise, 1.0) == Gate_Ok &&
-          gate_state(rise, 40.0) == Gate_Ok,
-          "a calibrated flow rise is never warned (the bands differ from loop to loop)");
     CHECK(tres->hi < tmax->hi, "the resume range tops out under the ceiling range");
     const gate_setting_t *exh = gate_setting_find("cool_tach_exhaust_min_rpm");
     const gate_setting_t *inl = gate_setting_find("cool_tach_intake_min_rpm");
@@ -156,9 +148,6 @@ int main(void)
     CHECK(!gate_parse(tmax, "33x", &v), "trailing text is not a value");
     CHECK(!gate_parse(tmax, "nan", &v), "nan is not a value");
     CHECK(!gate_parse(tmax, "inf", &v), "inf is not a value");
-    CHECK(gate_parse(fcs, "0", &v) && v == 0.0, "the flow window accepts zero");
-    CHECK(!gate_parse(fcs, "-1", &v), "the flow window rejects negatives");
-    CHECK(gate_parse(rise, "40", &v), "the flow rise accepts its wide top");
     CHECK(!gate_parse(NULL, "1", &v), "a NULL row parses nothing");
     const gate_setting_t *xal = gate_setting_find("cool_accel_x_alert");
     CHECK(xal && !gate_parse(xal, "300", &v), "a crash threshold past the register range (300 on 0..255) is refused");
@@ -181,13 +170,8 @@ int main(void)
     CHECK(gate_state(tmax, 59.9) == Gate_Warn, "ceiling just under the top: warn, not off");
     CHECK(gate_state(tmax, 60.0) == Gate_Off, "ceiling at the top: off");
     CHECK(gate_state(tmax, 75.0) == Gate_Off, "ceiling past the top (env override): off");
-    CHECK(gate_state(fcs, 50.0) == Gate_Ok, "flow window at default: ok");
-    CHECK(gate_state(fcs, 1.0) == Gate_Warn, "flow window of one second: warn, not off");
-    CHECK(gate_state(fcs, 0.0) == Gate_Off, "flow window of zero: off");
-    CHECK(gate_state(fcs, 300.0) == Gate_Warn, "flow window at its top: warn (the off end is low)");
     CHECK(gate_state(tres, 5.0) == Gate_Warn, "resume at its bottom: warn, never off");
     CHECK(gate_state(tres, 59.0) == Gate_Warn, "resume at its top: warn, never off");
-    CHECK(gate_state(rise, 40.0) == Gate_Ok, "rise at its top: neither warned nor off");
     CHECK(!strcmp(gate_state_name(Gate_Ok), "ok") &&
           !strcmp(gate_state_name(Gate_Warn), "warn") &&
           !strcmp(gate_state_name(Gate_Off), "off"), "state names");
@@ -217,8 +201,8 @@ int main(void)
           strstr(row, "\"state\":\"ok\""), "the ceiling row carries its gate, band, off end, value and state");
     CHECK(json_row(buf, "cool_temp_resume", row, sizeof(row)) && strstr(row, "\"gate\":null"),
           "a non-gate row carries gate:null");
-    CHECK(json_row(buf, "cool_flow_check_s", row, sizeof(row)) && strstr(row, "\"gate\":\"flow\"") &&
-          strstr(row, "\"off\":\"low\""), "the flow row says its off end is low");
+    CHECK(json_row(buf, "cool_temp_start", row, sizeof(row)) && strstr(row, "\"gate\":\"warm_up\"") &&
+          strstr(row, "\"off\":\"low\""), "the warm-up row says its off end is low");
     CHECK(json_row(buf, "cool_tach_exhaust_min_rpm", row, sizeof(row)) && strstr(row, "\"gate\":\"exhaust\""),
           "the exhaust row is there");
     CHECK(gates_json(buf, 16, value_default, NULL) == -1, "a short buffer reports -1");
@@ -229,9 +213,9 @@ int main(void)
     const char *ceiling_off[] = { "cool_temp_max", "60", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)ceiling_off);
     CHECK(r == 1 && !strcmp(buf, "[\"coolant_max\"]"), "ceiling at 60: coolant_max off");
-    const char *both_off[] = { "cool_temp_max", "60", "cool_flow_check_s", "0", NULL };
+    const char *both_off[] = { "cool_temp_max", "60", "cool_temp_start", "0", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)both_off);
-    CHECK(r == 2 && !strcmp(buf, "[\"coolant_max\",\"flow\"]"), "both off, in table order");
+    CHECK(r == 2 && !strcmp(buf, "[\"coolant_max\",\"warm_up\"]"), "both off, in table order");
     const char *critical_off[] = { "cool_temp_critical_c", "70", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)critical_off);
     CHECK(r == 1 && !strcmp(buf, "[\"coolant_critical\"]"), "critical line at 70: coolant_critical off");
@@ -240,7 +224,7 @@ int main(void)
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)fans_off);
     CHECK(r == 2 && !strcmp(buf, "[\"exhaust\",\"purge\"]"),
           "fan floors at zero are off; a zero grace is not a gate");
-    const char *warn_only[] = { "cool_temp_max", "45", "cool_flow_rise", "40", NULL };
+    const char *warn_only[] = { "cool_temp_max", "45", "cool_fan_grace_s", "60", NULL };
     r = gates_off_json(buf, sizeof(buf), value_from_table, (void *)warn_only);
     CHECK(r == 0 && !strcmp(buf, "[]"), "warned values are not off");
     CHECK(gates_off_json(buf, 2, value_from_table, (void *)both_off) == -1,

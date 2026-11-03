@@ -106,26 +106,11 @@ static void golden_lines(void)
     snprintf(u.phase, sizeof(u.phase), "diag");
     add_line(line, senslog_fmt_beat(line, sizeof(line), &ctx, &u));
 
-    senslog_flow_t f = {
-        .src = "check", .verdict = "verified", .rise = 11.3, .rise_raw = 12.1,
-        .laser_c = 0.8, .limit_c = 14.4, .duty_pct = 40, .window_s = 50,
-        .base_down = 22.41, .base_up = 22.32, .end_down = 34.51, .end_up = 23.18,
-        .dt = 9.6, .hv_dose = 26000,
-    };
-    add_line(line, senslog_fmt_flow(line, sizeof(line), &ctx, 1300.0, &f));
-    senslog_flow_t cal = {
-        .src = "cal", .verdict = "pump-off", .rise = 16.6, .rise_raw = 16.6,
-        .laser_c = NAN, .limit_c = 14.4, .duty_pct = 40, .window_s = 50,
-        .base_down = 21.1, .base_up = 21.0, .end_down = 37.7, .end_up = 24.0,
-        .dt = 11.7, .hv_dose = NAN, .trial = 2, .trials = 3,
-    };
-    add_line(line, senslog_fmt_flow(line, sizeof(line), &ctx, 1400.0, &cal));
-
     add_line(line, senslog_fmt_clock(line, sizeof(line), &ctx, 41.0, 41.0, 1793385000.0));
     add_line(line, senslog_fmt_kv(line, sizeof(line), "inv", &ctx, 41.0, "clock",
                                   "image=v0.0.11 kernel=6.12.20 soc=i.MX6DL head_id=044c head_fw=0bb13047 model=basic tec=0"));
     add_line(line, senslog_fmt_kv(line, sizeof(line), "cfg", &ctx, 41.0, "clock",
-                                  "cool_flow_heater_pct=40 cool_flow_rise=14.4 xy_microsteps=-"));
+                                  "cool_temp_max=33 cool_aa_offset_counts=0 xy_microsteps=-"));
 
     senslog_ring_t ring = {0};
     for (int i = 0; i < 5; i++) {
@@ -134,7 +119,7 @@ static void golden_lines(void)
         senslog_ring_push(&ring, &r);
     }
     add_line(line, senslog_fmt_fr_head(line, sizeof(line), &ctx, 3031.0, 1, 3001.0,
-                                       "verdict SUSPECT: COOLANT FLOW SUSPECT: heater rise 15.1 C"));
+                                       "verdict OVERTEMP: coolant 33.4 C over 33 C limit - hold until 31 C"));
     add_line(line, senslog_fmt_fr_channel(line, sizeof(line), &ctx, 3031.0, 1, &ring, 2999.5, 3003.5, 2));
     add_line(line, senslog_fmt_fr_channel(line, sizeof(line), &ctx, 3031.0, 1, &ring, 2999.5, 3003.5, 1));
 }
@@ -164,13 +149,10 @@ static senslog_job_t scripted_job(senslog_jobs_t *j, int *finished_at)
         } else {
             r.beam = 1830 + (i % 2) * 4;
         }
-        snprintf(r.verdict, sizeof(r.verdict), "%s", i == 45 ? "SUSPECT" : "OK");
+        snprintf(r.verdict, sizeof(r.verdict), "%s", i == 45 ? "OVERTEMP" : "OK");
         if (senslog_job_feed(j, &r))
             *finished_at = k;
-        if (i == 50)
-            senslog_job_flow(j, 12.5);
     }
-    senslog_job_flow(j, 11.0);
     for (int i = 0; i < 15; i++, k++) {
         senslog_sample_t r = at_phase(t++, "smoke");
         r.down_c = 27.0 - i * 0.05;
@@ -271,8 +253,8 @@ static void widest(void)
         job.fan[i] = st;
     for (int i = 0; i < 4; i++)
         job.ir_base[i] = job.ir_peak[i] = 1023;
-    job.beam_peak = 65535; job.flow_checks = 9999; job.flow_worst = 99.99;
-    snprintf(job.verdicts, sizeof(job.verdicts), "FIRE,CRASH,FLAME,BUMP,AIRFLOW,CRITICAL,SENSOR,OVERTEMP,COLD,FAULT,SUSPECT");
+    job.beam_peak = 65535;
+    snprintf(job.verdicts, sizeof(job.verdicts), "FIRE,CRASH,FLAME,BUMP,AIRFLOW,CRITICAL,SENSOR,OVERTEMP,COLD,WARMUP,EXT");
     n = senslog_fmt_job(line, sizeof(line), &ctx, 4294967.9, &job);
     CHECK(n > 0 && n < DGRAM, "the widest job fits a datagram");
 
@@ -300,8 +282,7 @@ static void job(void)
     CHECK(d.ir_base[3] == 54 && d.ir_peak[3] == 80, "the lid IR's baseline and peak");
     CHECK(d.beam_peak == 1939 && d.beam_dark.n == 40 && d.beam_dark.max == 1834,
           "the beam's peak lit, its dark level from the dark seconds");
-    CHECK(d.flow_checks == 2 && fabs(d.flow_worst - 12.5) < 1e-9, "the flow checks and the worst rise");
-    CHECK(!strcmp(d.verdicts, "SUSPECT"), "the verdicts other than OK");
+    CHECK(!strcmp(d.verdicts, "OVERTEMP"), "the verdicts other than OK");
 
     printf("C. a session opening during a cooldown ends the job before it\n");
     senslog_jobs_init(&j);

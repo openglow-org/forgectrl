@@ -120,9 +120,9 @@ static void test_diff(void)
     snprintf(d.gstate, sizeof(d.gstate), "Hold");
     step("paused by a hold", &c, &d, "job.paused {\"reason\":\"hold\"}");
     d.fire_ok = 0;
-    snprintf(d.verdict, sizeof(d.verdict), "FLOW");
+    snprintf(d.verdict, sizeof(d.verdict), "OVERTEMP");
     step("paused by cooling", &c, &d,
-         "cooling.verdict {\"verdict\":\"FLOW\",\"fire_ok\":false}|job.paused {\"reason\":\"cooling\"}");
+         "cooling.verdict {\"verdict\":\"OVERTEMP\",\"fire_ok\":false}|job.paused {\"reason\":\"cooling\"}");
     d = c;
     d.armed = 0;
     snprintf(d.gstate, sizeof(d.gstate), "Idle");
@@ -152,11 +152,11 @@ static void test_diff(void)
 
     /* The machine lease: taken, passed to an owner under the holder, given back. */
     b = a;
-    snprintf(b.lease, sizeof(b.lease), "wizard:cooling.flow");
-    step("lease taken", &a, &b, "lease.changed {\"owner\":\"wizard:cooling.flow\"}");
+    snprintf(b.lease, sizeof(b.lease), "wizard:cooling.aa-offset");
+    step("lease taken", &a, &b, "lease.changed {\"owner\":\"wizard:cooling.aa-offset\"}");
     c = b;
-    snprintf(c.lease, sizeof(c.lease), "diag:flow-calibrate");
-    step("lease nested", &b, &c, "lease.changed {\"owner\":\"diag:flow-calibrate\"}");
+    snprintf(c.lease, sizeof(c.lease), "diag:aa-offset-calibrate");
+    step("lease nested", &b, &c, "lease.changed {\"owner\":\"diag:aa-offset-calibrate\"}");
     step("lease given back", &b, &a, "lease.changed {\"owner\":null}");
 
     /* A newer release found, the same one again, a newer one yet, and none. */
@@ -174,8 +174,8 @@ static void test_diff(void)
     b.gate_open = 1;
     c = b;
     c.gate_open = 0;
-    snprintf(c.gate_why, sizeof(c.gate_why), "the wizard \"cooling.flow\" is required");
-    step("the gate closes", &b, &c, "setup.flag {\"gate_open\":false,\"reason\":\"the wizard \\\"cooling.flow\\\" is required\"}");
+    snprintf(c.gate_why, sizeof(c.gate_why), "the wizard \"machine\" is required");
+    step("the gate closes", &b, &c, "setup.flag {\"gate_open\":false,\"reason\":\"the wizard \\\"machine\\\" is required\"}");
     step("the gate opens", &c, &b, "setup.flag {\"gate_open\":true,\"reason\":\"\"}");
 }
 
@@ -209,7 +209,7 @@ static void test_button(void)
     s.armed = 1;
     press("a press inside the window is the job's", up, down, &s, "");
     s = base_snap();
-    snprintf(s.lease, sizeof(s.lease), "wizard:cooling.flow");
+    snprintf(s.lease, sizeof(s.lease), "wizard:cooling.aa-offset");
     press("a press under the lease is the wizard's", up, down, &s, "");
     s = base_snap();
     s.button_wait = 1;

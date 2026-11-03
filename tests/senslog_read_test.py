@@ -45,12 +45,10 @@ class Records(unittest.TestCase):
         self.assertEqual(sr.num(beat["sw"]), 0x28)
         self.assertEqual(beat["ir"], "50,49,52,54")
         self.assertIsNone(by["beat"][1]["down"])              # unread
-        cal = [f for f in by["flow"] if f["src"] == "cal"][0]
-        self.assertEqual((cal["trial"], cal["laser"]), ("2/3", None))
-        self.assertTrue(by["fr"][0]["msg"].startswith("verdict SUSPECT: COOLANT FLOW SUSPECT: heater rise"))
+        self.assertTrue(by["fr"][0]["msg"].startswith("verdict OVERTEMP: coolant 33.4 C over"))
         job = by["job"][0]
         self.assertEqual(sr.stat(job["up"])[2], 25.2)
-        self.assertEqual(job["verdicts"], "SUSPECT")
+        self.assertEqual(job["verdicts"], "OVERTEMP")
 
 
 class Redating(unittest.TestCase):
@@ -83,7 +81,7 @@ class Tables(unittest.TestCase):
     def test_one_table_per_type_and_per_dump(self):
         paths = sr.write_csv(sr.load(golden()), self.dir)
         names = sorted(os.path.basename(p) for p in paths)
-        self.assertEqual(names, ["beat.csv", "cfg.csv", "clock.csv", "flow.csv", "fr_fcce7554_1.csv",
+        self.assertEqual(names, ["beat.csv", "cfg.csv", "clock.csv", "fr_fcce7554_1.csv",
                                  "inv.csv", "job.csv"])
         with open(os.path.join(self.dir, "fr_fcce7554_1.csv")) as f:
             rows = f.read().splitlines()

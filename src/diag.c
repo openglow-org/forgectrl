@@ -12,40 +12,21 @@
  * mid-run is recovered at the next forgectrl start (hardware stood
  * down, controller resumed).
  *
- * Cooling tools. The flow check discriminates on how far the
- * downstream water sensor climbs while the loop heater runs: flowing
- * coolant carries the heat away, a stagnant loop cooks the sensor.
- * The bands depend on the pump, the plumbing, and the coolant's
- * thermal properties, so they are per-machine:
+ * Cooling tools:
  *
- *   flow-verify     one check with the pump on, one with the pump
- *                   commanded off, against the configured threshold.
- *                   PASS = the threshold separates the two readings.
  *   aa-offset-calibrate  the air-assist fan's ground shift on the two
  *                   coolant readings, in ADC counts: the fan stepped
  *                   idle <-> run three times, tube dark, heater off,
  *                   and the step at every edge averaged; recommends
  *                   cool_aa_offset_counts (see cool.c, AA_OFFSET_*).
- *   flow-calibrate  3 trials per case, alternating; reports both
- *                   bands and recommends threshold = band midpoint
- *                   (no recommendation when the gap is too small to
- *                   trust - raise the heater duty instead).
  *
- * Both run at the machine's configured heater duty and window so the
- * verdict applies to the check the cooling engine (cool.c) actually
- * runs; the engine suspends its own writes for the duration. They read
- * the rise as the check does: the baseline is the mean of the settled
- * window, the end the mean of the window's last COOL_FLOW_END_WIN
- * samples, both under the cut-profile fans, never single samples. The
- * setup's calibration gives each rung's duty to its run alone
- * (diag_start_duty) and writes it beside the threshold it finds.
+ * The engine suspends its own writes for the duration.
  */
 #define _GNU_SOURCE
 #include "cool.h"
 #include "diag.h"
 #include "fflog.h"
 #include "lease.h"
-#include "senslog.h"
 #include "settings.h"
 #include "status.h"
 #include "super.h"
@@ -53,7 +34,6 @@
 #include "testhook.h"
 
 #include <fcntl.h>
-#include <math.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -74,28 +54,13 @@ static const char *sysfs_root(void)
     return r ? r : GF_SYSFS;
 }
 
-/* Check parameters come from cool.h - the same compiled defaults the
- * engine runs - and the configured cool_* keys override both, so the
- * tools always test the check the engine actually runs. */
-#define DEF_RISE_C     ((double)COOL_FLOW_RISE_C)
-#define DEF_HEATER_PCT ((double)COOL_FLOW_HEATER_PCT)
-#define DEF_CHECK_S    ((double)COOL_FLOW_CHECK_S)
-
-/* Settle gate (engine-equivalent): baseline capture only from a
- * stationary loop (split-half mean drift over the window) with the
- * sensors in agreement. */
-#define SETTLE_WIN       COOL_SETTLE_WIN
-#define SETTLE_DRIFT_C   ((double)COOL_SETTLE_DRIFT_C)
-#define SETTLE_DT_C      ((double)COOL_SETTLE_DT_C)
+/* Settle gate: the edges are read only from a stationary loop
+ * (split-half mean drift over the window) with the sensors in
+ * agreement. */
+#define SETTLE_WIN       15     /* 1 Hz samples */
+#define SETTLE_DRIFT_C   0.4    /* split-half mean difference */
+#define SETTLE_DT_C      1.5    /* |downstream - upstream| */
 #define SETTLE_TIMEOUT_S 420
-#define END_WIN          COOL_FLOW_END_WIN
-
-#define CAL_TRIALS       3
-/* Below this flow/no-flow gap the midpoint cannot be trusted: the
- * bench matrix put band spreads near +-1.5 C per side. */
-#define CAL_MIN_GAP_C    3.0
-/* A verify margin thinner than this earns a run-calibration warning. */
-#define THIN_MARGIN_C    1.5
 
 /* ------------------------------------------------------------- state */
 
@@ -107,7 +72,6 @@ static char st_tool[24];
 static char st_phase[80];
 static time_t st_started;
 static double st_down, st_up;
-static double st_heater_pct;     /* this run's heater duty; 0 = cool_flow_heater_pct */
 
 #define LOG_LINES 48
 #define LOG_LEN   96
@@ -211,16 +175,6 @@ static void set_result(const char *fmt, ...)
 
 /* ---------------------------------------------------------- settling */
 
-static double cfg_num(const char *key, double def)
-{
-    char v[32];
-    char *end;
-    if (settings_get(key, v, sizeof(v)) != 0)
-        return def;
-    double f = strtod(v, &end);
-    return end == v ? def : f;
-}
-
 static int aborted(void)
 {
     pthread_mutex_lock(&mu);
@@ -269,219 +223,6 @@ static int settle(double *down, double *up, double *base_down, double *base_up)
         sleep(1);
     }
     return -1;
-}
-
-/* One heater trial from a settled loop whose downstream baseline is
- * base_down. Returns 0 with rise (the mean of the window's last END_WIN
- * samples over the baseline) and dt (the mean of their down - up)
- * filled, -1 on abort, -2 on the safety ceiling. The pump is always
- * restored. */
-static int trial(int flow, double duty, int secs, double base_down,
-                 double *rise, double *dt)
-{
-    double down = base_down, up = base_down;
-    double end[END_WIN], end_dt[END_WIN];
-    int n_end = 0;
-
-    cool_diag_pump(flow);
-    sleep(3);
-
-    cool_diag_heater_pct(duty);
-    int rc = 0;
-    for (int t = 0; t < secs; t++) {
-        if (aborted()) {
-            rc = -1;
-            break;
-        }
-        sample(&down, &up);
-        end[n_end % END_WIN] = down;
-        end_dt[n_end % END_WIN] = down - up;
-        n_end++;
-        if (down >= DIAG_ABORT_DOWN_C) {
-            dlog("safety: downstream %.1f C - trial aborted", down);
-            rc = -2;
-            break;
-        }
-        sleep(1);
-    }
-    cool_diag_heater_pct(0);
-    cool_diag_pump(1);
-
-    int k = n_end < END_WIN ? n_end : END_WIN;
-    double s = 0, s_dt = 0;
-    for (int i = 0; i < k; i++) {
-        s += end[i];
-        s_dt += end_dt[i];
-    }
-    *rise = k ? s / k - base_down : 0.0;
-    *dt = k ? s_dt / k : 0.0;
-    return rc;
-}
-
-/* ------------------------------------------------------------ runner */
-
-static void *runner(void *arg)
-{
-    int calibrate = arg != NULL;
-    double thr = cfg_num("cool_flow_rise", DEF_RISE_C);
-    pthread_mutex_lock(&mu);
-    double run_pct = st_heater_pct;
-    pthread_mutex_unlock(&mu);
-    double duty = run_pct > 0 ? run_pct : cfg_num("cool_flow_heater_pct", DEF_HEATER_PCT);
-    int secs = (int)cfg_num("cool_flow_check_s", DEF_CHECK_S);
-    if (secs <= 0)
-        secs = (int)DEF_CHECK_S;    /* checks disabled: test the default */
-
-    dlog("start: duty %.0f%%, window %d s, threshold %.1f C",
-         duty, secs, thr);
-
-    set_phase("stopping the motion controller");
-    if (controller_stop()) {
-        set_result("{\"error\":\"could not stop the motion controller\"}");
-        /* The stop already un-suspended on timeout; this additionally
-         * clears any motion fault and resets the respawn backoff, so a
-         * failed takeover can never leave the machine controller-less. */
-        cool_diag_release();
-        controller_start();
-        goto out_norestart;
-    }
-    close(open(MARKER, O_CREAT | O_WRONLY, 0644));
-
-    /* The cut-profile fans for the whole run, ahead of the first settle:
-     * the run airflow shifts both coolant readings (cool.c), so a
-     * baseline compares with its window's end only under the same fans. */
-    cool_diag_fans_run();
-    sleep(3);
-
-    double f_rise[CAL_TRIALS], f_dt[CAL_TRIALS], f_base[CAL_TRIALS];
-    double n_rise[CAL_TRIALS], n_dt[CAL_TRIALS], n_base[CAL_TRIALS];
-    int trials = calibrate ? CAL_TRIALS : 1;
-
-    for (int t = 0; t < trials; t++) {
-        for (int flow = 1; flow >= 0; flow--) {
-            /* The settle window starts from the last readings, never
-             * from uninitialized values a glitched first sample would
-             * leave in place. */
-            double down = 20.0, up = 20.0;
-            pthread_mutex_lock(&mu);
-            if (st_down > 5.0 && st_down < 60.0)
-                down = st_down;
-            if (st_up > 5.0 && st_up < 60.0)
-                up = st_up;
-            pthread_mutex_unlock(&mu);
-            set_phase("settling before trial %d/%d (%s)",
-                      t + 1, trials, flow ? "pump on" : "pump off");
-            double *base = flow ? &f_base[t] : &n_base[t];
-            double base_up = NAN;
-            int rc = settle(&down, &up, base, &base_up);
-            if (rc == -1) {
-                set_result("{\"error\":\"loop would not settle within "
-                           "%d s\"}", SETTLE_TIMEOUT_S);
-                goto out;
-            }
-            if (rc == -2)
-                goto out_aborted;
-
-            set_phase("trial %d/%d: heater %.0f%% for %d s (%s)",
-                      t + 1, trials, duty, secs,
-                      flow ? "pump on" : "pump off");
-            double *rise = flow ? &f_rise[t] : &n_rise[t];
-            double *dt = flow ? &f_dt[t] : &n_dt[t];
-            rc = trial(flow, duty, secs, *base, rise, dt);
-            if (rc == -1)
-                goto out_aborted;
-            if (rc == -2) {
-                set_result("{\"error\":\"downstream sensor hit %.0f C - "
-                           "aborted for safety\"}", DIAG_ABORT_DOWN_C);
-                goto out;
-            }
-            dlog("trial %d/%d %s: from %.1f C, rise %.1f C, dT %.1f C", t + 1, trials,
-                 flow ? "flow" : "no-flow", *base, *rise, *dt);
-            /* The same record the engine's checks write, the end readings
-             * from the trial's means (dt is the mean of down - up). */
-            senslog_flow_t rec = {
-                .src = calibrate ? "cal" : "verify",
-                .verdict = flow ? "pump-on" : "pump-off",
-                .rise = *rise, .rise_raw = *rise, .laser_c = NAN, .limit_c = thr,
-                .duty_pct = (long)duty, .window_s = (double)secs,
-                .base_down = *base, .base_up = base_up,
-                .end_down = *base + *rise, .end_up = *base + *rise - *dt,
-                .dt = *dt, .hv_dose = NAN, .trial = t + 1, .trials = trials,
-            };
-            senslog_flow(&rec);
-        }
-    }
-
-    if (!calibrate) {
-        int pass = f_rise[0] < thr && thr < n_rise[0];
-        double m_flow = thr - f_rise[0], m_noflow = n_rise[0] - thr;
-        int thin = m_flow < THIN_MARGIN_C || m_noflow < THIN_MARGIN_C;
-        set_result("{\"pass\":%s,\"threshold\":%.1f,"
-                   "\"flow_rise\":%.1f,\"flow_dt\":%.1f,"
-                   "\"noflow_rise\":%.1f,\"noflow_dt\":%.1f,"
-                   "\"margin_flow\":%.1f,\"margin_noflow\":%.1f,"
-                   "\"thin_margin\":%s}",
-                   pass ? "true" : "false", thr,
-                   f_rise[0], f_dt[0], n_rise[0], n_dt[0],
-                   m_flow, m_noflow,
-                   (pass && thin) ? "true" : "false");
-        dlog("verdict: %s (flow %.1f / threshold %.1f / no-flow %.1f)",
-             pass ? "PASS" : "FAIL", f_rise[0], thr, n_rise[0]);
-    } else {
-        double f_max = f_rise[0], n_min = n_rise[0];
-        for (int t = 1; t < CAL_TRIALS; t++) {
-            if (f_rise[t] > f_max)
-                f_max = f_rise[t];
-            if (n_rise[t] < n_min)
-                n_min = n_rise[t];
-        }
-        double gap = n_min - f_max;
-        /* The trials' starting temperatures ride with their rises: the
-         * setup's ladder projects the next duty's peaks from both. */
-        char bases[160];
-        snprintf(bases, sizeof(bases),
-                 "\"duty\":%.0f,\"flow_bases\":[%.1f,%.1f,%.1f],"
-                 "\"noflow_bases\":[%.1f,%.1f,%.1f]",
-                 duty, f_base[0], f_base[1], f_base[2],
-                 n_base[0], n_base[1], n_base[2]);
-        if (gap < CAL_MIN_GAP_C)
-            set_result("{\"flow_rises\":[%.1f,%.1f,%.1f],"
-                       "\"noflow_rises\":[%.1f,%.1f,%.1f],%s,"
-                       "\"flow_max\":%.1f,\"noflow_min\":%.1f,"
-                       "\"gap\":%.1f,"
-                       "\"error\":\"bands too close to separate at this "
-                       "duty - raise cool_flow_heater_pct and rerun\"}",
-                       f_rise[0], f_rise[1], f_rise[2],
-                       n_rise[0], n_rise[1], n_rise[2], bases,
-                       f_max, n_min, gap);
-        else
-            set_result("{\"flow_rises\":[%.1f,%.1f,%.1f],"
-                       "\"noflow_rises\":[%.1f,%.1f,%.1f],%s,"
-                       "\"flow_max\":%.1f,\"noflow_min\":%.1f,"
-                       "\"gap\":%.1f,\"recommend\":%.1f}",
-                       f_rise[0], f_rise[1], f_rise[2],
-                       n_rise[0], n_rise[1], n_rise[2], bases,
-                       f_max, n_min, gap, (f_max + n_min) / 2.0);
-        dlog("bands: flow <= %.1f, no-flow >= %.1f (gap %.1f)",
-             f_max, n_min, gap);
-    }
-    goto out;
-
-out_aborted:
-    set_result("{\"error\":\"aborted by operator\"}");
-out:
-    set_phase("standing down");
-    cool_diag_release();
-    controller_start();
-    unlink(MARKER);
-out_norestart:
-    dlog("done");
-    set_phase("done");
-    pthread_mutex_lock(&mu);
-    st_running = 0;
-    pthread_mutex_unlock(&mu);
-    lease_release(st_owner);
-    return NULL;
 }
 
 /* ------------------------------------------- aa-offset-calibrate */
@@ -628,10 +369,10 @@ static void *runner_aa(void *arg)
     cool_diag_heater_pct(0);
     cool_diag_fans_idle();
     cool_diag_aa(AA_IDLE);
-    /* The edges are read against a trend-free baseline: the same
-     * stationary-loop gate the flow tools use (drift and down/up
-     * agreement), so a loop still mixing after a heater trial waits
-     * here instead of putting its trend into the first edge. */
+    /* The edges are read against a trend-free baseline: the
+     * stationary-loop gate (drift and down/up agreement), so a loop
+     * still mixing waits here instead of putting its trend into the
+     * first edge. */
     set_phase("settling with the fans idle");
     {
         double d, u;
@@ -728,26 +469,7 @@ int diag_running(void)
 
 int diag_start(const char *tool, char *why, size_t len)
 {
-    return diag_start_duty(tool, 0, why, len);
-}
-
-int diag_start_duty(const char *tool, double heater_pct, char *why, size_t len)
-{
-    int calibrate;
-    void *(*fn)(void *) = runner;
-    if (!strcmp(tool, "flow-verify"))
-        calibrate = 0;
-    else if (!strcmp(tool, "flow-calibrate"))
-        calibrate = 1;
-    else if (!strcmp(tool, "aa-offset-calibrate")) {
-        calibrate = 0;
-        fn = runner_aa;
-    } else
-        return -3;
-    /* A duty of the run's own is the calibration's alone, inside the
-     * setting's range: the flow check and the offset tool run as the
-     * machine is configured. */
-    if (heater_pct != 0 && (!calibrate || !(heater_pct > 0 && heater_pct <= 100)))
+    if (strcmp(tool, "aa-offset-calibrate") != 0)
         return -3;
 
     pthread_mutex_lock(&mu);
@@ -775,7 +497,6 @@ int diag_start_duty(const char *tool, double heater_pct, char *why, size_t len)
     st_result[0] = '\0';
     st_phase[0] = '\0';
     st_started = time(NULL);
-    st_heater_pct = heater_pct;
     snprintf(st_tool, sizeof(st_tool), "%s", tool);
     pthread_mutex_unlock(&mu);
 
@@ -794,8 +515,7 @@ int diag_start_duty(const char *tool, double heater_pct, char *why, size_t len)
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, fn,
-                       calibrate ? (void *)1 : NULL) != 0) {
+    if (pthread_create(&th, &at, runner_aa, NULL) != 0) {
         cool_diag_release();
         pthread_mutex_lock(&mu);
         st_running = 0;
