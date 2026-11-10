@@ -68,6 +68,10 @@ var CK = [
   'cool_temp_critical_c',
   'cool_temp_min',
   'cool_temp_start',
+  'cool_flow_watch',
+  'cool_flow_hold_c',
+  'cool_flow_duty_min',
+  'cool_flow_duty_max',
   'cool_tec_present',
   'cool_tec_on_c',
   'cool_tec_off_c',
@@ -821,6 +825,7 @@ function degc(v) {
   return v > -100 ? dTa(v).toFixed(1) + ' ' + uT() : '\u2014';
 }
 var CL = null;          /* GET /cool/status: the engine's verdict */
+var FL = null;          /* GET /cool/flow: the coolant flow watch */
 var MD = null;          /* GET /mode: the supervisor's state */
 function loadCool() {
   fetch('/cool/status')
@@ -832,6 +837,44 @@ function loadCool() {
       renderCooling();
     })
     .catch(function () {});
+  fetch('/cool/flow')
+    .then(function (r) {
+      return r.ok ? r.json() : null;
+    })
+    .then(function (f) {
+      FL = f;
+      renderCooling();
+    })
+    .catch(function () {});
+}
+/* The coolant flow watch's rows: whether it runs, and its numbers. It only
+   logs, so nothing here is a verdict. */
+var FW_STATE = {
+  hold: 'running (log only)',
+  rest: 'resting, heater off',
+  wait: 'starting',
+  suspended: 'paused',
+  off: 'off'
+};
+function fwPct(v) {
+  return v == null ? '—' : v.toFixed(2) + '%';
+}
+function flowRows() {
+  if (!FL || !FL.watch) return '';
+  var st = FL.halted ? 'stopped' : FW_STATE[FL.watch] || FL.watch;
+  var cls = FL.watch === 'hold' ? 'b-run' : FL.halted ? 'b-warn' : 'b-dim';
+  var g = txt('Flow watch', st + (FL.why ? ': ' + FL.why : ''), cls);
+  if (FL.watch === 'off' && !FL.halted) return g;
+  if (FL.watch === 'hold') {
+    g += txt('Flow heater', fwPct(FL.duty) + ' (10 s ' + fwPct(FL.duty_10s) + ')');
+    g += txt('Flow fall', FL.fall == null ? 'not yet' : (FL.fall * 100).toFixed(0) + '%',
+             FL.fall != null && FL.fall >= 0.15 ? 'b-warn' : 'b-dim');
+  }
+  g += txt('Flow idle ref', FL.ref == null ? 'not yet' : fwPct(FL.ref), 'b-dim');
+  if (FL.hold_c != null)
+    g += txt('Flow settings', 'step ' + fnum(dTd(FL.hold_c), 2) + ' ' + uT() + ', heater ' +
+             fnum(FL.duty_min, 1) + ' to ' + fnum(FL.duty_max, 1) + '%', 'b-dim');
+  return g;
 }
 function loadMode() {
   fetch('/mode')
@@ -1301,7 +1344,78 @@ var W_TITLES = {};
 function retryMode() {
   setMode(MD && MD.mode ? MD.mode : 'grbl');
 }
+/* What the button's red flash is about. A failure that ended a job blocks the
+ * next one until it is acknowledged here. */
+function setBanner(b, html) {
+  if (b.dataset.shown !== html) {
+    b.dataset.shown = html;
+    b.innerHTML = html;
+  }
+  b.style.display = html ? '' : 'none';
+}
+function faultTime(t) {
+  return t ? new Date(t * 1000).toLocaleString() : '';
+}
+function renderAttention() {
+  var b = $('attn-banner'),
+    a = CL && CL.attention;
+  if (!b) return;
+  if (!a || !a.standing) {
+    setBanner(b, '');
+    return;
+  }
+  var what = esc(a.reason || a.verdict);
+  setBanner(
+    b,
+    a.live
+      ? '\u26A0 Firing is blocked: ' + what + '. Started ' + esc(faultTime(a.at)) +
+          '. The button flashes red until this is fixed.'
+      : '\u26A0 ' + what + '. Started ' + esc(faultTime(a.at)) +
+          (a.cleared_at ? ', ended ' + esc(faultTime(a.cleared_at)) : '') +
+          '. Firing stays blocked until you acknowledge this. ' +
+          '<button type="button" data-nolock="1" onclick="attentionAck()">Acknowledge</button>'
+  );
+}
+function attentionAck() {
+  fx('/cool/attention/ack', { method: 'POST' })
+    .then(function (r) {
+      if (!r.ok)
+        return r.text().then(function (t) {
+          changedMsg('Acknowledge: ' + (r.status === 409 ? 'the failure still stands' : t || r.status), 'b-bad');
+        });
+    })
+    .catch(function (e) {
+      changedMsg('Acknowledge: ' + String(e), 'b-bad');
+    })
+    .then(loadCool);
+}
+/* The faults that cleared on their own: nothing is blocked, and they stand here
+ * until they are dismissed. */
+function renderNotices() {
+  var b = $('notice-banner'),
+    n = CL && CL.notices,
+    html = '',
+    upto = 0;
+  if (!b) return;
+  if (n && n.length) {
+    n.forEach(function (x) {
+      upto = Math.max(upto, x.seq);
+      html +=
+        '<div>\u26A0 ' + esc(x.reason || x.verdict) + '. Started ' + esc(faultTime(x.at)) +
+        ', cleared on its own ' + esc(faultTime(x.cleared_at)) +
+        (x.times > 1 ? ' (' + x.times + ' times, this is the last)' : '') + '.</div>';
+    });
+    html += '<a href="#" data-nolock="1" onclick="noticesDismiss(' + upto + '); return false;">Dismiss</a>';
+  }
+  setBanner(b, html);
+}
+function noticesDismiss(upto) {
+  fx('/cool/notices/dismiss', { method: 'POST', body: new URLSearchParams({ upto: upto }) }).then(loadCool);
+}
+
 function renderCooling() {
+  renderAttention();
+  renderNotices();
   if (!M.coolant) return;
   var g = '';
   if (CL && CL.verdict) {
@@ -1315,6 +1429,7 @@ function renderCooling() {
   g += txt('Coolant in', degc(M.coolant.up_c));
   g += txt('Pump', M.coolant.pump ? 'on' : 'off', M.coolant.pump ? 'b-ok' : 'b-warn');
   g += txt('TEC', M.coolant.tec ? 'on' : 'off', 'b-dim');
+  g += flowRows();
   if (M.temps) {
     g += txt('Chassis', M.temps.chassis_c == null ? '\u2014' : degc(M.temps.chassis_c));
     g += txt('SoC die', M.temps.soc_c == null ? '\u2014' : degc(M.temps.soc_c),
@@ -1477,6 +1592,10 @@ function fill(force) {
   setF('laser_corner_gamma', S.laser_corner_gamma);
   setF('laser_pulse_ticks', S.laser_pulse_ticks);
   setF('laser_pulse_min_ticks', S.laser_pulse_min_ticks);
+  setF('cool_flow_watch', S.cool_flow_watch || '0');
+  setF('cool_flow_hold_c', S.cool_flow_hold_c);
+  setF('cool_flow_duty_min', S.cool_flow_duty_min);
+  setF('cool_flow_duty_max', S.cool_flow_duty_max);
   setF('cool_tec_present', S.cool_tec_present || '0');
   /* Unset reads as Not counted, so choosing either count is a change
    * to save: the setup's gate waits for it. */
@@ -1539,9 +1658,14 @@ function clearIdentity() {
 function showFuse() {
   fx('/fuse-identity')
     .then(function (r) {
+      /* The refusal is plain text (main.c's), not JSON. */
       if (!r.ok)
-        return r.json().then(function (j) {
-          throw (j && j.error) || 'cannot read fuses';
+        return r.text().then(function (t) {
+          var why = t;
+          try {
+            why = JSON.parse(t).error;
+          } catch (e) {}
+          throw why || 'cannot read fuses';
         });
       return r.json();
     })
@@ -1832,28 +1956,106 @@ function doReboot() {
       $('msg-slot').textContent = j.rebooting ? 'rebooting\u2026' : j.error || '?';
     });
 }
+/* ---- A change that needs an operator at the machine -----------------
+ * The dialog asks; OK sends the request, which the daemon takes only
+ * with the machine button held. The dialog closes when the daemon takes
+ * it, or on Cancel, and on nothing else: a refusal stays in the dialog,
+ * and one for the button (the answer's "button": "not held") says the
+ * button is not held, so OK can go again once it is. While a request is
+ * out, neither button answers. A job waiting for the button press would
+ * take the hold as its own, so each OK looks for one first and sends
+ * nothing while one waits: the dialog can stay open a long time. */
+var HOLD_NOT_HELD = "The machine's button is not held. Hold it down, then press OK again.";
+var HOLD_JOB_WAITS = 'A job is waiting for the button press: cancel it first.';
+var holdModal = null,
+  holdReq = null;
+function holdConfirm(o) {
+  if (!holdModal) {
+    holdModal = new bootstrap.Modal($('holdmodal'), { backdrop: 'static', keyboard: false });
+    /* The request that goes with a closing dialog is the one it had when
+     * the close began: one asked for while it fades out is the next
+     * dialog's, and stays. */
+    var closing = null;
+    $('holdmodal').addEventListener('hide.bs.modal', function () {
+      closing = holdReq;
+    });
+    $('holdmodal').addEventListener('hidden.bs.modal', function () {
+      if (holdReq === closing) holdReq = null;
+      closing = null;
+    });
+  }
+  holdReq = o;
+  $('hold-title').textContent = o.title;
+  $('hold-body').innerHTML = o.body
+    .map(function (p) {
+      return '<p>' + esc(p) + '</p>';
+    })
+    .join('');
+  $('hold-err').style.display = 'none';
+  $('hold-err').textContent = '';
+  $('hold-ok').disabled = false;
+  $('hold-cancel').disabled = false;
+  holdModal.show();
+}
+function holdGo() {
+  var o = holdReq;
+  if (!o) return;
+  var refuse = function (why) {
+    $('hold-err').textContent = why;
+    $('hold-err').style.display = '';
+    $('hold-ok').disabled = false;
+    $('hold-cancel').disabled = false;
+  };
+  if (CL && CL.armed) {
+    refuse(HOLD_JOB_WAITS);
+    return;
+  }
+  $('hold-ok').disabled = true;
+  $('hold-cancel').disabled = true;
+  $('hold-err').style.display = 'none';
+  o.send()
+    .then(function (r) {
+      return r
+        .json()
+        .catch(function () {
+          return {};
+        })
+        .then(function (j) {
+          if (holdReq !== o) return;
+          if (r.ok) {
+            holdModal.hide();
+            o.done(j);
+          } else if (j.button === 'not held') refuse(HOLD_NOT_HELD);
+          else refuse(j.error || 'the machine refused it (HTTP ' + r.status + ')');
+        });
+    })
+    .catch(function () {
+      if (holdReq === o) refuse('no answer from the machine');
+    });
+}
 /* Every setting back to a fresh install: the daemon leaves the request
  * and restarts the machine, and the boot carries it out. It takes the
  * machine button held while OK is pressed. */
 function doReset() {
-  if (
-    !confirm(
-      'Reset all settings and restart?\n\nYour account, every setting, the setup record, the API tokens and every extension package are removed, and the setup runs again.\n\nHold the machine button, then press OK.'
-    )
-  )
+  /* A job waiting for the press would take the hold as its own. */
+  if (CL && CL.armed) {
+    $('msg-reset').textContent = HOLD_JOB_WAITS;
     return;
-  fx('/system/reset?confirm=1', { method: 'POST' })
-    .then(function (r) {
-      return r.json();
-    })
-    .then(function (j) {
-      if (!j.rebooting) {
-        $('msg-reset').textContent = j.error || '?';
-        return;
-      }
+  }
+  $('msg-reset').textContent = '';
+  holdConfirm({
+    title: 'Reset all settings and restart?',
+    body: [
+      'Your account, every setting, the setup record, the API tokens and every extension package are removed, and the setup runs again.'
+    ],
+    send: function () {
+      return fx('/system/reset?confirm=1', { method: 'POST' });
+    },
+    done: function () {
       $('msg-reset').textContent = 'restarting\u2026 the setup opens when the machine is back';
       waitBack($('msg-reset'));
-    });
+    }
+  });
 }
 /* The machine goes down, then comes back: then the browser opens "/",
  * which serves what the machine now wants (after a reset, the setup).
@@ -2303,16 +2505,23 @@ function jobPoll() {
           j.result &&
           j.result.ok === false &&
           String(j.result.error || '').indexOf('confirm_unsigned') >= 0 &&
-          lastApply &&
-          confirm('The archive is not signed with the release key.\nInstall it anyway?')
+          lastApply
         ) {
-          startJob(
-            '/update/apply',
-            'file=' + lastApply.f + '&slot=' + lastApply.s + '&confirm_unsigned=1',
-            'msg-up'
-          );
+          var la = lastApply;
           lastApply = null;
-          return;
+          holdConfirm({
+            title: 'Install unsigned firmware?',
+            body: ['The archive is not signed with the release key. Install it anyway?'],
+            send: function () {
+              return fx('/update/apply?file=' + la.f + '&slot=' + la.s + '&confirm_unsigned=1', {
+                method: 'POST'
+              });
+            },
+            done: function (r) {
+              if (r.started) jobPoll();
+              else $('msg-up').textContent = r.error || '?';
+            }
+          });
         }
         g = j.result
           ? j.result.ok

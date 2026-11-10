@@ -88,6 +88,8 @@
         <a href="/setup" data-nolock="1">Continue the setup</a>
         &middot; <a href="#" onclick="dismissSetupBanner(); return false;" data-nolock="1">Dismiss</a>
       </div>
+      <div id="attn-banner" class="banner banner-bad" style="display: none"></div>
+      <div id="notice-banner" class="banner" style="display: none"></div>
       <section id="s-status">
         <div id="gate-banner" class="banner banner-bad" style="display: none"></div>
         <div id="gfsvc-banner" class="banner" style="display: none"></div>
@@ -305,6 +307,25 @@
             <div class="frow">
               <label for="cool_temp_start">Warm-up gate<span class="u utemp">&deg;C</span></label
               ><input class="form-control form-control-sm" id="cool_temp_start" inputmode="decimal" placeholder="16" />
+            </div>
+            <div class="frow">
+              <label for="cool_flow_watch">Coolant flow watch</label
+              ><select class="form-select form-select-sm" id="cool_flow_watch">
+                <option value="0">Off</option>
+                <option value="1">On, log only</option>
+              </select>
+            </div>
+            <div class="frow">
+              <label for="cool_flow_hold_c">Flow watch step<span class="u">&deg;C</span></label
+              ><input class="form-control form-control-sm" id="cool_flow_hold_c" inputmode="decimal" placeholder="1.0" />
+            </div>
+            <div class="frow">
+              <label for="cool_flow_duty_min">Flow watch heater min<span class="u">%</span></label
+              ><input class="form-control form-control-sm" id="cool_flow_duty_min" inputmode="decimal" placeholder="0" />
+            </div>
+            <div class="frow">
+              <label for="cool_flow_duty_max">Flow watch heater max<span class="u">%</span></label
+              ><input class="form-control form-control-sm" id="cool_flow_duty_max" inputmode="decimal" placeholder="15" />
             </div>
             <div class="frow">
               <label for="cool_tec_present">TEC (Pro chiller)</label
@@ -939,6 +960,24 @@
             <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Stay here</button
             ><button type="button" class="btn btn-sm btn-outline-danger" id="guard-discard">Discard and leave</button
             ><button type="button" class="btn btn-sm btn-primary" id="guard-save">Save and leave</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal fade" id="holdmodal" tabindex="-1" aria-labelledby="hold-title" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="hold-title"></h5>
+          </div>
+          <div class="modal-body">
+            <div id="hold-body"></div>
+            <p><b>Hold the machine's button, then press OK.</b></p>
+            <div class="banner banner-bad" id="hold-err" style="display: none"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="hold-cancel" data-bs-dismiss="modal">Cancel</button
+            ><button type="button" class="btn btn-sm btn-danger" id="hold-ok" onclick="holdGo()">OK</button>
           </div>
         </div>
       </div>

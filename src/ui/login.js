@@ -37,10 +37,17 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString()
     })
+      /* An answer whose body is not JSON is still an answer: the
+       * refusal reads "sign-in failed", never "no answer". */
       .then(function (r) {
-        return r.json().then(function (j) {
-          return { ok: r.ok, status: r.status, j: j };
-        });
+        return r
+          .json()
+          .catch(function () {
+            return null;
+          })
+          .then(function (j) {
+            return { ok: r.ok, status: r.status, j: j };
+          });
       })
       .then(function (x) {
         if (x.ok) {

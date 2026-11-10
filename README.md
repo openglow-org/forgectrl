@@ -22,7 +22,7 @@ truth for this project. This README is an index card.
 | Subject | Page |
 |---|---|
 | The machine-services contract: the switch map, the safety readbacks, telemetry, mode supervision, pulse-device ownership, the hardware ownership table | [forgectrl](https://docs.forgefirm.org/technical/forgefirm/forgectrl/) |
-| The cooling engine: the gates, flow verification, the job-state reports, the verdict file | [Cooling engine](https://docs.forgefirm.org/technical/forgefirm/cooling-engine/) |
+| The cooling engine: the gates, the coolant flow watch, the job-state reports, the verdict file | [Cooling engine](https://docs.forgefirm.org/technical/forgefirm/cooling-engine/) |
 | The cameras: the privacy gate, the encoders, the demosaic, the sensor profile | [Video pipeline](https://docs.forgefirm.org/technical/forgefirm/video-pipeline/) |
 | Logging: the emitters, the tree, the levels, the export sanitizer | [Logging](https://docs.forgefirm.org/technical/forgefirm/logging/) |
 | The update manager | [Install and update](https://docs.forgefirm.org/technical/forgefirm/install-and-update/) |

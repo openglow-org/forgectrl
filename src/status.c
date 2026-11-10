@@ -145,10 +145,16 @@ __attribute__((weak)) long cool_coolant_offset_counts(void)
 
 double coolant_degc(long raw)
 {
+    return coolant_degc_counts((double)raw);
+}
+
+/* The same conversion for a fractional count (the sampler's means). */
+double coolant_degc_counts(double raw)
+{
     static const double adc_f = 1024.0 * 1.3;
-    if (raw <= 0 || (double)raw >= adc_f)
+    if (raw <= 0.0 || raw >= adc_f)
         return -273.15;
-    double r = 10000.0 / (adc_f / (double)raw - 1.0);
+    double r = 10000.0 / (adc_f / raw - 1.0);
     double rinf = 10000.0 * exp(-3380.0 / 298.15);
     return 3380.0 / log(r / rinf) - 273.15;
 }
@@ -253,7 +259,9 @@ static int read_position(double *x, double *y, double *z, int *homed,
 static pthread_mutex_t sw_mu = PTHREAD_MUTEX_INITIALIZER;
 static int sw_fd = -1;
 
-static unsigned long read_switches(void)
+/* The switch word into *bits: 0, or -1 with *bits 0 when the device
+ * could not be read. */
+static int read_switch_word(unsigned long *bits)
 {
     uint8_t buf[2] = {0};
     pthread_mutex_lock(&sw_mu);
@@ -274,12 +282,25 @@ static unsigned long read_switches(void)
         }
     }
     pthread_mutex_unlock(&sw_mu);
-    return ok ? (buf[0] | ((unsigned long)buf[1] << 8)) : 0;
+    *bits = ok ? (buf[0] | ((unsigned long)buf[1] << 8)) : 0;
+    return ok ? 0 : -1;
+}
+
+static unsigned long read_switches(void)
+{
+    unsigned long bits;
+    read_switch_word(&bits);
+    return bits;
 }
 
 unsigned long machine_switch_bits(void)
 {
     return read_switches();
+}
+
+int machine_switch_read(unsigned long *bits)
+{
+    return read_switch_word(bits);
 }
 
 machine_switches_t machine_switches_decode(unsigned long bits)

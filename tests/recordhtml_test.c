@@ -148,6 +148,18 @@ int main(void)
     free(page);
     json_decref(gone);
 
+    /* a seeded record's press is marked as nobody's; a person's is not */
+    json_t *seeded = json_deep_copy(rec);
+    page = record_html(seeded, docs, wiz, "0.0.1-dev");
+    CHECK(page && !strstr(page, "not pressed"), "a press a person made is not marked");
+    free(page);
+    json_object_set_new(seeded, "seeded", json_string("2026-09-04T20:02:00Z"));
+    page = record_html(seeded, docs, wiz, "0.0.1-dev");
+    CHECK(page && strstr(page, "2026-09-04T20:03:00Z (seeded, not pressed)"),
+          "a seeded record's press says it was seeded, not pressed");
+    free(page);
+    json_decref(seeded);
+
     /* a record whose values carry markup */
     json_t *hostile = json_pack("{s:s,s:{s:{s:i,s:s,s:{s:s}}}}", "sheet_id", "<b>x</b>",
                                 "wizards", "sensors", "version", 1, "completed", "t",

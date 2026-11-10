@@ -22,10 +22,24 @@
  *   E. the beat: every 60 s at idle, every 10 s in a session, at once on
  *      a phase change
  *   F. the clock: a step past 2 s is a step, a drift is not
+ *   G. the flight recorder's budget: six dumps an hour for the alarm tier
+ *      and six for the rest, so a flapping warning never costs an alarm its
+ *      dump
+ *
+ * And the logger itself (senslog.c by inclusion, the machine's reads and
+ * the log line stood in for):
+ *
+ *   H. a stop writes the dump an event still waits for, once, with the
+ *      samples the ring holds
+ *   I. a switch device that could not be read is "-", never a word of zeros
  */
-#include "../src/senslogfmt.h"
+/* The logger's own context is named apart from this file's. */
+#define ctx logger_ctx
+#include "../src/senslog.c"
+#undef ctx
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,7 +257,8 @@ static void widest(void)
 
     senslog_job_t job;
     memset(&job, 0, sizeof(job));
-    job.seq = 4294967295UL; job.start_mono = 4294967.9; job.end = "new-session";
+    job.seq = 4294967295UL; job.start_mono = 4294967.9;
+    snprintf(job.end, sizeof(job.end), "new-session");
     job.run_s = job.cool_s = job.armed_s = job.lit_s = job.hv_sat_s = job.thr_s = 4294967;
     job.hv_dose = 4.3e9;
     job.down_start = job.up_start = job.down_end = job.up_end = job.down_last = job.up_last = -273.15;
@@ -345,6 +360,131 @@ static void clock_step(void)
     CHECK(senslog_clock_stepped(1000.0, 1793385000.0), "the clock set from 1970 is");
 }
 
+static void budget(void)
+{
+    printf("G. the flight recorder's budget\n");
+    CHECK(senslog_fr_alarm("verdict CRASH: head accelerometer") && senslog_fr_alarm("controller silent while armed")
+              && senslog_fr_alarm("stepper driver fault reported (mask 2)"),
+          "a crash, a silent controller and a driver fault are of the alarm tier");
+    CHECK(!senslog_fr_alarm("verdict AIRFLOW: exhaust") && !senslog_fr_alarm("SoC throttled: CPU cooling state 1")
+              && !senslog_fr_alarm(NULL), "a pause-tier verdict and a throttle are not");
+    senslog_fr_budget_t b;
+    memset(&b, 0, sizeof(b));
+    int took = 0;
+    for (int i = 0; i < 10; i++)
+        took += senslog_fr_admit(&b, 100.0 + i, 0);
+    CHECK(took == SENSLOG_FR_PER_HOUR, "a flapping warning gets six dumps in its hour");
+    CHECK(senslog_fr_admit(&b, 120.0, 1), "and an alarm after it still gets its own");
+    CHECK(senslog_fr_admit(&b, 100.0 + 3600.0, 0), "an hour on, the warnings have their budget again");
+}
+
+/* ------------------------------------------------- the logger's stand-ins */
+
+/* The sensors log: every line the logger writes, in order. */
+static pthread_mutex_t log_mu = PTHREAD_MUTEX_INITIALIZER;
+static char logged[96][LINE_MAX_B];
+static int nlogged;
+
+void fflog_ch(int c, int prio, const char *fmt, ...)
+{
+    (void)c;
+    (void)prio;
+    pthread_mutex_lock(&log_mu);
+    if (nlogged < (int)(sizeof(logged) / sizeof(*logged))) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(logged[nlogged++], sizeof(logged[0]), fmt, ap);
+        va_end(ap);
+    }
+    pthread_mutex_unlock(&log_mu);
+}
+
+/* The lines that start with a record type, and the last of them. */
+static int logged_of(const char *type, char *last, size_t len)
+{
+    int n = 0;
+    size_t tl = strlen(type);
+    pthread_mutex_lock(&log_mu);
+    for (int i = 0; i < nlogged; i++)
+        if (!strncmp(logged[i], type, tl) && logged[i][tl] == ' ') {
+            n++;
+            if (last && len)
+                snprintf(last, len, "%.*s", (int)len - 1, logged[i]);
+        }
+    pthread_mutex_unlock(&log_mu);
+    return n;
+}
+
+int fflog_channel(const char *name) { (void)name; return 0; }
+unsigned long fflog_dropped(void) { return 0; }
+void fflog(int prio, const char *fmt, ...) { (void)prio; (void)fmt; }
+double airflow_rpm(long period, double units_per_second, int pulses_per_rev)
+{
+    (void)period; (void)units_per_second; (void)pulses_per_rev;
+    return 0;
+}
+void cool_view(cool_view_t *v)
+{
+    memset(v, 0, sizeof(*v));
+    snprintf(v->phase, sizeof(v->phase), "idle");
+    snprintf(v->verdict, sizeof(v->verdict), "OK");
+    v->fire_ok = 1;
+}
+double cool_coolant_c(long raw) { return (double)raw; }
+double cool_tick_max_ms(void) { return 1; }
+void cool_settings_in_force(char *buf, size_t len) { if (len) buf[0] = '\0'; }
+void read_fw_version(char *buf, size_t len) { snprintf(buf, len, "test"); }
+int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
+void setup_machine_str(const char *key, char *buf, size_t len) { (void)key; if (len) buf[0] = '\0'; }
+int setup_machine_bool(const char *key) { (void)key; return -1; }
+double chassis_degc(void) { return -273.15; }
+double soc_degc(void) { return -273.15; }
+long soc_throttle_state(void) { return -1; }
+
+static int sw_unread;                   /* the switch device cannot be read */
+static unsigned long sw_word;
+int machine_switch_read(unsigned long *bits)
+{
+    *bits = sw_unread ? 0 : sw_word;
+    return sw_unread ? -1 : 0;
+}
+
+static void stop_dump(void)
+{
+    printf("H. a stop writes the dump an event still waits for\n");
+    char line[LINE_MAX_B] = "";
+    senslog_start();
+    /* The thread's first second is in the ring once its first beat is out. */
+    for (int i = 0; i < 300 && !logged_of("beat", NULL, 0); i++)
+        usleep(10000);
+    CHECK(logged_of("beat", NULL, 0) == 1, "the logger runs: its first beat is written");
+    senslog_event("verdict FIRE: a stop inside the window");
+    CHECK(logged_of("fr", NULL, 0) == 0, "the event's dump waits out its window");
+    senslog_stop();
+    CHECK(logged_of("fr", line, sizeof(line)) == 1 && strstr(line, " msg=verdict FIRE: a stop inside the window"),
+          "the stop writes the dump, the event named");
+    CHECK(logged_of("frc", line, sizeof(line)) == senslog_fr_channels() && !strstr(line, " n=0 "),
+          "with every channel, and the samples the ring holds");
+    senslog_stop();
+    CHECK(logged_of("fr", NULL, 0) == 1, "once: a second stop writes nothing");
+}
+
+static void unread_switch(void)
+{
+    printf("I. a switch device that could not be read is \"-\"\n");
+    char line[LINE_MAX_B];
+    senslog_sample_t s;
+    cpu_ctr_t cpu = {0};
+    sw_unread = 1;
+    sample(&s, &cpu);
+    CHECK(senslog_fmt_beat(line, sizeof(line), &ctx, &s) > 0 && strstr(line, " sw=- "),
+          "unread: sw=-, not a word that says the lid is open");
+    sw_unread = 0;
+    sw_word = 0x28;
+    sample(&s, &cpu);
+    CHECK(senslog_fmt_beat(line, sizeof(line), &ctx, &s) > 0 && strstr(line, " sw=0x28 "), "read: the word");
+}
+
 int main(void)
 {
     golden_check();
@@ -353,6 +493,9 @@ int main(void)
     recorder();
     cadence();
     clock_step();
+    budget();
+    stop_dump();
+    unread_switch();
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

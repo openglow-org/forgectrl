@@ -413,7 +413,8 @@ SETTINGS_KEYS = (
     'wifi_country',
     'cool_aa_offset_counts',
     'cool_temp_max', 'cool_temp_resume', 'cool_temp_critical_c',
-    'cool_temp_min', 'cool_temp_start', 'cool_tec_present',
+    'cool_temp_min', 'cool_temp_start', 'cool_tec_present', 'cool_flow_watch',
+    'cool_flow_hold_c', 'cool_flow_duty_min', 'cool_flow_duty_max',
     'cool_temp_offset_c',
     'cool_tec_on_c', 'cool_tec_off_c',
     'cool_fire_q1_alert', 'cool_fire_q1_critical',
@@ -451,6 +452,7 @@ SETTING_CHOICES = {
     'homing_mode': ('none', 'gfcloud', 'manual', 'switches'),
     'ui_units': ('metric', 'imperial'),
     'cool_tec_present': ('0', '1'),
+    'cool_flow_watch': ('0', '1'),
     'cool_intake_fans': ('1', '2'),
     'lid_policy': ('cancel', 'hold'),
     'xy_microsteps': ('8', '16', '32'),
@@ -756,7 +758,11 @@ class Mock:
     the token check.
 
     GF_MOCK_BUTTON=1 in the environment holds the machine button down
-    (the fuse-identity viewer needs an operator at the machine)."""
+    (the fuse-identity viewer, the reset of every setting and an unsigned
+    install need an operator at the machine). GF_MOCK_UNSIGNED=1 makes an
+    uploaded firmware archive one the release key did not sign: the
+    upload says so, and its install is refused until it is asked for with
+    confirm_unsigned=1 and the button held."""
 
     # The gate settings, one row per line of the table in src/gates.c:
     # key, the gate name /status reports (None for a key that tunes a
@@ -810,6 +816,8 @@ class Mock:
         self.report_at = self.t0
         self.rep_armed = False
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
+        self.upload_unsigned = False    # the staged upload is not signed with the release key
+        self.cool_demo = os.environ.get('GF_MOCK_COOL', '')
         # The setup record (GET /wiz): the mock starts with the setup complete
         # unless GF_MOCK_FIRST_RUN=1, so the panel is what the dev server
         # shows by default and the wizard on request.
@@ -1052,6 +1060,19 @@ class Mock:
 
     def idle(self):
         return self.status['state'] == 'idle'
+
+    def job_takes_button(self):
+        """main.c's job_takes_button: the refusal of a route that asks for
+        the machine button held, while a job would take the hold as its
+        own press, or None. An armed window (the controller's report), the
+        GRBL controller's own wait for the press, or a GRBL job running or
+        paused."""
+        g = self.grbl_report if self.mode == 'grbl' and self.controller == 'running' else None
+        if self.rep_armed or (g and g['laser'].get('arming')):
+            return 'a job waits for the button press: cancel it first'
+        if g and g['state'] in ('Run', 'Hold'):
+            return 'a job is running or paused: finish or cancel it first'
+        return None
 
     # The machine lease (src/lease.c): who has the machine, in the daemon's
     # order of nesting (a diagnostic under its wizard is the innermost), and
@@ -1509,9 +1530,26 @@ class Mock:
             round(time.time() - self.report_at, 1)
         watching = any(self.gate(k) > 0 for k in FIRE_GATES)
         c = self.status['coolant']
+        # GF_MOCK_COOL picks what the panel shows: live (a failure that still
+        # stands), ack (one waiting for its acknowledgment) or notice (a fault
+        # that cleared on its own). Unset, nothing.
+        demo = self.cool_demo
+        now = time.time()
+        reason = 'AIRFLOW: exhaust fan below its floor (5120 rpm, floor 6400) - fire blocked, hold' \
+            if demo in ('live', 'ack') else ''
+        attention = {'standing': demo in ('live', 'ack'), 'live': demo == 'live',
+                     'verdict': 'AIRFLOW' if reason else '', 'reason': reason,
+                     'at': round(now - 300) if reason else 0,
+                     'cleared_at': round(now - 60) if demo == 'ack' else 0}
+        notices = [{'seq': 1, 'verdict': 'BUMP',
+                    'reason': 'BUMP: head accelerometer x 140 over 132 - fire blocked, hold',
+                    'at': round(now - 300), 'cleared_at': round(now - 290), 'times': 2}] \
+            if demo == 'notice' else []
+        verdict = {'live': 'AIRFLOW', 'ack': 'ACK'}.get(demo, 'OK')
         return {
-            'phase': 'idle', 'verdict': 'OK', 'fire_ok': True,
-            'hold': False, 'resume_ok': True, 'reason': '',
+            'phase': 'idle', 'verdict': verdict, 'fire_ok': verdict == 'OK',
+            'hold': False, 'resume_ok': True, 'reason': reason,
+            'attention': attention, 'notices': notices,
             'down_c': c['down_c'], 'up_c': c['up_c'],
             'report_age_s': age, 'armed': self.rep_armed,
             'fire_watch': 'armed' if watching else 'watch',
@@ -1643,6 +1681,7 @@ class Mock:
     TOKENS_MAX = 16
     ROUTE_CAPS = {
         ('GET', '/status'): 'machine.read', ('GET', '/cool/status'): 'machine.read',
+        ('GET', '/cool/flow'): 'machine.read',
         ('GET', '/mode'): 'machine.read', ('GET', '/grbl/settings'): 'machine.read',
         ('GET', '/motion/state'): 'machine.read', ('GET', '/job'): 'machine.read',
         ('GET', '/events'): 'events',
@@ -1692,6 +1731,9 @@ class Mock:
                   'runtime': 'python', 'capabilities': ['hold', 'machine.read', 'storage:4'], 'modes': ['grbl', 'cloud']}
 
     def ext_key_post(self, path, form, J, T):
+        # a key is added with the button held: a job that would take the hold is refused first
+        if not path.endswith('/remove') and self.job_takes_button():
+            return T(409, self.job_takes_button())
         name = form.get('name', '')
         if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,47}', name):
             return T(400, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes")
@@ -1840,6 +1882,9 @@ class Mock:
             return T(409, self.lease_refusal())
         if not self.idle():
             return T(409, 'the machine is not idle')
+        # the button held is the consent for an unverified package: a job that would take the hold is refused
+        if self.job_takes_button():
+            return T(409, self.job_takes_button())
         grants = [g for g in form.get('grants', '').split(',')] if form.get('grants') else []
         if len(grants) > 8 or not all(re.fullmatch(r'[a-z_.]{1,40}', g) for g in grants):
             return T(400, 'grants is a comma-separated list of at most 8 capability names')
@@ -2257,12 +2302,16 @@ class Mock:
                 'present': True, 'bytes': 87654321, 'version': MOCK_RELEASE}
             result = {'ok': True, 'file': 'download',
                       'version': MOCK_RELEASE, 'bytes': 87654321}
+        elif u['kind'] == 'apply' and a['file'] == 'upload' and self.upload_unsigned and not a.get('unsigned'):
+            # an archive the release key did not sign, and no consent for it: nothing is written
+            result = {'ok': False, 'error': 'archive is not signed with the ForgeFIRM release key '
+                                            '(confirm_unsigned=1 to apply anyway)'}
         elif u['kind'] == 'apply':
             ver = self.slots['staged'][a['file']]['version']
             slots[a['slot']].update({'type': 'forgefirm', 'version': ver,
                                      'state': 'ok', 'kernel': 'yes'})
             result = {'ok': True, 'slot': a['slot'], 'version': ver,
-                      'signed': True}
+                      'signed': not (a['file'] == 'upload' and self.upload_unsigned)}
         elif u['kind'] == 'factory-return':
             ver = a['archive']['version']
             slots[a['slot']].update({'type': 'factory', 'version': 'v' + ver,
@@ -2688,6 +2737,15 @@ class Mock:
                 return J(200, self.diag)
             if path == '/cool/status':
                 return J(200, self.cool_reply())
+            if path == '/cool/flow':
+                on = self.settings.get('cool_flow_watch') == '1'
+                return J(200, {'watch': 'hold' if on else 'off', 'halted': False, 'why': '',
+                               'duty': 3.31 if on else None,
+                               'duty_10s': 3.30 if on else None, 'ref': 3.32 if on else None,
+                               'fall': 0.004 if on else None, 'rest_c': 0.012 if on else None,
+                               'hold_c': float(self.settings.get('cool_flow_hold_c') or 1.0),
+                               'duty_min': float(self.settings.get('cool_flow_duty_min') or 0.0),
+                               'duty_max': float(self.settings.get('cool_flow_duty_max') or 15.0)})
             if path == '/slots':
                 return J(200, self.slots)
             if path == '/update/status':
@@ -2708,6 +2766,8 @@ class Mock:
                     return T(404, 'unknown logger')
                 return J(200, tail)
             if path == '/fuse-identity':
+                if self.job_takes_button():
+                    return T(409, self.job_takes_button())
                 if not self.button:
                     return T(403, 'hold the machine button to reveal the '
                                   'fuse identity')
@@ -2825,6 +2885,17 @@ class Mock:
 
         # The quiet hold for a listening (the bench tools): every fan off,
         # with pump=1 the pump and the TEC too; idle machine only.
+        if path == '/cool/attention/ack':
+            if self.cool_demo == 'live':
+                return T(409, 'the failure still stands')
+            if self.cool_demo == 'ack':
+                self.cool_demo = ''
+            return J(200, {'acknowledged': True})
+        if path == '/cool/notices/dismiss':
+            if self.cool_demo == 'notice':
+                self.cool_demo = ''
+            return J(200, {'dismissed': True})
+
         if path == '/cool/quiet':
             on = form.get('on')
             pump = form.get('pump')
@@ -3045,6 +3116,34 @@ class Mock:
                       % MOCK_REBOOT_S)
             self.down_until = time.time() + 1.5 + MOCK_REBOOT_S
             return J(200, {'rebooting': True})
+        if path == '/system/reset':
+            # update.c's order: confirm, the lease, an idle machine, a job
+            # that would take the button hold, an update job, the next
+            # boot (slotcalc.c: it must come back to the booted slot), and
+            # the button last (its refusal names it). The mock keeps its
+            # settings.
+            if form.get('confirm') != '1':
+                return J(400, {'error': 'confirm=1 required'})
+            if self.lease_refusal():
+                return J(409, {'error': self.lease_refusal()})
+            if not self.idle():
+                return J(409, {'error': 'machine is not idle'})
+            if self.job_takes_button():
+                return J(409, {'error': self.job_takes_button()})
+            if self.update['running']:
+                return J(409, {'error': 'an update job is running'})
+            booted = [k for k, s in self.slots['slots'].items() if s.get('booted')]
+            if not booted:
+                return J(409, {'error': 'the next boot cannot be read'})
+            if [k for k, s in self.slots['slots'].items() if s.get('next')][:1] != booted[:1]:
+                return J(409, {'error': 'the next boot is set to the other slot: set it back to this one first'})
+            if not self.button:
+                return J(403, {'error': 'hold the machine button to reset every setting',
+                               'button': 'not held'})
+            self._log('system: every setting is reset at the next boot '
+                      '(mock: down for %d s, nothing reset)' % MOCK_REBOOT_S)
+            self.down_until = time.time() + 1.5 + MOCK_REBOOT_S
+            return J(200, {'rebooting': True, 'reset': True})
         if path == '/update/check':
             self.rel_checked = int(time.time())
             return J(200, self.release_reply())
@@ -3062,22 +3161,36 @@ class Mock:
                 return J(400, {'error': 'probe is 1 or 0'})
             return self._job_start('download', {'probe': probe == '1'}, J)
         if path == '/update/apply':
-            slot, err = self._slot_target(form, J)
-            if err:
-                return err
+            # update.c's order: the slot's name, the file, the staged
+            # archive, the consent for an unsigned one (a job that would
+            # take the button hold, then the button), the slot's guards.
+            if form.get('slot', '') not in ('a', 'b') or form.get('slot') not in self.slots['slots']:
+                return J(400, {'error': 'slot must be a or b'})
             f = form.get('file', '')
             if f not in ('download', 'upload'):
                 return J(400, {'error': 'file must be download or upload'})
             if not self.slots['staged'][f]['present']:
                 return J(404, {'error': 'staged archive not found'})
-            return self._job_start('apply', {'slot': slot, 'file': f}, J)
+            unsigned = form.get('confirm_unsigned') == '1'
+            if unsigned:
+                if self.job_takes_button():
+                    return J(409, {'error': self.job_takes_button()})
+                if not self.button:
+                    return J(403, {'error': 'hold the machine button to install unsigned firmware',
+                                   'button': 'not held'})
+            slot, err = self._slot_target(form, J)
+            if err:
+                return err
+            return self._job_start('apply', {'slot': slot, 'file': f, 'unsigned': unsigned}, J)
         if path == '/update/upload':
             if self.lease_refusal():
                 return J(400, {'error': self.lease_refusal()})
             self.slots['staged']['upload'] = {
                 'present': True, 'bytes': len(body), 'version': MOCK_RELEASE}
+            self.upload_unsigned = os.environ.get('GF_MOCK_UNSIGNED') == '1'
             return J(200, {'ok': True, 'file': 'upload', 'bytes': len(body),
-                           'version': MOCK_RELEASE, 'signature': 'forgefirm'})
+                           'version': MOCK_RELEASE,
+                           'signature': 'unsigned' if self.upload_unsigned else 'forgefirm'})
         if path == '/restore/factory':
             slot, err = self._slot_target(form, J)
             if err:

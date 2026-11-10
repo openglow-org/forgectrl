@@ -65,16 +65,24 @@ int coolfmt_status(char *buf, size_t len, const coolfmt_status_t *s)
                      "{\"phase\":\"%s\",\"verdict\":\"%s\",\"fire_ok\":%s,"
                      "\"hold\":%s,\"resume_ok\":%s,"
                      "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f,"
-                     "\"report_age_s\":%.1f,\"armed\":%s,\"fire_watch\":\"%s\","
+                     "\"report_age_s\":%.1f,\"armed\":%s,\"ack_wait\":%s,\"fire_watch\":\"%s\","
                      "\"accel_watch\":\"%s\",\"quiet_hold\":%s,"
-                     "\"gates_off\":%s,\"limits\":%s,\"fan_gates\":%s}",
+                     "\"gates_off\":%s,\"limits\":%s,\"fan_gates\":%s,"
+                     "\"attention\":{\"standing\":%s,\"live\":%s,\"verdict\":\"%s\","
+                     "\"reason\":\"%s\",\"at\":%.0f,\"cleared_at\":%.0f},"
+                     "\"notices\":%s}",
                      s->phase, s->verdict, s->fire_ok ? "true" : "false",
                      s->hold ? "true" : "false", s->hold ? "false" : "true",
                      s->reason, s->down_c, s->up_c,
-                     s->report_age_s, s->armed ? "true" : "false", s->fire_watch,
+                     s->report_age_s, s->armed ? "true" : "false",
+                     s->attn_standing && !s->attn_live ? "true" : "false", s->fire_watch,
                      s->accel_watch ? s->accel_watch : "watch",
                      s->quiet_hold ? "true" : "false",
-                     s->gates_off, s->limits, s->fan_gates);
+                     s->gates_off, s->limits, s->fan_gates,
+                     s->attn_standing ? "true" : "false", s->attn_live ? "true" : "false",
+                     s->attn_verdict ? s->attn_verdict : "",
+                     s->attn_reason ? s->attn_reason : "", s->attn_at, s->attn_cleared_at,
+                     s->notices ? s->notices : "[]");
     return n < 0 || (size_t)n >= len ? -1 : 0;
 }
 

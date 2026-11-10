@@ -31,15 +31,18 @@
  */
 #define _GNU_SOURCE
 #include "update.h"
+#include "slotcalc.h"
 #include "fwproduct.h"
 #include "auth.h"
 #include "diag.h"
 #include "fflog.h"
+#include "hooks.h"
 #include "lease.h"
 #include "paths.h"
 #include "relcheck.h"
 #include "settings.h"
 #include "status.h"
+#include "testhook.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -553,6 +556,43 @@ static void bput(char *buf, size_t size, size_t *off, const char *fmt, ...)
         *off = size - 1;
 }
 
+/* The slot inventory as `ffboot -l` prints it, into buf: 0, or -1 when
+ * ffboot could not be run. In a host-test run the test hook GF_SLOT_LIST
+ * names a file that holds it (testhook.h). */
+static int slot_list(char *buf, size_t len)
+{
+    const char *hook = ff_test_hook("GF_SLOT_LIST");
+    FILE *p = hook ? fopen(hook, "r") : popen(FFBOOT " -l 2>/dev/null", "r");
+    if (!p)
+        return -1;
+    size_t n = fread(buf, 1, len - 1, p);
+    buf[n] = '\0';
+    if (hook)
+        fclose(p);
+    else
+        pclose(p);
+    return 0;
+}
+
+/* Schedule a reboot delay_s seconds on, so the reply goes out first: 0,
+ * or -1 when it could not be scheduled. In a host-test run the test hook
+ * GF_REBOOT_FILE names a file the reboot is written to in its place
+ * (testhook.h). */
+static int schedule_reboot(int delay_s)
+{
+    const char *hook = ff_test_hook("GF_REBOOT_FILE");
+    if (hook) {
+        FILE *f = fopen(hook, "a");
+        if (!f)
+            return -1;
+        fprintf(f, "reboot in %d s\n", delay_s);
+        return fclose(f) == 0 ? 0 : -1;
+    }
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "(sleep %d; reboot) >/dev/null 2>&1 &", delay_s);
+    return system(cmd) == 0 ? 0 : -1;
+}
+
 /* Is this slot the one the saved environment boots next (ffboot -l)?
  * A write into the next-boot slot has no revert behind it: a failed
  * or interrupted write there leaves the next boot on a half-written
@@ -560,12 +600,8 @@ static void bput(char *buf, size_t size, size_t *off, const char *fmt, ...)
 static int slot_is_next(const struct slot_target *t)
 {
     char raw[4096];
-    FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
-    if (!p)
+    if (slot_list(raw, sizeof(raw)) != 0)
         return 1;
-    size_t n = fread(raw, 1, sizeof(raw) - 1, p);
-    raw[n] = '\0';
-    pclose(p);
     char key[48];
     snprintf(key, sizeof(key), "slot.%s.next=", t->name);
     return strstr(raw, key) != NULL;
@@ -594,12 +630,8 @@ int cb_slots(const struct _u_request *req, struct _u_response *res,
     }
 
     char raw[4096];
-    FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
-    if (!p)
+    if (slot_list(raw, sizeof(raw)) != 0)
         return reply_err(res, 500, "cannot run ffboot");
-    size_t n = fread(raw, 1, sizeof(raw) - 1, p);
-    raw[n] = '\0';
-    pclose(p);
 
     char env_json[512] = "";
     size_t eo = 0;
@@ -801,7 +833,7 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
         return reply_err(res, 400, "confirm=1 required");
     fflog(LOG_NOTICE, "update: rebooting on request");
     sync();
-    if (system("(sleep 1; reboot) >/dev/null 2>&1 &") != 0)
+    if (schedule_reboot(1) != 0)
         return reply_err(res, 500, "cannot schedule reboot");
     return reply_json(res, 200, "{\"rebooting\":true}");
 }
@@ -813,7 +845,10 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
  * keys, the TLS key and certificate, the boot state); the setup then runs
  * as after an install. It takes the machine button held, as the other
  * changes that need an operator at the machine do, an idle machine, and
- * no update job or lease. */
+ * no update job or lease. Every refusal that is not the button's comes
+ * before the button is read: the operator is told to hold the button only
+ * when the hold is all that is missing, and never while a job would take
+ * the hold as its own press. */
 int cb_system_reset(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
 {
@@ -823,15 +858,30 @@ int cb_system_reset(const struct _u_request *req, struct _u_response *res,
     const char *c = param(req, "confirm");
     if (!c || strcmp(c, "1"))
         return reply_err(res, 400, "confirm=1 required");
-    if (!operator_present())
-        return reply_err(res, 403, "hold the machine button to reset every setting");
     char held[128];
     if (lease_refusal(held, sizeof(held)))
         return reply_err(res, 409, held);
     if (!machine_is_idle())
         return reply_err(res, 409, "machine is not idle");
+    if (job_takes_button(held, sizeof(held)))
+        return reply_err(res, 409, held);
     if (update_job_running())
         return reply_err(res, 409, "an update job is running");
+    /* The request is the next boot's to carry out (forgefirm-data), so it
+     * is only taken when that boot comes back here: the other slot set for
+     * the next boot would leave it for some later boot to find. */
+    {
+        char inv[4096], why[96];
+        if (slot_list(inv, sizeof(inv)) != 0)
+            inv[0] = '\0';
+        if (!slots_next_boot_returns(inv, why, sizeof(why)))
+            return reply_err(res, 409, why);
+    }
+    /* "button" names the refusal for the panel's dialog, which stays open
+     * and says the button is not held. */
+    if (!operator_present())
+        return reply_json(res, 403, "{\"error\":\"hold the machine button to reset every setting\","
+                                    "\"button\":\"not held\"}");
     char path[256], ts[32], line[64];
     snprintf(path, sizeof(path), "%s/reset-requested", ff_data_dir());
     time_t now = time(NULL);
@@ -850,7 +900,7 @@ int cb_system_reset(const struct _u_request *req, struct _u_response *res,
     }
     fflog(LOG_WARNING, "update: every setting is reset at the next boot; rebooting (the button was held)");
     sync();
-    if (system("(sleep 1; reboot) >/dev/null 2>&1 &") != 0) {
+    if (schedule_reboot(1) != 0) {
         unlink(path);
         return reply_err(res, 500, "cannot schedule reboot");
     }
@@ -1244,17 +1294,6 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     const struct slot_target *t = find_target(param(req, "slot"));
     if (!t || !t->task)
         return reply_err(res, 400, "slot must be a or b");
-    if (is_booted_root(t->dev))
-        return reply_err(res, 409,
-                         "refusing to write the booted root slot");
-    if (slot_is_next(t))
-        return reply_err(res, 409,
-                         "refusing to write the slot selected for the next boot - "
-                         "point the next boot back at the running slot first");
-    if (!slot_geometry_ok(t))
-        return reply_err(res, 409,
-                         "target slot is not the 200 MiB factory geometry");
-
     const char *file = param(req, "file");
     const char *path = NULL;
     if (file && !strcmp(file, "download"))
@@ -1270,10 +1309,29 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     const char *cu = param(req, "confirm_unsigned");
     int allow_unsigned = cu && !strcmp(cu, "1");
     /* Skipping the signature check requires an operator physically at
-     * the machine, not just a token: the button must be held. */
-    if (allow_unsigned && !operator_present())
-        return reply_err(res, 403,
-            "hold the machine button to install unsigned firmware");
+     * the machine, not just a token: the button must be held. A job that
+     * would take the hold as its own press refuses it before the button
+     * is read. Both answers come before the slot's guards, which need
+     * the slot's device. */
+    if (allow_unsigned) {
+        char taken[96];
+        if (job_takes_button(taken, sizeof(taken)))
+            return reply_err(res, 409, taken);
+        if (!operator_present())
+            return reply_json(res, 403, "{\"error\":\"hold the machine button to install unsigned firmware\","
+                                        "\"button\":\"not held\"}");
+    }
+
+    if (is_booted_root(t->dev))
+        return reply_err(res, 409,
+                         "refusing to write the booted root slot");
+    if (slot_is_next(t))
+        return reply_err(res, 409,
+                         "refusing to write the slot selected for the next boot - "
+                         "point the next boot back at the running slot first");
+    if (!slot_geometry_ok(t))
+        return reply_err(res, 409,
+                         "target slot is not the 200 MiB factory geometry");
 
     struct apply_args *a = calloc(1, sizeof(*a));
     if (!a)
@@ -1558,7 +1616,7 @@ static void *factory_return_worker(void *argp)
 
     job_set_phase("rebooting into the factory firmware");
     sync();
-    if (system("(sleep 2; reboot) >/dev/null 2>&1 &") != 0) {
+    if (schedule_reboot(2) != 0) {
         job_finish("{\"ok\":false,\"error\":\"cannot schedule the reboot\"}");
         free(a);
         return NULL;
@@ -1576,12 +1634,8 @@ static void *factory_return_worker(void *argp)
 static const struct slot_target *inactive_slot(char *type, size_t tlen)
 {
     char raw[4096];
-    FILE *p = popen(FFBOOT " -l 2>/dev/null", "r");
-    if (!p)
+    if (slot_list(raw, sizeof(raw)) != 0)
         return NULL;
-    size_t n = fread(raw, 1, sizeof(raw) - 1, p);
-    raw[n] = '\0';
-    pclose(p);
     type[0] = '\0';
     const struct slot_target *pick = NULL;
     for (size_t t = 0; t < N_TARGETS; t++) {

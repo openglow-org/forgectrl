@@ -346,8 +346,13 @@ char *record_html(const json_t *rec, const json_t *docs, const json_t *wizards,
             sb_put(&b, "not accepted");
         sb_put(&b, "</td></tr>");
     }
+    /* A seeded record (the dev image's SD card) carries a press nobody made:
+     * it says so, as the documents' rows do. */
     const char *pressed = sget(json_object_get(rec, "acceptance"), "pressed_at");
-    put_row(&b, "The button press", *pressed ? pressed : "not yet");
+    char press_row[64];
+    snprintf(press_row, sizeof(press_row), "%s%s", *pressed ? pressed : "not yet",
+             *pressed && json_is_string(json_object_get(rec, "seeded")) ? " (seeded, not pressed)" : "");
+    put_row(&b, "The button press", press_row);
     sb_put(&b, "</table>\n");
 
     /* The account */

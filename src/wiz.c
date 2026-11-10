@@ -132,9 +132,40 @@ static int catalog_known(const char *id)
     return 0;
 }
 
+/* The machine the record was made on: a seeded record takes this
+ * machine's facts; one made on another machine (the dev SD card moved) asks
+ * the machine step again and recommends what a replaced head does, the lens
+ * window going with it, since every one of those was measured elsewhere. A
+ * record with no machine facts and no seed is left alone: the machine step
+ * writes them. Runs after the camera engine has resolved its sensors
+ * (cam_engine_init), so the camera fact is the sensor's name; a record
+ * whose camera fact is still unknown takes the name once the engine has
+ * it. */
+static json_t *detected_facts(void);
+static void check_machine(void)
+{
+    char id[SHEETID_LEN + 1] = "";
+    if (sheetid_get(id, sizeof(id)) == 0 && id[0]) {    /* else no serial to go by: nothing to say */
+        int rc = setup_machine_check(id, detected_facts());
+        if (rc == 1)
+            fflog(LOG_NOTICE, "wiz: the seeded record had no machine facts: this machine's are in it");
+        else if (rc == 2) {
+            fflog(LOG_WARNING, "wiz: the record was made on another machine: the machine step is asked again, "
+                  "and the lens window measured there is cleared");
+            head_window_clear();
+            setup_change_apply("head");
+        }
+    }
+    struct cam_status st;
+    cam_get_status(&st);
+    if (setup_machine_camera(st.sensor) == 1)
+        fflog(LOG_NOTICE, "wiz: the record's camera is %s", st.sensor);
+}
+
 void wiz_init(void)
 {
     setup_known_hook = catalog_known;
+    check_machine();
     check_head_change();
 }
 
@@ -432,6 +463,20 @@ int cb_wiz_record_html(const struct _u_request *req, struct _u_response *res, vo
     json_decref(wiz);
     if (!page)
         return reply_error(res, 500, "record unavailable");
+    /* A dev image's record says so, as every page does. */
+    const char *bar = page_dev_bar_inline();
+    char *body = bar[0] ? strstr(page, "<body>") : NULL;
+    if (body) {
+        size_t pre = (size_t)(body - page) + strlen("<body>");
+        char *with = malloc(strlen(page) + strlen(bar) + 1);
+        if (with) {
+            memcpy(with, page, pre);
+            strcpy(with + pre, bar);
+            strcat(with, page + pre);
+            free(page);
+            page = with;
+        }
+    }
     ulfius_add_header_to_response(res, "Content-Type", "text/html; charset=utf-8");
     ulfius_add_header_to_response(res, "Cache-Control", "no-store");
     ulfius_set_string_body_response(res, 200, page);
@@ -535,6 +580,10 @@ int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, v
         state = "pressed";
     } else if (!strcmp(state, "timeout") || !strcmp(state, "cancelled")) {
         led_release();
+    } else if (!strcmp(state, "waiting")) {
+        /* The press is still asked for: the teal, should the cooling
+         * engine's red flash have stood over it and ended dark. */
+        led_keep(LED_BREATHE_TEAL);
     }
     json_t *o = json_object();
     json_object_set_new(o, "button", json_string(state));

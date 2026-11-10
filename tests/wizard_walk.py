@@ -51,7 +51,11 @@ the page sends no second. A start refused once and pressed again starts
 once: the press cancels the first press's second start. A start refused
 once, where another client starts the diagnostic and the operator aborts
 it, never goes again: the Abort alone cancels the second start, and
-clears the press's "starting" text.
+clears the press's "starting" text. Last, the System tab's Reset all
+settings, with the mock's button not held: OK leaves the dialog open,
+saying the button is not held, and Cancel closes it with nothing reset;
+and with a job that arms while the dialog is open, OK sends nothing and
+says a job is waiting for the button press.
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -423,7 +427,66 @@ if (PLAN.diag) STEPS = STEPS.concat([
         if (s.running) throw new Error('1.7 s after the refused press, ' + s.tool + ' runs');
         if (q('#msg-d').textContent) throw new Error('after the Abort the panel shows ' + JSON.stringify(q('#msg-d').textContent)); })
       .then(function () {
-        return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }]
+        return until('the controls free', function () { return !w().D.running && !el(VERIFY).disabled; }, 10000); }); }],
+  /* The mock's button is not held (the walk clears GF_MOCK_BUTTON). A
+   * reset the mock took would take it down: /status answers after Cancel
+   * only if nothing was reset. */
+  ['the reset dialog stays open on OK while the machine button is not held, and says so; Cancel closes it, nothing reset', function () {
+    var open = function () { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); };
+    /* Bootstrap ignores a hide while the dialog is still fading in. */
+    var opened = false;
+    click('#t-system');
+    return until('the System tab', function () { return on('s-system'); })
+      .then(function () {
+        el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+        click('button[onclick="doReset()"]');
+        return until('the reset dialog', function () { return opened && open(); }); })
+      .then(function () {
+        click('#hold-ok');
+        return until('a refusal in the dialog', function () { return shown('#hold-err') && !el('#hold-ok').disabled; }, 10000); })
+      .then(function () {
+        if (!open()) throw new Error('the dialog closed on the refusal');
+        if (q('#hold-err').textContent !== w().HOLD_NOT_HELD)
+          throw new Error('the dialog says ' + JSON.stringify(q('#hold-err').textContent) + ', not that the button is not held');
+        click('#hold-cancel');
+        return until('the dialog closed', function () { return !open() && q('#holdmodal').style.display === 'none'; }, 5000); })
+      .then(function () {
+        if (q('#msg-reset').textContent) throw new Error('after Cancel the panel shows ' + JSON.stringify(q('#msg-reset').textContent));
+        return api('/status'); }); }],
+  /* The dialog can stay open a long time: a job that starts waiting for
+   * its press while it is open would take the hold OK asks for. The mock's
+   * controller reports its armed window; OK then says a job is waiting, in
+   * the page's own words (the mock's refusal has other words: the page
+   * sent nothing), and the dialog stays open. */
+  ['a job that arms while the reset dialog is open: OK sends nothing and says a job waits; the dialog stays open', function () {
+    var open = function () { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); };
+    var report = function (mode, armed) {
+      return fetch('/cool/state?mode=' + mode + '&armed=' + armed, { method: 'POST', headers: { 'X-ForgeFIRM-Report': PLAN.report } })
+        .then(function (r) { if (!r.ok) throw new Error('the mock refused the report: HTTP ' + r.status); }); };
+    var opened = false;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    /* The dialog before it is closed for the page once its backdrop has
+     * faded out, a moment after the dialog itself is gone. */
+    return until('the dialog before it wholly closed', function () { return !q('.modal-backdrop'); }, 5000)
+      .then(function () { return sleep(300); })
+      .then(function () {
+        click('button[onclick="doReset()"]');
+        return until('the reset dialog', function () { return opened && open(); }); })
+      .then(function () { return report('run', 1); })
+      .then(function () { return until('the panel reads the armed window', function () { return w().CL && w().CL.armed; }, 10000); })
+      .then(function () {
+        click('#hold-ok');
+        return until('a refusal in the dialog', function () { return shown('#hold-err') && !el('#hold-ok').disabled; }, 10000); })
+      .then(function () {
+        if (!open()) throw new Error('the dialog closed on the refusal');
+        if (q('#hold-err').textContent !== w().HOLD_JOB_WAITS)
+          throw new Error('the dialog says ' + JSON.stringify(q('#hold-err').textContent) + ', not that a job is waiting');
+        return report('idle', 0); })
+      .then(function () { return until('the panel reads the window closed', function () { return w().CL && !w().CL.armed; }, 10000); })
+      .then(function () {
+        click('#hold-cancel');
+        return until('the dialog closed', function () { return !open() && q('#holdmodal').style.display === 'none'; }, 5000); })
+      .then(function () { return api('/status'); }); }]
 ]);
 
 function run() {
@@ -573,7 +636,8 @@ def main():
         devserver.DARK_PROMPTS["airflow.intakes"] = CHECK_PROMPT
         Walk.plan = {"check": {"id": "airflow.intakes", "prompt": {"options": PROMPT_OPTIONS,
                                                                 "hostile": PROMPT_HOSTILE},
-                               "result_ms": 20000}, "logout": False, "diag": True}
+                               "result_ms": 20000}, "logout": False, "diag": True,
+                     "report": devserver.MOCK_REPORT_SECRET}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0
         Walk.cfg = types.SimpleNamespace(mock=True)

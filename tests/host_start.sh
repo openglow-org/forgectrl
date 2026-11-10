@@ -12,7 +12,9 @@
 # motors.released marker. One unauthenticated read must answer 200 and
 # say the motors are released, from both run-dir readers behind it (the
 # daemon read the hook's run directory); then the daemon is stopped, and
-# nothing may have started a controller or run iw. The daemon's start
+# nothing may have started a controller or run iw. The data directory
+# holds a setup seed and the image has no dev marker: the seed stays, no
+# record is made of it, and the setup is still a first run. The daemon's start
 # notice names the fourteen overrides set here (the three test hooks
 # among them), names only, and none that is not set. Then the daemon is
 # started again with FORGECTRL_HOST_TEST unset and the same three test
@@ -49,6 +51,12 @@ done
 # the marker the run-dir readers look for: the hook's directory has it,
 # the machine's does not
 : > "$T/run/motors.released"
+# a reset request no boot carried out: the daemon withdraws it at start
+echo "requested 2026-01-01T00:00:00Z" > "$T/data/reset-requested"
+# a setup seed, on an image with no dev marker (no GF_DEV_MARKER here, and
+# a host has no /etc/forgefirm-dev): a release image never takes one
+[ ! -e /etc/forgefirm-dev ] || { echo "host_start.sh needs a host with no /etc/forgefirm-dev"; exit 2; }
+: > "$T/data/setup.seed"
 fail() { echo "FAIL: $1"; echo "--- the daemon's output"; cat "$T/out"; exit 1; }
 # /status says whether the motors are released twice, from the two
 # run-dir readers behind it: status.c's own run_dir (the top-level key)
@@ -79,6 +87,18 @@ code=$(curl -s -o "$T/status.json" -w '%{http_code}' --retry 30 --retry-connrefu
 [ "$code" = 200 ] || fail "GET /status answered '$code', not 200"
 motors status.json true "the hook's run directory was not read"
 echo "  ok: GET /status answered 200, the motors released by the hook's run directory, both readers"
+[ ! -e "$T/data/reset-requested" ] || fail "a reset request no boot carried out is still in the folder"
+grep -q "requested and not carried out at this boot; the request is withdrawn" "$T/out"     || fail "the withdrawn reset request is not named"
+echo "  ok: a reset request no boot carried out is withdrawn at start, and named"
+# The seed on an image that is no dev image: left where it is, no record
+# made of it, and the setup still a first run with its gate closed.
+code=$(curl -s -o "$T/wiz.json" -w '%{http_code}' --max-time 10 "http://127.0.0.1:$HTTP_PORT/wiz") || true
+[ "$code" = 200 ] || fail "GET /wiz answered '$code', not 200"
+[ -e "$T/data/setup.seed" ] || fail "with no dev marker, the setup seed was taken: it is gone"
+[ ! -e "$T/data/setup.json" ] || fail "with no dev marker, a setup record was written beside the seed"
+grep -q '"first_run":true' "$T/wiz.json" && grep -q '"gate":"closed"' "$T/wiz.json" \
+    || fail "with no dev marker and a seed, the setup is not a first run with its gate closed: $(cat "$T/wiz.json")"
+echo "  ok: a setup seed with no dev marker stays, nothing is seeded, and the setup is a first run"
 
 kill $PID
 i=0

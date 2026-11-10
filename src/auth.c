@@ -522,7 +522,10 @@ int auth_loopback_ok(const struct _u_request *req, struct _u_response *res)
 int operator_present(void)
 {
     uint8_t sw[2] = { 0 };
-    int fd = open(SWITCH_DEV, O_RDONLY | O_NONBLOCK);
+    /* The switch device, or the test hook GF_SWITCH_DEV in a host-test
+     * run (testhook.h), as button.c reads it. */
+    const char *hook = ff_test_hook("GF_SWITCH_DEV");
+    int fd = open(hook ? hook : SWITCH_DEV, O_RDONLY | O_NONBLOCK);
     if (fd < 0)
         return 0;
     int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;

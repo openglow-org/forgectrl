@@ -478,7 +478,7 @@ int wiz_controller_stop(void)
     int rc = super_controller_stop();
     if (rc == 0) {
         machine_held = 1;
-        led_set(LED_BREATHE_WHITE);
+        led_set(LED_SOLID_WHITE);
     }
     return rc;
 }
@@ -495,7 +495,7 @@ void wiz_led_attention(int on)
     if (on)
         led_set(LED_BLINK_AMBER);
     else if (machine_held)
-        led_set(LED_BREATHE_WHITE);
+        led_set(LED_SOLID_WHITE);
     else
         led_release();
 }

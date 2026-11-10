@@ -73,6 +73,9 @@ add_executable(forgectrl
   src/camhealth.c
   src/cool.c
   src/coolfmt.c
+  src/flowcalc.c
+  src/flowrun.c
+  src/flowwatch.c
   src/debayer.c
   src/diag.c
   src/fflog.c
@@ -109,6 +112,7 @@ add_executable(forgectrl
   src/super.c
   src/relcheck.c
   src/update.c
+  src/slotcalc.c
   src/vpu_h264.c
   src/vpu_jpeg.c
   src/advisories.c
@@ -287,14 +291,32 @@ add_executable(coolfmt_test tests/coolfmt_test.c src/coolfmt.c)
 target_compile_options(coolfmt_test PRIVATE -Wall -Wextra)
 target_link_libraries(coolfmt_test m jansson)
 
+# Host unit test for the coolant flow watch: its arithmetic, and the watch on
+# a model of the flow board (the hold, the falls, the yields, the setting).
+add_executable(flowwatch_test tests/flowwatch_test.c src/flowwatch.c src/flowcalc.c)
+target_compile_options(flowwatch_test PRIVATE -Wall -Wextra)
+target_link_libraries(flowwatch_test m)
+add_executable(slotcalc_test tests/slotcalc_test.c src/slotcalc.c)
+target_compile_options(slotcalc_test PRIVATE -Wall -Wextra)
+
+# Host unit test for the button LED's two readers (led.c against plain files
+# under the test hook GF_LED_ROOT): what the red flash and a breathing white
+# read as, beside a dark lamp and a solid white one.
+add_executable(led_test tests/led_test.c src/led.c)
+target_compile_options(led_test PRIVATE -Wall -Wextra)
+add_executable(flowrun_test tests/flowrun_test.c src/flowwatch.c src/flowcalc.c)
+target_compile_options(flowrun_test PRIVATE -Wall -Wextra)
+target_link_libraries(flowrun_test m pthread)
+
 # Host unit test for the sensors logger's records: the formatters write
 # exactly tests/senslog_records.txt, the file the bundle reader's own test
 # parses (tools/senslog_read.py); the widest records fit one log datagram;
 # the job summary, the flight recorder's window, the beat's cadence and
-# the clock step.
+# the clock step. The logger itself (senslog.c by inclusion): the dump a
+# stop writes, and a switch device that could not be read.
 add_executable(senslog_test tests/senslog_test.c src/senslogfmt.c)
 target_compile_options(senslog_test PRIVATE -Wall -Wextra)
-target_link_libraries(senslog_test m)
+target_link_libraries(senslog_test m pthread)
 
 
 # Host unit test for the fragmented-MP4 muxer behind /cam/h264: the init

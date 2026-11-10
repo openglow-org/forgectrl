@@ -744,6 +744,71 @@ int setup_set_head(json_t *head)
     return rc;
 }
 
+int setup_machine_check(const char *machine_id, json_t *facts)
+{
+    if (!machine_id || !*machine_id || !json_is_object(facts)) {
+        if (facts)
+            json_decref(facts);
+        return -1;
+    }
+    json_object_set_new(facts, "machine_id", json_string(machine_id));
+    pthread_mutex_lock(&mu);
+    json_t *machine = json_object_get(rec, "machine");
+    const char *had = json_string_value(json_object_get(machine, "machine_id"));
+    int rc;
+    if (!json_is_object(machine)) {
+        if (!json_object_get(rec, "seeded")) {
+            /* No machine facts and no seed: the machine step has not run
+             * (a first run under way, or not begun). The facts are that
+             * step's to write, and nothing is written for it here: a
+             * record on disk before any consent would not be a fresh
+             * install's any more. */
+            json_decref(facts);
+            pthread_mutex_unlock(&mu);
+            return 0;
+        }
+        /* A seeded record (the dev card's) has no machine facts: this
+         * machine's, so the head-change trigger has a head to go by. */
+        json_object_set_new(rec, "machine", facts);
+        rc = 1;
+    } else if (!had) {
+        /* Made before the record knew its machine: it learns it now. */
+        json_object_set_new(machine, "machine_id", json_string(machine_id));
+        json_decref(facts);
+        rc = 0;
+    } else if (strcmp(had, machine_id)) {
+        /* Made on another machine: the machine step's answers are that
+         * machine's, so it is asked again (it is required: the gate closes
+         * until it runs), and the facts are this machine's. */
+        json_object_del(obj_get_or_make(rec, "wizards"), "machine");
+        json_object_set_new(rec, "machine", facts);
+        rc = 2;
+    } else {
+        json_decref(facts);
+        pthread_mutex_unlock(&mu);
+        return 0;
+    }
+    int c = commit_locked();
+    pthread_mutex_unlock(&mu);
+    return c == 0 ? rc : -1;
+}
+
+int setup_machine_camera(const char *sensor)
+{
+    if (!sensor || !*sensor || !strcmp(sensor, "unknown"))
+        return 0;
+    pthread_mutex_lock(&mu);
+    json_t *machine = json_object_get(rec, "machine");
+    const char *had = json_string_value(json_object_get(machine, "camera"));
+    int rc = 0;
+    if (json_is_object(machine) && (!had || !*had || !strcmp(had, "unknown"))) {
+        json_object_set_new(machine, "camera", json_string(sensor));
+        rc = commit_locked() == 0 ? 1 : -1;
+    }
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
 void setup_head_hash(char *buf, size_t len)
 {
     pthread_mutex_lock(&mu);

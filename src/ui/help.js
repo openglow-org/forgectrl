@@ -214,7 +214,8 @@ var HELP = {
     t: 'Laser arming',
     d: 'usage/grbl-mode/',
     p: [
-      'A job that fires the laser waits for the physical button (the light comes on) before its first fire; if nobody presses within the button wait the job is refused.',
+      'A job that fires the laser waits for the physical button before its first fire: the button breathes white while it waits for your press. If nobody presses within the button wait the job is refused.',
+      'The button is solid white while the machine moves. Slow flashing red means firing is blocked: this page says why, and a fault that ended a job has to be acknowledged here before the next job can fire.',
       'Once armed, the window closes after the disarm grace with the laser off, and the next job asks again. While a job runs the button pauses it, and pressing again resumes.'
     ]
   },

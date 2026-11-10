@@ -102,7 +102,7 @@ typedef struct {
 typedef struct {
     unsigned long seq;
     double start_mono, end_mono;
-    const char *end;                /* idle, new-session, diag */
+    char end[12];                   /* idle, new-session, or the phase that ended it (diag) */
     long run_s, cool_s, armed_s, lit_s, hv_sat_s, thr_s;
     double hv_dose;
     double down_start, up_start, down_end, up_end, down_last, up_last;
@@ -139,6 +139,23 @@ void senslog_ring_push(senslog_ring_t *r, const senslog_sample_t *s);
 /* The number of channels a dump writes, and one channel's line: every
  * sample in the ring with mono in [from, to]. ch is 0..count-1. */
 int senslog_fr_channels(void);
+
+/* The flight recorder's budget: at most SENSLOG_FR_PER_HOUR dumps in any
+ * hour for the alarm tier (a fire, a crash, a flame, the critical line, an
+ * emission or a power-good drop, a silent controller, a stepper driver
+ * fault) and as many again for the rest (the pause tier's verdicts, a CPU
+ * throttle, a thermal timeout), so a flapping warning never costs an alarm
+ * its dump. */
+#define SENSLOG_FR_PER_HOUR 6
+typedef struct {
+    double at[2][SENSLOG_FR_PER_HOUR];
+    unsigned n[2];
+} senslog_fr_budget_t;
+/* Whether an event's message is of the alarm tier. */
+int senslog_fr_alarm(const char *msg);
+/* Whether an event at @now gets a dump: when it does, it is counted in its
+ * tier's budget. */
+int senslog_fr_admit(senslog_fr_budget_t *b, double now, int alarm);
 int senslog_fmt_fr_head(char *buf, size_t len, const senslog_ctx_t *c,
                         double mono, unsigned long ev, double at,
                         const char *msg);

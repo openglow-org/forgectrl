@@ -10,7 +10,11 @@
  * host test: GF_SYSFS_ROOT the sysfs tree of the kernel module (it ends
  * with '/'), GF_SWITCH_DEV the switch device, GF_RUN_DIR the run
  * directory, GF_DEV_MARKER the dev-image marker (/etc/forgefirm-dev),
- * GF_DATA_STATE the boot's data record (/run/forgefirm-data.state).
+ * GF_DATA_STATE the boot's data record (/run/forgefirm-data.state),
+ * GF_LED_ROOT the LED class (/sys/class/leds). Two stand in for a
+ * program a host test must not run: GF_SLOT_LIST names a file that holds
+ * the slot inventory in place of `ffboot -l`, and GF_REBOOT_FILE a file
+ * a reboot the daemon schedules is written to in place of the reboot.
  * ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion

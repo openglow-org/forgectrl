@@ -34,7 +34,6 @@
 #define LINE_MAX_B      2000        /* under fflog's datagram, its header included */
 #define INV_CHECK_S     60.0        /* how often the inventory and settings are compared */
 #define INV_DAILY_S     86400.0
-#define FR_MAX_PER_HOUR 6           /* a flapping warning cannot fill the logger */
 #define DATA_DIR        "/data"
 
 #ifndef GF_SYSFS
@@ -58,9 +57,10 @@ static senslog_jobs_t jobs;
 static unsigned long ev_seq = 0;
 static int fr_pending = 0;
 static double fr_at = 0;
-static char fr_msg[160];
-static double fr_times[FR_MAX_PER_HOUR];
-static unsigned fr_count = 0;
+static char fr_msg[320];
+static senslog_fr_budget_t fr_budget; /* senslogfmt.h: two budgets, the alarm tier's and the rest's */
+static unsigned fr_unrecorded = 0;      /* events no dump has named since the last one */
+static char fr_unrecorded_last[96];
 
 /* The thread's own. */
 static senslog_ring_t ring;
@@ -195,8 +195,11 @@ static void sample(senslog_sample_t *s, cpu_ctr_t *cpu)
     if (rd_str("cnc/state", s->kst, sizeof(s->kst)) != 0)
         s->kst[0] = '\0';
     s->faults = rd_long("cnc/faults");
-    unsigned long bits = machine_switch_bits();
-    s->sw = (long)bits;
+    /* A switch device that could not be read stays unread ("-"): a word
+     * of zeros would say the lid is open and the button up. */
+    unsigned long bits;
+    if (machine_switch_read(&bits) == 0)
+        s->sw = (long)bits;
 
     s->down_raw = rd_long("pic/water_temp_1");
     s->up_raw = rd_long("pic/water_temp_2");
@@ -360,6 +363,7 @@ static const char *const cfg_keys[] = {
     "laser_pulse_min_ticks", "lens_hall_edge_z_mm", "lens_park_z_mm",
     "lens_stop_below_steps", "lens_stop_above_steps", "tray_offset_mm",
     "cloud_pause_backtrack_ticks", "cloud_resume_lead_ticks", "cloud_hold_max_s",
+    "cool_flow_watch", "cool_flow_hold_c", "cool_flow_duty_min", "cool_flow_duty_max",
 };
 
 static void settings_body(char *body, size_t cap)
@@ -367,7 +371,7 @@ static void settings_body(char *body, size_t cap)
     body[0] = '\0';
     cool_settings_in_force(body, cap);
     for (size_t i = 0; i < sizeof(cfg_keys) / sizeof(*cfg_keys); i++) {
-        char v[128];
+        char v[256];                    /* laser_dose_curve validates up to 180 */
         if (settings_get(cfg_keys[i], v, sizeof(v)) != 0)
             v[0] = '\0';
         add_kv(body, cap, cfg_keys[i], v);
@@ -414,7 +418,9 @@ static void *thread_main(void *arg)
 {
     (void)arg;
     char line[LINE_MAX_B];
-    char inv[1024], cfg[1600], inv_last[1024] = "", cfg_last[1600] = "";
+    /* The cfg record: every setting it names, whole (the dose curve the
+     * longest), under the line's 2000 bytes with its prefix. */
+    char inv[1024], cfg[1880], inv_last[1024] = "", cfg_last[1880] = "";
     double inv_checked = -1e9, inv_emitted = -1e9;
     double last_beat = -1;
     char last_phase[12] = "", last_verdict[12] = "OK";
@@ -548,28 +554,51 @@ void senslog_stop(void)
     int was = running;
     running = 0;
     pthread_mutex_unlock(&mu);
-    if (was)
-        pthread_join(th, NULL);
+    if (!was)
+        return;
+    pthread_join(th, NULL);
+    /* A dump still waiting out its post-event window is written now, once,
+     * with the samples the ring holds: an event in the last seconds before
+     * a stop is in the log. The thread is gone, so the ring is this
+     * caller's to read. */
+    pthread_mutex_lock(&mu);
+    int dump = fr_pending;
+    unsigned long ev = ev_seq;
+    double at = fr_at;
+    char msg[sizeof(fr_msg)];
+    snprintf(msg, sizeof(msg), "%s", fr_msg);
+    fr_pending = 0;
+    pthread_mutex_unlock(&mu);
+    if (dump)
+        fr_dump(ev, at, msg);
 }
 
+/* An event: a dump of the minutes around it, within its tier's budget
+ * (senslogfmt.h). One inside a pending dump's window is named in that dump;
+ * one past its budget is counted and named in the next dump, so no event
+ * goes unsaid. */
 void senslog_event(const char *msg)
 {
     double now = mono_s();
+    const char *m = msg ? msg : "";
     pthread_mutex_lock(&mu);
-    if (!fr_pending) {
-        /* At most FR_MAX_PER_HOUR dumps in any hour. */
-        unsigned recent = 0;
-        for (unsigned i = 0; i < fr_count && i < FR_MAX_PER_HOUR; i++)
-            if (now - fr_times[i] < 3600.0)
-                recent++;
-        if (recent < FR_MAX_PER_HOUR) {
-            fr_times[fr_count % FR_MAX_PER_HOUR] = now;
-            fr_count++;
-            ev_seq++;
-            fr_pending = 1;
-            fr_at = now;
-            snprintf(fr_msg, sizeof(fr_msg), "%s", msg ? msg : "");
-        }
+    if (fr_pending) {
+        size_t n = strlen(fr_msg);
+        if (n + 10 < sizeof(fr_msg))
+            snprintf(fr_msg + n, sizeof(fr_msg) - n, "; then %s", m);
+    } else if (senslog_fr_admit(&fr_budget, now, senslog_fr_alarm(m))) {
+        ev_seq++;
+        fr_pending = 1;
+        fr_at = now;
+        if (fr_unrecorded)
+            snprintf(fr_msg, sizeof(fr_msg), "%s (%u earlier event%s not recorded, the last: %s)", m,
+                     fr_unrecorded, fr_unrecorded == 1 ? "" : "s", fr_unrecorded_last);
+        else
+            snprintf(fr_msg, sizeof(fr_msg), "%s", m);
+        fr_unrecorded = 0;
+    } else {
+        fr_unrecorded++;
+        snprintf(fr_unrecorded_last, sizeof(fr_unrecorded_last), "%s", m);
     }
     pthread_mutex_unlock(&mu);
 }

@@ -25,13 +25,15 @@
 #define COOL_GATES_OFF_JSON_MAX 224
 #define COOL_LIMITS_JSON_MAX    256
 #define COOL_FAN_GATES_JSON_MAX 512
+#define COOL_NOTICES_N          5
+#define COOL_NOTICES_JSON_MAX   (COOL_NOTICES_N * (COOL_VERDICT_MAX + COOL_REASON_MAX + 96) + 2)
 
 /* The scalar fields and the document's own punctuation, at their widest
  * rendering (coolfmt_test measures it; the build fails if it no longer
  * fits under the fragments). */
-#define COOL_STATUS_JSON_SCALARS 288
+#define COOL_STATUS_JSON_SCALARS 512
 
-_Static_assert(COOL_REASON_MAX + COOL_GATES_OFF_JSON_MAX + COOL_LIMITS_JSON_MAX +
+_Static_assert(2 * COOL_REASON_MAX + COOL_NOTICES_JSON_MAX + COOL_GATES_OFF_JSON_MAX + COOL_LIMITS_JSON_MAX +
                COOL_FAN_GATES_JSON_MAX + COOL_STATUS_JSON_SCALARS <= COOL_STATUS_JSON_MAX,
                "the /cool/status fragments outgrew COOL_STATUS_JSON_MAX");
 
@@ -60,6 +62,14 @@ typedef struct {
     int quiet_hold;                     /* every fan held off for a listening */
     double down_c, up_c, report_age_s;
     const char *gates_off, *limits, *fan_gates;
+    /* What wants the operator: a failure that blocks firing, standing or not
+     * yet acknowledged. The document's ack_wait is the two together: standing
+     * and no longer live, the same boolean the verdict file carries. */
+    int attn_standing, attn_live;
+    const char *attn_verdict, *attn_reason;
+    double attn_at;                     /* when it began, seconds since the epoch */
+    double attn_cleared_at;             /* when its cause went away, or 0 */
+    const char *notices;                /* the faults that cleared on their own: a JSON array */
 } coolfmt_status_t;
 
 /* Returns 0, or -1 when len was too small for the document. */

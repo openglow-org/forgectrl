@@ -45,6 +45,7 @@
 #include "setup.h"
 #include "mp4mux.h"
 #include "cool.h"
+#include "flowrun.h"
 #include "curverec.h"
 #include "diag.h"
 #include "events.h"
@@ -84,6 +85,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -651,6 +653,21 @@ static int valid_range(const char *v, double lo, double hi)
     return end != v && *end == '\0' && f >= lo && f <= hi;
 }
 
+/* The coolant flow watch's hold: the step and the duty limits, to the
+ * ranges flowcalc.h gives the reasons for (the watch holds the same). */
+static int valid_flow_hold_c(const char *v)
+{
+    return valid_range(v, FLOWCALC_HOLD_C_LO, FLOWCALC_HOLD_C_HI);
+}
+static int valid_flow_duty_min(const char *v)
+{
+    return valid_range(v, FLOWCALC_DUTY_MIN_LO, FLOWCALC_DUTY_MIN_HI);
+}
+static int valid_flow_duty_max(const char *v)
+{
+    return valid_range(v, FLOWCALC_DUTY_MAX_LO, FLOWCALC_DUTY_MAX_HI);
+}
+
 /* The gate settings (the coolant ceiling and its resume gate, the
  * floors and the watches) validate against the one table in gates.c:
  * a wide legal range whose far end turns the gate off by value, and a
@@ -810,6 +827,10 @@ static const struct {
     { "cool_temp_min",          valid_temp_min,    0 },
     { "cool_temp_start",        valid_temp_start,  0 },
     { "cool_tec_present",       valid_tec_present, 0 },
+    { "cool_flow_watch",        valid_bool,        0 },
+    { "cool_flow_hold_c",       valid_flow_hold_c, 0 },
+    { "cool_flow_duty_min",     valid_flow_duty_min, 0 },
+    { "cool_flow_duty_max",     valid_flow_duty_max, 0 },
     { "cool_temp_offset_c",     valid_temp_offset, 0 },
     { "cool_tec_on_c",          valid_tec_on,      0 },
     { "cool_tec_off_c",         valid_tec_off,     0 },
@@ -1483,6 +1504,11 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
         return reply_error(res, 409, why);
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is not idle");
+    /* The button held is the consent for a package nobody the machine
+     * trusts signed: a job that would take the hold as its own press
+     * refuses the install before the button is read. */
+    if (job_takes_button(why, sizeof(why)))
+        return reply_error(res, 409, why);
     if (extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), operator_present(), &status, why,
                        sizeof(why)) != 0)
         return reply_error(res, (unsigned)status, why);
@@ -1492,7 +1518,9 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
 }
 
 /* The owner's keys. Adding one takes the machine's button held: a key
- * added here is what the machine will trust from then on. */
+ * added here is what the machine will trust from then on. A job that
+ * would take the hold as its own press refuses it before the button is
+ * read. */
 static int cb_ext_key(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -1501,6 +1529,8 @@ static int cb_ext_key(const struct _u_request *req, struct _u_response *res, voi
     const char *key = setting_param(req, "key");
     char why[300];
     int status;
+    if (job_takes_button(why, sizeof(why)))
+        return reply_error(res, 409, why);
     if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, operator_present(), &status, why,
                        sizeof(why)) != 0)
         return reply_error(res, (unsigned)status, why);
@@ -2021,7 +2051,12 @@ static int cb_fuse_identity(const struct _u_request *req,
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     /* The SRK password is irrevocable and never rotates - reveal it only
-     * to someone physically at the machine holding the button. */
+     * to someone physically at the machine holding the button. A job
+     * that would take the hold as its own press refuses the view before
+     * the button is read. */
+    char taken[96];
+    if (job_takes_button(taken, sizeof(taken)))
+        return reply_error(res, 409, taken);
     if (!operator_present())
         return reply_error(res, 403,
             "hold the machine button to reveal the fuse identity");
@@ -2261,6 +2296,38 @@ static void snap_str(json_t *o, const char *key, char *dst, size_t len)
         snprintf(dst, len, "%s", v);
 }
 
+/* hooks.h. Two sources, both state the daemon already holds: the running
+ * controller's report of its armed window (the cooling engine's, either
+ * controller's: it opens with the wait for the press), and the GRBL
+ * controller's own state file while the supervisor holds one, which
+ * names the wait itself and a job that runs or is held with its window
+ * closed. */
+int job_takes_button(char *why, size_t len)
+{
+    static const char waits[] = "a job waits for the button press: cancel it first";
+    if (cool_armed()) {
+        snprintf(why, len, "%s", waits);
+        return 1;
+    }
+    if (!super_grbl_running())
+        return 0;
+    char path[256], state[12] = "";
+    snprintf(path, sizeof(path), "%s/grbl.state", ff_run_dir());
+    json_t *o = json_load_file(path, 0, NULL);
+    if (!o)
+        return 0;
+    snap_str(o, "state", state, sizeof(state));
+    int arming = json_is_true(json_object_get(json_object_get(o, "laser"), "arming"));
+    json_decref(o);
+    if (arming)
+        snprintf(why, len, "%s", waits);
+    else if (!strcmp(state, "Run") || !strcmp(state, "Hold"))
+        snprintf(why, len, "a job is running or paused: finish or cancel it first");
+    else
+        return 0;
+    return 1;
+}
+
 /* The event stream's view of the machine: state the daemon already
  * holds (the supervisor, the cooling engine's last tick) and the files
  * in the run directory. No sensor is read for it. */
@@ -2425,6 +2492,36 @@ static int cb_cool_state(const struct _u_request *req,
  * running; released here, or by the engine itself when a run session
  * opens or the hold runs out of time (cool.h), so a listener that died
  * cannot leave the machine quiet. */
+/* The operator's acknowledgment of a failure that blocks the next job (the
+ * verdict ACK): refused while its cause still stands. */
+static int cb_cool_attention_ack(const struct _u_request *req,
+                                 struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (cool_attention_ack() != 0)
+        return reply_error(res, 409, "the failure still stands");
+    ulfius_set_string_body_response(res, 200, "{\"acknowledged\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The notices of faults that cleared on their own, dismissed up to and
+ * including upto (every one when it is left out). */
+static int cb_cool_notices_dismiss(const struct _u_request *req,
+                                   struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *v = setting_param(req, "upto");
+    cool_notices_dismiss(v ? (unsigned)strtoul(v, NULL, 10) : UINT_MAX);
+    ulfius_set_string_body_response(res, 200, "{\"dismissed\":true}");
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_cool_quiet(const struct _u_request *req,
                          struct _u_response *res, void *user_data)
 {
@@ -2443,6 +2540,8 @@ static int cb_cool_quiet(const struct _u_request *req,
             return reply_error(res, 409, held);
         if (!machine_is_idle())
             return reply_error(res, 409, "machine is not idle");
+        if (pump && !strcmp(pump, "1") && !cool_quiet_pump_ok())
+            return reply_error(res, 409, "the cooling engine is not idle: the pump stays on");
     }
     cool_quiet_hold_ex(!strcmp(on, "1"), pump && !strcmp(pump, "1"));
     char body[48];
@@ -2462,6 +2561,22 @@ static int cb_cool_status(const struct _u_request *req,
     char body[COOL_STATUS_JSON_MAX];
     if (cool_status_json(body, sizeof(body)) < 0)
         return reply_error(res, 500, "cool status document too long");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
+/* The coolant flow watch, as it stands (flowwatch.h): opt-in, logged,
+ * enforcing nothing. */
+static int cb_cool_flow(const struct _u_request *req,
+                        struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_read_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char body[512];
+    if (flowrun_status_json(body, sizeof(body)) < 0)
+        return reply_error(res, 500, "flow watch document too long");
     ulfius_set_string_body_response(res, 200, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -2561,8 +2676,23 @@ static const char *page_dev_data_line(void)
     if (!strcmp(w, "card-none"))
         return "<strong>DATA Mount</strong>: eMMC";
     if (!strcmp(w, "card-failed"))
-        return "<strong>DATA Mount</strong>: eMMC (SD mount error - see logs)";
-    return "<strong>DATA Mount</strong>: UNKNOWN (error - see logs)";
+        return "<strong>DATA Mount</strong>: SD card failed - nothing is saved this boot (see logs); "
+               "controllers held";
+    return "<strong>DATA Mount</strong>: UNKNOWN (error - see logs); controllers held";
+}
+
+const char *page_dev_bar_inline(void)
+{
+    static char bar[768];
+    if (!auth_dev_image())
+        return "";
+    snprintf(bar, sizeof(bar),
+             "<div class=\"ff-devbar\" role=\"status\" style=\"background:#b00020;color:#fff;"
+             "padding:6px 14px;font:600 14px/1.4 system-ui,sans-serif;text-align:center\">"
+             "%s<br>%s</div>",
+             PAGE_DEV_BAR_HEAD + strlen("<div class=\"ff-devbar\" role=\"status\">"),
+             page_dev_data_line());
+    return bar;
 }
 
 /* html with its first mark replaced by with, in a new string; NULL when
@@ -2757,7 +2887,15 @@ static int cb_login_page(const struct _u_request *req, struct _u_response *res,
 /* POST /login: name and password; a session cookie on success. The
  * token is not required here (the page that carries it is behind the
  * login), so this is the one state-changing route without it; the
- * per-address throttle and the constant-time verify are its guards. */
+ * per-address throttle and the constant-time verify are its guards.
+ * Every answer is JSON: the login page shows its "error". */
+static int login_reply(struct _u_response *res, unsigned status, const char *body)
+{
+    ulfius_set_string_body_response(res, status, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    return U_CALLBACK_CONTINUE;
+}
+
 static int cb_login(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
 {
@@ -2772,27 +2910,23 @@ static int cb_login(const struct _u_request *req, struct _u_response *res,
         snprintf(body, sizeof(body),
                  "{\"error\":\"too many attempts; wait %d s\",\"wait\":%d}",
                  left, left);
-        ulfius_set_string_body_response(res, 429, body);
-        ulfius_add_header_to_response(res, "Content-Type", "application/json");
-        return U_CALLBACK_CONTINUE;
+        return login_reply(res, 429, body);
     }
     const char *name = setting_param(req, "name");
     const char *pw = setting_param(req, "password");
     if (!users_verify(name, pw)) {
         login_failed(peer);
         fflog(LOG_WARNING, "login failed from %s", peer[0] ? peer : "?");
-        return reply_error(res, 401, "wrong name or password");
+        return login_reply(res, 401, "{\"error\":\"wrong name or password\"}");
     }
     login_succeeded(peer);
     char sid[SESSION_ID_HEX + 1], cookie[256];
     if (session_create(name, sid, sizeof(sid)) != 0)
-        return reply_error(res, 500, "cannot create a session");
+        return login_reply(res, 500, "{\"error\":\"cannot create a session\"}");
     session_cookie_set(sid, cookie, sizeof(cookie));
     ulfius_add_header_to_response(res, "Set-Cookie", cookie);
     fflog(LOG_NOTICE, "login from %s", peer[0] ? peer : "?");
-    ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
-    ulfius_add_header_to_response(res, "Content-Type", "application/json");
-    return U_CALLBACK_CONTINUE;
+    return login_reply(res, 200, "{\"ok\":true}");
 }
 
 static int cb_logout(const struct _u_request *req, struct _u_response *res,
@@ -2827,7 +2961,7 @@ static int cb_cert_page(const struct _u_request *req, struct _u_response *res,
     if (!auth_origin_ok(req, res))
         return U_CALLBACK_COMPLETE;
     const char *fp = tls_fingerprint();
-    char mid[16], body[3072];
+    char mid[16], body[4096];
     machine_id(mid, sizeof(mid));
     snprintf(body, sizeof(body),
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -2840,7 +2974,7 @@ static int cb_cert_page(const struct _u_request *req, struct _u_response *res,
         "dt{color:#767a82}dd{margin:0}code{font-family:ui-monospace,Consolas,monospace;"
         "font-size:14px;word-break:break-all}"
         "@media(prefers-color-scheme:dark){body{color:#d9dce3;background:#15161c}"
-        "h1{color:#b9bcd8}a{color:#2ea3e0}dt{color:#9296a2}}</style></head><body><main>"
+        "h1{color:#b9bcd8}a{color:#2ea3e0}dt{color:#9296a2}}</style></head><body>%s<main>"
         "<h1>This machine's certificate</h1>"
         "<p>The control panel is served over HTTPS with a certificate the machine "
         "signed itself. Your browser will warn once and ask you to continue. Before you "
@@ -2854,6 +2988,7 @@ static int cb_cert_page(const struct _u_request *req, struct _u_response *res,
         "<p>%s</p>"
         "<p>The same fingerprint is on the panel's System tab and on the setup's "
         "welcome screen once you are in.</p></main></body></html>",
+        page_dev_bar_inline(),
         mid[0] ? mid : "(unknown)",
         fp[0] ? fp : "not available: this image serves HTTP only",
         tls_names()[0] ? tls_names() : "(none)",
@@ -3027,14 +3162,14 @@ static int cb_licenses_page(const struct _u_request *req,
         "padding:14px;overflow:auto;font-size:12.5px}"
         "@media(prefers-color-scheme:dark){body{color:#d9dce3;background:#15161c}"
         "h1{color:#b9bcd8}a{color:#2ea3e0}pre{background:#1e2028;border-color:#32353f}}"
-        "</style></head><body><main><h1>Licenses</h1>"
+        "</style></head><body>%s<main><h1>Licenses</h1>"
         "<p>ForgeFIRM %s. Every software package on this machine, with its license, "
         "is listed below. The full text of every license is in the bundle: "
         "<a href=\"/system/licenses\">download the license bundle (.tar.gz)</a>. "
         "The bundle is what the licenses ask to travel with the software; you can pass it "
         "on with the machine. The project's own components and their licenses are in the "
         "Licenses and notices document of the setup.</p>",
-        fwver[0] ? fwver : "");
+        page_dev_bar_inline(), fwver[0] ? fwver : "");
     if (have) {
         o += (size_t)snprintf(page + o, cap - o, "<pre>");
         for (size_t i = 0; i < mlen && o + 8 < cap; i++) {
@@ -3471,7 +3606,7 @@ static void mhd_log(void *cls, const char *fmt, va_list ap)
  * holds this list to the sources. The camera and port knobs are on the
  * developer page; the rest are the host tests' seams and the cooling
  * engine's bench overrides, and nothing on a machine sets one. The
- * three test hooks are listed apart, below. */
+ * test hooks are listed apart, below. */
 static const char *const ENV_OVERRIDES[] = {
     "FFLOG_CONF", "FFLOG_LEVEL", "FFLOG_SOCK", "FFLOG_STDERR",
     "FORGECTRL_CLOUD_BIN", "FORGECTRL_CONF", "FORGECTRL_CURL", "FORGECTRL_DATA_DIR",
@@ -3490,7 +3625,7 @@ static const char *const ENV_OVERRIDES[] = {
     "GFCOOL_TACH_AIR_MIN", "GFCOOL_TACH_EXHAUST_MIN", "GFCOOL_TACH_INTAKE_MIN", "GFCOOL_TEC_OFF",
     "GFCOOL_TEC_ON", "GFCOOL_TEC_PRESENT", "GFCOOL_TEMP_CRITICAL", "GFCOOL_TEMP_MAX",
     "GFCOOL_TEMP_MIN", "GFCOOL_TEMP_OFFSET_C", "GFCOOL_TEMP_RESUME", "GFCOOL_TEMP_START",
-    "GF_FUSE_SERIAL", "GF_GRBL_PORT", "GF_LED_ROOT", "GF_LENS_STEP_US", "GF_LOGS_EFFECTIVE",
+    "GF_FUSE_SERIAL", "GF_GRBL_PORT", "GF_LENS_STEP_US", "GF_LOGS_EFFECTIVE",
     "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE", "GF_PROC_STAT", "GF_PULSE_DEV",
     "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
 };
@@ -3501,7 +3636,8 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_RUN_DIR", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_LED_ROOT", "GF_REBOOT_FILE", "GF_RUN_DIR", "GF_SLOT_LIST",
+    "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
@@ -3625,13 +3761,37 @@ int main(int argc, char **argv)
      * before any thread reads them: an unset hook reads as satisfied. */
     setup_fact_hook = setup_fact;
     setup_fans_hook = setup_fans_counted;
+    /* A reset request still in the folder was not carried out: the boot
+     * takes it (forgefirm-data, before anything reads the folder), so one
+     * left now would be carried out by some later boot, of whatever image.
+     * It is withdrawn, and said. */
+    {
+        char rr[256];
+        snprintf(rr, sizeof(rr), "%s/reset-requested", ff_data_dir());
+        if (access(rr, F_OK) == 0) {
+            if (unlink(rr) == 0)
+                fflog(LOG_WARNING, "update: a reset of every setting was requested and not carried out "
+                      "at this boot; the request is withdrawn");
+            else
+                fflog(LOG_ERR, "update: a reset of every setting was requested and not carried out at this "
+                      "boot, and it cannot be withdrawn (%s): a later boot of this data folder carries it out",
+                      strerror(errno));
+        }
+    }
     /* The dev image's SD card starts as a finished first run: its seed
      * becomes the record once, with the account its record holds. */
     {
         char acct[USERS_NAME_MAX + 1] = "";
         if (users_name(acct, sizeof(acct)) != 0)
             acct[0] = '\0';
-        setup_seed(acct, USERS_UID);
+        /* The dev image's alone: a release rootfs written to a dev card
+         * must not start as a finished setup with a published login. */
+        char seed[256];
+        snprintf(seed, sizeof(seed), "%s/setup.seed", ff_data_dir());
+        if (auth_dev_image())
+            setup_seed(acct, USERS_UID);
+        else if (access(seed, F_OK) == 0)
+            fflog(LOG_WARNING, "setup: a setup seed on a release image is ignored");
     }
     /* The account reset: the button held through the daemon's start,
      * for ten seconds, with the LED blinking amber while it counts.
@@ -3649,8 +3809,8 @@ int main(int argc, char **argv)
     }
     setup_init();
     int have_tls = tls_init() == 0;
-    wiz_init();
     cam_engine_init();
+    wiz_init();             /* its machine check reads the sensor the camera engine resolved: after it */
     curverec_init();
     cool_init();
     cool_fail_tier_stop = super_controller_restart;
@@ -3732,7 +3892,10 @@ int main(int argc, char **argv)
         { "POST", "/motion/tray",          cb_motion_panel,     "tray", 0, NULL },
         { "POST", "/cool/state",           cb_cool_state,       NULL, 0, NULL },
         { "GET",  "/cool/status",          cb_cool_status,      NULL, 1, "machine.read" },
+        { "GET",  "/cool/flow",            cb_cool_flow,        NULL, 1, "machine.read" },
         { "POST", "/cool/quiet",           cb_cool_quiet,       NULL, 0, NULL },
+        { "POST", "/cool/attention/ack",   cb_cool_attention_ack, NULL, 0, NULL },
+        { "POST", "/cool/notices/dismiss", cb_cool_notices_dismiss, NULL, 0, NULL },
         { "POST", "/diag/aa-offset-calibrate", cb_diag_start,   "aa-offset-calibrate", 0, NULL },
         { "POST", "/diag/abort",           cb_diag_abort,       NULL, 0, NULL },
         { "GET",  "/diag/status",          cb_diag_status,      NULL, 1, NULL },

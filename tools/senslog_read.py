@@ -16,7 +16,7 @@ where its boot's offset is known: from the boot's clock record, else
 from its latest stamped line (a stamp before the clock is set is 1970 or
 a date saved at an earlier shutdown). --csv writes one
 table per record type and one per flight-recorder dump; --summary (the
-default) prints the inventory, the jobs, the flow verdicts and the dumps.
+default) prints the inventory, the jobs and the dumps.
 Standard library only.
 """
 
@@ -30,7 +30,7 @@ import sys
 import tarfile
 from datetime import datetime, timezone
 
-TYPES = ("beat", "job", "flow", "inv", "cfg", "clock", "fr", "frc")
+TYPES = ("beat", "job", "inv", "cfg", "clock", "fr", "frc")
 # A log line: the rsyslog stamp, the program, the level, the record.
 LOG_LINE = re.compile(r"^(\S+) (\S+?)(?:\[\d+\])? ([A-Z]+) (.*)$")
 SET_YEAR = 2020         # a stamp before this was written before the clock was set
@@ -186,7 +186,7 @@ def dumps(recs):
 def write_csv(recs, outdir):
     os.makedirs(outdir, exist_ok=True)
     written = []
-    for t in ("beat", "job", "flow", "inv", "cfg", "clock"):
+    for t in ("beat", "job", "inv", "cfg", "clock"):
         rows = [r for r in recs if r["type"] == t]
         if not rows:
             continue
@@ -234,13 +234,6 @@ def summary(recs, out=sys.stdout):
             j.get("wall", "boot %s +%s" % (j.get("boot"), j.get("start"))), j.get("run_s"), j.get("cool_s"),
             j.get("lit_s"), j.get("up_start"), j.get("up_end"), up[2], j.get("exhaust_rpm"),
             j.get("beam_rise"), (" verdicts " + j["verdicts"]) if j.get("verdicts") else ""))
-    flows = [r for r in recs if r["type"] == "flow"]
-    out.write("flow verdicts: %d\n" % len(flows))
-    for f in flows:
-        out.write("  %s %s %s%s rise %s (limit %s, duty %s%%) from %s/%s rest_dt %s\n" % (
-            f.get("wall", "-"), f.get("src"), f.get("verdict"),
-            (" " + f["trial"]) if f.get("trial") else "", f.get("rise"), f.get("limit"),
-            f.get("duty"), f.get("base_down"), f.get("base_up"), f.get("rest_dt")))
     ds = dumps(recs)
     out.write("flight-recorder dumps: %d\n" % len(ds))
     for (boot, ev), d in ds.items():

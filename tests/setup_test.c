@@ -112,6 +112,17 @@ int main(void)
           "status lists four documents");
     CHECK(st && strlen(sget(st, "sheet_id")) == SHEETID_LEN, "status carries the sheet id");
     json_decref(st);
+    /* The start's machine check on it: no seed, so no facts are taken and
+     * no record is written before any consent. */
+    {
+        char rp[300], hh[32];
+        snprintf(rp, sizeof(rp), "%s/setup.json", data_dir);
+        CHECK(setup_machine_check("AAAAA-AAAAA", json_pack("{s:{s:s}}", "head", "serial_hash", "H0")) == 0 &&
+                  access(rp, F_OK) != 0,
+              "a fresh record takes no machine facts at the start, and none is written");
+        setup_head_hash(hh, sizeof(hh));
+        CHECK(!hh[0], "it has none in memory either");
+    }
 
     /* 2. Consent: a wrong hash is refused; all four accepted is not yet
      * consent (the press is missing); then the press. */
@@ -557,6 +568,36 @@ int main(void)
         CHECK(sc && !strcmp(sget(json_object_get(sc, "account"), "name"), "forgefirm"),
               "the record stands");
         json_decref(sc);
+
+        /* The machine it was made on: the seeded record has no machine
+         * facts and takes this machine's; the same machine again changes
+         * nothing; another machine asks the machine step again, so the
+         * gate closes until it runs. */
+        CHECK(setup_machine_check("AAAAA-AAAAA", json_pack("{s:{s:s},s:s}", "head", "serial_hash", "H1",
+                                                           "camera", "unknown")) == 1,
+              "a seeded record takes this machine's facts");
+        char hh[32];
+        setup_head_hash(hh, sizeof(hh));
+        CHECK(!strcmp(hh, "H1"), "and has a head to go by");
+        /* Its camera fact, written before the camera engine had seen the
+         * sensor, takes the sensor's name once; a name it has is kept. */
+        char cam[32];
+        CHECK(setup_machine_camera("unknown") == 0 && setup_machine_camera("OV5648") == 1 &&
+                  setup_machine_camera("OV8856") == 0,
+              "an unknown camera fact takes the sensor's name, once");
+        setup_init();
+        setup_machine_str("camera", cam, sizeof(cam));
+        CHECK(!strcmp(cam, "OV5648"), "and the record on disk holds it");
+        CHECK(setup_machine_check("AAAAA-AAAAA", json_object()) == 0 && setup_gate_open(why, sizeof(why)),
+              "the same machine: nothing changes, the gate stays open");
+        CHECK(setup_machine_check("BBBBB-BBBBB", json_pack("{s:{s:s}}", "head", "serial_hash", "H2")) == 2,
+              "another machine is told apart");
+        setup_init();
+        CHECK(!setup_gate_open(why, sizeof(why)) && setup_wizard_version("machine") == 0,
+              "its machine step is asked again: the gate closed until it runs");
+        setup_head_hash(hh, sizeof(hh));
+        CHECK(!strcmp(hh, "H2"), "and the facts are this machine's");
+        CHECK(setup_machine_check("", json_object()) == -1, "no machine id: nothing judged");
         setup_set_steps(steps, 3);
     }
 

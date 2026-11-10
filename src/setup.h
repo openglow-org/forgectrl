@@ -102,6 +102,20 @@ int setup_on_demand_accept(const char *doc_id, const char *hash, const char *met
 int setup_set_account(const char *name, long uid);
 int setup_clear_account(void);
 int setup_set_machine(json_t *machine);   /* takes a reference */
+/* The machine the record was made on, by its sheet id (sheetid.h: the
+ * serial never stands in the record). Takes a reference to @facts (the
+ * machine step's detected facts). Returns 1 when a seeded record with no
+ * machine facts took these, 2 when the record was made on another machine
+ * (its machine step is required again, and the facts are these), 0 when
+ * it is this machine's, or has no machine facts and no seed (the machine
+ * step has not run: nothing is written), -1 on an error. */
+int setup_machine_check(const char *machine_id, json_t *facts);
+/* The camera fact, for a record whose machine facts were written before
+ * the camera engine had seen the sensor: a fact that is missing or
+ * "unknown" takes @sensor (the engine's model name; "unknown" and "" fill
+ * nothing). Returns 1 when it was filled, 0 when nothing changed, -1 when
+ * the record could not be written. */
+int setup_machine_camera(const char *sensor);
 /* A wizard completed at a version, with its result and the settings
  * it applied ({key: {from, to}}); both may be NULL. Takes references.
  * A step of the table is recorded at the table's version when that is

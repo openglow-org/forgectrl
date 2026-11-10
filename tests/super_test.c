@@ -43,6 +43,10 @@
  *   L. the report channel is the running controller's alone: each spawn
  *      is handed a fresh secret in its environment, an inherited one is
  *      replaced, nothing else passes for it, and a reap ends it
+ *   M. a dev image starts a controller only when the boot's data record
+ *      says where its settings are (emmc, card, card-none): a record
+ *      that is missing or holds any other word holds the controllers,
+ *      and a release image is not held by the record
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -314,10 +318,14 @@ double cool_report_age(void) { return -1.0; }
 static int led_last = -1;               /* the pattern led_set was last given */
 void led_set(led_pattern_t p) { led_last = (int)p; }
 void led_release(void) { }
+static int led_kept = -1, led_keeps;    /* the pattern led_keep was last given, and how often */
+void led_keep(led_pattern_t p) { led_kept = (int)p; led_keeps++; }
 void lenshome_clear(void) { }
 int lenshome_run(char *detail, size_t dlen) { snprintf(detail, dlen, "fake edge"); return 1; }
 void cam_lamp_apply_idle(void) { }
 int setup_gate_open(char *why, size_t len) { if (len) why[0] = '\0'; return 1; }
+static int dev_image;                   /* the image carries the dev marker (M) */
+int auth_dev_image(void) { return dev_image; }
 int diag_running(void) { return 0; }
 int update_job_running(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
@@ -588,6 +596,14 @@ int main(void)
               strstr(st, "\"controller\":\"waiting\"") != NULL, "/mode says waiting, and that the lid is open");
     }
     CHECK(led_last == LED_BLINK_AMBER, "the button blinks amber");
+    {
+        /* The amber is written once; the cooling engine's red flash stands
+         * over it and ends dark, so every pass of the wait keeps it. */
+        int keeps = led_keeps;
+        tick();
+        tick();
+        CHECK(led_keeps == keeps + 2 && led_kept == LED_BLINK_AMBER, "and every pass of the wait keeps the amber");
+    }
     enclosure_open = 0;
     tick();
     CHECK(probes == 1 && child_pid == 0, "the lid closed: the probe runs first");
@@ -827,6 +843,44 @@ int main(void)
               "with a secret of its own, and the old one stays dead");
     }
     unsetenv("GF_REPORT_SECRET");
+
+    printf("M. a dev image's controllers wait on the boot's data record\n");
+    {
+        static const char *const record = "super-test/run/data.state";
+        static const struct {
+            const char *word;           /* NULL: no record */
+            int starts;
+        } boots[] = {
+            { "emmc\n", 1 }, { "card\n", 1 }, { "card-none\n", 1 }, { NULL, 0 }, { "card-mounted\n", 0 },
+        };
+        setenv("GF_DATA_STATE", record, 1);
+        dev_image = 1;
+        for (size_t i = 0; i < sizeof(boots) / sizeof(*boots); i++) {
+            const char *w = boots[i].word;
+            char msg[96], name[24], body[512];
+            snprintf(name, sizeof(name), "%.*s", w ? (int)strcspn(w, "\n") : 0, w ? w : "");
+            reset_state();
+            unlink(record);
+            if (w) {
+                FILE *f = fopen(record, "w");
+                if (f) {
+                    fputs(w, f);
+                    fclose(f);
+                }
+            }
+            int spawned = run_until_spawned(5.0);
+            super_status_json(body, sizeof(body));
+            int held = strstr(body, "\"gated\":true") != NULL;
+            snprintf(msg, sizeof(msg), "the record %s: %s", w ? name : "missing",
+                     boots[i].starts ? "a controller starts" : "no controller, and /mode says gated");
+            CHECK(boots[i].starts ? spawned && !held : !spawned && held && forks == 0, msg);
+        }
+        dev_image = 0;
+        reset_state();
+        unlink(record);
+        CHECK(run_until_spawned(5.0), "a release image with no record starts its controller");
+        unsetenv("GF_DATA_STATE");
+    }
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

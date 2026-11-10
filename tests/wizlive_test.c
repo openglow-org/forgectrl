@@ -140,7 +140,7 @@ int jobrun_sync(const jobrun_cfg_t *cfg, jobstream_run_t *run, char *err, size_t
         err[0] = '\0';
     return -1;
 }
-int led_lit(void) { return 0; }
+int led_asks_press(void) { return 0; }
 int grbl_settings_text(char *buf, size_t len) { (void)buf; (void)len; return -1; }
 int machine_lid_closed(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }

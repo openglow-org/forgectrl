@@ -272,7 +272,7 @@ static void job_start(senslog_jobs_t *j, const senslog_sample_t *s)
 static void job_finish(senslog_jobs_t *j, const senslog_sample_t *s, const char *end)
 {
     j->cur.end_mono = s->mono;
-    j->cur.end = end;
+    snprintf(j->cur.end, sizeof(j->cur.end), "%s", end);
     j->cur.down_last = s->down_c;
     j->cur.up_last = s->up_c;
     j->done = j->cur;
@@ -442,6 +442,34 @@ static const fr_ch_t fr_ch[] = {
     CH_L("purge_cur", purge_cur),
     CH_D("soc", soc_c, 1), CH_D("cpu", cpu_pct, 0),
 };
+
+int senslog_fr_alarm(const char *msg)
+{
+    static const char *const alarm[] = {
+        "verdict FIRE", "verdict CRASH", "verdict FLAME", "verdict CRITICAL",
+        "laser emission", "laser supply power-good", "controller silent", "stepper driver fault",
+    };
+    if (!msg)
+        return 0;
+    for (size_t i = 0; i < sizeof(alarm) / sizeof(*alarm); i++)
+        if (!strncmp(msg, alarm[i], strlen(alarm[i])))
+            return 1;
+    return 0;
+}
+
+int senslog_fr_admit(senslog_fr_budget_t *b, double now, int alarm)
+{
+    int t = alarm ? 1 : 0;
+    unsigned recent = 0;
+    for (unsigned i = 0; i < b->n[t] && i < SENSLOG_FR_PER_HOUR; i++)
+        if (now - b->at[t][i] < 3600.0)
+            recent++;
+    if (recent >= SENSLOG_FR_PER_HOUR)
+        return 0;
+    b->at[t][b->n[t] % SENSLOG_FR_PER_HOUR] = now;
+    b->n[t]++;
+    return 1;
+}
 
 int senslog_fr_channels(void)
 {

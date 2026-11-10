@@ -43,6 +43,9 @@ int machine_lid_closed(void);
  * 2 button, 3 doors (closed = 1), 4 hv_enable readback, 5 interlock
  * (active = the loop is open), 7 head. */
 unsigned long machine_switch_bits(void);
+/* The same word for a reader that must tell an unread device from a word
+ * of zeros: 0 with the bits, or -1 (and *bits 0) on any failure. */
+int machine_switch_read(unsigned long *bits);
 
 /* The EV_SW word decoded: the one place in this file each bit's number
  * and sense is written (the device tree's map). lid is bit 3 set (both
@@ -60,6 +63,7 @@ machine_switches_t machine_switches_decode(unsigned long bits);
  * runner). Raw 10-bit ADC count -> degrees C; out-of-range input maps
  * to -273.15. */
 double coolant_degc(long raw);
+double coolant_degc_counts(double raw);
 
 /* The board temperatures, watched and not gated: the chassis LM75 in
  * degrees C (hwmon, resolved by name; -273.15 when absent) and the

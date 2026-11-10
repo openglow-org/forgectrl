@@ -49,6 +49,17 @@ static double num_at(const char *s, const char *k1, const char *k2)
     return d;
 }
 
+/* A top-level boolean: 1 true, 0 false, -1 absent or not a boolean. */
+static int bool_at(const char *s, const char *key)
+{
+    json_error_t e;
+    json_t *j = json_loads(s, 0, &e);
+    json_t *v = json_object_get(j, key);
+    int b = json_is_boolean(v) ? json_is_true(v) : -1;
+    json_decref(j);
+    return b;
+}
+
 /* A string at a path of object keys is want. */
 static int str_at(const char *s, const char *k1, const char *k2, const char *want)
 {
@@ -110,23 +121,41 @@ int main(void)
     /* The widest gates_off list the engine can publish is every gate
      * key; pad a valid array out to the buffer's full width. */
     snprintf(gates_off, sizeof(gates_off), "[\"%0*d\"]", (int)sizeof(gates_off) - 5, 0);
+    char notices[COOL_NOTICES_JSON_MAX];
+    snprintf(notices, sizeof(notices), "[\"%0*d\"]", (int)sizeof(notices) - 5, 0);
     coolfmt_status_t st = {
         .phase = "cooldown", .verdict = "OVERTEMP", .reason = reason,
         .fire_watch = "armed", .accel_watch = "armed",
         .fire_ok = 0, .hold = 0, .armed = 0,
         .down_c = -273.15, .up_c = -273.15, .report_age_s = 99999999.9,
         .gates_off = gates_off, .limits = lim, .fan_gates = fg,
+        .attn_standing = 1, .attn_live = 1, .attn_verdict = "OVERTEMP", .attn_reason = reason,
+        .attn_at = 99999999999.0, .attn_cleared_at = 99999999999.0, .notices = notices,
     };
     CHECK(coolfmt_status(doc, sizeof(doc), &st) == 0, "the widest document fits COOL_STATUS_JSON_MAX");
     CHECK(is_json(doc), "and parses");
-    size_t scalars = strlen(doc) - strlen(reason) - strlen(gates_off) - widest_limits - widest_fans;
+    size_t scalars = strlen(doc) - 2 * strlen(reason) - strlen(gates_off) - strlen(notices) -
+                     widest_limits - widest_fans;
     printf("  widest: limits %zu, fan gates %zu, scalars+punctuation %zu, document %zu of %d\n",
            widest_limits, widest_fans, scalars, strlen(doc), COOL_STATUS_JSON_MAX);
     CHECK(scalars < COOL_STATUS_JSON_SCALARS, "the scalar allowance covers the widest scalars");
     CHECK(coolfmt_status(doc, 512, &st) < 0, "a 512-byte buffer is refused, not served cut off");
 
+    /* ack_wait: a failure standing whose cause has gone, and nothing else. */
+    coolfmt_status(doc, sizeof(doc), &st);
+    CHECK(bool_at(doc, "ack_wait") == 0, "a failure still live: ack_wait is false");
+    st.attn_live = 0;
+    coolfmt_status(doc, sizeof(doc), &st);
+    CHECK(bool_at(doc, "ack_wait") == 1, "standing with its cause gone: ack_wait is true, whatever the verdict's name");
+    st.attn_standing = 0;
+    coolfmt_status(doc, sizeof(doc), &st);
+    CHECK(bool_at(doc, "ack_wait") == 0, "nothing standing: ack_wait is false");
+    st.attn_standing = 1;
+    st.attn_live = 1;
+
     /* The document parses with every fragment at its empty fallback. */
     st.gates_off = "[]"; st.limits = "{}"; st.fan_gates = "{}"; st.reason = "";
+    st.attn_reason = NULL; st.attn_verdict = NULL; st.notices = NULL;
     CHECK(coolfmt_status(doc, sizeof(doc), &st) == 0 && is_json(doc), "empty fragments still make a document");
 
     printf("armed flag\n");

@@ -42,6 +42,7 @@
  * over the exclusive-open pulse device and the Grbl port.
  */
 #define _GNU_SOURCE
+#include "auth.h"
 #include "cam.h"
 #include "setup.h"
 #include "cool.h"
@@ -158,6 +159,42 @@ static unsigned generation = 0;    /* bumped on every state change */
 static int local_posture = 0;      /* a wizard owns the controller: loopback only */
 static int gated = 0;              /* the setup gate is closed (under mu) */
 static char gate_why[256];
+
+/* A dev image booted from an SD card whose data partition is there and not
+ * in use runs on the eMMC's settings, read-only, its logs in RAM
+ * (forgefirm-data): no controller, so nothing runs on a setup that is not
+ * the card's. The boot's one word, as the dev bar reads it: emmc, card and
+ * card-none each say where this boot's settings are. Any other word holds
+ * the controllers, and so does a record that is missing or cannot be read:
+ * a dev image that cannot tell whose settings it runs on starts nothing on
+ * them. The card's branch is the dev image's alone, so a release image is
+ * never held here. */
+static int card_data_failed(void)
+{
+    if (!auth_dev_image())
+        return 0;
+    const char *hook = ff_test_hook("GF_DATA_STATE");
+    char w[32] = "";
+    FILE *f = fopen(hook ? hook : "/run/forgefirm-data.state", "r");
+    if (f) {
+        if (!fgets(w, sizeof(w), f))
+            w[0] = '\0';
+        fclose(f);
+    }
+    w[strcspn(w, "\r\n")] = '\0';
+    return strcmp(w, "emmc") && strcmp(w, "card") && strcmp(w, "card-none");
+}
+
+/* The controller gate: the setup's, and the card's data partition. */
+static int controller_gate_open(char *why, size_t len)
+{
+    if (card_data_failed()) {
+        snprintf(why, len, "the SD card's data partition is not in use: nothing is saved this boot "
+                 "(see the boot log)");
+        return 0;
+    }
+    return setup_gate_open(why, len);
+}
 
 static int broker_fd = -1;         /* /dev/glowforge, held for our lifetime */
 static int broker_warned = 0;      /* the broker's refusal is said once per episode */
@@ -318,11 +355,16 @@ static void broker_open_locked(void)
  * does not run while a lid or the interlock is open, or while the
  * switches cannot be read: no controller until the enclosure closes,
  * /mode says "waiting" and why, and the button blinks amber so the
- * machine itself asks for the lid. Called with mu held. */
+ * machine itself asks for the lid. The gate comes here on every pass of
+ * the wait, and each one keeps the amber: the cooling engine's red flash
+ * stands over it and leaves the button dark when it ends. Called with mu
+ * held. */
 static void wait_enter_locked(const char *why)
 {
-    if (enclosure_wait && strcmp(why, wait_why) == 0)
+    if (enclosure_wait && strcmp(why, wait_why) == 0) {
+        led_keep(LED_BLINK_AMBER);
         return;
+    }
     fflog(LOG_WARNING, "super: %s - the motion check waits for it to "
                        "close; no controller until then", why);
     snprintf(wait_why, sizeof(wait_why), "%s", why);
@@ -340,6 +382,14 @@ static void wait_leave_locked(const char *how)
     wait_why[0] = '\0';
     generation++;
     led_release();
+}
+
+int super_motion_fault(void)
+{
+    pthread_mutex_lock(&mu);
+    int fault = motion_fault;
+    pthread_mutex_unlock(&mu);
+    return fault;
 }
 
 /* The stop lever's reach into a probe in flight: the ladder looks
@@ -418,7 +468,9 @@ static int probe_sequence(int fd)
         wr_attr("cnc/enable", "1");
         if (probe_wait(1))
             goto aborted;
+        led_set(LED_SOLID_WHITE);       /* the machine is moving */
         int rc = liveness_probe(fd, detail, sizeof(probe_detail));
+        led_release();
         fflog(rc == -3 ? LOG_NOTICE : LOG_INFO, "super: liveness probe: %s - %s",
               rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION"
               : rc == -3 ? "WAITS" : "ERROR", detail);
@@ -963,7 +1015,7 @@ static void pass_locked(void)
         {
             char why[256];
             pthread_mutex_unlock(&mu);
-            int open = setup_gate_open(why, sizeof(why));
+            int open = controller_gate_open(why, sizeof(why));
             pthread_mutex_lock(&mu);
             int now_gated = !open && !local_posture;
             if (now_gated != gated || (now_gated && strcmp(why, gate_why))) {
@@ -1210,7 +1262,7 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
     }
     {
         char why[256];
-        if (!setup_gate_open(why, sizeof(why)) && !local_posture) {
+        if (!controller_gate_open(why, sizeof(why)) && !local_posture) {
             snprintf(err, elen, "controllers are gated: %s", why);
             return -1;
         }

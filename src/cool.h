@@ -34,6 +34,9 @@ void cool_diag_purge(int on);       /* the head's purge fan */
 void cool_quiet_hold(int on);
 void cool_quiet_hold_ex(int on, int with_pump);
 int cool_quiet_held(void);
+/* Whether a quiet hold may take the pump now: the engine idle (no warm-up,
+ * run, smoke or thermal phase, no diagnostic). */
+int cool_quiet_pump_ok(void);
 int cool_quiet_pump_held(void);
 
 /* Factory run fan duties (pulse-header ground truth; also the
@@ -83,8 +86,16 @@ int cool_state_report(const char *mode, int armed,
  * does not fit is published empty, never cut); returns -1 when the
  * buffer given was too small, so a caller never serves a cut-off
  * document as JSON. */
-#define COOL_STATUS_JSON_MAX 1536
+#define COOL_STATUS_JSON_MAX 3072
 int cool_status_json(char *buf, size_t len);
+
+/* The operator's acknowledgment of a failure the panel shows. Returns 0, or
+ * -1 while its cause still stands: the red flash stays until that is gone. */
+int cool_attention_ack(void);
+
+/* Dismiss the notices of faults that cleared on their own, up to and including
+ * this sequence number (the panel's last one shown). */
+void cool_notices_dismiss(unsigned upto);
 
 /* The armed window as `GET /cool/status` publishes it: the running
  * controller's last report while that report is fresh, and false when

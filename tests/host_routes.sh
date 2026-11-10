@@ -50,15 +50,22 @@
 #   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT),
 #     and one outside its form runs nothing
 #   the login over HTTPS: the lock, the cookie, the logout
-#   the reset of every setting: confirm=1 and the machine button held, or
-#     nothing is requested
+#   the button held as proof of an operator (the switch device a file,
+#     its ioctl a preloaded stand-in; GF_SLOT_LIST the slot inventory,
+#     GF_REBOOT_FILE the reboot): the reset of every setting, an unsigned
+#     install and the fuse view each refuse 403 with the button up; under
+#     an armed job the reset, the unsigned install, /ext/key, /ext/install
+#     and the fuse view each answer 409 before the button is asked for, and
+#     so does the fuse view beside a paused GRBL job and the reset with the
+#     next boot on the other slot; with the button held the reset is
+#     taken, its request written and the reboot scheduled
 #   a dev image (GF_DEV_MARKER): the login page, the panel and the setup
 #     each carry the dev bar above the header, with where the boot's
 #     settings are (GF_DATA_STATE, the boot step's record)
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
 # distribution's library cuts the peer address that the loopback checks
-# read. Runs unprivileged; build.yml runs it:
+# read. Needs a C compiler (cc). Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_routes.sh <build-dir> <ulfius-lib-dir>
 
@@ -116,12 +123,13 @@ start_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
         FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
-        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
+        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="${SWITCH_DEV:-$T/no-switches}" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
-        GF_DATA_STATE="${DATA_STATE:-}" \
+        GF_DATA_STATE="${DATA_STATE:-}" GF_SLOT_LIST="${SLOT_LIST:-}" GF_REBOOT_FILE="${REBOOT_FILE:-}" \
+        LD_PRELOAD="${PRELOAD:-}" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -355,7 +363,8 @@ echo "== the write routes without the token"
 n=$(lines)
 for p in /controller/stop /controller/start /mode /settings /diag/aa-offset-calibrate /diag/abort \
          /update/apply /boot /update/check /update/dismiss /system/reboot /system/reset /restore/factory \
-         /restore/factory-return /system/ssh /wiz/advisories/accept /wiz/account /wiz/complete; do
+         /restore/factory-return /system/ssh /wiz/advisories/accept /wiz/account /wiz/complete \
+         /cool/attention/ack /cool/notices/dismiss; do
     code=$(post $p -)
     if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
         ok "POST $p: 403, authentication required"
@@ -598,6 +607,7 @@ expect 200 "$(post /wiz/account "$TOKEN" -d name=$NAME -d password=$PW)" "a temp
 login() { curl -sk -D "$T/head" -o "$T/body" -w '%{http_code}' -X POST -d "name=$1" -d "password=$2" "$TLS/login"; }
 session() { curl -sk -o "$T/body" -H "Cookie: ffsid=$1" "$TLS/wiz"; jv 'd.get("session")'; }
 expect 401 "$(login $NAME not-$PW)" "a wrong password is 401"
+expect True "$(jv 'bool(d.get("error"))')" "with a JSON error, the one the login page shows"
 codes=
 i=0
 while [ $i -lt 6 ]; do
@@ -642,13 +652,123 @@ grep -q "FORGECTRL_SSHD_INIT is not an absolute path" "$T/out" && ok "the refusa
 expect 200 "$(post /system/ssh "$TOKEN" -d enable=0)" "enable=0 is 200"
 expect "$n" "$(wc -l < "$T/sshd.log")" "and the stop ran nothing either"
 
-echo "== the reset of every setting"
+echo "== the button held as proof of an operator, and the jobs that would take the hold"
+# The daemon again, with the machine button to hold: the switch device is
+# the switch word's file, read through a stand-in for the device's ioctl
+# (bit 2 is the button, bit 3 the closed lid); the slot inventory is a
+# file that says the next boot comes back to the booted slot; a reboot is
+# written to a file.
+stop_daemon
+cat > "$T/swshim.c" <<'EOF'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <linux/input.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+
+int ioctl(int fd, unsigned long req, ...)
+{
+    va_list ap;
+    va_start(ap, req);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    if (_IOC_TYPE(req) == 'E' && _IOC_NR(req) == _IOC_NR(EVIOCGSW(0)) && _IOC_DIR(req) == _IOC_READ) {
+        const char *wf = getenv("GF_SWITCH_WORD_FILE");
+        FILE *f = wf ? fopen(wf, "r") : NULL;
+        unsigned long word;
+        int got = f && fscanf(f, "%lu", &word) == 1;
+        if (f)
+            fclose(f);
+        if (!got)
+            return -1;
+        unsigned char *b = arg;
+        for (unsigned i = 0; i < _IOC_SIZE(req); i++)
+            b[i] = (unsigned char)(word >> (8 * i));
+        return (int)_IOC_SIZE(req);
+    }
+    static int (*real)(int, unsigned long, ...);
+    if (!real)
+        real = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
+    return real(fd, req, arg);
+}
+EOF
+cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch stand-in did not build"
+printf 'booted.root=/dev/mmcblk2p1\nslot.a.device=/dev/mmcblk2p1\nslot.a.present=yes\nslot.a.booted=yes\nslot.a.next=yes\n' \
+    > "$T/slots.list"
+OLD=$(cat "$T/ctl.secret")
+SWITCH_DEV="$T/switches" PRELOAD="$T/swshim.so" SLOT_LIST="$T/slots.list" REBOOT_FILE="$T/reboot" start_daemon
+until_ok 150 eval '[ "$(cat "$T/ctl.secret")" != "$OLD" ]' || fatal "no controller started beside the button's stand-in"
+SEC=$(cat "$T/ctl.secret")
+# armed <1|0>: the controller's report, its armed window open or closed
+armed() {
+    if [ "$1" = 1 ]; then set -- run 1; else set -- idle 0; fi
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-ForgeFIRM-Report: $SEC" -d "mode=$1" -d "armed=$2" \
+              "$URL/cool/state")" = 200 ] || bad "the controller's report (mode=$1 armed=$2) was refused"
+}
+# gstate <state>: the GRBL controller's own state file
+gstate() {
+    python3 - "$T/run/grbl.state" "$1" <<'EOF'
+import json, os, sys, time
+tmp = sys.argv[1] + '.tmp'
+json.dump({'ts_mono': round(time.monotonic(), 3), 'state': sys.argv[2], 'alarm': 0,
+           'laser': {'armed': False, 'arming': False, 'model': 'density'}}, open(tmp, 'w'))
+os.replace(tmp, sys.argv[1])
+EOF
+}
+getfuse() { curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/fuse-identity"; }
+WAITS='a job waits for the button press: cancel it first'
+gstate Idle
+echo unsigned > "$T/data/upload.fw"
+
+# The button up, no job: each route's own refusal for the button.
 expect 400 "$(post /system/reset "$TOKEN")" "POST /system/reset without confirm=1 is 400"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
-if [ "$code" = 403 ] && grep -q 'hold the machine button' "$T/body"; then
-    ok "confirm=1 without the machine button held: 403, hold the machine button"
+if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not held" ]; then
+    ok "confirm=1 without the machine button held: 403, the button named (the panel's dialog stays open on it)"
 else bad "confirm=1 without the button -> $code $(cat "$T/body")"; fi
-[ ! -e "$T/data/reset-requested" ] && ok "and no reset is requested" || bad "a refused reset left data/reset-requested"
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1)
+if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not held" ]; then
+    ok "an unsigned install without the button held: 403, the button named"
+else bad "confirm_unsigned=1 without the button -> $code $(cat "$T/body")"; fi
+expect 403 "$(getfuse)" "GET /fuse-identity without the button held is 403"
+
+# A job armed, the button still up: 409 from each, before the button is
+# asked for, in the words the routes share.
+armed 1
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "409|$WAITS" "$code|$(jv 'd.get("error")')" "the reset under an armed job: 409, not the button's 403"
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1)
+expect "409|$WAITS" "$code|$(jv 'd.get("error")')" "an unsigned install under an armed job: 409, a job waits"
+expect "409|$WAITS" "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(cat "$T/body")" \
+    "POST /ext/key under an armed job: 409, a job waits"
+expect "409|$WAITS" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" "POST /ext/install under an armed job: 409, a job waits"
+expect "409|$WAITS" "$(getfuse)|$(cat "$T/body")" "GET /fuse-identity under an armed job: 409, a job waits"
+armed 0
+# A GRBL job paused with its window closed: the controller's state file says so.
+gstate Hold
+expect 409 "$(getfuse)" "GET /fuse-identity beside a paused GRBL job is 409"
+gstate Idle
+expect 403 "$(getfuse)" "and 403 again, the button's, with the controller idle"
+[ ! -e "$T/data/reset-requested" ] && [ ! -e "$T/reboot" ] && ok "no reset is requested, and nothing rebooted" \
+    || bad "a refused reset left data/reset-requested or a reboot"
+
+# The next boot set to the other slot: refused before the button too.
+printf 'slot.a.booted=yes\nslot.b.next=yes\n' > "$T/slots.other"
+cp "$T/slots.list" "$T/slots.same"
+cp "$T/slots.other" "$T/slots.list"
+expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset with the next boot on the other slot is 409"
+cp "$T/slots.same" "$T/slots.list"
+
+# The button held: the reset is taken, its request written, the reboot scheduled.
+echo 12 > "$T/switches"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "with the button held the reset is taken"
+[ -s "$T/data/reset-requested" ] && ok "the reset request is in the data directory" || bad "no data/reset-requested"
+[ -s "$T/reboot" ] && ok "and the reboot is scheduled (written to the stand-in's file)" || bad "no reboot was scheduled"
+echo 8 > "$T/switches"
+rm -f "$T/data/reset-requested" "$T/data/upload.fw"
 
 echo "== a dev image's pages carry the dev bar"
 stop_daemon
@@ -669,7 +789,8 @@ b = p.find('<body>')
 h = p.find('<header>', b)
 bar = p[b:h]
 sys.exit(0 if 0 <= b < h and head in bar and
-         '<strong>DATA Mount</strong>: eMMC (SD mount error - see logs)' in bar and
+         '<strong>DATA Mount</strong>: SD card failed - nothing is saved this boot' in bar and
+         'controllers held' in bar and
          '<!--FFDEV-->' not in p else 1)
 EOF
     then ok "$3 carries the dev bar above its header, with the card's data not mounted"
@@ -678,6 +799,12 @@ EOF
 devpage /login 'id="lg"' "the login page"
 devpage / 'id="savebar"' "the panel"
 devpage /setup 'id="rail"' "the setup"
+# that boot holds the controllers, and says why
+code=$(curl -s -o "$T/mode.json" -w '%{http_code}' "$URL/mode")
+if [ "$code" = 200 ] && grep -q '"gated":true' "$T/mode.json" && \
+        grep -q "the SD card's data partition is not in use" "$T/mode.json"; then
+    ok "a card boot whose data partition is not in use holds the controllers, and /mode says why"
+else bad "GET /mode on a card-failed boot -> $code $(cat "$T/mode.json")"; fi
 
 stop_daemon
 [ ! -e "$T/cloud.started" ] || bad "the cloud client's stand-in started"

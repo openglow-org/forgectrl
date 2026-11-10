@@ -8,7 +8,7 @@
 tests/senslog_records.txt is the golden file senslog_test proves the
 formatters write, so a format change reaches this test the moment the
 golden file is rewritten. Proven here: every golden record parses with
-its values; a boot's lines written before the clock was set are re-dated
+its values, and the reader's record types are the golden file's; a boot's lines written before the clock was set are re-dated
 from its clock record; the tables come out one per record type and one
 per flight-recorder dump; an export's rotated files are read oldest
 first."""
@@ -40,6 +40,8 @@ class Records(unittest.TestCase):
         by = {}
         for r in recs:
             by.setdefault(r["type"], []).append(r)
+        # the reader knows the logger's record types, and no other
+        self.assertEqual(sorted(by), sorted(sr.TYPES))
         beat = by["beat"][0]
         self.assertEqual(sr.num(beat["down"]), 21.43)
         self.assertEqual(sr.num(beat["sw"]), 0x28)

@@ -87,7 +87,10 @@ int auth_by_scoped(void);
 int auth_local_viewer(const struct _u_request *req);
 
 /* Operator-present factor: true only while the physical button is held.
- * Gates the irrevocable fuse view and unsigned-firmware installs. */
+ * Gates the irrevocable fuse view, unsigned-firmware installs, the reset
+ * of every setting, an owner's key and an unverified package. A level
+ * read with no regard for a job: every route that asks for it asks
+ * job_takes_button() (hooks.h) first, so the hold is never a job's press. */
 int operator_present(void);
 
 #endif /* FORGECTRL_AUTH_H */

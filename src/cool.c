@@ -23,10 +23,11 @@
  * start), GFCOOL_* env vars as bench overrides that win for the
  * process lifetime.
  *
- * - IDLE: pump on, TEC off, purge on, fans at factory idle, HEATER OFF
- *   (an always-on loop heater measurably warms the loop - ~1.5 C in
- *   minutes - eating headroom below the start gate for no benefit
- *   while nothing can fire).
+ * - IDLE: pump on, TEC off, purge on, fans at factory idle, and this
+ *   engine's heater off (the warm-up's 40 % would warm the loop ~1.5 C
+ *   in minutes for no benefit while nothing can fire). The flow watch,
+ *   when an owner turns it on, holds the heater at a few percent: about
+ *   0.5 C over 90 min on the bench reference.
  * - RUN (reported mode "run", or armed whatever the mode says):
  *   cut-profile fans - per-job duties from the report when given.
  * - COOLDOWN (run ends): a smoke-clear phase at run duty, then a
@@ -94,7 +95,9 @@
  *   channels lit well past the lamp. Over its critical threshold is
  *   the fail tier: motion stopped, latch locked, the controller ended
  *   through the supervisor (cool_fail_tier_stop), verdict FIRE with
- *   hold until the next run session, smoke airflow held. Zero is a
+ *   hold through the session's tail (it ends when the engine is back
+ *   at idle or a run session opens, and the operator's acknowledgment
+ *   carries it from there), smoke airflow held. Zero is a
  *   tier off; the thresholds sit above a fully lit lid lamp by
  *   construction, so the lamp never trips them - and a candle-sized
  *   flame stays under them too: this catches a developed fire.
@@ -110,6 +113,11 @@
  *   running, exhaust/intake never drop below cooldown duty.
  * - Diagnostics (diag.c) own the hardware while they run: the engine
  *   suspends its writes and publishes fire-blocked until they finish.
+ * - The coolant flow watch (flowrun.c, flowwatch.h; opt-in, log only)
+ *   borrows the loop heater for its hold and never touches the pump: it
+ *   gets this engine's context every tick, and every engine path that
+ *   writes the heater (the warm-up, an unreadable sensor, diagnostics, a
+ *   quiet hold, shutdown) takes it back first.
  */
 #define _GNU_SOURCE
 #include "accel.h"
@@ -118,11 +126,14 @@
 #include "setup.h"
 #include "coolfmt.h"
 #include "fflog.h"
+#include "flowrun.h"
 #include "gates.h"
 #include "holds.h"
+#include "led.h"
 #include "senslog.h"
 #include "settings.h"
 #include "status.h"
+#include "super.h"
 #include "testhook.h"
 
 #include <errno.h>
@@ -186,6 +197,9 @@ static const char *sysfs_root(void)
 #define WARMUP_STALL_C          0.2f    /* what counts as progress */
 #define WARMUP_WIN            60        /* 1 Hz samples; the bulk, not a slug */
 #define WARMUP_HEATER_PCT     40        /* the loop heater's duty while held */
+#define WARMUP_HEAT_MAX_S   1800        /* the heater's budget in one warm-up; the hold stays after */
+#define WARMUP_DOWN_OFF_C     45.0f     /* downstream at this: the warm-up heater off */
+#define WARMUP_DOWN_ON_C      40.0f     /* ...and back on under this */
 /* A coolant sensor read that fails (a sysfs error, not a rail value)
  * leaves every coolant gate blind. One failed tick is tolerated: the
  * gates keep their state and the sample is skipped. This many in a row
@@ -295,6 +309,9 @@ static float warmup_gate_c = 0;     /* the start gate the session holds against 
 static float warmup_last_up = 0;    /* progress tracking for the stall warning */
 static double warmup_progress_at = 0;
 static int warmup_stall_warned = 0;
+static double warmup_started_at = 0;    /* the warm-up's start, for the heater's budget */
+static int warmup_spent = 0;            /* the budget ran out: heater off, the hold stays */
+static int warmup_hot = 0;              /* downstream at the cutoff: heater off until it cools */
 /* The release judges the mixed bulk, not the heater's slug passing the
  * sensor: the minimum of the upstream reading over the last WARMUP_WIN
  * seconds (between slugs the reading falls back to the bulk). */
@@ -1018,7 +1035,14 @@ static void conf_reload(void)
         float f = tunables[i].def;
         if (settings_get(tunables[i].key, v, sizeof(v)) == 0) {
             float parsed = strtof(v, &end);
-            if (end != v && *end == '\0')
+            /* "nan" and "inf" parse as numbers. Every comparison against a
+             * NaN is false, so a limit set to one never trips and never
+             * reads as off: the default stands instead, and the line says
+             * so at every run start. */
+            if (end != v && *end == '\0' && !isfinite(parsed))
+                fflog(LOG_WARNING, "cool: %s = %s is not a finite number; the default %g stands",
+                      tunables[i].key, v, (double)tunables[i].def);
+            else if (end != v && *end == '\0')
                 f = parsed;
         }
         if (tunables[i].f)
@@ -1080,6 +1104,7 @@ int cool_diag_take(void)
         pthread_mutex_lock(&mu);
     }
     pthread_mutex_unlock(&mu);
+    flowrun_yield("diagnostics");
     warn("diagnostics own the thermal hardware");
     return 0;
 }
@@ -1117,6 +1142,10 @@ void cool_quiet_hold_ex(int on, int with_pump)
     if (on)
         quiet_since = wall_s();
     pthread_mutex_unlock(&mu);
+    /* After the hold is published: a tick between the two then carries it,
+     * so nothing lets the watch take the heater back before the pump stops. */
+    if (on)
+        flowrun_yield("a quiet hold");
     if (on) {
         if (!was) {
             fans_quiet();
@@ -1151,6 +1180,17 @@ int cool_quiet_held(void)
     return held;
 }
 
+/* The pump only from an idle engine: never under a warm-up (its heater
+ * would run on a still loop), a run session, a smoke or thermal phase, or
+ * a diagnostic. */
+int cool_quiet_pump_ok(void)
+{
+    pthread_mutex_lock(&mu);
+    int ok = !diag_owned && !strcmp(pub_phase, "idle");
+    pthread_mutex_unlock(&mu);
+    return ok;
+}
+
 int cool_quiet_pump_held(void)
 {
     pthread_mutex_lock(&mu);
@@ -1165,6 +1205,10 @@ void cool_diag_pump(int on)
         wr_attr("thermal/water_pump_on", on ? "1" : "0");
 }
 
+/* The kernel holds a heater duty above zero only for its lease
+ * (heater_lease_ms): a diagnostic that wants heat writes it again inside
+ * the lease, here. The engine's tick does not write it for the diagnostic,
+ * so one that hangs loses its heat with the lease. */
 void cool_diag_heater_pct(double pct)
 {
     if (diag_guard("diag heater write") == 0)
@@ -1229,10 +1273,10 @@ static int fan_margin_noted[Fan_N];
 /* The document must always fit its buffer. An oversized one is not
  * published at all, and no verdict reads to every controller as a
  * fault: fire blocked and the job held. Budget: the keys, quotes and
- * separators; the four booleans; the numbers (seq, ts_mono and the two
+ * separators; the five booleans; the numbers (seq, ts_mono and the two
  * temperatures); and the two bounded strings. */
-#define VERDICT_PUNCTUATION 104
-#define VERDICT_BOOLEANS     20
+#define VERDICT_PUNCTUATION 116
+#define VERDICT_BOOLEANS     25
 #define VERDICT_NUMBERS      64
 #define VERDICT_BODY_MAX    384
 _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
@@ -1254,7 +1298,16 @@ _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
  * carrying armed=true was computed with the run session open, and only
  * once every gated fan reads at or above its floor (fans_up): the
  * controller waits on this acknowledgment, so the first fire waits for
- * the airflow instead of the fans catching up under the beam. */
+ * the airflow instead of the fans catching up under the beam.
+ *
+ * "ack_wait" says a failure waits for the operator's acknowledgment
+ * (attention_tick), whatever the verdict's name: the name is ACK only
+ * where no other verdict stands, and a controller that must not ask for a
+ * press it would then refuse reads this instead. It is read from the
+ * attention's own state here, so every document carries it. fire_ok is
+ * false whenever it is true. */
+static int attn_ack_waits(void);
+
 static void verdict_publish(int fire_ok, const char *verdict, int hold,
                             int have_down, float down,
                             int have_up, float up)
@@ -1262,6 +1315,7 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     char body[VERDICT_BODY_MAX];
     int armed_ack = eff_armed && fans_up;
     pthread_mutex_lock(&mu);
+    int ack_wait = attn_ack_waits();
     snprintf(pub_verdict, sizeof(pub_verdict), "%s", verdict);
     pub_fire_ok = fire_ok;
     pub_hold = hold;
@@ -1276,10 +1330,11 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     int n = snprintf(body, sizeof(body),
         "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
         "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
+        "\"ack_wait\":%s,"
         "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
         ++verdict_seq, stamp, fire_ok ? "true" : "false",
         verdict, hold ? "true" : "false", hold ? "false" : "true",
-        armed_ack ? "true" : "false",
+        armed_ack ? "true" : "false", ack_wait ? "true" : "false",
         pub_reason, pub_down, pub_up);
     pthread_mutex_unlock(&mu);
     /* snprintf reports the untruncated length; never publish more than
@@ -1307,6 +1362,243 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
 /* Enter/leave the effective run window: reported mode "run" OR armed -
  * fire must never happen without the cut airflow, which only lives
  * inside a run session. */
+/* The operator's attention. Whatever blocks firing and needs the operator
+ * flashes the button red, and the panel says why: FIRE, CRASH, FLAME, BUMP,
+ * AIRFLOW, CRITICAL, SENSOR, and a failed motion check. Holds that clear on
+ * their own (the warm-up, a cold or a hot loop, an extension's hold) do not:
+ * they are the machine's own to wait out.
+ *
+ * Red always means firing is blocked. A failure of the fail tier (FIRE,
+ * CRASH, AIRFLOW, CRITICAL), or one that still stands when its session ends,
+ * ends with the session as far as its own verdict goes, so it stays up as
+ * the verdict ACK, which blocks fire and holds any armed window until the
+ * operator has acknowledged it on the panel. Motion is free. A pause tier's
+ * cause that goes away under a job still held needs no acknowledgment: the
+ * job's resume is the operator's (a press, or the window the operator armed
+ * still open). Nothing here survives a restart.
+ *
+ * The flash stands over any pattern a controller writes: it is checked every
+ * tick and put back, never rewritten while it stands, which would restart its
+ * period. When nothing wants it any more the engine puts out only its own:
+ * a button that no longer reads as the flash was written by another owner
+ * since the last tick, and is left as that owner set it. A pattern the
+ * flash covered comes back from its owner (led_keep).
+ *
+ * A fault that clears on its own still gets said: a notice with its type and
+ * its times stands on the panel until it is dismissed. It blocks nothing and
+ * lights nothing. Repeats of the last one are counted, not stacked. */
+static int attn_latched = 0;
+static int attn_live = 0;
+static int attn_sticky = 0;             /* it takes the acknowledgment to end it */
+static int attn_was_armed = 0;
+static int attn_was_session = 0;        /* the engine was in a run session or its tail */
+static int attn_unwatched = 0;          /* a watch stood down with its pause tier standing */
+static char attn_verdict[COOL_VERDICT_MAX];
+static char attn_reason[COOL_REASON_MAX];
+static double attn_at = 0.0;
+static double attn_cleared_at = 0.0;
+static int attn_lamp_up = 0;
+
+typedef struct {
+    unsigned seq;
+    char verdict[COOL_VERDICT_MAX];
+    char reason[COOL_REASON_MAX];
+    double at, cleared_at;
+    int times;
+} attn_notice_t;
+static attn_notice_t attn_notices[COOL_NOTICES_N];
+static int attn_notice_n = 0;
+static unsigned attn_notice_seq = 0;
+static char pub_notices[COOL_NOTICES_JSON_MAX] = "[]";
+
+/* Under mu. */
+static void notices_publish(void)
+{
+    size_t o = 0;
+    int n = snprintf(pub_notices, sizeof(pub_notices), "[");
+    o = (size_t)n;
+    for (int i = 0; i < attn_notice_n; i++) {
+        const attn_notice_t *a = &attn_notices[i];
+        n = snprintf(pub_notices + o, sizeof(pub_notices) - o,
+                     "%s{\"seq\":%u,\"verdict\":\"%s\",\"reason\":\"%s\",\"at\":%.0f,"
+                     "\"cleared_at\":%.0f,\"times\":%d}",
+                     i ? "," : "", a->seq, a->verdict, a->reason, a->at, a->cleared_at, a->times);
+        if (n < 0 || (size_t)n >= sizeof(pub_notices) - o - 1) {
+            snprintf(pub_notices, sizeof(pub_notices), "[]");   /* never cut */
+            return;
+        }
+        o += (size_t)n;
+    }
+    snprintf(pub_notices + o, sizeof(pub_notices) - o, "]");
+}
+
+/* Under mu. */
+static void notice_add(const char *verdict, const char *reason, double at, double cleared_at)
+{
+    if (attn_notice_n > 0 && !strcmp(attn_notices[attn_notice_n - 1].verdict, verdict)) {
+        attn_notice_t *a = &attn_notices[attn_notice_n - 1];
+        a->cleared_at = cleared_at;
+        a->times++;
+    } else {
+        if (attn_notice_n == COOL_NOTICES_N) {
+            memmove(&attn_notices[0], &attn_notices[1],
+                    sizeof(attn_notices[0]) * (COOL_NOTICES_N - 1));
+            attn_notice_n--;
+        }
+        attn_notice_t *a = &attn_notices[attn_notice_n++];
+        a->seq = ++attn_notice_seq;
+        snprintf(a->verdict, sizeof(a->verdict), "%s", verdict);
+        snprintf(a->reason, sizeof(a->reason), "%s", reason);
+        a->at = at;
+        a->cleared_at = cleared_at;
+        a->times = 1;
+    }
+    notices_publish();
+    fflog(LOG_NOTICE, "cool: %s cleared on its own after %.0f s", verdict, cleared_at - at);
+}
+
+void cool_notices_dismiss(unsigned upto)
+{
+    pthread_mutex_lock(&mu);
+    int k = 0;
+    for (int i = 0; i < attn_notice_n; i++)
+        if (attn_notices[i].seq > upto)
+            attn_notices[k++] = attn_notices[i];
+    attn_notice_n = k;
+    notices_publish();
+    pthread_mutex_unlock(&mu);
+}
+
+static int attn_needs_operator(const char *verdict)
+{
+    static const char *const names[] = { "FIRE", "CRASH", "FLAME", "BUMP", "AIRFLOW",
+                                         "CRITICAL", "SENSOR" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
+        if (!strcmp(verdict, names[i]))
+            return 1;
+    return 0;
+}
+
+static int attn_fail_tier(const char *verdict)
+{
+    return !strcmp(verdict, "FIRE") || !strcmp(verdict, "CRASH") ||
+           !strcmp(verdict, "AIRFLOW") || !strcmp(verdict, "CRITICAL");
+}
+
+/* A failure whose cause has gone waits for the acknowledgment. Under mu. */
+static int attn_ack_waits(void)
+{
+    return attn_latched && !attn_live;
+}
+
+static void attention_tick(const char *verdict)
+{
+    int live = attn_needs_operator(verdict);
+    int motion = super_motion_fault();
+    pthread_mutex_lock(&mu);
+    double wall_now = (double)time(NULL);
+    /* A new cause takes the record, unless the record waits for its
+     * acknowledgment: that one stays what the panel asks about (the new one
+     * shows as the verdict). One that another took over from may still stand
+     * under it (a verdict names only the highest), so it is not called
+     * cleared. */
+    if (live && attn_latched && attn_sticky && strcmp(attn_verdict, verdict) && !attn_live)
+        fflog(LOG_WARNING, "cool: firing blocked, the operator's attention wanted: %s (the "
+              "acknowledgment of %s still waits)", pub_reason[0] ? pub_reason : verdict, attn_verdict);
+    if (live && (!attn_latched || (!attn_sticky && strcmp(attn_verdict, verdict)))) {
+        snprintf(attn_verdict, sizeof(attn_verdict), "%s", verdict);
+        snprintf(attn_reason, sizeof(attn_reason), "%s", pub_reason);
+        /* The reason goes into JSON as it stands. */
+        for (char *p = attn_reason; *p; p++)
+            if (*p == '"' || *p == '\\')
+                *p = '\'';
+        attn_at = wall_now;
+        attn_cleared_at = 0.0;
+        fflog(LOG_WARNING, "cool: firing blocked, the operator's attention wanted: %s",
+              pub_reason[0] ? pub_reason : verdict);
+    }
+    /* The window closing, or the engine returning to idle (a watch that
+     * stands down at the session's end clears its cause without the cause
+     * having cleared): a cause still standing then needs the acknowledgment. */
+    int in_session = cool_state != Cool_Idle;
+    int session_ended = (attn_was_armed && !eff_armed) || (attn_was_session && !in_session);
+    /* A watch that stood down over its own pause tier (the crash watch, when
+     * the head stops answering) ended that cause the same way: nothing saw
+     * it clear, so it needs the acknowledgment too. */
+    if (attn_unwatched) {
+        attn_unwatched = 0;
+        session_ended = 1;
+    }
+    if (live) {
+        attn_latched = 1;
+        if (attn_fail_tier(verdict) || session_ended)
+            attn_sticky = 1;
+    } else if (attn_latched && !attn_sticky) {
+        if (session_ended) {
+            attn_sticky = 1;
+        } else {
+            attn_latched = 0;
+            notice_add(attn_verdict, attn_reason, attn_at, wall_now);
+        }
+    }
+    if (attn_live && !live)
+        attn_cleared_at = wall_now;
+    attn_live = live;
+    attn_was_armed = eff_armed;
+    attn_was_session = in_session;
+    int want = attn_latched || motion;
+    pthread_mutex_unlock(&mu);
+
+    if (want) {
+        if (led_red_up() != 1)
+            led_set(LED_FLASH_RED);
+        attn_lamp_up = 1;
+    } else if (attn_lamp_up) {
+        attn_lamp_up = 0;
+        /* Only the flash is the engine's to put out. One that cannot be
+         * read is put out too: a red left flashing would say firing is
+         * blocked when it is not. */
+        if (led_red_up() != 0)
+            led_release();
+    }
+}
+
+int cool_attention_ack(void)
+{
+    pthread_mutex_lock(&mu);
+    int rc = attn_live ? -1 : 0;
+    if (rc == 0 && attn_latched) {
+        attn_latched = 0;
+        attn_sticky = 0;
+        /* Only the acknowledged fault's words go: another cause's stand. */
+        if (!strcmp(pub_reason, attn_reason))
+            pub_reason[0] = '\0';
+        fflog(LOG_NOTICE, "cool: the operator acknowledged %s", attn_verdict);
+    }
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
+/* The crash watch disarmed with its pause tier standing. Nothing polls the
+ * part from here, so nothing could release the alert: left standing, BUMP
+ * holds for the rest of the session and the Acknowledge is refused. The
+ * alert goes with the watch (the fail tier's alarm stays for its session),
+ * and since nothing saw the head sit quiet, what it held waits for the
+ * operator's acknowledgment: the window closing makes it so, and a watch
+ * that stood down inside an open window says so itself (attn_unwatched). */
+static void crash_alert_stand_down(void)
+{
+    if (!crash_w.alert)
+        return;
+    crash_w.alert = 0;
+    crash_w.clear_ticks = 0;
+    attn_unwatched = 1;
+    info("head bump alert ended with its watch; firing waits for the acknowledgment");
+    pthread_mutex_lock(&mu);
+    pub_reason[0] = '\0';
+    pthread_mutex_unlock(&mu);
+}
+
 static void flood_apply(int on, double now)
 {
     if (on) {
@@ -1335,7 +1627,11 @@ static void flood_apply(int on, double now)
             warmup_progress_at = now;
             warmup_stall_warned = 0;
             warmup_win_n = 0;
+            warmup_started_at = now;
+            warmup_spent = 0;
+            warmup_hot = 0;
             fans_idle();
+            flowrun_yield("warm-up");
             heater_set_pct(WARMUP_HEATER_PCT);
             char msg[96];
             snprintf(msg, sizeof(msg),
@@ -1347,11 +1643,12 @@ static void flood_apply(int on, double now)
             fans_run();
         }
         /* New run session: a standing fire alarm clears - a new job
-         * means the operator is back at the machine. */
+         * means the operator is back at the machine. The pause tier's hold
+         * is not the session's to clear: a FLAME standing from the last
+         * session's tail stands on into this one, and is released as any
+         * other, by FIRE_CLEAR_TICKS clean readings. */
         ir_over_ticks = 0;
         fire_alarm = 0;
-        flame_alert = 0;
-        flame_clear_ticks = 0;
         crash_reset(&crash_w);
         crash_poll_errs = 0;
         pgood_warned = 0;
@@ -1365,11 +1662,11 @@ static void flood_apply(int on, double now)
         }
         cool_state = Cool_Smoke;
         phase_until = now + (session_armed ? (double)smoke_s : 0.0);
-        /* A fan fault is the session's: it ends with it, because the next
-         * session re-proves every fan after the grace before anything can
-         * fire. Left standing, the hold would cancel jogs at idle and the
-         * cloud client's print pre-check would refuse the print that
-         * re-proves the fan. */
+        /* A fan fault is the session's: its verdict and its hold end with
+         * it, because the next session re-proves every fan after the grace
+         * before anything can fire, and a hold left standing would cancel
+         * jogs at idle. What outlasts the session is the operator's
+         * acknowledgment (attention_tick): fire blocked, motion free. */
         if (airflow_alarm)
             info("airflow fault cleared with the run session; the next "
                  "session judges every fan afresh");
@@ -1422,7 +1719,24 @@ static void engine_tick(void)
         pthread_mutex_lock(&mu);
         pub_phase = "diag";
         pthread_mutex_unlock(&mu);
-        verdict_publish(0, "OK", 1, 0, 0, 0, 0);
+        flowrun_ctx_t fc = { .t = now, .yield = 1, .yield_why = "diagnostics", .session = 0,
+                             .fans = FW_FANS_OTHER };
+        flowrun_engine(&fc);
+        /* Nothing is sensed while a diagnostic owns the hardware, so the
+         * operator's attention stands as the last tick left it: a cause
+         * that was live is still counted live (no notice says it cleared),
+         * the red flash is kept up over whatever the diagnostic's side
+         * wrote, and an acknowledgment that waits keeps its name. Fire is
+         * blocked and the hold stands either way. */
+        char held[COOL_VERDICT_MAX];
+        pthread_mutex_lock(&mu);
+        snprintf(held, sizeof(held), "%s", attn_live ? attn_verdict : "OK");
+        pthread_mutex_unlock(&mu);
+        attention_tick(held);
+        pthread_mutex_lock(&mu);
+        int ack_wait = attn_latched && !attn_live;
+        pthread_mutex_unlock(&mu);
+        verdict_publish(0, ack_wait ? "ACK" : "OK", 1, 0, 0, 0, 0);
         return;
     }
 
@@ -1575,10 +1889,10 @@ static void engine_tick(void)
     if (faults >= 0)
         last_faults = faults;
 
-    /* Lid IR fire watch + HV range. The run-session baseline and peaks
-     * build the setup dataset; the tiers judge the sorted
-     * readings (the quartiles) against the factory-shaped thresholds
-     * through the whole session tail. */
+    /* Lid IR fire watch. The tiers judge the sorted readings (the
+     * quartiles) against the factory-shaped thresholds through the whole
+     * session tail. What the channels read over a job is the sensors
+     * logger's job record (senslog.h). */
     long ir[4];
     int have_ir = 1;
     for (int i = 0; i < 4; i++) {
@@ -1635,9 +1949,25 @@ static void engine_tick(void)
             }
         } else if (flame_alert)
             flame_clear_ticks = 0;
-    } else if (flame_alert) {
-        flame_alert = 0;        /* the session is over; nothing to hold */
+    } else if (flame_alert && cool_state == Cool_Idle) {
+        /* The watch stands down at idle and its hold goes with it: a flame
+         * still alight then is the acknowledgment's (attention_tick). */
+        flame_alert = 0;
         flame_clear_ticks = 0;
+    } else if (flame_alert) {
+        /* Not judged this tick (a lid IR read failed): the hold stands, and
+         * the tick is not a clean one. The release is FIRE_CLEAR_TICKS clean
+         * readings in a row, so the count starts over. */
+        flame_clear_ticks = 0;
+    }
+    /* The fire alarm is the session's, its tail included: once the engine
+     * is back at idle the watch stands down, and the alarm goes with it.
+     * The operator's acknowledgment carries it from there (attention_tick):
+     * fire stays blocked until the panel's Acknowledge, motion is free. An
+     * IR read that fails mid-session clears nothing. */
+    if (fire_alarm && cool_state == Cool_Idle) {
+        fire_alarm = 0;
+        info("lid IR fire alarm ended with its session; firing waits for the acknowledgment");
     }
     pthread_mutex_lock(&mu);
     pub_fire_watch = fire_alarm ? "ALARM"
@@ -1686,6 +2016,7 @@ static void engine_tick(void)
             crash_hw_disarm();
             crash_hw_armed = 0;
             crash_poll_errs = 0;
+            crash_alert_stand_down();
         }
         if (crash_hw_armed) {
             unsigned s1, s2;
@@ -1722,6 +2053,7 @@ static void engine_tick(void)
             } else if (++crash_poll_errs >= 3) {
                 crash_hw_disarm();
                 crash_hw_armed = 0;
+                crash_alert_stand_down();
                 warn("head accelerometer stopped answering - crash watch "
                      "down for this session");
             }
@@ -1871,8 +2203,6 @@ static void engine_tick(void)
                 pub_reason[0] = '\0';
                 pthread_mutex_unlock(&mu);
             }
-            if (cool_state == Cool_Warmup)
-                heater_set_pct(WARMUP_HEATER_PCT);
         }
     } else {
         if (sensor_fail_ticks < UINT32_MAX)
@@ -1887,6 +2217,7 @@ static void engine_tick(void)
                      : !have_up ? "upstream sensor" : "downstream sensor",
                      (unsigned)sensor_fail_ticks);
             warn(msg);
+            flowrun_yield("a coolant sensor is unreadable");
             heater_set_pct(0);
         }
     }
@@ -2003,6 +2334,35 @@ static void engine_tick(void)
                      bulk, WARMUP_STALL_S, warmup_gate_c);
             warn(msg);
         }
+    }
+
+    /* The warm-up heater, decided every tick, and written every tick it may
+     * run: the kernel holds a heater write above zero only for its lease
+     * (heater_lease_ms, 5 s), so a daemon that stops ticking leaves it off.
+     * Off with a blind sensor (SENSOR above), past the downstream cutoff
+     * (on again 5 C under it: every gate reads upstream, which sits before
+     * the heater), once the budget is spent (the hold stays: a loop that
+     * has not reached the gate in 30 minutes is not going to), and with
+     * the pump held off by a quiet hold. */
+    if (cool_state == Cool_Warmup) {
+        if (have_down && !warmup_hot && down >= WARMUP_DOWN_OFF_C) {
+            warmup_hot = 1;
+            fflog(LOG_WARNING, "cool: warm-up: downstream coolant %.1f C at the %.0f C cutoff - heater off "
+                  "until %.0f C", down, WARMUP_DOWN_OFF_C, WARMUP_DOWN_ON_C);
+        } else if (have_down && warmup_hot && down <= WARMUP_DOWN_ON_C) {
+            warmup_hot = 0;
+            info("warm-up: downstream coolant back under the cutoff - heater on");
+        }
+        if (!warmup_spent && now - warmup_started_at >= (double)WARMUP_HEAT_MAX_S) {
+            warmup_spent = 1;
+            char msg[112];
+            snprintf(msg, sizeof(msg),
+                     "WARM-UP: heater off after %d min, coolant %.1f C under the %.0f C gate - hold",
+                     WARMUP_HEAT_MAX_S / 60, have_up ? up : NAN, warmup_gate_c);
+            warn(msg);
+        }
+        int heat = have_down && !sensor_alarm && !warmup_hot && !warmup_spent && !cool_quiet_pump_held();
+        heater_set_pct(heat ? WARMUP_HEATER_PCT : 0);
     }
 
     /* The SoC's own thermal governor: it throttles the CPU at its
@@ -2148,15 +2508,27 @@ static void engine_tick(void)
                         : cold_gate ? "COLD"
                         : warming ? "WARMUP"
                         : ext.standing ? "EXT" : "OK";
+    /* A failure that waits for the operator's acknowledgment (ACK): its
+     * own verdict has gone, and it blocks fire, and holds an armed window,
+     * until the panel's Acknowledge. Motion is free. */
+    attention_tick(verdict);
+    pthread_mutex_lock(&mu);
+    int ack_wait = attn_ack_waits();
+    /* The fault's words where the verdict is ACK; another verdict keeps its own. */
+    if (ack_wait && !strcmp(verdict, "OK"))
+        snprintf(pub_reason, sizeof(pub_reason), "%s", attn_reason);
+    pthread_mutex_unlock(&mu);
+    if (ack_wait && !strcmp(verdict, "OK"))
+        verdict = "ACK";
     int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
              || airflow_alarm || critical_alarm || sensor_alarm
              || over_temp_gate || cold_gate || warming
-             || ext.standing;
+             || ext.standing || (ack_wait && eff_armed);
     int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
                 && !crash_w.alert && !airflow_alarm
                 && !critical_alarm && !sensor_alarm
                 && !over_temp_gate && !cold_gate && !warming
-                && !ext.standing;
+                && !ext.standing && !ack_wait;
     /* The reason is the hold's while the verdict is: it says which package
      * and why, and another event's words may have stood there since. */
     if (!strcmp(verdict, "EXT")) {
@@ -2170,7 +2542,37 @@ static void engine_tick(void)
               : cool_state == Cool_Warmup ? "warm-up"
               : cool_state == Cool_Smoke ? "smoke"
               : cool_state == Cool_Thermal ? "thermal" : "idle";
+    int quiet_now = quiet_held;
     pthread_mutex_unlock(&mu);
+
+    /* The flow watch's context: when it may have the heater, and the fans
+     * and the job it sees. */
+    {
+        flowrun_ctx_t fc;
+        fc.t = now;
+        /* Never heat a loop the engine has called too hot, or one the TEC
+         * is cooling. And never under the floor: the heater sits between the
+         * two coolant sensors, and in a loop that is still or slow its heat
+         * reaches the upstream one, the reading that releases the floor. */
+        int hot_ungated = gate_coolant_off && have_up && up > TEMP_MAX_C_DEFAULT;
+        int cooling = cool_state == Cool_Thermal || forced_cool;
+        fc.yield = warming || sensor_alarm || quiet_now || over_temp_gate || cold_gate || critical_alarm
+                   || tec_on_state || hot_ungated || cooling;
+        fc.yield_why = warming ? "warm-up" : sensor_alarm ? "a coolant sensor is unreadable"
+                     : quiet_now ? "a quiet hold" : critical_alarm ? "the coolant is at the critical line"
+                     : over_temp_gate || hot_ungated ? "the coolant is over the ceiling"
+                     : cold_gate ? "the coolant is under the floor"
+                     : cooling ? "the engine is cooling the loop"
+                     : tec_on_state ? "the TEC is cooling" : NULL;
+        fc.offset_counts = (double)cool_coolant_offset_counts();
+        fc.temp_offset_c = temp_offset_c;
+        fc.session = cool_state == Cool_Run;
+        fc.fans = quiet_now ? FW_FANS_OTHER
+                : (cool_state == Cool_Run || cool_state == Cool_Smoke) ? FW_FANS_RUN
+                : (cool_state == Cool_Thermal || forced_cool || start_cool) ? FW_FANS_COOL
+                : FW_FANS_IDLE;
+        flowrun_engine(&fc);
+    }
 
     verdict_publish(fire_ok, verdict, hold, have_down, down, have_up, up);
 }
@@ -2226,6 +2628,14 @@ void cool_init(void)
     const char *opt;
     for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++) {
         if ((opt = getenv(tunables[i].env))) {
+            /* A limit that is not a finite number is no override: the
+             * variable is passed over, and the setting or the default
+             * stands (conf_reload). */
+            if (tunables[i].f && !isfinite(strtof(opt, NULL))) {
+                fflog(LOG_WARNING, "cool: %s=%s is not a finite number; ignored",
+                      tunables[i].env, opt);
+                continue;
+            }
             tunables[i].env_set = 1;
             if (tunables[i].f)
                 *tunables[i].f = strtof(opt, NULL);
@@ -2264,6 +2674,7 @@ void cool_init(void)
         return;
     }
     fflog(LOG_INFO, "cool: engine started");
+    flowrun_init();
 }
 
 void cool_shutdown(void)
@@ -2274,6 +2685,8 @@ void cool_shutdown(void)
     pthread_mutex_unlock(&mu);
     if (was)
         pthread_join(engine_th, NULL);
+    /* The flow watch first: its heater off, whatever it was doing. */
+    flowrun_shutdown();
     /* The heater is the warm-up's heat source; off is always the right
      * parting state, job or no job. */
     heater_set_pct(0);
@@ -2358,6 +2771,9 @@ int cool_status_json(char *buf, size_t len)
         .report_age_s = age,
         .gates_off = pub_gates_off, .limits = pub_limits,
         .fan_gates = pub_fan_gates,
+        .attn_standing = attn_latched, .attn_live = attn_live,
+        .attn_verdict = attn_verdict, .attn_reason = attn_reason, .attn_at = attn_at,
+        .attn_cleared_at = attn_cleared_at, .notices = pub_notices,
     };
     int rc = coolfmt_status(buf, len, &st);
     pthread_mutex_unlock(&mu);

@@ -559,16 +559,16 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
         g->lit = 1;
     }
     g->lit_now = lit_now;
-    /* The press: the controller lights the button white for its arm
-     * wait and puts it out at the press, so a lit button before the
+    /* The press: the controller breathes the button white for its arm
+     * wait and stops at the press, so a breathing button before the
      * first discharge is the press this job waits for. The page shows
-     * it as a prompt with the seconds from the moment the button lights,
-     * and takes it down the moment the button goes out (the press taken)
+     * it as a prompt with the seconds from the moment it starts,
+     * and takes it down the moment it stops (the press taken)
      * or the tube lights: the button is read at every sample, so the
      * prompt never stands over a press already made, which an operator
      * would answer with another press, and a press during the job pauses
      * it. */
-    int led = g->lit ? 0 : led_lit();
+    int led = g->lit ? 0 : led_asks_press();
     if (g->press_open && (g->lit || led == 0)) {
         wiz_wait_close();
         g->press_open = 0;
@@ -576,7 +576,7 @@ static void gen_sample(void *ctx, const jobstream_sample_t *s)
     if (!g->lit && !g->press_open && led == 1) {
         g->press_open = 1;
         g->t_led0 = s->t;
-        wiz_wait_open("press", "The button is lit white. Press it now: the laser fires after "
+        wiz_wait_open("press", "The button is breathing white. Press it now: the laser fires after "
                                "your press.", (int)WAIT_TIMEOUT_S);
     }
     if (s->t - g->last_phase >= 1.0) {

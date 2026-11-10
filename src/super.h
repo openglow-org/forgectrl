@@ -18,6 +18,9 @@ void super_init(void);
 /* Stop the supervised controller (SIGTERM, escalating) and the thread. */
 void super_shutdown(void);
 
+/* Whether the motion check failed: no controller runs until it is retried. */
+int super_motion_fault(void);
+
 /* Switch the active controller mode ("grbl" or "cloud"): idle-gated,
  * stops the active controller, persists the setting, starts the other,
  * and waits for its first job-state report. Returns 0 on success, -1
