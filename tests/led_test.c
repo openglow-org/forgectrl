@@ -90,7 +90,7 @@ int main(void)
     CHECK(led_red_up() == 0, "and that is not the red");
 
     printf("D. solid white\n");
-    lamp(254, 254, 254, 0, 0, 0);       /* a settled 255, as the trigger reads it back */
+    lamp(255, 255, 255, 0, 0, 0);
     CHECK(led_asks_press() == 0 && led_red_up() == 0, "no press asked, no red");
     led_set(LED_SOLID_WHITE);           /* as the probe and a setup step write it */
     CHECK(led_asks_press() == 0 && led_red_up() == 0 && led_dark() == 0,
@@ -139,7 +139,7 @@ int main(void)
           "the keeper writes the amber again (red and green pulsing: not dark, not the red, no press asked)");
     led_keep(LED_BREATHE_TEAL);
     CHECK(led_asks_press() == 0 && led_red_up() == 0 && led_dark() == 0, "another keeper leaves a light that stands");
-    lamp(254, 254, 254, 0, 0, 0);
+    lamp(255, 255, 255, 0, 0, 0);
     led_keep(LED_BREATHE_TEAL);
     CHECK(led_dark() == 0 && led_asks_press() == 0, "and leaves a controller's solid white as it is");
     led_release();
