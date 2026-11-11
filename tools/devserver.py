@@ -818,6 +818,7 @@ class Mock:
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
         self.upload_unsigned = False    # the staged upload is not signed with the release key
         self.cool_demo = os.environ.get('GF_MOCK_COOL', '')
+        self.notices_seen = 0           # the notices dismissed: every seq up to this one
         # The setup record (GET /wiz): the mock starts with the setup complete
         # unless GF_MOCK_FIRST_RUN=1, so the panel is what the dev server
         # shows by default and the wizard on request.
@@ -1541,10 +1542,16 @@ class Mock:
                      'verdict': 'AIRFLOW' if reason else '', 'reason': reason,
                      'at': round(now - 300) if reason else 0,
                      'cleared_at': round(now - 60) if demo == 'ack' else 0}
-        notices = [{'seq': 1, 'verdict': 'BUMP',
-                    'reason': 'BUMP: head accelerometer x 140 over 132 - fire blocked, hold',
-                    'at': round(now - 300), 'cleared_at': round(now - 290), 'times': 2}] \
-            if demo == 'notice' else []
+        # The notice demo: two faults that cleared on their own, the newest
+        # seq 3; a dismissal takes every one up to its upto, as the daemon's.
+        notices = [n for n in (
+            {'seq': 1, 'verdict': 'BUMP',
+             'reason': 'BUMP: head accelerometer x 140 over 132 - fire blocked, hold',
+             'at': round(now - 300), 'cleared_at': round(now - 290), 'times': 2},
+            {'seq': 3, 'verdict': 'SENSOR',
+             'reason': 'SENSOR: coolant sensors unreadable for 2 s - fire blocked, hold, heater off',
+             'at': round(now - 120), 'cleared_at': round(now - 117), 'times': 1})
+            if n['seq'] > self.notices_seen] if demo == 'notice' else []
         verdict = {'live': 'AIRFLOW', 'ack': 'ACK'}.get(demo, 'OK')
         return {
             'phase': 'idle', 'verdict': verdict, 'fire_ok': verdict == 'OK',
@@ -2892,8 +2899,9 @@ class Mock:
                 self.cool_demo = ''
             return J(200, {'acknowledged': True})
         if path == '/cool/notices/dismiss':
-            if self.cool_demo == 'notice':
-                self.cool_demo = ''
+            upto = form.get('upto')
+            n = (1 << 32) if upto is None else int(upto) if upto.isdigit() else 0
+            self.notices_seen = max(self.notices_seen, n)
             return J(200, {'dismissed': True})
 
         if path == '/cool/quiet':

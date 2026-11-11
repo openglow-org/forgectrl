@@ -14,8 +14,9 @@
  *      once; then readings, a rest, and the hold heats; a 1 s window short
  *      of half the sampler's rate is no reading
  *   C. the kernel's lease: a heater above zero is written again every second
- *   D. the engine takes the heater: off at once, never overwritten while the
- *      engine holds it, and back only after a rest
+ *   D. the engine takes the heater: off at once and unstamped, never
+ *      overwritten while the engine holds it, and back only after a rest; a
+ *      tick that began before the yield lets nothing go
  *   E. an engine that stops ticking: after 3 s the heater off, the watch
  *      paused and saying why; back after a rest once it ticks again
  *   F. the readings corrected as the engine corrects its own: the 45 C rail
@@ -23,6 +24,9 @@
  *   G. a start: with no heater-off stamp (a daemon killed in a hold) the
  *      full rest; with a stamp a minute old or more, the short one
  *   H. cool_flow_watch 0: the heater off within the 5 s setting poll
+ *   I. the three numbers read from the settings store at the poll: a number
+ *      taken, one that is not a number at its default, one past its range
+ *      held to it
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -98,13 +102,18 @@ static int log_count(const char *needle)
     return n;
 }
 
-/* The stored setting: NULL is a key that is not set, and the caller's
+/* The stored settings: NULL is a key that is not set, and the caller's
  * default answers for it. */
 static const char *watch_setting;
+static const char *num_kv[8];           /* key, value, ..., NULL: the three numbers */
 int settings_get(const char *key, char *val, size_t len)
 {
-    (void)key; (void)val; (void)len;
-    return -1;                      /* every number at its default */
+    for (size_t i = 0; num_kv[i]; i += 2)
+        if (!strcmp(num_kv[i], key)) {
+            snprintf(val, len, "%s", num_kv[i + 1]);
+            return 0;
+        }
+    return -1;
 }
 int settings_get_bool(const char *key, int def)
 {
@@ -268,6 +277,7 @@ int main(void)
     printf("D. the engine takes the heater\n");
     flowrun_yield("warm-up");
     CHECK(heater() == 0, "off at once");
+    CHECK(access(ROOT "run/" STAMP_FILE, F_OK) != 0, "and unstamped: what the engine does with the heater is not off");
     eng.yield = 1;
     eng.yield_why = "warm-up";
     put("thermal/heater_pwm", "26214\n");   /* the engine's warm-up */
@@ -280,6 +290,22 @@ int main(void)
     CHECK(heater() == 0 && fw.mode == FW_REST, "the engine lets go: a rest first");
     step(35.0);
     CHECK(fw.mode == FW_HOLD && heater() > 0, "then the hold");
+    /* A tick that began before the yield hands in its context after it:
+     * it saw no cause, and must not let go of the heater the yield took. */
+    flowrun_yield("a quiet hold");
+    eng.yield = 0;
+    eng.t = fake_now - 0.5;
+    flowrun_engine(&eng);
+    engine_ticking = 0;
+    step(2.0);
+    CHECK(heater() == 0 && fw.mode == FW_SUSPENDED, "a tick from before the yield lets nothing go");
+    engine_ticking = 1;
+    next_tick = 0.0;
+    step(1.0);
+    CHECK(fw.mode == FW_REST, "a tick from after it lets go: a rest");
+    step(64.95);
+    next_tick = 0.0;                    /* the engine's last tick as E begins */
+    step(0.05);
 
     printf("E. an engine that stops ticking\n");
     engine_ticking = 0;
@@ -334,6 +360,16 @@ int main(void)
     watch_setting = "0";
     step(5.1);
     CHECK(heater() == 0 && fw.mode == FW_OFF, "off within the 5 s setting poll");
+
+    printf("I. the three numbers from the settings store\n");
+    num_kv[0] = "cool_flow_hold_c"; num_kv[1] = "abc";
+    num_kv[2] = "cool_flow_duty_min"; num_kv[3] = "1.5";
+    num_kv[4] = "cool_flow_duty_max"; num_kv[5] = "30"; num_kv[6] = NULL;
+    step(5.1);
+    CHECK(cfg.hold_c == FLOWCALC_HOLD_C_DEF && cfg.duty_min == 1.5 && cfg.duty_max == FLOWCALC_DUTY_MAX_HI,
+          "at the next poll: a stored number taken, one that is not a number at its default, one past its range held");
+    num_kv[0] = NULL;
+    step(5.1);
 
     flowrun_shutdown();
     printf(failures ? "flowrun_test: %d FAILED\n" : "flowrun_test: all ok\n", failures);

@@ -17,8 +17,9 @@
 #   the report channel: a run report with the secret moves the exhaust
 #     duty; an idle report with no secret, a wrong one, or one of the
 #     wrong length is refused and leaves the duty file as it was; an idle
-#     report with the secret ends the session; the secret dies with its
-#     controller
+#     report with the secret ends the session, and a quiet hold may not
+#     take the pump while the engine cools down after it; the secret dies
+#     with its controller
 #   /events: the stream, the cap, the reads beside it, a freed place
 #   the motion routes: the token, the numbers, a line on the port each;
 #     GET /motion/state passing the port's state on, GET /motion/sender,
@@ -39,7 +40,8 @@
 #     unset key running at x32, restarts the controller; one that does
 #     not leaves it running
 #   the page (its frame policy, the token, nothing external, the theme
-#     and the save bar, no dev bar), /status's switches and its grbl block only
+#     and the save bar, no dev bar, and none on the certificate page),
+#     /status's switches and its grbl block only
 #     while the controller runs, /cam/status, the dose-curve reads, and
 #     the controller's settings store in the data directory
 #   scoped tokens: each refused a route it was not given, and neither
@@ -50,18 +52,38 @@
 #   SSH until the reboot, sshd's init a stand-in (FORGECTRL_SSHD_INIT),
 #     and one outside its form runs nothing
 #   the login over HTTPS: the lock, the cookie, the logout
+#   the cooling engine's attention on a fresh start (no coolant channel
+#     in the sysfs tree: SENSOR stands): GET /cool/flow with the watch
+#     off; the Acknowledge refused while SENSOR stands; the channels
+#     readable, SENSOR cleared at idle is a notice and the Acknowledge is
+#     taken; a dismissal up to an earlier seq leaves the notice, one with
+#     no upto takes it
 #   the button held as proof of an operator (the switch device a file,
 #     its ioctl a preloaded stand-in; GF_SLOT_LIST the slot inventory,
-#     GF_REBOOT_FILE the reboot): the reset of every setting, an unsigned
+#     GF_REBOOT_FILE the reboot): a login that cannot make a session (the
+#     stand-in refuses /dev/urandom while a flag file stands) is a JSON
+#     500; the reset of every setting, an unsigned
 #     install and the fuse view each refuse 403 with the button up; under
 #     an armed job the reset, the unsigned install, /ext/key, /ext/install
 #     and the fuse view each answer 409 before the button is asked for, and
-#     so does the fuse view beside a paused GRBL job and the reset with the
-#     next boot on the other slot; with the button held the reset is
-#     taken, its request written and the reboot scheduled
-#   a dev image (GF_DEV_MARKER): the login page, the panel and the setup
+#     so do the fuse view beside a paused or a running GRBL job, the fuse
+#     view and the reset while the GRBL controller's state file says it is
+#     arming, and the reset with the next boot on the other slot; with the
+#     button held the reset is still refused under the lease, on a machine
+#     that is not idle, and with a request that cannot be written or a
+#     reboot that cannot be scheduled, leaving no request; then it is
+#     taken, its request written and the reboot scheduled; GET /slots reads
+#     the inventory, and POST /system/reboot schedules its reboot 1 s on;
+#     with the controller stopped, a paused job's state file refuses nothing
+#   a dev image (GF_DEV_MARKER): a setup seed with no record becomes the
+#     record at start, with the account the users file holds; the login
+#     page, the panel and the setup
 #     each carry the dev bar above the header, with where the boot's
-#     settings are (GF_DATA_STATE, the boot step's record)
+#     settings are (GF_DATA_STATE, the boot step's record); a card boot
+#     whose data partition is not in use refuses a mode switch; the
+#     certificate page, the licenses page and the printable record carry
+#     the bar inline after <body>; the bar's data line for each word the
+#     record can hold
 #
 # The daemon runs on the image's ulfius (tests/ulfius_image.sh): the
 # distribution's library cuts the peer address that the loopback checks
@@ -129,7 +151,7 @@ start_daemon() {
         FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
         GF_DATA_STATE="${DATA_STATE:-}" GF_SLOT_LIST="${SLOT_LIST:-}" GF_REBOOT_FILE="${REBOOT_FILE:-}" \
-        LD_PRELOAD="${PRELOAD:-}" \
+        LD_PRELOAD="${PRELOAD:-}" SWSHIM_NO_URANDOM="$T/no-urandom" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -276,6 +298,12 @@ expect 200 "$(report idle "$SEC")" "an idle report with the secret is taken"
 if until_ok 25 eval '[ "$(cat "$EXH")" = 32768 ]'; then ok "the session ends: exhaust 65535 -> 32768"
 else bad "the exhaust stayed at '$(cat "$EXH")' after the idle report"; fi
 echo idle > "$SYS/cnc/state"
+# The machine idle and the engine cooling down after the session: a quiet
+# hold may not take the pump.
+code=$(post /cool/quiet "$TOKEN" -d on=1 -d pump=1)
+if [ "$code" = 409 ] && grep -q 'the pump stays on' "$T/body"; then
+    ok "POST /cool/quiet pump=1 while the engine cools down: 409, the pump stays on"
+else bad "POST /cool/quiet pump=1 while the engine cools down -> $code $(cat "$T/body")"; fi
 
 echo "== the event streams"
 for i in 2 3 4; do
@@ -439,6 +467,24 @@ grep -qx 'laser_disarm_s = 90' "$CONF" && grep -v '^laser_disarm_s ' "$CONF" | c
 expect 200 "$(post '/settings?laser_disarm_s=' "$TOKEN")" "an empty laser_disarm_s is 200"
 cmp -s "$T/conf.before" "$CONF" && ok "the key is gone: the file is as it was before the writes" \
     || bad "the cleared key left the file as: $(cat "$CONF")"
+# The flow watch's settings and the sensors logger's levels: a value
+# outside each one's range refused, each alone; the six at the ends of
+# their ranges taken in one write, then cleared in one.
+refused "cool_flow_watch=2" -d cool_flow_watch=2
+refused "cool_flow_hold_c=0.4" -d cool_flow_hold_c=0.4
+refused "cool_flow_duty_min=4.5" -d cool_flow_duty_min=4.5
+refused "cool_flow_duty_max=26" -d cool_flow_duty_max=26
+refused "log_sensors_disk=loud" -d log_sensors_disk=loud
+refused "log_sensors_remote=loud" -d log_sensors_remote=loud
+FLOWSET='cool_flow_watch=0 cool_flow_hold_c=3 cool_flow_duty_min=4 cool_flow_duty_max=25 log_sensors_disk=debug log_sensors_remote=off'
+expect 200 "$(post /settings "$TOKEN" $(for kv in $FLOWSET; do echo "-d $kv"; done))" "the six at their ranges' ends in one write: 200"
+held=0
+for kv in $FLOWSET; do grep -qx "${kv%%=*} = ${kv#*=}" "$CONF" && held=$((held + 1)); done
+expect 6 "$held" "and the settings file holds each of them"
+CLEAR=$(for kv in $FLOWSET; do printf '%s=&' "${kv%%=*}"; done)
+expect 200 "$(post "/settings?${CLEAR%&}" "$TOKEN")" "clearing the six is 200"
+cmp -s "$T/conf.before" "$CONF" && ok "and the file is as it was before the writes" \
+    || bad "the cleared keys left the file as: $(cat "$CONF")"
 # The lid lamp under the sysfs root follows lid_lamp_idle at once: a level
 # is written to it, a refused value writes nothing, and a cleared key
 # writes the default.
@@ -495,6 +541,9 @@ for want in data-bs-theme 'id="savebar"'; do
 done
 grep -qF -e 'class="ff-devbar"' -e '<!--FFDEV-->' "$T/page.html" \
     && bad "a release image's page carries the dev bar or its mark" || ok "no dev bar and no mark on a release image"
+expect 200 "$(curl -s -o "$T/cert.html" -w '%{http_code}' "$URL/cert")" "GET /cert is 200"
+grep -qF 'ff-devbar' "$T/cert.html" && bad "a release image's certificate page carries the dev bar" \
+    || ok "and carries no dev bar on a release image"
 curl -s -o "$T/status.json" "$URL/status"
 expect True "$(python3 -c 'import json, sys
 d = json.load(open(sys.argv[1]))
@@ -652,21 +701,88 @@ grep -q "FORGECTRL_SSHD_INIT is not an absolute path" "$T/out" && ok "the refusa
 expect 200 "$(post /system/ssh "$TOKEN" -d enable=0)" "enable=0 is 200"
 expect "$n" "$(wc -l < "$T/sshd.log")" "and the stop ran nothing either"
 
+echo "== the cooling engine's Acknowledge, its notices and the flow watch"
+# This start has run no session, and the sysfs tree has no coolant
+# channel: SENSOR stands 2 s after the start, live, and is no fail tier.
+expect 200 "$(curl -s -o "$T/body" -w '%{http_code}' "$URL/cool/flow")" "GET /cool/flow is 200"
+expect off "$(jv 'd["watch"]')" "and the watch is off, the setting unset"
+coolv() { curl -s -o "$T/cool.json" "$URL/cool/status"; python3 -c 'import json, sys
+d = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$T/cool.json" "$1" 2>&1; }
+live() { [ "$(coolv 'int(d["attention"]["live"])')" = 1 ]; }
+until_ok 25 live || bad "SENSOR is not live with no coolant channel: $(cat "$T/cool.json")"
+code=$(post /cool/attention/ack "$TOKEN")
+expect "409|the failure still stands" "$code|$(cat "$T/body")" "POST /cool/attention/ack while SENSOR stands is 409"
+# The channels readable (694 counts, 22.8 C): SENSOR clears at idle, so it
+# leaves a notice and nothing waits for the Acknowledge.
+echo 694 > "$SYS/pic/water_temp_1"
+echo 694 > "$SYS/pic/water_temp_2"
+noticed() { [ "$(coolv 'int(not d["attention"]["live"] and len(d["notices"]) == 1)')" = 1 ]; }
+until_ok 50 noticed || bad "SENSOR did not clear into one notice: $(cat "$T/cool.json")"
+SEQ=$(coolv 'd["notices"][0]["seq"]')
+code=$(post /cool/attention/ack "$TOKEN")
+expect "200|True" "$code|$(jv 'd.get("acknowledged")')" "SENSOR cleared: POST /cool/attention/ack is 200, acknowledged"
+expect "200|1" "$(post /cool/notices/dismiss "$TOKEN" -d upto=$((SEQ - 1)))|$(coolv 'len(d["notices"])')" \
+    "a dismissal up to the seq before the notice's leaves it"
+expect "200|0" "$(post /cool/notices/dismiss "$TOKEN")|$(coolv 'len(d["notices"])')" \
+    "a dismissal with no upto takes every notice"
+rm -f "$SYS/pic/water_temp_1" "$SYS/pic/water_temp_2"
+
 echo "== the button held as proof of an operator, and the jobs that would take the hold"
 # The daemon again, with the machine button to hold: the switch device is
 # the switch word's file, read through a stand-in for the device's ioctl
 # (bit 2 is the button, bit 3 the closed lid); the slot inventory is a
 # file that says the next boot comes back to the booted slot; a reboot is
-# written to a file.
+# written to a file. The same stand-in refuses to open /dev/urandom while
+# the file SWSHIM_NO_URANDOM names stands, so a login cannot make its
+# session.
 stop_daemon
 cat > "$T/swshim.c" <<'EOF'
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <linux/input.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
+
+static int urandom_refused(const char *path)
+{
+    const char *flag = getenv("SWSHIM_NO_URANDOM");
+    return path && !strcmp(path, "/dev/urandom") && flag && access(flag, F_OK) == 0;
+}
+
+static int open_next(const char *sym, const char *path, int flags, va_list ap)
+{
+    mode_t mode = (flags & (O_CREAT | O_TMPFILE)) ? (mode_t)va_arg(ap, int) : 0;
+    if (urandom_refused(path)) {
+        errno = EACCES;
+        return -1;
+    }
+    int (*real)(const char *, int, ...) = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, sym);
+    return real(path, flags, mode);
+}
+
+int open(const char *path, int flags, ...)
+{
+    va_list ap;
+    va_start(ap, flags);
+    int fd = open_next("open", path, flags, ap);
+    va_end(ap);
+    return fd;
+}
+
+int open64(const char *path, int flags, ...)
+{
+    va_list ap;
+    va_start(ap, flags);
+    int fd = open_next("open64", path, flags, ap);
+    va_end(ap);
+    return fd;
+}
 
 int ioctl(int fd, unsigned long req, ...)
 {
@@ -707,13 +823,14 @@ armed() {
     [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-ForgeFIRM-Report: $SEC" -d "mode=$1" -d "armed=$2" \
               "$URL/cool/state")" = 200 ] || bad "the controller's report (mode=$1 armed=$2) was refused"
 }
-# gstate <state>: the GRBL controller's own state file
+# gstate <state> [arming]: the GRBL controller's own state file, the laser
+# arming (waiting for the press) when the second argument is given
 gstate() {
-    python3 - "$T/run/grbl.state" "$1" <<'EOF'
+    python3 - "$T/run/grbl.state" "$1" "${2:-}" <<'EOF'
 import json, os, sys, time
 tmp = sys.argv[1] + '.tmp'
 json.dump({'ts_mono': round(time.monotonic(), 3), 'state': sys.argv[2], 'alarm': 0,
-           'laser': {'armed': False, 'arming': False, 'model': 'density'}}, open(tmp, 'w'))
+           'laser': {'armed': False, 'arming': bool(sys.argv[3]), 'model': 'density'}}, open(tmp, 'w'))
 os.replace(tmp, sys.argv[1])
 EOF
 }
@@ -721,6 +838,13 @@ getfuse() { curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN
 WAITS='a job waits for the button press: cancel it first'
 gstate Idle
 echo unsigned > "$T/data/upload.fw"
+
+# A login whose session cannot be made answers JSON too, as every login
+# answer does: the page shows its error.
+: > "$T/no-urandom"
+code=$(login $NAME $PW)
+rm -f "$T/no-urandom"
+expect "500|True" "$code|$(jv 'bool(d.get("error"))')" "a login that cannot make a session: 500, with a JSON error"
 
 # The button up, no job: each route's own refusal for the button.
 expect 400 "$(post /system/reset "$TOKEN")" "POST /system/reset without confirm=1 is 400"
@@ -749,6 +873,15 @@ armed 0
 # A GRBL job paused with its window closed: the controller's state file says so.
 gstate Hold
 expect 409 "$(getfuse)" "GET /fuse-identity beside a paused GRBL job is 409"
+gstate Run
+expect "409|a job is running or paused: finish or cancel it first" "$(getfuse)|$(cat "$T/body")" \
+    "GET /fuse-identity beside a running GRBL job: 409, a job runs"
+# The GRBL controller waiting for the press before its report says armed:
+# its state file is the one source.
+gstate Idle arming
+expect "409|$WAITS" "$(getfuse)|$(cat "$T/body")" "GET /fuse-identity while the GRBL state file says arming: 409, a job waits"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "409|$WAITS" "$code|$(jv 'd.get("error")')" "and the reset: 409, a job waits"
 gstate Idle
 expect 403 "$(getfuse)" "and 403 again, the button's, with the controller idle"
 [ ! -e "$T/data/reset-requested" ] && [ ! -e "$T/reboot" ] && ok "no reset is requested, and nothing rebooted" \
@@ -761,20 +894,69 @@ cp "$T/slots.other" "$T/slots.list"
 expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset with the next boot on the other slot is 409"
 cp "$T/slots.same" "$T/slots.list"
 
-# The button held: the reset is taken, its request written, the reboot scheduled.
+# The button held, and each refusal still comes first: the machine's
+# lease (an extension keeping the sender out holds it), a machine that is
+# not idle, a request that cannot be written (its name a link to
+# /dev/full), a reboot that cannot be scheduled (the stand-in's file a
+# directory). None leaves a request or a reboot.
 echo 12 > "$T/switches"
+none_left() { [ ! -e "$T/data/reset-requested" ] && [ ! -L "$T/data/reset-requested" ] && [ ! -s "$T/reboot" ]; }
+CRED=$(cat "$CRED_FILE")
+expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "$PKG keeps the sender out: it holds the machine"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "409|True" "$code|$(jv '"'$PKG'" in d.get("error", "")')" "the reset under the lease, the button held: 409, the holder named"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
+echo running > "$SYS/cnc/state"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "409|machine is not idle" "$code|$(jv 'd.get("error")')" "the reset on a machine that is not idle, the button held: 409"
+echo idle > "$SYS/cnc/state"
+none_left && ok "neither left a request or a reboot" || bad "a refused reset left data/reset-requested or a reboot"
+ln -s /dev/full "$T/data/reset-requested"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "500|cannot write the reset request" "$code|$(jv 'd.get("error")')" "a reset request that cannot be written: 500"
+none_left && ok "and no request is left, nor a reboot" || bad "the unwritten request left data/reset-requested or a reboot"
+mkdir "$T/reboot"
+code=$(post /system/reset "$TOKEN" -d confirm=1)
+expect "500|cannot schedule reboot" "$code|$(jv 'd.get("error")')" "a reset whose reboot cannot be scheduled: 500"
+[ ! -e "$T/data/reset-requested" ] && ok "and the request is withdrawn" || bad "a reset with no reboot left data/reset-requested"
+rmdir "$T/reboot"
+
+# The button held: the reset is taken, its request written, the reboot scheduled.
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "with the button held the reset is taken"
 [ -s "$T/data/reset-requested" ] && ok "the reset request is in the data directory" || bad "no data/reset-requested"
 [ -s "$T/reboot" ] && ok "and the reboot is scheduled (written to the stand-in's file)" || bad "no reboot was scheduled"
 echo 8 > "$T/switches"
-rm -f "$T/data/reset-requested" "$T/data/upload.fw"
+rm -f "$T/data/reset-requested" "$T/data/upload.fw" "$T/reboot"
 
-echo "== a dev image's pages carry the dev bar"
+# The inventory and the reboot route, through the same hooks.
+expect "200|True" "$(curl -s -o "$T/body" -w '%{http_code}' "$URL/slots")|$(jv 'd["slots"]["a"]["booted"] is True')" \
+    "GET /slots reads the inventory: slot a booted"
+code=$(post /system/reboot "$TOKEN" -d confirm=1)
+expect "200|True|reboot in 1 s" "$code|$(jv 'd.get("rebooting")')|$(cat "$T/reboot" 2>/dev/null)" \
+    "POST /system/reboot: 200, the reboot scheduled 1 s on"
+
+# A paused job's state file left by a GRBL controller that no longer runs
+# refuses nothing: the fuse view asks for the button again.
+gstate Hold
+expect 200 "$(post /controller/stop "$TOKEN")" "the controller is stopped"
+expect 403 "$(getfuse)" "beside a paused job's state file with no GRBL controller: 403, the button's"
+
+echo "== a dev image: the seed, and the dev bar on its pages"
 stop_daemon
 : > "$T/forgefirm-dev"
 echo card-failed > "$T/data-state"
+# The dev card's seed, with no record beside it: the start makes it the
+# record, with the account the users file holds (the login's, made above).
+mv "$T/data/setup.json" "$T/setup.finished"
+: > "$T/data/setup.seed"
 DEV_MARKER="$T/forgefirm-dev" DATA_STATE="$T/data-state" start_daemon
+curl -s -o "$T/body" "$URL/wiz"
+if [ ! -e "$T/data/setup.seed" ] && [ "$(jv 'd["first_run"], d["gate"]')" = "(False, 'open')" ] && \
+        [ "$(python3 -c 'import json, sys; d = json.load(open(sys.argv[1])); print(bool(d.get("seeded")), d["account"]["name"])' \
+             "$T/data/setup.json" 2>&1)" = "True $NAME" ]; then
+    ok "the seed is the record at start, the account the users file's ($NAME), the gate open"
+else bad "the seed was not taken with the users file's account: seed $(ls "$T/data/setup.seed" 2>&1), GET /wiz $(cat "$T/body")"; fi
 # devpage <path> <the page's own id> <what it is>: the bar between <body>
 # and the header, in the words the bar says, with the boot's data line:
 # a card boot whose data partition is not mounted says so
@@ -805,6 +987,42 @@ if [ "$code" = 200 ] && grep -q '"gated":true' "$T/mode.json" && \
         grep -q "the SD card's data partition is not in use" "$T/mode.json"; then
     ok "a card boot whose data partition is not in use holds the controllers, and /mode says why"
 else bad "GET /mode on a card-failed boot -> $code $(cat "$T/mode.json")"; fi
+# and refuses a mode switch for it, the setup's own gate open
+code=$(post /mode "$TOKEN" -d controller=grbl)
+if [ "$code" = 409 ] && grep -q "controllers are gated: the SD card's data partition" "$T/body"; then
+    ok "a mode switch on that boot: 409, the controllers gated by the card"
+else bad "POST /mode on a card-failed boot -> $code $(cat "$T/body")"; fi
+# The pages the daemon writes itself carry the bar inline, right after
+# <body>: the certificate page, the licenses page and the printable record.
+DEVHEAD='<strong>DEVELOPMENT IMAGE</strong>: SSH open with passwordless root logon<br>'
+FAILED='<strong>DATA Mount</strong>: SD card failed - nothing is saved this boot (see logs); controllers held'
+inline() {
+    expect 200 "$(curl -sk -o "$T/dev.html" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$TLS$1")" "GET $1 is 200"
+    if python3 - "$T/dev.html" "$DEVHEAD$FAILED" <<'EOF'
+import sys
+p = open(sys.argv[1], encoding='utf-8').read()
+b = p.find('<body>') + len('<body>')
+sys.exit(0 if p.startswith('<div class="ff-devbar"', b) and sys.argv[2] in p[b:p.find('</div>', b)] else 1)
+EOF
+    then ok "$1 carries the dev bar right after <body>, with the card's data not mounted"
+    else bad "$1 lacks the dev bar right after <body>, or its data line"; fi
+}
+inline /cert
+inline /licenses
+inline /wiz/record.html
+# The data line for each word the boot's record can hold, read again at
+# each page (the certificate page's)
+for word in card emmc card-none unknown-word; do
+    echo "$word" > "$T/data-state"
+    curl -s -o "$T/dev.html" "$URL/cert"
+    case $word in
+        card) want='<strong>DATA Mount</strong>: SD Card</div>' ;;
+        emmc|card-none) want='<strong>DATA Mount</strong>: eMMC</div>' ;;
+        *) want='<strong>DATA Mount</strong>: UNKNOWN (error - see logs); controllers held</div>' ;;
+    esac
+    grep -qF "$want" "$T/dev.html" && ok "the bar's data line for $word" || bad "the bar's data line for $word is not '$want'"
+done
+echo card-failed > "$T/data-state"
 
 stop_daemon
 [ ! -e "$T/cloud.started" ] || bad "the cloud client's stand-in started"

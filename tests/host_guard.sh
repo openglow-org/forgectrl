@@ -10,6 +10,12 @@
 # record), with the logging tree's paths in the temporary directory too,
 # and proves, one case each:
 #
+#   the start's machine check, on its first start: a record made on
+#     another machine (its machine facts carry another machine id) asks
+#     the machine step again, takes this machine's facts, the camera the
+#     sensor the camera engine resolved (a media-ctl stand-in names an
+#     OV5648 on the daemon's PATH), clears the lens window measured on
+#     the old head, and recommends what a replaced head does
 #   the factory return refused without confirm=1, no update job started,
 #     the slot inventory's archive list, and the setup page's confirmed
 #     call; confirm=1 is never sent
@@ -109,7 +115,7 @@ start_daemon() {
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         GF_LOGS_ROOT="$T/log" GF_LOGS_RSYSLOG="$T/rsyslog-forgefirm.conf" \
         GF_LOGS_EFFECTIVE="$T/loglevels" GF_LOGS_STAGE="$T/stage" \
-        FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
+        FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT PATH="${CAM_PATH:+$CAM_PATH:}$PATH" \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
     curl -s -o /dev/null --retry 30 --retry-connrefused --retry-delay 1 "$URL/status" \
@@ -147,9 +153,35 @@ printf '#!/bin/sh\necho "$0" >> "%s/cloud.started"\n' "$T" > "$T/bin/cloud"
 chmod +x "$T/bin/grbl" "$T/bin/cloud"
 
 # A first start reads the documents' hashes and the required steps; the
-# seeded record is what a finished first run leaves.
-start_daemon
+# seeded record is what a finished first run leaves. Its record is one
+# made on another machine, with the machine step run there, and the lens
+# window measured there in the settings; the camera engine resolves an
+# OV5648 (media-ctl -p is a stand-in on this start's PATH).
+mkdir -p "$T/cam"
+cat > "$T/cam/media-ctl" <<'EOF'
+#!/bin/sh
+echo '- entity 1: ov5648 0-0036 (1 pad, 1 link, 0 route)'
+echo '- entity 5: ov5648 3-0036 (1 pad, 1 link, 0 route)'
+EOF
+chmod +x "$T/cam/media-ctl"
+cat > "$REC" <<'EOF'
+{"schema": 1,
+ "machine": {"machine_id": "AAAAA-AAAAA", "camera": "unknown", "head": {"serial_hash": "OLD-HEAD"}},
+ "wizards": {"machine": {"version": 1, "completed": "2026-01-01T00:00:00Z", "result": {}, "applied": {}}},
+ "flags": {}}
+EOF
+printf 'lens_stop_below_steps = 120\nlens_stop_above_steps = 340\n' >> "$CONF"
+CAM_PATH="$T/cam" start_daemon
 curl -s -o "$T/wiz0.json" "$URL/wiz" || fatal "GET /wiz failed"
+echo "== the start's machine check: a record made on another machine"
+expect "$(jget "$T/wiz0.json" 'd.get("sheet_id") or "none"')|OV5648|False" \
+    "$(jget "$REC" '"%s|%s|%s" % (d["machine"].get("machine_id"), d["machine"].get("camera"), "machine" in d["wizards"])')" \
+    "the record takes this machine's id and the resolved camera, and its machine step is asked again"
+grep -q '^lens_stop_' "$CONF" && bad "the old head's lens window is still in the settings" \
+    || ok "the lens window measured on the other machine is cleared"
+expect "the head was replaced|the head was replaced|the head was replaced|the head was replaced" \
+    "$(jget "$T/wiz0.json" '"|".join(([r["reason"] for r in d["recommended"] if r["id"] == i] or ["not recommended"])[0] for i in ("lens.travel", "laser.focus", "motion", "cameras"))')" \
+    "lens travel, the focus, motion and the cameras are recommended: the head was replaced"
 stop_daemon
 python3 - "$T/wiz0.json" "$T/seed.json" <<'EOF' || fatal "the setup record was not written"
 import json, sys, time

@@ -47,6 +47,9 @@
  *      says where its settings are (emmc, card, card-none): a record
  *      that is missing or holds any other word holds the controllers,
  *      and a release image is not held by the record
+ *   N. the button is solid white while the probe moves the machine and out
+ *      after it; a probe that finds no motion is the fault the cooling
+ *      engine reads (super_motion_fault), and the retry clears it
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -246,14 +249,18 @@ int fake_execle(const char *path, const char *arg, ...)
 
 static int probe_rc = 1;                /* what the probe answers */
 static int probe_rcs[8], nprobe_rcs, probes;    /* ...or a sequence of answers */
+static int probe_led = -1;              /* the button as the last probe found it lit (-1: dark) */
 static int enclosure_open;
 static int machine_idle = 1;
+static int led_lit;                     /* the button lit by led_set, not released since */
+static int led_last = -1;               /* the pattern led_set was last given */
 
 int fake_liveness_probe(int fd, char *detail, size_t dlen)
 {
     (void)fd;
     int rc = probes < nprobe_rcs ? probe_rcs[probes] : probe_rc;
     probes++;
+    probe_led = led_lit ? led_last : -1;
     snprintf(detail, dlen, "fake probe %d", rc);
     return rc;
 }
@@ -315,9 +322,8 @@ static int pair_named(int i)
 static int engine_stops;
 void cool_controller_stopped(void) { engine_stops++; }
 double cool_report_age(void) { return -1.0; }
-static int led_last = -1;               /* the pattern led_set was last given */
-void led_set(led_pattern_t p) { led_last = (int)p; }
-void led_release(void) { }
+void led_set(led_pattern_t p) { led_last = (int)p; led_lit = 1; }
+void led_release(void) { led_lit = 0; }
 static int led_kept = -1, led_keeps;    /* the pattern led_keep was last given, and how often */
 void led_keep(led_pattern_t p) { led_kept = (int)p; led_keeps++; }
 void lenshome_clear(void) { }
@@ -470,6 +476,8 @@ static void reset_state(void)
     crit_reset();
     unlink_on_kill = NULL;
     led_last = -1;
+    led_lit = 0;
+    probe_led = -1;
     calls[0] = '\0';
     logs[0] = '\0';
     clear_safing();
@@ -881,6 +889,18 @@ int main(void)
         CHECK(run_until_spawned(5.0), "a release image with no record starts its controller");
         unsetenv("GF_DATA_STATE");
     }
+
+    printf("N. the button while the probe moves the machine; the motion fault the cooling engine reads\n");
+    reset_state();
+    CHECK(run_until_spawned(5.0) && probes == 1 && probe_led == LED_SOLID_WHITE && !led_lit,
+          "solid white while the probe moves the machine, put out after it");
+    reset_state();
+    probe_rc = 0;                       /* NO MOTION at every rung of the ladder */
+    tick();
+    CHECK(probes == 4 && super_motion_fault() == 1, "no motion after the ladder: the fault, as the engine reads it");
+    super_controller_start();           /* the operator's retry */
+    CHECK(super_motion_fault() == 0, "the retry clears it");
+    reset_state();
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

@@ -36,8 +36,9 @@ one with quotes, each shown as written and the code-shaped one answered
 as written), and against the daemon, which the harness gives its fan
 count, the intake fans shown counted and passed by; the choice, where Start using the machine lands on the panel with the setup
 complete; one setting saved through the panel's save bar; and the login
-page, which refuses a wrong password and signs the account in, the
-session read back from GET /wiz.
+page, which (against the mock) reads a plain-text answer as "sign-in
+failed", never "no answer from the machine", refuses a wrong password
+and signs the account in, the session read back from GET /wiz.
 
 Against the mock, the walk then starts a diagnostic on the panel's Setup
 tab. The daemon refuses a start (409, "machine is not idle") until the
@@ -51,11 +52,24 @@ the page sends no second. A start refused once and pressed again starts
 once: the press cancels the first press's second start. A start refused
 once, where another client starts the diagnostic and the operator aborts
 it, never goes again: the Abort alone cancels the second start, and
-clears the press's "starting" text. Last, the System tab's Reset all
+clears the press's "starting" text. Then the System tab's Reset all
 settings, with the mock's button not held: OK leaves the dialog open,
 saying the button is not held, and Cancel closes it with nothing reset;
-and with a job that arms while the dialog is open, OK sends nothing and
-says a job is waiting for the button press.
+with a job that arms while the dialog is open, OK sends nothing and
+says a job is waiting for the button press; and with the job armed
+before it, the button opens no dialog and says so. The fuse view shows
+the mock's plain-text refusal as it came. An upload the release key did
+not sign (the walk's /__walk/mock stages one and holds the button) asks
+through the hold dialog once its install is refused, and OK installs it
+with confirm_unsigned=1. The cooling engine's banners, in the mock's
+demos: a live failure offers no Acknowledge, one that waits does, a 409
+says the failure still stands and a taken one clears the banner; two
+notices go with one Dismiss. The Coolant loop form saves the flow
+watch's four settings, and the Cooling card then shows the watch's hold
+from GET /cool/flow. Last, with the button held, a reset the mock takes
+closes the dialog, says the machine restarts, and opens "/" once the
+mock went down and came back (the page's timers run at a tenth of their
+length there, and the mock is down half a second).
 
   python3 -B tests/wizard_walk.py [build/ui] [--browser chrome|firefox]
   python3 -B tests/wizard_walk.py --daemon 127.0.0.1:18455
@@ -92,6 +106,9 @@ PAGES = ("index", "wizard", "login")
 # written and posts the code-shaped one as written.
 PROMPT_HOSTILE = "No'); window.__ran = 1; ('"
 PROMPT_OPTIONS = ["Yes", PROMPT_HOSTILE, 'He said "go" <b>&amp;</b>']
+# Seconds the mock answers nothing after a reset it took: short, so the
+# page's wait for the machine to come back takes a moment.
+DOWN_S = 0.5
 CHECK_PROMPT = ("choice", "intake-text", "How many intake fans run? An option is text.", PROMPT_OPTIONS)
 BROWSERS = {
     "chrome": [r"C:\Program Files\Google\Chrome\Application\chrome.exe", "/usr/bin/google-chrome",
@@ -165,7 +182,7 @@ function until(what, test, ms) {
     try { ok = test(); } catch (e) { ok = false; }
     if (ok) return Promise.resolve(ok);
     if (Date.now() > end) return Promise.reject(new Error('timed out waiting for ' + what + '; ' + where()));
-    return sleep(200).then(again);
+    return sleep(50).then(again);
   })();
 }
 function el(sel) { var e = q(sel); if (!e) throw new Error('the page has no ' + sel + '; ' + where()); return e; }
@@ -173,6 +190,34 @@ function click(sel) { el(sel).click(); }
 function set(sel, v, ev) { var e = el(sel); e.value = v; e.dispatchEvent(new (w().Event)(ev || 'change', { bubbles: true })); }
 function api(p) { return fetch(p).then(function (r) { return r.json(); }); }
 function at(o, dotted) { return dotted.split('.').reduce(function (x, k) { return x == null ? x : x[k]; }, o); }
+/* The mock's state as the walk sets it (the walk's /__walk/mock). */
+function walkMock(qs) { return fetch('/__walk/mock?' + qs, { method: 'POST' }).then(function (r) { return r.json(); }); }
+/* until() over an asynchronous read. */
+function untilGot(what, get, test, ms) {
+  var end = Date.now() + (ms || 10000);
+  return (function again() {
+    return get().then(function (v) {
+      if (test(v)) return v;
+      if (Date.now() > end) throw new Error('timed out waiting for ' + what + '; ' + where());
+      return sleep(50).then(again);
+    });
+  })();
+}
+/* The hold dialog: shown, and wholly closed (its backdrop gone too). */
+function modalOpen() { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); }
+function modalGone() { return !modalOpen() && q('#holdmodal').style.display === 'none' && !q('.modal-backdrop'); }
+/* The controller's report to the mock: its armed window open or closed. */
+function reportCtl(mode, armed) {
+  return fetch('/cool/state?mode=' + mode + '&armed=' + armed, { method: 'POST', headers: { 'X-ForgeFIRM-Report': PLAN.report } })
+    .then(function (r) { if (!r.ok) throw new Error('the mock refused the report: HTTP ' + r.status); });
+}
+/* The page's own timers at a tenth of their length, on the frame's window
+ * until a navigation replaces it: the walk's clock, as a unit test fakes one. */
+function fastTimers() {
+  var W = w(), st = W.setTimeout, si = W.setInterval;
+  W.setTimeout = function (f, ms) { return st.call(W, f, (ms || 0) / 10); };
+  W.setInterval = function (f, ms) { return si.call(W, f, (ms || 0) / 10); };
+}
 
 var STEPS = [
   ['GET /wiz carries the first-run fields the page reads, each with its type, and the page\'s required steps are the setup\'s', function () {
@@ -307,9 +352,19 @@ var STEPS = [
       .then(function () { click('#sb-save'); return until('the save', function () { return !q('#savebar').classList.contains('on'); }); })
       .then(function () { return api('/settings'); })
       .then(function (s) { if (s.ui_units !== to) throw new Error('ui_units reads ' + s.ui_units + ' after saving ' + to); }); }],
-  ['the login page refuses a wrong password and signs the account in', function () {
+  ['the login page ' + (PLAN.plain_login ? 'reads an answer that is not JSON as a refusal (sign-in failed, never no answer), ' : '') +
+   'refuses a wrong password and signs the account in', function () {
     if (PLAN.logout) click('#logoutbtn'); else F.src = '/login?next=%2F';
     return until('the login page', function () { return path() === '/login' && q('#lg'); })
+      .then(function () {
+        if (!PLAN.plain_login) return;
+        return walkMock('login_plain=1')
+          .then(function () {
+            set('#name', NAME, 'input'); set('#password', PW, 'input'); click('#go');
+            return until('the refusal of a plain-text answer', function () { return q('#msg').classList.contains('bad') && !q('#go').disabled; }); })
+          .then(function () {
+            if (q('#msg').textContent !== 'sign-in failed')
+              throw new Error('a plain-text answer reads ' + JSON.stringify(q('#msg').textContent) + ', not sign-in failed'); }); })
       .then(function () { set('#name', NAME, 'input'); set('#password', 'not the password', 'input'); click('#go'); })
       .then(function () { return until('the refusal', function () { return q('#msg').classList.contains('bad') && !q('#go').disabled; }); })
       .then(function () { set('#password', PW, 'input'); click('#go'); })
@@ -486,7 +541,133 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () {
         click('#hold-cancel');
         return until('the dialog closed', function () { return !open() && q('#holdmodal').style.display === 'none'; }, 5000); })
-      .then(function () { return api('/status'); }); }]
+      .then(function () { return api('/status'); }); }],
+  /* The card's button itself, with the panel reading an armed job: no
+   * dialog opens at all, and the card says why. */
+  ['the Reset all settings button under an armed job opens no dialog, and says a job waits', function () {
+    var asked = false;
+    el('#holdmodal').addEventListener('show.bs.modal', function () { asked = true; });
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () { return reportCtl('run', 1); })
+      .then(function () { w().loadCool(); return until('the panel reads the armed window', function () { return w().CL && w().CL.armed; }, 5000); })
+      .then(function () {
+        click('button[onclick="doReset()"]');
+        if (asked || modalOpen()) throw new Error('the reset dialog opened under an armed job');
+        if (q('#msg-reset').textContent !== w().HOLD_JOB_WAITS)
+          throw new Error('the card says ' + JSON.stringify(q('#msg-reset').textContent) + ', not that a job is waiting');
+        return reportCtl('idle', 0); })
+      .then(function () { w().loadCool(); return until('the panel reads the window closed', function () { return w().CL && !w().CL.armed; }, 5000); }); }],
+  /* The mock's button is up: the daemon refuses the fuse view in plain
+   * text, and the page shows that text as it came. */
+  ['the fuse view shows the daemon\'s plain-text refusal as it came', function () {
+    var said;
+    return w().fx('/fuse-identity')
+      .then(function (r) { return r.text(); })
+      .then(function (t) {
+        said = t;
+        q('#msg-i').textContent = '';
+        click('button[onclick="showFuse()"]');
+        return until('the refusal', function () { return q('#msg-i').textContent; }, 5000); })
+      .then(function () {
+        if (!said || q('#msg-i').textContent !== said)
+          throw new Error('the fuse view shows ' + JSON.stringify(q('#msg-i').textContent) + ', the daemon said ' + JSON.stringify(said)); }); }],
+  /* An upload the release key did not sign: its install ends refused, the
+   * page asks through the hold dialog, and OK (the button held) sends the
+   * install again with confirm_unsigned=1. The walk ends each mock job at
+   * once, and polls through the page's own poll (every 2 s on its own). */
+  ['an archive the release key did not sign asks through the hold dialog, and OK installs it with confirm_unsigned=1', function () {
+    var opened = false;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    return walkMock('unsigned=1&button=1')
+      .then(function () { w().loadSlots(); return until('a slot to install to', function () { return q('#applyslot') && q('#applyslot').value; }, 5000); })
+      .then(function () {
+        w().confirm = function () { return true; };   /* the browser's own OK */
+        w().applyStaged('upload', 'the upload');
+        return untilGot('the install job running', function () { return walkMock('job_end=0'); }, function (s) { return s.running; }, 5000); })
+      .then(function () { return walkMock('job_end=1'); })
+      .then(function () {
+        return until('the hold dialog for the unsigned archive', function () { if (!opened) w().jobPoll(); return opened && modalOpen(); }, 5000); })
+      .then(function () { click('#hold-ok'); return until('the dialog closed on the install', function () { return !modalOpen(); }, 5000); })
+      .then(function () { return walkMock('job_end=1&button=0'); })
+      .then(function (s) {
+        if (!s.job || s.job.unsigned !== true || s.job.file !== 'upload' || s.running)
+          throw new Error('the install went again as ' + JSON.stringify(s)); }); }],
+  /* The cooling engine's attention, in the mock's demos: live, a failure
+   * that still stands; ack, one that waits for its Acknowledge. */
+  ['the attention banner: a live failure offers no Acknowledge; one that waits does, a refusal says the failure still stands, and a taken one clears the banner', function () {
+    var b = function () { return q('#attn-banner'); }, ack;
+    return walkMock('cool=live')
+      .then(function () { w().loadCool(); return until('the live banner', function () { return shown('#attn-banner') && b().textContent; }, 5000); })
+      .then(function () {
+        if (b().querySelector('button')) throw new Error('a live failure offers the Acknowledge');
+        return walkMock('cool=ack'); })
+      .then(function () { w().loadCool(); return until('the Acknowledge', function () { return ack = b().querySelector('button'); }, 5000); })
+      /* the cause back before the click: the mock refuses the Acknowledge, 409 */
+      .then(function () { return walkMock('cool=live'); })
+      .then(function () {
+        q('#msg-changed').textContent = '';
+        ack.click();
+        return until('the refusal', function () { return q('#msg-changed').textContent; }, 5000); })
+      .then(function () {
+        if (q('#msg-changed').textContent.indexOf('the failure still stands') < 0)
+          throw new Error('the refused Acknowledge says ' + JSON.stringify(q('#msg-changed').textContent));
+        return walkMock('cool=ack'); })
+      .then(function () { w().loadCool(); return until('the Acknowledge again', function () { return ack = b().querySelector('button'); }, 5000); })
+      .then(function () {
+        ack.click();
+        return until('the banner gone, the Acknowledge taken', function () { return !shown('#attn-banner'); }, 5000); }); }],
+  /* Two notices, seq 1 and 3: one Dismiss takes both, so it sends the newest. */
+  ['the notices banner lists each notice, and its Dismiss takes every one shown', function () {
+    return walkMock('cool=notice')
+      .then(function () { w().loadCool(); return until('the notices', function () { return shown('#notice-banner') && q('#notice-banner a'); }, 5000); })
+      .then(function () {
+        var n = q('#notice-banner').querySelectorAll('div').length;
+        if (n !== 2) throw new Error('the banner lists ' + n + ' notices, not 2');
+        q('#notice-banner a').click();
+        return until('the banner gone', function () { return !shown('#notice-banner'); }, 5000); })
+      .then(function () { return walkMock('cool='); }); }],
+  /* The Coolant loop form's four flow watch keys, saved through the save
+   * bar; the watch then runs in the mock, and the Cooling card shows its
+   * hold's duty (3.31 %) from GET /cool/flow. */
+  ['the Coolant loop form saves the flow watch\'s four settings, and the Cooling card shows the watch from GET /cool/flow', function () {
+    var want = { cool_flow_watch: '1', cool_flow_duty_min: '1', cool_flow_duty_max: '20' };
+    return until('the settings read into the panel', function () { return w().orig && w().orig.cool_flow_watch !== undefined; })
+      .then(function () {
+        set('#cool_flow_watch', '1');
+        set('#cool_flow_hold_c', '2');
+        set('#cool_flow_duty_min', '1');
+        set('#cool_flow_duty_max', '20');
+        return until('the save bar', function () { return q('#savebar').classList.contains('on'); }); })
+      .then(function () { click('#sb-save'); return until('the save', function () { return !q('#savebar').classList.contains('on'); }, 5000); })
+      .then(function () { return api('/settings'); })
+      .then(function (s) {
+        var got = {};
+        Object.keys(want).forEach(function (k) { got[k] = s[k]; });
+        if (JSON.stringify(got) !== JSON.stringify(want) || !s.cool_flow_hold_c)
+          throw new Error('the flow watch settings read ' + JSON.stringify(got) + ', step ' + JSON.stringify(s.cool_flow_hold_c));
+        w().loadCool();
+        return until('the flow watch on the Cooling card', function () { return q('#cooling').textContent.indexOf('3.31%') >= 0; }, 5000); }); }],
+  /* Last, as it reloads the page: the button held, a reset the mock
+   * takes. The dialog closes, the card says the machine restarts, and once
+   * the mock went down and came back the page opens "/" again: a new
+   * document in the frame. */
+  ['a taken reset closes the dialog, says the machine restarts, and opens "/" once the machine went down and came back', function () {
+    var doc, m, opened = false;
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () { return walkMock('button=1'); })
+      .then(function () {
+        doc = d();
+        m = el('#holdmodal');
+        m.addEventListener('shown.bs.modal', function () { opened = true; });
+        fastTimers();
+        click('button[onclick="doReset()"]');
+        return until('the reset dialog', function () { return opened && modalOpen(); }); })
+      .then(function () {
+        click('#hold-ok');
+        return until('the dialog closed, the card saying the machine restarts', function () {
+          return !m.classList.contains('show') && doc.getElementById('msg-reset').textContent; }, 5000); })
+      .then(function () { return until('"/" opened again', function () { return d() !== doc && path() === '/' && q('#savebar'); }, 10000); })
+      .then(function () { return walkMock('button=0'); }); }]
 ]);
 
 function run() {
@@ -517,6 +698,9 @@ class Walk(devserver.Handler):
     # The answers to the page's diagnostic starts since the walk last set
     # the mock's engine refusals: (status, monotonic seconds) each.
     starts = []
+    # The next POST /login answers 502 with a plain-text body, as a proxy
+    # in front of the machine might.
+    login_plain = False
 
     def _say(self, msg):
         Walk.said.append(msg)
@@ -526,6 +710,18 @@ class Walk(devserver.Handler):
         if self.command == "POST" and p.startswith("/diag/") and p != "/diag/abort":
             Walk.starts.append((code, time.monotonic()))
         devserver.Handler._send(self, code, headers, body)
+
+    def _mock(self, path, q):
+        if self.command == "POST" and path == "/login" and Walk.login_plain:
+            Walk.login_plain = False
+            self._read_body()
+            return self._send(502, {"Content-Type": "text/plain"}, b"bad gateway")
+        devserver.Handler._mock(self, path, q)
+        # A restart the mock took answers nothing for DOWN_S seconds.
+        if self.command == "POST" and path == "/system/reset":
+            with Walk.mock.lock:
+                if Walk.mock.down_until:
+                    Walk.mock.down_until = min(Walk.mock.down_until, time.time() + DOWN_S)
 
     def _route(self):
         u = urlsplit(self.path)
@@ -543,6 +739,28 @@ class Walk(devserver.Handler):
                 Walk.starts = []
             t0 = Walk.starts[0][1] if Walk.starts else 0.0
             return self._json(200, {"starts": [[c, round(t - t0, 3)] for c, t in Walk.starts]})
+        # The mock's state as the walk sets it: the machine button held or
+        # not, the cooling demo (GF_MOCK_COOL's words, its notices undismissed),
+        # an upload staged that the release key did not sign, the running
+        # update job ended now (the walk's clock, not the mock's), the next
+        # login answered with a body that is not JSON; and the update job,
+        # read back.
+        if u.path == "/__walk/mock" and Walk.mock:
+            if self.command == "POST":
+                with Walk.mock.lock:
+                    if "button" in q:
+                        Walk.mock.button = q["button"] == "1"
+                    if "cool" in q:
+                        Walk.mock.cool_demo = q["cool"]
+                        Walk.mock.notices_seen = 0
+                    if q.get("unsigned") == "1":
+                        Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1,
+                                                               "version": devserver.MOCK_RELEASE}
+                        Walk.mock.upload_unsigned = True
+                    if q.get("job_end") == "1" and Walk.mock.update["running"]:
+                        Walk.mock._job_end()
+                Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
+            return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"]})
         if Walk.daemon:
             return self._proxy(u)
         if self.command in ("GET", "HEAD") and (u.path in ("/setup", "/login") or (u.path == "/" and "action" not in q)):
@@ -618,7 +836,7 @@ def main():
         # The harness counts the daemon's intake fans, so no check opens
         # between the forms and the choice. The diagnostic starts need
         # the mock's engine refusals, which a daemon does not take.
-        Walk.plan = {"check": None, "logout": True, "diag": False}
+        Walk.plan = {"check": None, "logout": True, "diag": False, "plain_login": False}
         Walk.daemon = (host, int(port))
         Walk.cfg = types.SimpleNamespace(mock=False, token="",
                                          upstream=lambda: (host, int(port), "%s:%s" % (host, port)))
@@ -636,7 +854,7 @@ def main():
         devserver.DARK_PROMPTS["airflow.intakes"] = CHECK_PROMPT
         Walk.plan = {"check": {"id": "airflow.intakes", "prompt": {"options": PROMPT_OPTIONS,
                                                                 "hostile": PROMPT_HOSTILE},
-                               "result_ms": 20000}, "logout": False, "diag": True,
+                               "result_ms": 20000}, "logout": False, "diag": True, "plain_login": True,
                      "report": devserver.MOCK_REPORT_SECRET}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0

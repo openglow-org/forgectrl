@@ -27,16 +27,45 @@
  *      dump
  *
  * And the logger itself (senslog.c by inclusion, the machine's reads and
- * the log line stood in for):
+ * the log line stood in for, its thread run second by second on a fake
+ * clock):
  *
  *   H. a stop writes the dump an event still waits for, once, with the
  *      samples the ring holds
  *   I. a switch device that could not be read is "-", never a word of zeros
+ *   J. a beat carries the slowest engine tick and the CPU load since the
+ *      beat before it, not its own second's
+ *   K. the inventory and the settings: at start (every tunable in force and
+ *      every named setting, the longest whole, in one line), after a clock
+ *      step, on a change, daily, and not otherwise
+ *   L. a fault or gate verdict's arrival arms the flight recorder; the
+ *      warm-up, an extension's hold and ACK do not
+ *   M. an event inside a pending dump's window is named in that dump; one
+ *      past its budget is counted and named in the next
  */
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdio.h>
+#include <time.h>
+
+/* The logger's clock and its /proc/stat are the test's. Its thread waits
+ * out each second in clock_nanosleep, which here waits for the test to give
+ * it the next one (logger_seconds), so the thread runs in lockstep with the
+ * cases on a monotonic clock the test moves; CLOCK_REALTIME is that clock
+ * plus an offset the test can step. */
+int fake_clock_gettime(clockid_t id, struct timespec *ts);
+int fake_clock_nanosleep(clockid_t id, int flags, const struct timespec *until, struct timespec *rem);
+FILE *fake_fopen(const char *path, const char *mode);
+#define clock_gettime fake_clock_gettime
+#define clock_nanosleep fake_clock_nanosleep
+#define fopen fake_fopen
 /* The logger's own context is named apart from this file's. */
 #define ctx logger_ctx
 #include "../src/senslog.c"
 #undef ctx
+#undef fopen
+#undef clock_nanosleep
+#undef clock_gettime
 
 #include <math.h>
 #include <stdarg.h>
@@ -423,18 +452,38 @@ double airflow_rpm(long period, double units_per_second, int pulses_per_rev)
     (void)period; (void)units_per_second; (void)pulses_per_rev;
     return 0;
 }
+/* The engine as the logger sees it: its phase and verdict, the slowest
+ * tick since it was last asked, and every tunable in force. */
+static const char *view_phase = "idle", *view_verdict = "OK";
+static double tick_now = 1;
+static const char *in_force = "";
 void cool_view(cool_view_t *v)
 {
     memset(v, 0, sizeof(*v));
-    snprintf(v->phase, sizeof(v->phase), "idle");
-    snprintf(v->verdict, sizeof(v->verdict), "OK");
+    snprintf(v->phase, sizeof(v->phase), "%s", view_phase);
+    snprintf(v->verdict, sizeof(v->verdict), "%s", view_verdict);
     v->fire_ok = 1;
 }
 double cool_coolant_c(long raw) { return (double)raw; }
-double cool_tick_max_ms(void) { return 1; }
-void cool_settings_in_force(char *buf, size_t len) { if (len) buf[0] = '\0'; }
+double cool_tick_max_ms(void) { return tick_now; }
+void cool_settings_in_force(char *buf, size_t len) { snprintf(buf, len, "%s", in_force); }
 void read_fw_version(char *buf, size_t len) { snprintf(buf, len, "test"); }
-int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
+/* The stored settings: the named ones, then every key the cfg record names
+ * at one value, or unset. */
+static const char *set_kv[8];           /* key, value, ..., NULL */
+static const char *set_every;           /* NULL: the rest unset */
+int settings_get(const char *key, char *val, size_t len)
+{
+    for (size_t i = 0; set_kv[i]; i += 2)
+        if (!strcmp(set_kv[i], key)) {
+            snprintf(val, len, "%s", set_kv[i + 1]);
+            return 0;
+        }
+    if (!set_every)
+        return -1;
+    snprintf(val, len, "%s", set_every);
+    return 0;
+}
 void setup_machine_str(const char *key, char *buf, size_t len) { (void)key; if (len) buf[0] = '\0'; }
 int setup_machine_bool(const char *key) { (void)key; return -1; }
 double chassis_degc(void) { return -273.15; }
@@ -449,14 +498,121 @@ int machine_switch_read(unsigned long *bits)
     return sw_unread ? -1 : 0;
 }
 
+/* --- the logger's clock ------------------------------------------------ */
+
+static pthread_mutex_t fk_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fk_cv = PTHREAD_COND_INITIALIZER;
+static double fk_mono = 50000.0;        /* the logger's CLOCK_MONOTONIC */
+static double fk_wall = 1793335000.0;   /* CLOCK_REALTIME less it */
+static unsigned fk_parks;               /* the thread's arrivals at its second's end */
+static int fk_turns;                    /* seconds given and not yet taken */
+static char stat_file[64];              /* /proc/stat as the logger reads it ("": the host's) */
+
+int fake_clock_gettime(clockid_t id, struct timespec *ts)
+{
+    pthread_mutex_lock(&fk_mu);
+    double t = fk_mono + (id == CLOCK_REALTIME ? fk_wall : 0.0);
+    pthread_mutex_unlock(&fk_mu);
+    ts->tv_sec = (time_t)t;
+    ts->tv_nsec = (long)((t - (double)ts->tv_sec) * 1e9);
+    return 0;
+}
+
+/* The end of the thread's second: it waits for the next one, or for a stop
+ * (the logger's own flag, looked at every millisecond of real time). */
+int fake_clock_nanosleep(clockid_t id, int flags, const struct timespec *until, struct timespec *rem)
+{
+    (void)id; (void)flags; (void)rem;
+    pthread_mutex_lock(&fk_mu);
+    fk_parks++;
+    pthread_cond_broadcast(&fk_cv);
+    for (;;) {
+        if (fk_turns) {
+            fk_turns--;
+            break;
+        }
+        pthread_mutex_unlock(&fk_mu);
+        pthread_mutex_lock(&mu);
+        int run = running;
+        pthread_mutex_unlock(&mu);
+        pthread_mutex_lock(&fk_mu);
+        if (!run)
+            break;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 1000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        if (!fk_turns)
+            pthread_cond_timedwait(&fk_cv, &fk_mu, &ts);
+    }
+    double u = (double)until->tv_sec + until->tv_nsec / 1e9;
+    if (u > fk_mono)
+        fk_mono = u;
+    pthread_mutex_unlock(&fk_mu);
+    return 0;
+}
+
+FILE *fake_fopen(const char *path, const char *mode)
+{
+    return fopen(stat_file[0] && !strcmp(path, "/proc/stat") ? stat_file : path, mode);
+}
+
+/* The CPU's busy and idle ticks so far, as /proc/stat gives them. */
+static void stat_put(unsigned long busy, unsigned long idle)
+{
+    FILE *f = fopen(stat_file, "w");
+    if (f) {
+        fprintf(f, "cpu %lu 0 0 %lu 0 0 0 0\n", busy, idle);
+        fclose(f);
+    }
+}
+
+/* The logger started, its first second written. */
+static void logger_start(void)
+{
+    pthread_mutex_lock(&fk_mu);
+    fk_parks = 0;
+    fk_turns = 0;
+    pthread_mutex_unlock(&fk_mu);
+    senslog_start();
+    pthread_mutex_lock(&fk_mu);
+    while (fk_parks < 1)
+        pthread_cond_wait(&fk_cv, &fk_mu);
+    pthread_mutex_unlock(&fk_mu);
+}
+
+/* @n more seconds, each sampled and written before the next is given. */
+static void logger_seconds(int n)
+{
+    pthread_mutex_lock(&fk_mu);
+    for (int i = 0; i < n; i++) {
+        unsigned want = fk_parks + 1;
+        fk_turns = 1;
+        pthread_cond_broadcast(&fk_cv);
+        while (fk_parks < want)
+            pthread_cond_wait(&fk_cv, &fk_mu);
+    }
+    pthread_mutex_unlock(&fk_mu);
+}
+
+/* The clocks moved under the parked thread: the monotonic one (a gap), the
+ * wall clock (a step). */
+static void logger_clocks(double mono_s, double wall_s)
+{
+    pthread_mutex_lock(&fk_mu);
+    fk_mono += mono_s;
+    fk_wall += wall_s;
+    pthread_mutex_unlock(&fk_mu);
+}
+
 static void stop_dump(void)
 {
     printf("H. a stop writes the dump an event still waits for\n");
     char line[LINE_MAX_B] = "";
-    senslog_start();
-    /* The thread's first second is in the ring once its first beat is out. */
-    for (int i = 0; i < 300 && !logged_of("beat", NULL, 0); i++)
-        usleep(10000);
+    logger_start();
     CHECK(logged_of("beat", NULL, 0) == 1, "the logger runs: its first beat is written");
     senslog_event("verdict FIRE: a stop inside the window");
     CHECK(logged_of("fr", NULL, 0) == 0, "the event's dump waits out its window");
@@ -485,6 +641,140 @@ static void unread_switch(void)
     CHECK(senslog_fmt_beat(line, sizeof(line), &ctx, &s) > 0 && strstr(line, " sw=0x28 "), "read: the word");
 }
 
+/* A record of @type, the last one, carries @needle. */
+static int last_has(const char *type, const char *needle)
+{
+    char line[LINE_MAX_B] = "";
+    return logged_of(type, line, sizeof(line)) > 0 && strstr(line, needle) != NULL;
+}
+
+/* One logger, run second by second through J, K and L. Its settings as wide
+ * as they come: the tunables in force at 810 characters (the engine's 25 as
+ * conf_reload writes them, every value at %g's widest of 12, come to 803),
+ * every named setting set, the dose curve at the 180 characters its
+ * validator allows. */
+static char wide_force[811], wide_curve[181];
+
+static void beat_window(void)
+{
+    printf("J. a beat carries the slowest engine tick and the CPU load since the beat before it\n");
+    char line[LINE_MAX_B];
+    for (int i = 0; i < 810; i++)
+        wide_force[i] = i % 25 == 24 ? ' ' : 'a' + i % 25;
+    for (int i = 0; i < 180; i++)
+        wide_curve[i] = i % 4 == 3 ? ',' : '0' + i % 4;
+    in_force = wide_force;
+    set_kv[0] = "laser_dose_curve"; set_kv[1] = wide_curve;
+    set_kv[2] = "cool_flow_watch"; set_kv[3] = "1"; set_kv[4] = NULL;
+    set_every = "12345678";
+    snprintf(stat_file, sizeof(stat_file), "/tmp/senslog-test-stat-XXXXXX");
+    int fd = mkstemp(stat_file);
+    if (fd >= 0)
+        close(fd);
+    nlogged = 0;
+    view_phase = "idle";
+    view_verdict = "OK";
+    unsigned long busy = 1000, idle = 1000;
+    stat_put(busy, idle);
+    tick_now = 3;
+    logger_start();                     /* the first beat */
+    static const double ticks[] = { 5, 30, 7 };
+    for (int i = 0; i < 3; i++) {       /* three idle seconds, the CPU busy through them */
+        tick_now = ticks[i];
+        stat_put(busy += 100, idle);
+        logger_seconds(1);
+    }
+    tick_now = 6;                       /* a fourth, the CPU idle, and a phase change: a beat */
+    stat_put(busy, idle += 100);
+    view_phase = "run";
+    logger_seconds(1);
+    int beats = logged_of("beat", line, sizeof(line));
+    CHECK(beats == 2 && strstr(line, " tick_ms=30 ") && strstr(line, " cpu=75 "),
+          "the beat after four seconds: the slowest tick of the four (30), the CPU of the four (75 %)");
+    tick_now = 4;
+    for (int i = 0; i < 10; i++) {      /* the session's ten seconds to its next beat, the CPU idle */
+        stat_put(busy, idle += 100);
+        logger_seconds(1);
+    }
+    beats = logged_of("beat", line, sizeof(line));
+    CHECK(beats == 3 && strstr(line, " tick_ms=4 ") && strstr(line, " cpu=0 "),
+          "the next beat: its own seconds only");
+}
+
+static void inventory_records(void)
+{
+    printf("K. the inventory and the settings: at start, after a clock step, on a change, daily, not otherwise\n");
+    char line[LINE_MAX_B];
+    view_phase = "idle";
+    int n = logged_of("cfg", line, sizeof(line));
+    CHECK(n == 1 && logged_of("inv", NULL, 0) == 1 && strstr(line, " why=start ") && strstr(line, wide_force) &&
+          strstr(line, wide_curve) && strstr(line, " cool_flow_watch=1 ") && strstr(line, " cool_flow_duty_max=12345678") &&
+          strlen(line) < LINE_MAX_B - 1,
+          "at start: inv and cfg, the cfg line every tunable in force and every setting, the curve whole, in one line");
+    logger_seconds(61);
+    CHECK(logged_of("cfg", NULL, 0) == 1, "a minute on, nothing changed: none");
+    set_kv[3] = "0";
+    logger_seconds(61);
+    CHECK(logged_of("cfg", NULL, 0) == 2 && last_has("cfg", " why=change ") && last_has("cfg", " cool_flow_watch=0 ") &&
+          logged_of("inv", NULL, 0) == 2, "a setting changed: both again at the next look, why=change");
+    logger_clocks(0.0, 100.0);
+    logger_seconds(1);
+    CHECK(logged_of("cfg", NULL, 0) == 3 && last_has("cfg", " why=clock ") && logged_of("clock", NULL, 0) == 1,
+          "the wall clock stepped: the clock record, and both again at once, why=clock");
+    logger_clocks(86401.0, 0.0);
+    logger_seconds(1);
+    CHECK(logged_of("cfg", NULL, 0) == 4 && last_has("cfg", " why=daily "), "a day on: both again, why=daily");
+}
+
+static void verdict_arms(void)
+{
+    printf("L. a fault or gate verdict's arrival arms the flight recorder; WARMUP, EXT and ACK do not\n");
+    unsigned long ev = ev_seq;
+    view_verdict = "OVERTEMP";
+    logger_seconds(1);
+    CHECK(ev_seq == ev + 1 && strstr(fr_msg, "verdict OVERTEMP") == fr_msg, "OVERTEMP arrives: a dump, named for it");
+    static const char *const quiet[] = { "OK", "WARMUP", "OK", "EXT", "ACK" };
+    for (size_t i = 0; i < sizeof(quiet) / sizeof(*quiet); i++) {
+        view_verdict = quiet[i];
+        logger_seconds(1);
+    }
+    /* The dump still waits out its window: an arming would be named in it. */
+    CHECK(ev_seq == ev + 1 && fr_pending && !strstr(fr_msg, "WARMUP") && !strstr(fr_msg, "EXT") &&
+          !strstr(fr_msg, "ACK"), "the warm-up, an extension's hold and ACK arm nothing");
+    view_verdict = "OK";
+    senslog_stop();
+    in_force = "";
+    set_kv[0] = NULL;
+    set_every = NULL;
+    unlink(stat_file);
+    stat_file[0] = '\0';
+}
+
+static void event_naming(void)
+{
+    printf("M. an event in a pending dump's window is named in it; one past its budget, in the next\n");
+    pthread_mutex_lock(&mu);
+    fr_pending = 0;
+    fr_unrecorded = 0;
+    memset(&fr_budget, 0, sizeof(fr_budget));
+    pthread_mutex_unlock(&mu);
+    senslog_event("SoC throttled: first");
+    senslog_event("SoC throttled: second");
+    CHECK(fr_pending && strstr(fr_msg, "SoC throttled: first") == fr_msg && strstr(fr_msg, "SoC throttled: second"),
+          "a second event inside the first's window: named in its dump");
+    for (int i = 0; i < SENSLOG_FR_PER_HOUR - 1; i++) {
+        fr_pending = 0;                 /* each dump written */
+        senslog_event("SoC throttled: again");
+    }
+    fr_pending = 0;
+    senslog_event("SoC throttled: one too many");
+    CHECK(!fr_pending && fr_unrecorded == 1, "the seventh warning in its hour: no dump, counted");
+    senslog_event("verdict CRASH: head accelerometer");
+    CHECK(fr_pending && fr_unrecorded == 0 && strstr(fr_msg, "verdict CRASH") == fr_msg &&
+          strstr(fr_msg, "SoC throttled: one too many"), "the next dump names it");
+    fr_pending = 0;
+}
+
 int main(void)
 {
     golden_check();
@@ -496,6 +786,10 @@ int main(void)
     budget();
     stop_dump();
     unread_switch();
+    beat_window();
+    inventory_records();
+    verdict_arms();
+    event_naming();
     if (failures) {
         printf("%d FAILED\n", failures);
         return 1;

@@ -57,7 +57,9 @@
 #     the dose curve off, the keys are as they were after the burn, and
 #     the pick 8 writes the floor 10
 #   the first run, in the page's order: each document accepted at its
-#     hash, the press step breathing teal, the press accepted, the
+#     hash, the press step breathing teal, and again once a red flash
+#     has left the button dark (the press status puts it back), the
+#     press accepted, the
 #     account and its cookie, the gate's reason after each form step,
 #     the intake fan count opening the gate, and the run completed
 #   the first run, walked in the browser: the page the daemon serves,
@@ -1127,10 +1129,17 @@ wiz
 expect true "$(jget "$T/wiz.json" 'json.dumps(d["advisories_complete"])')" "the documents are accepted"
 expect 200 "$(post /wiz/advisories/press "$TOKEN")" "POST /wiz/advisories/press is 200"
 led() { cat "$T/leds/button_led_$1/$2" 2>/dev/null; }
-if [ "$(led 1 target)" = 0 ] && [ "$(led 2 target)" -gt 0 ] && [ "$(led 3 target)" -gt 0 ] \
-   && [ "$(led 2 pulse_on)" -gt 0 ] && [ "$(led 3 pulse_on)" -gt 0 ]; then
+teal() { [ "$(led 1 target)" = 0 ] && [ "$(led 2 target)" -gt 0 ] && [ "$(led 3 target)" -gt 0 ] \
+             && [ "$(led 2 pulse_on)" -gt 0 ] && [ "$(led 3 pulse_on)" -gt 0 ]; }
+if teal; then
     ok "the button breathes teal: red off, green and blue lit and pulsing"
 else bad "the button LEDs: targets $(led 1 target)/$(led 2 target)/$(led 3 target), pulse_on $(led 2 pulse_on)/$(led 3 pulse_on)"; fi
+# The cooling engine's red flash ends dark, over whatever stood: the press
+# status the page polls puts the teal back while the press is asked for.
+for c in 1 2 3; do echo 0 > "$T/leds/button_led_$c/target"; echo 0 > "$T/leds/button_led_$c/pulse_on"; done
+curl -s -o /dev/null "$URL/wiz/advisories/press"
+teal && ok "a red flash that ended dark over the press step: the press status puts the teal back" \
+    || bad "after a dark button, the press status left targets $(led 1 target)/$(led 2 target)/$(led 3 target), pulse_on $(led 2 pulse_on)/$(led 3 pulse_on)"
 # a new reason: the supervisor takes it up on its next tick, then holds the gate on it
 says() { mode; [ "$(jget "$T/mode.json" 'd.get("why", "")')" = "$1" ]; }
 held_next() { until_ok 50 says "$1"; held "$1"; }

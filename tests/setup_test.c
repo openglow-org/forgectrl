@@ -14,7 +14,9 @@
  * left out; a damaged record reads as nothing done; the status document
  * parses and says what the gate says; a record under the file's earlier
  * name is adopted once and never over a current one; the cloud step's
- * homing choices.
+ * homing choices; the seed (a write that fails keeps it, no account name
+ * seeds no account) and the start's machine check (a record without a
+ * machine id learns it and keeps its machine step).
  */
 #include "../src/advisories.h"
 #include "../src/setup.h"
@@ -24,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 unsigned long fuse_serial(void) { return 123456789; }
@@ -522,6 +525,35 @@ int main(void)
         f = fopen(seed, "w");
         if (f)
             fclose(f);
+        /* A seeded record that cannot be written (its temporary file's
+         * name is taken by a directory) keeps the seed for the next start,
+         * and nothing is written. */
+        {
+            char tmp[310];
+            snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+            CHECK(mkdir(tmp, 0700) == 0 && setup_seed("forgefirm", 1000) == -1 &&
+                      access(seed, F_OK) == 0 && access(path, F_OK) != 0,
+                  "a seeded record that cannot be written keeps the seed, and no record is written");
+            rmdir(tmp);
+        }
+        /* A seed with no account name seeds no account and no account step:
+         * the gate holds on the account. */
+        {
+            int rc = setup_seed("", 0);
+            setup_init();
+            json_t *ns = status();
+            json_t *nr = setup_record_copy();
+            CHECK(rc == 1 && !setup_gate_open(why, sizeof(why)) && strstr(why, "account") && ns &&
+                      json_is_false(json_object_get(ns, "account")) && nr && !json_object_get(nr, "account") &&
+                      !json_object_get(json_object_get(nr, "wizards"), "account"),
+                  "a seed with no account name records no account and no account step: the gate holds on the account");
+            json_decref(ns);
+            json_decref(nr);
+            unlink(path);
+            f = fopen(seed, "w");
+            if (f)
+                fclose(f);
+        }
         CHECK(setup_seed("forgefirm", 1000) == 1 && access(seed, F_OK) != 0,
               "the seed becomes the record and goes");
         setup_init();
@@ -598,6 +630,22 @@ int main(void)
         setup_head_hash(hh, sizeof(hh));
         CHECK(!strcmp(hh, "H2"), "and the facts are this machine's");
         CHECK(setup_machine_check("", json_object()) == -1, "no machine id: nothing judged");
+        /* Machine facts with no machine id (what the machine step writes, and
+         * every record from before the check) are this machine's: the record
+         * learns the id, on disk, and keeps its facts and its machine step. */
+        {
+            setup_wizard_done("machine", 1, NULL, NULL);
+            setup_set_machine(json_pack("{s:{s:s}}", "head", "serial_hash", "H3"));
+            int mv = setup_wizard_version("machine");
+            int rc = setup_machine_check("CCCCC-CCCCC", json_pack("{s:{s:s}}", "head", "serial_hash", "H4"));
+            setup_init();
+            char mid[24];
+            setup_machine_str("machine_id", mid, sizeof(mid));
+            setup_head_hash(hh, sizeof(hh));
+            CHECK(rc == 0 && mv > 0 && setup_wizard_version("machine") == mv && setup_gate_open(why, sizeof(why)) &&
+                      !strcmp(mid, "CCCCC-CCCCC") && !strcmp(hh, "H3"),
+                  "facts with no machine id learn this machine's, on disk, and keep the machine step: the gate open");
+        }
         setup_set_steps(steps, 3);
     }
 

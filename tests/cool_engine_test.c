@@ -81,6 +81,13 @@
  *              are its gates off
  *   TEC.       fitted: on with the run airflow, off at idle, a dwell before
  *              it comes on again; not fitted: never
+ *
+ * And after them: the holds that clear on their own light nothing; at most
+ * five notices, their document JSON-safe and never cut; a waiting
+ * acknowledgment keeps its record; the flow watch's context (its fans and
+ * run session, the two corrections) and the yields that land at once (K3);
+ * no engine heat outside a warm-up; the warnings that arm the flight
+ * recorder; the retired flow-check settings; the shutdown's order.
  */
 #define GF_SYSFS    "cool-engine-test/sys/"
 #define VERDICT_DIR "cool-engine-test/run"
@@ -271,15 +278,27 @@ int setup_flag(const char *id, const char *reason)
     return 0;
 }
 /* The coolant flow watch, faked: its yields counted with the heater as each
-   one found it (a yield lands before the engine's own heater write), and the
-   last tick's context. */
+   one found it (a yield lands before the engine's own heater write), with the
+   quiet hold, the diagnostic's take and the pump as each one found them, and
+   the last tick's context; its stop counted with the heater as it found it. */
 static int flow_yields;
-static long flow_yield_heater = -1;
+static long flow_yield_heater = -1, flow_yield_pump = -1;
+static int flow_yield_quiet, flow_yield_diag;
+static int flow_stops;
+static long flow_stop_heater = -1;
 static flowrun_ctx_t flow_ctx;
 void flowrun_init(void) { }
-void flowrun_shutdown(void) { }
+void flowrun_shutdown(void) { flow_stops++; flow_stop_heater = get_long("thermal/heater_pwm"); }
 void flowrun_engine(const flowrun_ctx_t *c) { flow_ctx = *c; }
-void flowrun_yield(const char *why) { (void)why; flow_yields++; flow_yield_heater = get_long("thermal/heater_pwm"); }
+void flowrun_yield(const char *why)
+{
+    (void)why;
+    flow_yields++;
+    flow_yield_heater = get_long("thermal/heater_pwm");
+    flow_yield_pump = get_long("thermal/water_pump_on");
+    flow_yield_quiet = quiet_held && quiet_pump_held;
+    flow_yield_diag = diag_owned;
+}
 /* The button as the engine sees it, and the supervisor's motion check. */
 static int led_red, led_released, led_writes, motion_fault_stub;
 static int led_unreadable;              /* the LED cannot be read */
@@ -290,7 +309,8 @@ int super_motion_fault(void) { return motion_fault_stub; }
 double chassis_degc(void) { return 25.0; }
 long supply_temp_raw(void) { return 540; }
 double soc_degc(void) { return 38.0; }
-long soc_throttle_state(void) { return 0; }
+static long throttle_stub;              /* the kernel's CPU cooling state */
+long soc_throttle_state(void) { return throttle_stub; }
 
 /* The factory conversion (status.c), and its inverse for the model. */
 double coolant_degc(long raw)
@@ -1022,11 +1042,14 @@ static void attention(loop_t *L)
     run_tick(L);
     run_tick(L);
     CHECK(!strcmp(pub_verdict, "CRITICAL") && led_red, "the fail tier flashes red");
+    CHECK(attn_latched && attn_sticky, "CRITICAL is the fail tier: it takes the acknowledgment, its window still open");
     CHECK(verdict_has("\"ack_wait\":false"), "while its cause stands nothing waits for the acknowledgment yet");
     kv[0] = NULL;
     close_session(L);
     run_idle_tick(L);
     CHECK(!strcmp(pub_verdict, "ACK") && !pub_fire_ok, "its session over: ACK, fire blocked");
+    CHECK(strstr(pub_reason, "CRITICAL") && !strcmp(pub_reason, attn_reason) &&
+          verdict_has("\"reason\":\"CRITICAL"), "ACK carries the fault's words, in the verdict file too");
     CHECK(verdict_has("\"ack_wait\":true"), "and the verdict file's ack_wait says so");
     CHECK(!pub_hold, "and motion free");
     CHECK(led_red, "the red stays");
@@ -1076,6 +1099,7 @@ static void attention(loop_t *L)
     run_tick(L);
     run_tick(L);
     CHECK(!strcmp(pub_verdict, "FIRE") && led_red, "a fire: FIRE, red");
+    CHECK(attn_latched && attn_sticky, "FIRE is the fail tier: it takes the acknowledgment, its window still open");
     for (int i = 1; i <= 4; i++) {
         char a[24];
         snprintf(a, sizeof(a), "pic/lid_ir_%d", i);
@@ -1322,6 +1346,13 @@ static void gate_critical(loop_t *L)
     CHECK(verdict_has("\"verdict\":\"OVERTEMP\"") && verdict_has("\"ack_wait\":true") &&
           verdict_has("\"fire_ok\":false"),
           "the acknowledgment CRITICAL left waits under that name: ack_wait true, fire blocked");
+    {
+        /* The Acknowledge takes CRITICAL's words only: the ceiling's stand. */
+        char ceiling[COOL_REASON_MAX];
+        snprintf(ceiling, sizeof(ceiling), "%s", pub_reason);
+        CHECK(ceiling[0] && strcmp(ceiling, attn_reason) && cool_attention_ack() == 0 &&
+              !strcmp(pub_reason, ceiling), "the Acknowledge clears its own fault's words, and leaves the ceiling's");
+    }
     /* The ceiling's own hold stands under the case above: with the
      * ceiling at its off end the critical line holds alone. */
     close_session(L);
@@ -1368,33 +1399,35 @@ static int yield_terms(int term[Y_N])
 }
 
 /* One row per cause: the settings its session opens with, how far over its
- * 22.3 C the loop goes once the session is open, and what the context says.
- * Each row leaves its cause the only one standing, so a term dropped from
- * the engine's yield fails that row and no other. */
+ * 22.3 C the loop goes once the session is open, what the context says, and
+ * the fans and the run session it hands the watch. Each row leaves its cause
+ * the only one standing, so a term dropped from the engine's yield fails
+ * that row and no other. */
 static const struct {
     int cause;
     const char *name, *why;
     const char *kv[7];
     double bulk_c;
+    int fans, session;
 } yield_rows[] = {
     { Y_Warmup,     "a warm-up",                    "warm-up",
-      { "cool_temp_start", "30", NULL }, 0.0 },
+      { "cool_temp_start", "30", NULL }, 0.0, FW_FANS_IDLE, 0 },
     { Y_Sensor,     "a coolant sensor unreadable",  "a coolant sensor is unreadable",
-      { NULL }, 0.0 },
+      { NULL }, 0.0, FW_FANS_RUN, 1 },
     { Y_Quiet,      "a quiet hold",                 "a quiet hold",
-      { NULL }, 0.0 },
+      { NULL }, 0.0, FW_FANS_OTHER, 0 },
     { Y_Overtemp,   "the coolant over the ceiling", "the coolant is over the ceiling",
-      { NULL }, 12.0 },
+      { NULL }, 12.0, FW_FANS_RUN, 1 },
     { Y_Cold,       "the coolant under the floor",  "the coolant is under the floor",
-      { "cool_temp_min", "30", NULL }, 0.0 },
+      { "cool_temp_min", "30", NULL }, 0.0, FW_FANS_RUN, 1 },
     { Y_Critical,   "the coolant at the critical line", "the coolant is at the critical line",
-      { "cool_temp_critical_c", "20", NULL }, 0.0 },
+      { "cool_temp_critical_c", "20", NULL }, 0.0, FW_FANS_RUN, 1 },
     { Y_Tec,        "the TEC running",              "the TEC is cooling",
-      { "cool_tec_present", "1", "cool_tec_on_c", "15", "cool_tec_off_c", "13", NULL }, 0.0 },
+      { "cool_tec_present", "1", "cool_tec_on_c", "15", "cool_tec_off_c", "13", NULL }, 0.0, FW_FANS_RUN, 1 },
     { Y_HotUngated, "a hot loop with the ceiling gate off", "the coolant is over the ceiling",
-      { "cool_temp_max", "60", NULL }, 13.5 },
+      { "cool_temp_max", "60", NULL }, 13.5, FW_FANS_RUN, 1 },
     { Y_Cooling,    "the thermal cooldown",         "the engine is cooling the loop",
-      { NULL }, 9.7 },
+      { NULL }, 9.7, FW_FANS_COOL, 0 },
 };
 
 static void flow_yields_table(loop_t *L)
@@ -1406,6 +1439,7 @@ static void flow_yields_table(loop_t *L)
     run_tick(L);
     CHECK(yield_terms(term) == 0 && !flow_ctx.yield && fabs(flow_ctx.t - fake_now) < 1e-6,
           "a run session at a normal coolant: no cause stands, and the watch may hold");
+    CHECK(flow_ctx.session && flow_ctx.fans == FW_FANS_RUN, "and the watch sees a run session at the run fans");
     CHECK(sizeof(yield_rows) / sizeof(yield_rows[0]) == Y_N, "one row for every cause");
     for (size_t r = 0; r < sizeof(yield_rows) / sizeof(yield_rows[0]); r++) {
         int cause = yield_rows[r].cause;
@@ -1447,6 +1481,8 @@ static void flow_yields_table(loop_t *L)
         CHECK(flow_ctx.yield && flow_ctx.yield_why && !strcmp(flow_ctx.yield_why, yield_rows[r].why), msg);
         snprintf(msg, sizeof(msg), "%s: the context carries the tick's own clock", yield_rows[r].name);
         CHECK(fabs(flow_ctx.t - fake_now) < 1e-6, msg);
+        snprintf(msg, sizeof(msg), "%s: the fans and the run session the watch sees", yield_rows[r].name);
+        CHECK(flow_ctx.fans == yield_rows[r].fans && flow_ctx.session == yield_rows[r].session, msg);
         if (cause == Y_Quiet)
             cool_quiet_hold(0);
         L->bulk_c = 0.0;
@@ -1460,10 +1496,38 @@ static void flow_yields_table(loop_t *L)
     close_session(L);
     /* A diagnostic builds the context itself: the same yield, the same clock. */
     run_idle_tick(L);
+    CHECK(!flow_ctx.session && flow_ctx.fans == FW_FANS_IDLE, "idle: no run session, the idle fans");
     CHECK(cool_diag_take() == 0, "a diagnostic takes the thermal hardware");
     run_idle_tick(L);
     CHECK(flow_ctx.yield && !strcmp(flow_ctx.yield_why, "diagnostics") && fabs(flow_ctx.t - fake_now) < 1e-6,
           "diagnostics: the watch is told to give the heater back, on the tick's own clock");
+    CHECK(!flow_ctx.session && flow_ctx.fans == FW_FANS_OTHER, "and sees no run session, the fans not its to judge");
+    cool_diag_release();
+    run_idle_tick(L);
+}
+
+/* A quiet hold and a diagnostic's take each take the heater back from the
+ * watch at once, not at the next tick: the yield lands with the hold or the
+ * take already published (a tick between them carries it) and, for a quiet
+ * hold with the pump, before the pump stops. A quiet hold may not take the
+ * pump from a diagnostic even before the diagnostic's first tick. */
+static void flow_yield_now(loop_t *L)
+{
+    printf("K3. a quiet hold and a diagnostic's take each take the heater from the watch at once\n");
+    close_session(L);
+    run_idle_tick(L);
+    put_long("thermal/water_pump_on", 1);
+    int y = flow_yields;
+    cool_quiet_hold_ex(1, 1);
+    CHECK(flow_yields == y + 1 && flow_yield_quiet && flow_yield_pump == 1 &&
+          get_long("thermal/water_pump_on") == 0,
+          "a quiet hold with the pump: one yield, the hold already published, the pump not yet stopped");
+    cool_quiet_hold(0);
+    run_idle_tick(L);
+    y = flow_yields;
+    CHECK(cool_diag_take() == 0 && flow_yields == y + 1 && flow_yield_diag,
+          "a diagnostic's take: one yield, the take already published");
+    CHECK(!cool_quiet_pump_ok(), "a quiet hold may not take the pump from it, before its first tick");
     cool_diag_release();
     run_idle_tick(L);
 }
@@ -1484,6 +1548,7 @@ static void gate_fans(loop_t *L)
           "the third tick past the grace: AIRFLOW, fire blocked, hold, no resume");
     CHECK(strstr(pub_reason, "exhaust") && fan_state_is("exhaust", "TRIPPED"),
           "the reason names the exhaust, its gate TRIPPED");
+    CHECK(attn_latched && attn_sticky, "AIRFLOW is the fail tier: it takes the acknowledgment, its window still open");
     session_end_tick(L);
     CHECK(!strcmp(pub_verdict, "ACK") && !pub_hold, "the session over: no hold, the fault for the operator");
     (void)cool_attention_ack();
@@ -1701,6 +1766,288 @@ static void tec(loop_t *L)
     close_session(L);
 }
 
+/* --- the attention's rules, the heater's, the recorder's ---------------- */
+
+static void lid_ir_all(long v)
+{
+    for (int i = 1; i <= 4; i++) {
+        char a[24];
+        snprintf(a, sizeof(a), "pic/lid_ir_%d", i);
+        put_long(a, v);
+    }
+}
+
+/* The holds the machine waits out on its own light nothing and leave
+ * nothing to acknowledge: the warm-up, a cold loop and an extension's hold,
+ * each the only cause in its session (a hot loop is the attention case's). */
+static void self_clearing_holds(loop_t *L)
+{
+    static const struct {
+        const char *verdict;
+        const char *kv[3];
+    } rows[] = {
+        { "WARMUP", { "cool_temp_start", "30", NULL } },
+        { "COLD",   { "cool_temp_min", "30", NULL } },
+        { "EXT",    { "ext_enabled", "1", NULL } },
+    };
+    char msg[96];
+    printf("the holds that clear on their own: WARMUP, COLD and EXT light nothing\n");
+    for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); r++) {
+        close_session(L);
+        for (int i = 0; i < 3; i++)
+            kv[i] = rows[r].kv[i];
+        settle_and_open(L);
+        if (!strcmp(rows[r].verdict, "EXT"))
+            ext_hold_file("org.example.badge", 1, 1, "no badge presented", fake_now + 1.0);
+        run_tick(L);
+        snprintf(msg, sizeof(msg), "%s: no red, nothing for the operator", rows[r].verdict);
+        CHECK(!strcmp(pub_verdict, rows[r].verdict) && !led_red && !attn_latched, msg);
+        kv[0] = NULL;
+    }
+    unlink("cool-engine-test/holds/org.example.badge.json");
+    close_session(L);
+}
+
+/* At most five notices stand: two pause-tier causes, each cleared inside
+ * the window, in turn six times (a repeat of the last would count on it). */
+static void notices_cap(loop_t *L)
+{
+    printf("the notices: at most five stand, a sixth drops the oldest\n");
+    close_session(L);
+    cool_notices_dismiss((unsigned)-1);
+    crash_src1 = crash_src2 = 0;
+    crash_poll_fail = 0;
+    unsigned base = attn_notice_seq;
+    settle_and_open(L);
+    run_tick(L);
+    for (int i = 0; i < 6; i++) {
+        if (i % 2 == 0) {
+            L->dead_down = 1;                       /* SENSOR */
+            for (int k = 0; k < 3; k++)
+                run_tick(L);
+            L->dead_down = 0;
+            run_tick(L);
+        } else {
+            crash_src1 = 0x40 | 0x08;               /* BUMP: IG1, the alert generator, Y */
+            run_tick(L);
+            crash_src1 = 0;
+            for (int k = 0; k < 6; k++)
+                run_tick(L);
+        }
+    }
+    CHECK(attn_notice_n == COOL_NOTICES_N && attn_notice_seq == base + 6 &&
+          attn_notices[0].seq == base + 2 && attn_notices[COOL_NOTICES_N - 1].seq == base + 6,
+          "six causes cleared in the window: five notices stand, the oldest gone");
+    cool_notices_dismiss((unsigned)-1);
+    close_session(L);
+}
+
+/* The notices document: a reason's quote and backslash are made plain
+ * before it reaches /cool/status, and a list past the budget is published
+ * as none, never cut. The engine's own reasons hold neither, so the cause
+ * is raised on attention_tick itself. */
+static void notices_json_safe(loop_t *L)
+{
+    char doc[COOL_STATUS_JSON_MAX];
+    printf("the notices document: JSON-safe, never cut\n");
+    close_session(L);
+    run_idle_tick(L);
+    cool_notices_dismiss((unsigned)-1);
+    snprintf(pub_reason, sizeof(pub_reason), "a \"quoted\" word and a \\ backslash");
+    attention_tick("SENSOR");
+    attention_tick("OK");               /* cleared at idle, nothing ended: a notice */
+    pub_reason[0] = '\0';               /* the verdict's own words gone with it */
+    cool_status_json(doc, sizeof(doc));
+    json_t *j = json_loads(doc, 0, NULL);
+    const char *why = json_string_value(
+        json_object_get(json_array_get(json_object_get(j, "notices"), 0), "reason"));
+    CHECK(why && !strpbrk(why, "\"\\"), "a quote and a backslash in a reason: the document parses, the reason plain");
+    if (j)
+        json_decref(j);
+    for (int i = 0; i < COOL_NOTICES_N; i++) {
+        attn_notice_t *a = &attn_notices[i];
+        a->seq = 4294967295u;
+        snprintf(a->verdict, sizeof(a->verdict), "CRITICAL");
+        memset(a->reason, 'x', sizeof(a->reason) - 1);
+        a->reason[sizeof(a->reason) - 1] = '\0';
+        a->at = a->cleared_at = 1e15;
+        a->times = 2147483647;
+    }
+    attn_notice_n = COOL_NOTICES_N;
+    notices_publish();
+    CHECK(!strcmp(pub_notices, "[]"), "five notices past the budget: published as none, never cut");
+    attn_notice_n = 0;
+    notices_publish();
+    run_idle_tick(L);
+}
+
+/* A new cause and the record the panel asks about: a record that waits for
+ * its acknowledgment stays (the new cause shows as the verdict); a record
+ * that is not sticky gives way to the next cause. */
+static void attention_takeover(loop_t *L)
+{
+    printf("the attention's record: a waiting acknowledgment keeps it, one not sticky gives way\n");
+    close_session(L);
+    cool_notices_dismiss((unsigned)-1);
+    attn_keep = 1;
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+    kv[4] = "cool_temp_critical_c"; kv[5] = "20"; kv[6] = NULL;
+    settle_and_open(L);
+    run_tick(L);
+    kv[0] = NULL;
+    close_session(L);
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "ACK") && !strcmp(attn_verdict, "CRITICAL"), "CRITICAL waits for its acknowledgment");
+    settle_and_open(L);
+    L->dead_down = 1;
+    for (int k = 0; k < 3; k++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "SENSOR") && !strcmp(attn_verdict, "CRITICAL"),
+          "a new cause under it: the verdict SENSOR, the record still CRITICAL's");
+    L->dead_down = 0;
+    run_tick(L);
+    CHECK(cool_attention_ack() == 0, "the Acknowledge takes it");
+    close_session(L);
+    lid_ir_all(100);
+    settle_and_open(L);
+    L->dead_down = 1;
+    for (int k = 0; k < 3; k++)
+        run_tick(L);
+    CHECK(!strcmp(attn_verdict, "SENSOR") && attn_latched && !attn_sticky, "SENSOR stands in the window, not sticky");
+    lid_ir_all(300);                    /* q1 past its alert, under its critical */
+    run_tick(L);
+    run_tick(L);
+    CHECK(!strcmp(pub_verdict, "FLAME") && !strcmp(attn_verdict, "FLAME"), "FLAME over it: the record is FLAME's");
+    lid_ir_all(100);
+    L->dead_down = 0;
+    for (int k = 0; k < FIRE_CLEAR_TICKS + 1; k++)
+        run_tick(L);
+    attn_keep = 0;
+    close_session(L);
+    cool_notices_dismiss((unsigned)-1);
+    for (int i = 1; i <= 4; i++) {
+        char a[64];
+        snprintf(a, sizeof(a), GF_SYSFS "pic/lid_ir_%d", i);
+        unlink(a);
+    }
+}
+
+/* With the flow check gone, nothing but a warm-up heats the loop: an armed
+ * session past the old check's settle and run, and its tail to idle. */
+static void no_engine_heat(loop_t *L)
+{
+    printf("no flow check: the engine heats nothing outside a warm-up\n");
+    close_session(L);
+    put_long("thermal/heater_pwm", 0);
+    int heated = 0;
+    settle_and_open(L);
+    for (int i = 0; i < 120; i++) {
+        run_tick(L);
+        heated |= get_long("thermal/heater_pwm") != 0;
+    }
+    L->session = 0;
+    for (int i = 0; i < 900 && cool_state != Cool_Idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+        heated |= get_long("thermal/heater_pwm") != 0;
+    }
+    CHECK(!heated && heater_pct == 0 && cool_state == Cool_Idle,
+          "120 s armed at a normal coolant, and the tail to idle: the heater never above 0");
+}
+
+/* The engine's warnings that change no verdict ask the flight recorder for
+ * the minutes around them, each once (the silent controller is M's). */
+static void recorder_warnings(loop_t *L)
+{
+    printf("the warnings that change no verdict arm the flight recorder\n");
+    close_session(L);
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);               /* the armed window well past */
+    int ev = events;
+    put_long("cnc/laser_on_sampled", 5);
+    run_idle_tick(L);
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    CHECK(events == ev + 1, "an emission with no armed window");
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    long pgood = get_long("cnc/laser_pgood_sampled");
+    put_long("cnc/laser_pgood_sampled", 255);
+    settle_and_open(L);
+    ev = events;
+    put_long("cnc/laser_pgood_sampled", 50);
+    run_tick(L);
+    run_tick(L);
+    CHECK(events == ev + 1, "a power-good drop in the armed window");
+    put_long("cnc/laser_pgood_sampled", pgood);
+    ev = events;
+    put_long("cnc/faults", 4);
+    run_tick(L);
+    run_tick(L);
+    put_long("cnc/faults", 0);
+    run_tick(L);
+    CHECK(events == ev + 1, "a stepper driver fault in the session");
+    ev = events;
+    throttle_stub = 1;
+    run_tick(L);
+    run_tick(L);
+    throttle_stub = 0;
+    run_tick(L);
+    CHECK(events == ev + 1, "a CPU throttle");
+    close_session(L);
+    kv[0] = "cool_cooldown_max_s"; kv[1] = "5"; kv[2] = NULL;
+    settle_and_open(L);
+    L->bulk_c = 9.7;                    /* over the resume line once the run airflow's offset is gone */
+    run_tick(L);
+    ev = events;
+    session_end_tick(L);
+    for (int i = 0; i < 60 && cool_state != Cool_Idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+    }
+    CHECK(cool_state == Cool_Idle && events == ev + 1, "a thermal cooldown that times out above the resume line");
+    L->bulk_c = 0.0;
+    kv[0] = NULL;
+    close_session(L);
+}
+
+/* The flow check's settings are gone with it: no tunable reads them and no
+ * bench override names them. */
+static void retired_tunables(void)
+{
+    static const char *const keys[] = {
+        "cool_flow_rise", "cool_flow_heater_pct", "cool_flow_check_s", "cool_recheck_s",
+        "cool_confirm_max_s", "cool_laser_heat_density", "cool_laser_heat_cw" };
+    static const char *const envs[] = {
+        "GFCOOL_FLOW_RISE", "GFCOOL_FLOW_HEATER_PCT", "GFCOOL_FLOW_CHECK_S", "GFCOOL_RECHECK_S",
+        "GFCOOL_CONFIRM_MAX_S", "GFCOOL_LASER_HEAT_DENSITY", "GFCOOL_LASER_HEAT_CW" };
+    printf("the retired flow-check settings\n");
+    int found = 0;
+    for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++)
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+            found += !strcmp(tunables[i].key, keys[k]) || !strcmp(tunables[i].env, envs[k]);
+    CHECK(!found, "no tunable reads a retired key, and no GFCOOL_ variable names one");
+}
+
+/* The shutdown stops the flow watch, its heater off, before the engine
+ * writes its own heater off: nothing of the watch's runs after the last
+ * write. The engine's heat stands at the watch's stop (a warm-up), so the
+ * order shows. Last: the engine is not started again. */
+static void shutdown_order(loop_t *L)
+{
+    printf("the shutdown: the flow watch stopped first, then the engine's heater off\n");
+    close_session(L);
+    kv[0] = "cool_temp_start"; kv[1] = "30"; kv[2] = NULL;
+    settle_and_open(L);
+    long heat = get_long("thermal/heater_pwm");
+    kv[0] = NULL;
+    flow_stops = 0;
+    engine_run = 0;                     /* no thread to join: the test ticks the engine itself */
+    cool_shutdown();
+    CHECK(heat > 0 && flow_stops == 1 && flow_stop_heater == heat && get_long("thermal/heater_pwm") == 0,
+          "the watch stopped once with the warm-up's heat still on, then the heater off");
+}
+
 int main(void)
 {
     make_tree();
@@ -1740,6 +2087,20 @@ int main(void)
     CHECK(cool_coolant_offset_counts() > 20 && cool_coolant_offset_counts() < 40,
           "a part duty adds part of the setting (600 of 1023)");
     aa_write(204);
+    kv[0] = NULL;
+    conf_reload();
+    /* The flow watch reads its 45 C rail through the engine's two
+     * corrections, so the context carries both; and a sample's degrees
+     * (the sensors logger's) are the engine's own reading of the raw. */
+    kv[0] = "cool_aa_offset_counts"; kv[1] = "20"; kv[2] = "cool_temp_offset_c"; kv[3] = "0.5"; kv[4] = NULL;
+    open_session(&L);
+    CHECK(fabs(flow_ctx.offset_counts - 20.0) < 1e-9 && fabs(flow_ctx.temp_offset_c - 0.5) < 1e-6,
+          "the run profile: the watch's context carries the 20-count shift and the 0.5 C correction");
+    CHECK(fabs(cool_coolant_c(get_long("pic/water_temp_2")) - pub_up) < 0.01,
+          "a sample's degrees from the raw are the engine's own reading, both corrections in");
+    close_session(&L);
+    CHECK(flow_ctx.offset_counts == 0.0 && fabs(flow_ctx.temp_offset_c - 0.5) < 1e-6,
+          "idle: no shift in the context, the correction still in it");
     kv[0] = NULL;
     conf_reload();
 
@@ -1857,6 +2218,7 @@ int main(void)
     CHECK(cool_quiet_pump_ok(), "idle again: a quiet hold may take the pump");
 
     flow_yields_table(&L);
+    flow_yield_now(&L);
 
     test_ack_waits_for_fans(&L);
 
@@ -2113,6 +2475,14 @@ int main(void)
     flame_over_session_open(&L);
     nonfinite_tunables(&L);
     tec(&L);
+    self_clearing_holds(&L);
+    notices_cap(&L);
+    notices_json_safe(&L);
+    attention_takeover(&L);
+    no_engine_heat(&L);
+    recorder_warnings(&L);
+    retired_tunables();
+    shutdown_order(&L);
 
     printf(failures ? "FAIL: %d check(s) failed\n"
                     : "PASS: the engine takes the air-assist offset off while the fan "

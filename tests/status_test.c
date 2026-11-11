@@ -6,7 +6,7 @@
  *
  * The real status.c, pointed at one temp directory through its test
  * seams (GF_SYSFS_ROOT, GF_SWITCH_DEV, GF_PROC_STAT, GF_RUN_DIR,
- * FORGECTRL_DATA_DIR), with the supervisor stubbed. Five parts:
+ * FORGECTRL_DATA_DIR), with the supervisor stubbed. Six parts:
  *
  * The camera privacy gate. Every camera entry point in cam.c refuses
  * while machine_lid_closed() is false, but for the head camera to a
@@ -20,6 +20,8 @@
  * process: none may read closed, none may leave an fd behind. The reader
  * caches its device path on first use, so each case runs in its own
  * child, and this part runs before the parent reads the switch at all.
+ * The word the sensors logger reads (machine_switch_read) fails the same
+ * way: -1 with no bits, never a word of zeros passed off as a reading.
  *
  * The switch word's decode, which machine_lid_closed() and the
  * document's switches read through, driven with literal words: the
@@ -28,6 +30,10 @@
  * bit 2 the button pressed, bit 5 set the interlock loop open
  * (interlock_ok false), bit 4 the HV_ENABLE readback, which moves
  * nothing else, and bit 7 decodes to nothing: it is not head presence.
+ *
+ * The coolant conversion the engine, the flow watch and the sensors
+ * logger share: the thermistor's 25 C at mid-scale, and the sampler's
+ * fractional counts converted as whole ones.
  *
  * machine_is_idle() fails closed: not idle on any read failure, the
  * fd-table exhaustion a connection flood can cause (EMFILE) included. A
@@ -62,6 +68,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,6 +121,30 @@ static int lid_closed_with(const char *dev)
     if (pid == 0) {
         setenv("GF_SWITCH_DEV", dev, 1);
         _exit(machine_lid_closed() ? 1 : 0);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) {
+        fprintf(stderr, "child did not exit normally\n");
+        exit(2);
+    }
+    return WEXITSTATUS(st);
+}
+
+/* The switch word as the sensors logger reads it, in its own process: 0
+ * when the read failed and said so with no bits, 1 otherwise. */
+static int switch_read_fails_with(const char *dev)
+{
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(2);
+    }
+    if (pid == 0) {
+        setenv("GF_SWITCH_DEV", dev, 1);
+        unsigned long bits = 0xffff;
+        int rc = machine_switch_read(&bits);
+        _exit(rc == -1 && bits == 0 ? 0 : 1);
     }
     int st = 0;
     if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) {
@@ -223,8 +254,23 @@ static void lid_gate(void)
           "100 reads of a non-input path: each NOT closed, no fd kept");
     CHECK(lid_repeated_with("/dev/null") == 0,
           "100 reads without EVIOCGSW: each NOT closed, no fd kept");
+    CHECK(switch_read_fails_with(missing) == 0,
+          "machine_switch_read on a missing device: -1 and no bits, never a word of zeros as a reading");
 
     unlink(regular);
+}
+
+/* --- the coolant conversion --------------------------------------------- */
+
+/* The 10 kOhm NTC (B 3380) on its 10 kOhm divider reads mid-scale at 25 C:
+ * 1331.2 / 2 counts on the 10-bit ADC at its 1.3 gain. The sampler's means
+ * are fractional counts, and convert as whole ones do. */
+static void coolant_conversion(void)
+{
+    printf("the coolant conversion:\n");
+    CHECK(fabs(coolant_degc_counts(665.6) - 25.0) < 1e-9 && coolant_degc(694) == coolant_degc_counts(694.0) &&
+          coolant_degc_counts(694.5) < coolant_degc(694) && coolant_degc_counts(694.5) > coolant_degc(695),
+          "mid-scale (665.6 counts) is 25 C; a whole count converts as the fractional one, between its neighbors");
 }
 
 /* --- the switch word's decode ------------------------------------------- */
@@ -525,6 +571,7 @@ int main(void)
 
     lid_gate();
     switch_decode();
+    coolant_conversion();
     idle_fails_closed();
     sys_block();
     grbl_block();

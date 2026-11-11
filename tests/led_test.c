@@ -15,7 +15,8 @@
  *   C. breathing white, as a controller writes it while a job waits for
  *      the press: the press is asked for, and that is not the red
  *   D. solid white, as a controller writes it while the machine moves,
- *      its targets read back as the kernel settles them: neither
+ *      its targets read back as the kernel settles them, and as led_set
+ *      writes it: neither
  *   E. the red flash, as led_set writes it: the red, and no press asked
  *   F. another pattern's green and blue left lit under a pulsing red: not
  *      the red
@@ -91,6 +92,9 @@ int main(void)
     printf("D. solid white\n");
     lamp(254, 254, 254, 0, 0, 0);       /* a settled 255, as the trigger reads it back */
     CHECK(led_asks_press() == 0 && led_red_up() == 0, "no press asked, no red");
+    led_set(LED_SOLID_WHITE);           /* as the probe and a setup step write it */
+    CHECK(led_asks_press() == 0 && led_red_up() == 0 && led_dark() == 0,
+          "led_set's solid white: lit, no pulse, so no press asked and no red");
 
     printf("E. the red flash\n");
     led_set(LED_FLASH_RED);

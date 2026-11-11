@@ -33,9 +33,9 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-Werror -DFORGEEXT_SRC=forgeext-src/src
       - name: Build
         run: cmake --build build -j"$(nproc)"
-      - name: "The served pages' scripts parse (node --check on every bundled script), and index.html carries the extension card with loadExt defined before its call"
-        run: python3 -B tools/check_ui_js.py build/ui
-      - name: "wizard_walk (the first-run page as bundled, walked in headless Chrome against the dev server's mock: the documents, the press, the account, preferences, machine, cloud, the intake fans check with its prompt options shown and answered as text, the choice onto the panel, a diagnostic start the cooling engine refuses sent once more a second later, and not after a later press or the operator's Abort, which clears the press's starting text, a start refused for another reason shown at once and not sent again, the reset dialog open on a button that is not held and on a job that arms while it is open)"
+      - name: "The served pages' scripts parse (node --check on every bundled script), index.html carries the extension card with loadExt defined before its call, and embed.cmake refuses a page without the dev-image mark"
+        run: python3 -B tools/check_ui_js.py --embed build/ui
+      - name: "wizard_walk (the first-run page as bundled, walked in headless Chrome against the dev server's mock: the documents, the press, the account, preferences, machine, cloud, the intake fans check with its prompt options shown and answered as text, the choice onto the panel, a plain-text login answer read as sign-in failed, a diagnostic start the cooling engine refuses sent once more a second later, and not after a later press or the operator's Abort, which clears the press's starting text, a start refused for another reason shown at once and not sent again, the reset dialog open on a button that is not held and on a job that arms while it is open, no dialog under an armed job, the fuse view's plain-text refusal, an unsigned install through the hold dialog, the attention and notices banners, the flow watch's settings and rows, and a taken reset that reopens the page once the machine is back)"
         run: python3 -B tests/wizard_walk.py build/ui
       - name: "status_test (the lid and idle reads fail closed; the sys, grbl and lens blocks of /status)"
         run: ./build/status_test
@@ -85,15 +85,15 @@ jobs:
         run: sh tests/host_start.sh build
       - name: "The image's ulfius for host_routes (the recipe's revision and patch: a request carries the whole peer address)"
         run: sh tests/ulfius_image.sh forgefirm-layer/meta-forgefirm/recipes-extended/ulfius build/ulfius-image
-      - name: "host_routes (the controller up on a host: the report channel and its secret, the event streams' cap, the motion routes to the port, the extension and setup routes, the write routes without the token, and the routes that take the button held: each one's 403 with the button up, its 409 under an armed job before the button is asked for, and the reset taken with the button held)"
+      - name: "host_routes (the controller up on a host: the report channel and its secret, the quiet hold's pump, the event streams' cap, the motion routes to the port, the extension and setup routes, the write routes without the token, the cooling engine's Acknowledge, notices and flow watch, a login with no session, and the routes that take the button held: each one's 403 with the button up, its 409 under an armed or running job or a GRBL controller arming before the button is asked for, the reset's refusals and failures with the button held, the reset taken, the reboot route; a dev image's seed, card gate and dev bar)"
         run: sh tests/host_routes.sh build build/ulfius-image/lib
       - name: "host_ext (the extension host's routes on a host, against a compiled stand-in that is a live host: the upload sink, the install and a key without the button, the package routes and their 403s, a package's check run with the lease free and the setup record untouched, one session driving it and another following until it takes over)"
         run: sh tests/host_ext.sh build build/ulfius-image/lib
-      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off; the first-run page the daemon serves, walked in headless Chrome: the documents, the press, the account, the forms, the counted intake fans passed by, the choice onto the panel, a save, the login)"
+      - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off, the press step's teal put back after a red flash; the first-run page the daemon serves, walked in headless Chrome: the documents, the press, the account, the forms, the counted intake fans passed by, the choice onto the panel, a save, the login)"
         run: sh tests/host_setup.sh build build/ulfius-image/lib
       - name: "host_lease (the machine lease on a host: a waiting switches check holds it, six requests are refused in its name, the abort frees it, and the event stream says both)"
         run: sh tests/host_lease.sh build build/ulfius-image/lib
-      - name: "host_guard (the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export, the log tree and its tail, and what the export carries and takes out)"
+      - name: "host_guard (the start's machine check on a record made on another machine, the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export, the log tree and its tail, and what the export carries and takes out)"
         run: sh tests/host_guard.sh build build/ulfius-image/lib
       - name: "host_lan (writes from a LAN peer go to HTTPS, and the camera key reads from the LAN with the reads closed: a network namespace, one veth, the daemon as the CI user)"
         run: sudo sh tests/host_lan.sh build build/ulfius-image/lib

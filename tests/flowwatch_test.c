@@ -14,9 +14,11 @@
  *      means; the fall detector's means
  *   B. a start: a rest with the heater off, then the hold; the idle
  *      reference; an idle summary every 10 minutes
- *   C. a pump that quits at idle: the fall detector names it
+ *   C. a pump that quits at idle: the fall detector names it; its 15 % line
+ *      from both sides
  *   D. a job: the floor and the fall detector name a stop under it, and a
- *      summary at its end; a flowing job crosses neither
+ *      summary at its end; a flowing job crosses neither, and the fans back
+ *      at idle after it are no fall (the blind after a fan change)
  *   E. the engine takes the heater back: off at once, a full rest after
  *   F. cool_flow_watch 0 (the default): nothing heated; on again after a rest
  *   G. no readings: the heater off within 2 s; a hold pinned at its most
@@ -236,6 +238,20 @@ static void test_idle_stop(void)
         run(0.5);
     CHECK(log_has("flow: fall:") && log_has("at idle"), "the fall detector names it");
     CHECK(P.t - t0 < 30.0, "within 30 s");
+
+    /* The line from both sides: a flowing loop whose hold costs 12 % less
+     * (a loop that sheds less heat) is no fall; 18 % less is. */
+    plant_reset(1);
+    fw_begin(&W, P.t, 1e9);
+    run(200.0);
+    P.g_scale = 1.0 / 0.88;
+    run(120.0);
+    CHECK(!log_has("flow: fall:"), "the hold's duty 12 % down: under the 15 % line, no fall");
+    P.g_scale = 1.0;
+    run(120.0);
+    P.g_scale = 1.0 / 0.82;
+    run(120.0);
+    CHECK(log_has("flow: fall:"), "18 % down: past the line, named");
 }
 
 static void test_job(void)
@@ -262,6 +278,9 @@ static void test_job(void)
           "a flowing job crosses neither, and says so");
     logbuf[0] = '\0';
     run(200.0);
+    /* Back at the idle fans the hold costs about a fifth less: a fall past
+     * the line, which the blind after a fan change keeps from being named. */
+    CHECK(!log_has("flow: fall:"), "the fans back at idle: the duty's drop is no fall (the blind after a fan change)");
     P.session = 1;
     P.fans = FW_FANS_RUN;
     P.run_fans = 1;

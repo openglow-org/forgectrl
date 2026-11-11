@@ -76,6 +76,8 @@ int main(void)
     const gate_setting_t *tres = gate_setting_find("cool_temp_resume");
     CHECK(tmax && tres, "every key resolves");
     CHECK(!gate_setting_find("cool_cooldown_s"), "a non-gate key does not resolve");
+    CHECK(!gate_setting_find("cool_flow_check_s") && !gate_setting_find("cool_flow_rise") &&
+          !gate_setting_find("cool_recheck_s"), "the retired flow check's keys are gone from the table");
     CHECK(!gate_setting_find(NULL), "NULL does not resolve");
     CHECK(tmax->gate && !strcmp(tmax->gate, "coolant_max") && tmax->off_end > 0,
           "the coolant ceiling is the coolant_max gate, off at its top");

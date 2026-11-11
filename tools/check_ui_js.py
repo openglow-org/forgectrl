@@ -14,9 +14,16 @@ page and fails on any error. It also reads what a page must carry
 defines loadExt before the call panel.js runs while the page parses, so
 a later ext.js is a broken tab.
 
-Usage: check_ui_js.py [BUNDLE_DIR]   (default build/ui)
-The node binary is NODE from the environment, else `node` on the PATH.
-No node, no pages, or no scripts is a failure, never a pass.
+With --embed it also runs src/ui/embed.cmake, as the build runs it, on
+the login page with the dev-image mark taken out, and fails unless the
+script refuses it, saying the page lacks the mark: main.c puts a dev
+image's bar in place of the mark, so a page bundled without it would
+hide a dev image.
+
+Usage: check_ui_js.py [--embed] [BUNDLE_DIR]   (default build/ui)
+The node binary is NODE from the environment, else `node` on the PATH;
+cmake (for --embed) is CMAKE, else `cmake` on the PATH. No node, no
+pages, no scripts, or no cmake with --embed is a failure, never a pass.
 """
 import glob
 import os
@@ -27,6 +34,10 @@ import sys
 import tempfile
 
 SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S | re.I)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEV_MARK = "<!--FFDEV-->"
+# The login page's sources, as embed.cmake inlines them
+LOGIN_SOURCES = ("login.html", "login.js", "theme.css", "wizard.css", os.path.join("vendor", "bootstrap.min.css"))
 
 # page: (the strings it carries, the (first, then) pairs whose first
 # occurrences come in that order)
@@ -47,8 +58,39 @@ def carry_failures(name, html):
     return out
 
 
+def embed_failure(tmp):
+    """Why embed.cmake did not refuse the login page without the dev-image
+    mark, or None when it refused it for that."""
+    cmake = os.environ.get("CMAKE") or shutil.which("cmake")
+    if not cmake:
+        return "--embed: no cmake: set CMAKE or put cmake on the PATH"
+    src = os.path.join(ROOT, "src", "ui")
+    ui = os.path.join(tmp, "unmarked")
+    for f in LOGIN_SOURCES:
+        os.makedirs(os.path.dirname(os.path.join(ui, f)), exist_ok=True)
+        shutil.copyfile(os.path.join(src, f), os.path.join(ui, f))
+    page = os.path.join(ui, "login.html")
+    with open(page, encoding="utf-8") as f:
+        html = f.read()
+    if DEV_MARK not in html:
+        return "src/ui/login.html carries no %s to take out" % DEV_MARK
+    with open(page, "w", encoding="utf-8") as f:
+        f.write(html.replace(DEV_MARK, ""))
+    out = os.path.join(tmp, "unmarked-login.html")
+    r = subprocess.run([cmake, "-DUI_DIR=" + ui, "-DPAGE=login", "-DOUT_HTML=" + out, "-DOUT_C=" + out + ".c",
+                        "-P", os.path.join(src, "embed.cmake")], capture_output=True, text=True)
+    if r.returncode == 0 or os.path.exists(out):
+        return "embed.cmake bundled a login page that lacks the dev-image mark %s" % DEV_MARK
+    if "lacks the dev-image mark" not in r.stdout + r.stderr:
+        return "embed.cmake refused the unmarked login page, but not for the mark: %s" % (r.stderr or r.stdout).strip()
+    return None
+
+
 def main():
-    bundle = sys.argv[1] if len(sys.argv) > 1 else os.path.join("build", "ui")
+    args = sys.argv[1:]
+    embed = "--embed" in args
+    args = [a for a in args if a != "--embed"]
+    bundle = args[0] if args else os.path.join("build", "ui")
     node = os.environ.get("NODE") or shutil.which("node")
     if not node:
         print("check_ui_js: no node: set NODE or put node on the PATH")
@@ -81,6 +123,13 @@ def main():
             for why in carry_failures(os.path.basename(page), html):
                 lacking += 1
                 print("FAIL %s" % why)
+        if embed:
+            why = embed_failure(tmp)
+            if why:
+                lacking += 1
+                print("FAIL %s" % why)
+            else:
+                print("embed.cmake refuses a page that lacks the dev-image mark")
     for name in sorted(set(MUST_CARRY) - {os.path.basename(p) for p in pages}):
         lacking += 1
         print("FAIL %s is not in the bundle" % name)

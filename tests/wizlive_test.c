@@ -10,7 +10,8 @@
  * the lens is stepped over sysfs only with no controller and the engine
  * idle, and a session that cannot put the lens back on its hall edge
  * leaves no marker, so the next controller holds Z unreferenced; every
- * exit hands the posture and the controller back.
+ * exit hands the posture and the controller back. And the burn's press
+ * prompt (gen_sample): it follows the button until the tube first lights.
  */
 #define _GNU_SOURCE
 #include "../src/wizlive.c"
@@ -100,9 +101,12 @@ int wiz_ask_continue(const char *pid, const char *text) { (void)pid; (void)text;
 int wiz_ask_confirm(const char *pid, const char *text) { (void)pid; (void)text; return -1; }
 void wiz_wait_open(const char *pid, const char *text, int timeout_s)
 {
-    (void)pid; (void)text; (void)timeout_s;
+    (void)text; (void)timeout_s;
+    char what[48];
+    snprintf(what, sizeof(what), "open:%s", pid);
+    note(what);
 }
-void wiz_wait_close(void) { }
+void wiz_wait_close(void) { note("close"); }
 void wiz_finish_err(const char *fmt, ...) { (void)fmt; }
 void wiz_finish_ok(int version, json_t *result, json_t *applied)
 {
@@ -140,12 +144,25 @@ int jobrun_sync(const jobrun_cfg_t *cfg, jobstream_run_t *run, char *err, size_t
         err[0] = '\0';
     return -1;
 }
-int led_asks_press(void) { return 0; }
+static int led_breathes;                /* led_asks_press's answer */
+int led_asks_press(void) { return led_breathes; }
 int grbl_settings_text(char *buf, size_t len) { (void)buf; (void)len; return -1; }
 int machine_lid_closed(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
 
 /* --- the cases -------------------------------------------------------- */
+
+/* One sample of a live burn: its time, the tube's current, and the button as
+ * the LED class reads it. */
+static void sample_at(gen_t *g, double t, long hv, int breathes)
+{
+    jobstream_sample_t s;
+    memset(&s, 0, sizeof(s));
+    s.t = t;
+    s.hv = hv;
+    led_breathes = breathes;
+    gen_sample(g, &s);
+}
 
 /* One exit: the session as `L` left it, the stubs' answers, and what
  * live_end must do, in order. */
@@ -194,6 +211,24 @@ int main(void)
               "settle stop rehome local0 start");
     /* A session that never stopped the controller touches nothing. */
     exit_does("the stop failed at the start", (live_t){ .local = 0 }, 0, 0, 0, "settle");
+
+    /* The press prompt follows the button before the first discharge: open
+     * while it breathes white, closed at the press (it stops) or when the
+     * tube lights, and never opened once the tube has lit. */
+    gen_t g;
+    memset(&g, 0, sizeof(g));
+    calls[0] = '\0';
+    sample_at(&g, 1.0, 0, 0);                       /* the program goes out, the button dark */
+    sample_at(&g, 2.0, 0, 1);                       /* the arm: it breathes */
+    sample_at(&g, 3.0, 0, 1);
+    sample_at(&g, 4.0, 0, 0);                       /* the press: it stops */
+    sample_at(&g, 5.0, 0, 1);                       /* asked again */
+    sample_at(&g, 6.0, JOBSTREAM_HV_ON + 1, 1);     /* the tube lights */
+    sample_at(&g, 7.0, 0, 1);
+    CHECK(!strcmp(calls, "open:press close open:press close"),
+          "the press prompt: open while the button breathes, closed at the press and at the light, none after");
+    if (strcmp(calls, "open:press close open:press close"))
+        printf("     got: %s\n", calls);
 
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
