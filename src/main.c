@@ -751,7 +751,7 @@ static int valid_dose_curve(const char *v)
 static int valid_pulse_ticks(const char *v){ return valid_range(v, 1, 1024); }
 static int valid_settle_s(const char *v)   { return valid_range(v, 0, 30); }
 
-/* The lid lamp's idle level (PWM 0-255; unset = 236). Applied live. */
+/* The lid lamp's idle level (PWM 0-255; unset = 240). Applied live. */
 static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
 
 /* Cloud-mode print pause: pulse ticks retraced (laser off) on the button

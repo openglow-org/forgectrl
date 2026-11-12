@@ -495,7 +495,7 @@ expect 100 "$(lamp)" "and pic/lid_led reads 100"
 expect 400 "$(post /settings "$TOKEN" -d lid_lamp_idle=bright)" "lid_lamp_idle=bright is 400"
 expect 100 "$(lamp)" "and pic/lid_led is as it was"
 expect 200 "$(post '/settings?lid_lamp_idle=' "$TOKEN")" "an empty lid_lamp_idle is 200"
-expect 236 "$(lamp)" "and pic/lid_led reads the default, 236"
+expect 240 "$(lamp)" "and pic/lid_led reads the default, 240"
 
 echo "== an XY microstep change restarts the controller"
 # An unset key runs at x32, the controller's own default. A write that

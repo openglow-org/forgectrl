@@ -670,8 +670,11 @@ static int sysfs_write_int(const char *path, int val)
  * leaves it dark (the module's remove path turns it off) and the cloud
  * client sets its own level, so the daemon asserts the configured idle
  * level itself: at start, on a settings change, and whenever the
- * supervisor spawns a controller. Setting lid_lamp_idle, 0-255. */
-#define LAMP_IDLE_DEFAULT 236
+ * supervisor spawns a controller. Setting lid_lamp_idle, 0-255. The
+ * default is the level the cloud client lights it at (the factory LLvl
+ * 132 through the LED trigger's gamma table), so the two writers leave
+ * the same light whichever writes last. */
+#define LAMP_IDLE_DEFAULT 240
 
 int cam_lamp_idle_level(void)
 {
