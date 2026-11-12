@@ -107,6 +107,8 @@ jobs:
         run: ./build/super_test
       - name: Capture frame-health ladder
         run: ./build/camhealth_test
+      - name: A camera lamp write reports its failure
+        run: ./build/camlamp_test
       - name: Gate settings table
         run: ./build/cool_gate_test
       - name: "cool_engine_test (the cooling engine: the air-assist offset, the tiers, extension holds, the verified fan writes, the intakes fitted, the gates past the loop and off, the phases' duties, the TEC)"

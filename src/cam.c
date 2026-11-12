@@ -36,6 +36,7 @@
 #define _GNU_SOURCE
 #include "cam.h"
 #include "camhealth.h"
+#include "camlamp.h"
 #include "debayer.h"
 #include "fflog.h"
 #include "gpu_debayer.h"
@@ -656,14 +657,15 @@ static int sysfs_read_int(const char *path, int *val)
     return ok ? 0 : -1;
 }
 
-static int sysfs_write_int(const char *path, int val)
+/* A camera lamp to @level (camlamp.h). A write that failed is logged: the
+ * kernel fails a head register write that never held. A lamp with no
+ * attribute is left alone. */
+static void lamp_set(int cam, int level)
 {
-    FILE *f = fopen(path, "w");
-    if (!f)
-        return -1;
-    int ok = fprintf(f, "%d", val) > 0;
-    fclose(f);
-    return ok ? 0 : -1;
+    int e = camlamp_write(lamp_path(cam), level);
+    if (e && e != ENOENT)
+        fflog(LOG_WARNING, "cam: %s lamp write %d failed: %s",
+              camdefs[cam].name, level, strerror(e));
 }
 
 /* The lid lamp at idle. The PIC lights it at power-on; a warm reboot
@@ -698,7 +700,7 @@ void cam_lamp_apply_idle(void)
     if (lid_capturing)
         eng.lamp_prev = level;      /* restored at the capture's teardown */
     else
-        sysfs_write_int(lamp_path(CAM_LID), level);
+        lamp_set(CAM_LID, level);
     pthread_mutex_unlock(&eng.ctl);
     fflog(LOG_INFO, "cam: lid lamp idle level %d%s", level,
           lid_capturing ? " (applies after the capture)" : "");
@@ -978,7 +980,7 @@ static void release_capture(void)
         eng.fd = -1;
     }
     if (eng.lamp_prev >= 0) {
-        sysfs_write_int(lamp_path(eng.cam), eng.lamp_prev);
+        lamp_set(eng.cam, eng.lamp_prev);
         eng.lamp_prev = -1;
     }
 }
@@ -1068,7 +1070,7 @@ static int start_capture(cam_id_t cam, int head_open, char *err, size_t errlen)
      * teardown (raw register write - instant, no fade). */
     if (sysfs_read_int(lamp_path(cam), &eng.lamp_prev))
         eng.lamp_prev = 0;
-    sysfs_write_int(lamp_path(cam), eng.lamp_level);
+    lamp_set(cam, eng.lamp_level);
 
     /* O_CLOEXEC: a controller spawned while the capture is up must not
      * inherit this descriptor - the buffers stay allocated for as long as
@@ -2137,7 +2139,7 @@ static void *worker(void *arg)
         /* A stream client's lamp level, or the engine's again when none
          * asks, outside a snapshot's own relight. */
         if (lamp_restore < 0 && want_lamp != lamp_applied) {
-            sysfs_write_int(lamp_path(orig_cam), want_lamp);
+            lamp_set(orig_cam, want_lamp);
             lamp_applied = want_lamp;
         }
 
@@ -2146,11 +2148,11 @@ static void *worker(void *arg)
          * level is restored after delivery (or if the requester gives
          * up). */
         if (snap && snap_lamp >= 0 && lamp_restore < 0) {
-            sysfs_write_int(lamp_path(orig_cam), snap_lamp);
+            lamp_set(orig_cam, snap_lamp);
             lamp_restore = lamp_applied;
             lamp_skip = LAMP_SKIP_FRAMES;
         } else if (!snap && lamp_restore >= 0) {
-            sysfs_write_int(lamp_path(orig_cam), lamp_restore);
+            lamp_set(orig_cam, lamp_restore);
             lamp_restore = -1;
         }
 
@@ -2163,7 +2165,7 @@ static void *worker(void *arg)
             if (start_capture(borrow_cam, snap_local, berr, sizeof(berr)) == 0) {
                 int skip = 0;
                 if (snap_lamp >= 0) {
-                    sysfs_write_int(lamp_path(borrow_cam), snap_lamp);
+                    lamp_set(borrow_cam, snap_lamp);
                     skip = LAMP_SKIP_FRAMES;
                 }
                 if (grab_one_snap(raw_cached, rgb_half, &rgb_full,
@@ -2308,8 +2310,7 @@ static void *worker(void *arg)
                     strm.snap.valid = 0;
                     snap = 0;
                     if (lamp_restore >= 0) {
-                        sysfs_write_int(lamp_path(orig_cam),
-                                        lamp_restore);
+                        lamp_set(orig_cam, lamp_restore);
                         lamp_restore = -1;
                     }
                 } else if (lamp_skip > 0) {

@@ -71,6 +71,7 @@ add_executable(forgectrl
   src/cam.c
   src/peer.c
   src/camhealth.c
+  src/camlamp.c
   src/cool.c
   src/coolfmt.c
   src/flowcalc.c
@@ -211,6 +212,12 @@ target_compile_options(debayer_test PRIVATE -Wall -Wextra)
 # put the ladder back at the bottom. CI runs it after the build.
 add_executable(camhealth_test tests/camhealth_test.c src/camhealth.c)
 target_compile_options(camhealth_test PRIVATE -Wall -Wextra)
+
+# Host unit test for a camera lamp write and its result: a write refused at
+# the flush comes back as its error, a missing attribute as ENOENT. CI runs
+# it after the build.
+add_executable(camlamp_test tests/camlamp_test.c src/camlamp.c)
+target_compile_options(camlamp_test PRIVATE -Wall -Wextra)
 
 # Host unit test for the gate-settings table the cooling gates, their
 # validators, the settings reply and the panel all read: the legal
