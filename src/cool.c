@@ -111,6 +111,12 @@
  *   laser latch right here: the supervisor safes controller *deaths*,
  *   this covers controller *hangs*. And while cnc/state still reads
  *   running, exhaust/intake never drop below cooldown duty.
+ * - The engine's laser latch locks (the fail tiers, a silence, emission
+ *   with no armed window) go through its own holder in the kernel,
+ *   cnc/laser_latch_cooling, which no controller unlock undoes. The
+ *   engine writes the release on every tick on which no reason stands,
+ *   before that tick's verdict; the release leaves the latch locked until
+ *   a controller unlocks it again (cool_latch_lock).
  * - Diagnostics (diag.c) own the hardware while they run: the engine
  *   suspends its writes and publishes fire-blocked until they finish.
  * - The coolant flow watch (flowrun.c, flowwatch.h; opt-in, log only)
@@ -440,6 +446,52 @@ static void safing_write(const char *attr, const char *val)
     if (wr_attr(attr, val) != 0)
         fflog(LOG_CRIT, "cool: safing write %s=%s failed: %s", attr, val,
               strerror(errno));
+}
+
+/* The engine's own hold on the laser latch: the kernel's cooling holder,
+ * apart from the controller's cnc/laser_latch. Its lock takes the
+ * controller's hold with it, no controller unlock is taken while it
+ * stands, and only the engine releases it, which never unlocks the latch
+ * by itself: a controller's next unlock does. The engine holds it while
+ * a reason it locked for stands (the release's call at the end of
+ * engine_tick names them), and writes the release on every tick on which
+ * none stands: the kernel also sets the holder at every final close of
+ * the pulse device, which can come at any time (a controller that
+ * outlived a daemon restart closing the device later), and a release
+ * changes nothing where the engine does not hold. */
+#define COOL_LATCH_ATTR "cnc/laser_latch_cooling"
+static int cool_latch_release_named = 0;
+
+/* The engine's lock, then the controller's hold as well. With the cooling
+ * holder in the kernel the second write changes nothing (the cooling lock
+ * has locked the controller's hold already); on a module without that
+ * holder it is the lock that lands. It comes second, so a controller
+ * unlock that falls between the two is refused, never taken. */
+static void cool_latch_lock(void)
+{
+    safing_write(COOL_LATCH_ATTR, "1");
+    safing_write("cnc/laser_latch", "1");
+}
+
+/* The release, on every tick on which no reason stands: called before the
+ * tick's verdict is published, so the verdict that permits fire again
+ * never has the engine's hold behind it. A release that does not take
+ * leaves the hold where it was (every controller unlock is refused while
+ * it stands), is written again the next tick, and is named once until
+ * one takes. */
+static void cool_latch_release_tick(int wanted)
+{
+    if (wanted)
+        return;
+    if (wr_attr(COOL_LATCH_ATTR, "0") == 0) {
+        cool_latch_release_named = 0;
+        return;
+    }
+    if (!cool_latch_release_named) {
+        cool_latch_release_named = 1;
+        fflog(LOG_ERR, "cool: the cooling holder of the laser latch could not be released: %s",
+              strerror(errno));
+    }
 }
 
 static int wr_attr_long(const char *attr, long val)
@@ -1703,9 +1755,7 @@ static void flood_apply(int on, double now)
     }
 }
 
-/* One engine tick at 1 Hz. Hardware writes happen only on transitions
- * so the engine coexists with a not-yet-migrated in-controller writer
- * during bring-up. */
+/* One engine tick at 1 Hz. */
 static void engine_tick(void)
 {
     double now = wall_s();
@@ -1765,7 +1815,7 @@ static void engine_tick(void)
             /* The writes first, the words after: a log line waits for
              * nothing, but nothing waits for a log line. */
             safing_write("cnc/stop", "1");
-            safing_write("cnc/laser_latch", "1");
+            cool_latch_lock();
             if (!silent_safed) {
                 warn("controller silent while armed/running - "
                      "stopping motion, locking laser");
@@ -1854,7 +1904,7 @@ static void engine_tick(void)
     long em = rd_long("cnc/laser_on_sampled");
     if (em > 0 && (last_armed_at < 0 || now - last_armed_at > 3.0)) {
         safing_write("cnc/stop", "1");
-        safing_write("cnc/laser_latch", "1");
+        cool_latch_lock();
         if (!emission_warned) {
             warn("LASER EMISSION SENSED with no armed window - "
                  "stopping motion, locking laser");
@@ -1922,7 +1972,7 @@ static void engine_tick(void)
                      "LID IR FIRE SIGNAL (quartiles %ld %ld) - motion "
                      "stopped, laser locked, smoke airflow held", q[0], q[1]);
             safing_write("cnc/stop", "1");
-            safing_write("cnc/laser_latch", "1");
+            cool_latch_lock();
             fans_run();     /* full smoke-clear airflow */
             warn(msg);
             /* The kernel writes come first and stand on their own; the
@@ -2033,7 +2083,7 @@ static void engine_tick(void)
                              "HEAD CRASH SIGNAL (axes %s) - motion stopped, "
                              "laser locked", crash_axes_name(crash_w.axes));
                     safing_write("cnc/stop", "1");
-                    safing_write("cnc/laser_latch", "1");
+                    cool_latch_lock();
                     warn(msg);
                     if (cool_fail_tier_stop)
                         cool_fail_tier_stop("head crash signal");
@@ -2578,6 +2628,11 @@ static void engine_tick(void)
         flowrun_engine(&fc);
     }
 
+    /* The engine's hold on the latch stands while a reason it locked for
+     * stands: the fail tiers' alarms, a silence it safed (until a report
+     * is fresh again), and emission sensed with no armed window (until
+     * the witness reads none). Released here, before the verdict. */
+    cool_latch_release_tick(fire_alarm || crash_w.alarm || silent_safed || emission_warned);
     verdict_publish(fire_ok, verdict, hold, have_down, down, have_up, up);
 }
 

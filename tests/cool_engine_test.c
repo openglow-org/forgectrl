@@ -115,6 +115,15 @@ static const char *drop_attr;       /* a path suffix, or NULL */
 static int drop_left;               /* writes to drop; -1 = every one */
 static int refuse;                  /* refuse instead of dropping */
 static int drop_fd = -1;
+/* The engine's latch hold as the kernel had it when the verdict was
+   written: the order of the release and the verdict shows in it. */
+static int verdict_fd = -1;
+static long latch_at_verdict = -1;
+/* The engine's hold as the kernel had it when the controller's latch was
+   written: the order of the two locks shows in it. */
+static int ctl_latch_fd = -1;
+static long cooling_at_ctl_lock = -2;
+static long get_long(const char *attr);
 
 static int fake_open(const char *path, int flags, ...)
 {
@@ -129,11 +138,26 @@ static int fake_open(const char *path, int flags, ...)
                     (flags & O_WRONLY) && !drop ? (flags | O_TRUNC) : flags, 0644);
     if (fd >= 0 && drop)
         drop_fd = fd;
+    if (fd >= 0 && (flags & O_WRONLY) && strstr(path, ".cooling.state.tmp"))
+        verdict_fd = fd;
+    {
+        size_t lp = strlen(path), la = strlen("cnc/laser_latch");
+        if (fd >= 0 && (flags & O_WRONLY) && lp >= la && !strcmp(path + lp - la, "cnc/laser_latch"))
+            ctl_latch_fd = fd;
+    }
     return fd;
 }
 
 static ssize_t fake_write(int fd, const void *buf, size_t n)
 {
+    if (fd == verdict_fd) {
+        verdict_fd = -1;
+        latch_at_verdict = get_long("cnc/laser_latch_cooling");
+    }
+    if (fd == ctl_latch_fd) {
+        ctl_latch_fd = -1;
+        cooling_at_ctl_lock = get_long("cnc/laser_latch_cooling");
+    }
     if (fd == drop_fd && drop_left != 0) {
         if (drop_left > 0)
             drop_left--;
@@ -200,9 +224,12 @@ static void ext_hold_file(const char *id, int required, int raised, const char *
 static char last_log[256];
 static char logbuf[16384];          /* every line since an intake case began */
 
+static int log_errs;                /* lines at LOG_ERR, counted by level */
+
 void fflog(int prio, const char *fmt, ...)
 {
-    (void)prio;
+    if (prio == LOG_ERR)
+        log_errs++;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
@@ -275,7 +302,7 @@ static void fake_stop(const char *why)
     stops++;
     snprintf(stop_why, sizeof(stop_why), "%s", why);
     stop_seen_stop = get_long("cnc/stop");
-    stop_seen_latch = get_long("cnc/laser_latch");
+    stop_seen_latch = get_long("cnc/laser_latch_cooling");
 }
 static int machine_idle = 1;        /* the kernel idle, as status.c reads it */
 int machine_is_idle(void) { return machine_idle; }
@@ -385,6 +412,8 @@ static void make_tree(void)
     mkdir(GF_SYSFS "head", 0755);
     mkdir(GF_SYSFS "cnc", 0755);
     put("cnc/state", "idle\n");
+    put("cnc/laser_latch_cooling", "1\n");  /* every holder holds after a final close */
+    put("cnc/laser_latch", "1\n");
     put_long("cnc/faults", 0);
     put_long("cnc/laser_on_sampled", 0);
     put_long("cnc/laser_pgood_sampled", 0);
@@ -2001,11 +2030,14 @@ static void recorder_warnings(loop_t *L)
     int ev = events;
     put_long("cnc/laser_on_sampled", 5);
     run_idle_tick(L);
+    run_idle_tick(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 1,
+          "emission with no armed window: the engine's latch hold stands while it is sensed");
     put_long("cnc/laser_on_sampled", 0);
     run_idle_tick(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "and is released once the witness reads none");
     CHECK(events == ev + 1, "an emission with no armed window");
     put("cnc/stop", "0\n");
-    put("cnc/laser_latch", "0\n");
     long pgood = get_long("cnc/laser_pgood_sampled");
     put_long("cnc/laser_pgood_sampled", 255);
     settle_and_open(L);
@@ -2086,6 +2118,11 @@ static void shutdown_order(loop_t *L)
 int main(void)
 {
     make_tree();
+    /* The engine's first tick, on the tree a final close of the pulse
+     * device leaves (every holder of the laser latch holding). */
+    printf("R0. a fresh engine releases the latch hold the final close left\n");
+    tick("idle", 0);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the engine's own hold released at its first tick");
     /* The fan writes and the intakes fitted run on a loop at rest; the
      * tree is laid again after them. */
     fan_writes();
@@ -2263,7 +2300,7 @@ int main(void)
     printf("M. the hang dead-man: once while armed, every tick while the kernel runs\n");
     open_session(&L);
     put("cnc/stop", "0\n");
-    put("cnc/laser_latch", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
     logbuf[0] = '\0';
     /* The tolerance side first: a report 4.5 s old is still fresh.
      * Nothing is safed, and the armed window stays acknowledged. The
@@ -2274,34 +2311,44 @@ int main(void)
     fake_now += 4.5;
     loop_tick(&L);
     engine_tick();
-    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch") == 0 && pub_armed_ack &&
+    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 0 && pub_armed_ack &&
           !log_has("controller silent"),
           "4.5 s without a report: nothing safed, the window still acknowledged");
     fake_now += 1.5;                    /* 6.0 s: past REPORT_TIMEOUT_S with no report */
     int ev0 = events;
     loop_tick(&L);
     engine_tick();
-    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
-          "silence while armed: motion stopped and the latch locked");
+    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch_cooling") == 1,
+          "silence while armed: motion stopped and the engine's own latch hold locked");
     CHECK(events == ev0 + 1, "and the flight recorder is asked for the minutes around it, once");
     put("cnc/stop", "0\n");
-    put("cnc/laser_latch", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
     fake_now += 1.0;
     loop_tick(&L);
     engine_tick();
-    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch") == 0,
+    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 0,
           "the armed case writes once per silence");
+    put("cnc/laser_latch_cooling", "1\n");  /* the kernel's: the engine holds */
+    fake_now += 1.0;
+    loop_tick(&L);
+    engine_tick();
+    CHECK(get_long("cnc/laser_latch_cooling") == 1, "the hold is not released while the silence lasts");
     put("cnc/state", "running\n");
     for (int i = 0; i < 3; i++) {
         put("cnc/stop", "0\n");
-        put("cnc/laser_latch", "0\n");
+        put("cnc/laser_latch_cooling", "0\n");
         fake_now += 1.0;
         loop_tick(&L);
         engine_tick();
-        CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
+        CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch_cooling") == 1,
               "the kernel still running: the pair is written again this tick");
     }
     put("cnc/state", "idle\n");
+    /* A report again: the silence is over, and the hold is released that
+     * tick, before the tick's verdict. */
+    run_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0 && latch_at_verdict == 0,
+          "a fresh report: the hold released, and released before the verdict was written");
     close_session(&L);
 
     diag_heater_lease(&L);
@@ -2310,7 +2357,7 @@ int main(void)
     cool_fail_tier_stop = fake_stop;
     stops = 0;
     put("cnc/stop", "0\n");
-    put("cnc/laser_latch", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
     for (int i = 1; i <= 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
@@ -2334,15 +2381,18 @@ int main(void)
     run_tick(&L);
     run_tick(&L);
     CHECK(stops == 1 && !strcmp(pub_verdict, "FIRE"), "the tier stands, the hook is not called again");
+    CHECK(get_long("cnc/laser_latch_cooling") == 1, "and the engine's latch hold stands with it");
     for (int i = 1; i <= 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
         put_long(attr, 100);
     }
     close_session(&L);
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the tier ended with its session: the hold released");
     stops = 0;
     put("cnc/stop", "0\n");
-    put("cnc/laser_latch", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
     crash_src1 = crash_src2 = 0;
     open_session(&L);
     CHECK(crash_armed_fake && stops == 0, "the crash watch is armed with the session, no stop");
@@ -2355,10 +2405,72 @@ int main(void)
           "the kernel writes had landed when the hook was called");
     run_tick(&L);
     CHECK(stops == 1, "the tier stands, the hook is not called again");
+    CHECK(get_long("cnc/laser_latch_cooling") == 1, "and the engine's latch hold stands with it");
     CHECK(attn_latched && attn_sticky && !strcmp(attn_verdict, "CRASH"),
           "CRASH is the fail tier: it takes the acknowledgment to end it");
     crash_src2 = 0;
     close_session(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the tier ended with its session: the hold released");
+
+    /* The kernel sets the cooling holder at every final close of the pulse
+     * device, long after the engine's first tick (a controller that
+     * outlived a daemon restart closing the device later): with no reason
+     * standing, the engine releases it at its next tick, and a release the
+     * kernel did not take is written again the tick after. */
+    printf("R. a hold a later final close sets is released at the next tick with no reason\n");
+    put("cnc/laser_latch_cooling", "1\n");      /* a later final close */
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the hold a later final close left is released");
+    put("cnc/laser_latch_cooling", "1\n");
+    drop_attr = "cnc/laser_latch_cooling";
+    drop_left = -1;
+    refuse = 1;
+    int errs0 = log_errs;
+    run_idle_tick(&L);
+    run_idle_tick(&L);
+    CHECK(log_errs == errs0 + 1, "two releases the kernel did not take are named once");
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "a release that did not take is written again the next tick");
+    put("cnc/laser_latch_cooling", "1\n");
+    drop_attr = "cnc/laser_latch_cooling";
+    drop_left = -1;
+    refuse = 1;
+    run_idle_tick(&L);
+    CHECK(log_errs == errs0 + 2, "a refusal after a release that took is named again");
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "and the hold is released once the kernel takes it");
+
+    /* The engine's lock writes the controller's hold too, after its own:
+     * on a module with the cooling holder the second write changes
+     * nothing, and on one without it the latch still locks. Emission with
+     * no armed window is the lock (the armed window is long past). */
+    printf("S. the engine's lock locks the controller's hold too, after its own\n");
+    put("cnc/laser_latch_cooling", "0\n");
+    put("cnc/laser_latch", "0\n");
+    cooling_at_ctl_lock = -2;
+    put_long("cnc/laser_on_sampled", 5);
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 1 && get_long("cnc/laser_latch") == 1,
+          "both holds locked");
+    CHECK(cooling_at_ctl_lock == 1, "the controller's hold written after the engine's own");
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(&L);
+    unlink(GF_SYSFS "cnc/laser_latch_cooling");     /* a module without the cooling holder */
+    put("cnc/laser_latch", "0\n");
+    put_long("cnc/laser_on_sampled", 5);
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch") == 1,
+          "on a module without the cooling holder the latch is still locked");
+    put_long("cnc/laser_on_sampled", 0);
+    put("cnc/laser_latch_cooling", "1\n");
+    run_idle_tick(&L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the holder back: the hold released");
 
     printf("O. the pause tiers hold the job and call nothing\n");
     stops = 0;

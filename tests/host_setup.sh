@@ -203,7 +203,7 @@ held() {
 # period, two pulses a turn), the pump on, the purge drawing.
 mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head" "$SYS/pic" "$T/shots"
 echo idle > "$SYS/cnc/state"
-for a in cnc/stop cnc/laser_latch cnc/enable cnc/disable cnc/halt \
+for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt \
          head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm thermal/heater_pwm; do
     : > "$SYS/$a"
 done

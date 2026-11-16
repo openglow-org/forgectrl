@@ -128,7 +128,7 @@ ctl_up() { p=$(cat "$T/ctl.pid" 2>/dev/null); [ -n "$p" ] && alive "$p"; }
 # The machine, as host_guard.sh builds it.
 mkdir -p "$T/data" "$T/run" "$T/bin" "$T/log" "$SYS/cnc" "$SYS/thermal" "$SYS/head"
 echo idle > "$SYS/cnc/state"
-for a in cnc/stop cnc/laser_latch cnc/enable cnc/disable cnc/halt \
+for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt \
          head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm; do
     : > "$SYS/$a"
 done

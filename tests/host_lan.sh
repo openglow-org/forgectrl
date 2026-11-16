@@ -108,7 +108,7 @@ ip -n $NS addr add $DAEMON/24 dev $VB && ip -n $NS link set $VB up && ip -n $NS 
 # The scratch tree host_guard.sh uses, the daemon's user owning it.
 mkdir -p "$T/data" "$T/run" "$T/bin" "$T/log" "$SYS/cnc" "$SYS/thermal" "$SYS/head"
 echo idle > "$SYS/cnc/state"
-for a in cnc/stop cnc/laser_latch cnc/enable cnc/disable cnc/halt \
+for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt \
          head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm; do
     : > "$SYS/$a"
 done
