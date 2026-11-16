@@ -757,8 +757,13 @@ static int valid_lamp(const char *v)       { return valid_range(v, 0, 255); }
 /* Cloud-mode print pause: pulse ticks retraced (laser off) on the button
  * press, and the laser-off lead the resume runs before re-enabling
  * (unset = the factory's 2000 / 1950). The kernel reserves 32 KiB of
- * ring for the backtrack; both stay well inside it. */
-static int valid_ticks(const char *v)      { return valid_range(v, 0, 30000); }
+ * ring for the backtrack; both stay well inside it. The floor is the
+ * resume's acceleration at a 10 kHz print tick and the kernel's default
+ * ramp (424 ticks), rounded up: a smaller value cannot lead a print at that
+ * tick out of the ramp. It is a floor only. The cloud client lengthens a
+ * lead to the ramp at the tick and ramp in force, and the kernel refuses
+ * a lead shorter than that. */
+static int valid_ticks(const char *v)      { return valid_range(v, 500, 30000); }
 /* How long a cloud print may be held on the cooling verdict before it is
  * canceled: the engine's fail tiers never offer a resume. */
 static int valid_hold_s(const char *v)     { return valid_range(v, 60, 7200); }

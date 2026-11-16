@@ -456,6 +456,15 @@ refused "laser_disarm_s=99999" -d laser_disarm_s=99999
 refused "pulse_reject_threshold_bytes=2000000000" -d pulse_reject_threshold_bytes=2000000000
 refused "a key that is no setting" -d no_such_key_hostroutes=1
 for v in 256 -1 bright; do refused "lid_lamp_idle=$v" -d lid_lamp_idle=$v; done
+# The cloud pause's floor: no value under 500 ticks, for either key; 500
+# itself is taken, then cleared.
+for k in cloud_pause_backtrack_ticks cloud_resume_lead_ticks; do refused "$k=499" -d $k=499; done
+expect 200 "$(post /settings "$TOKEN" -d cloud_pause_backtrack_ticks=500)" "cloud_pause_backtrack_ticks=500 is 200"
+grep -qx 'cloud_pause_backtrack_ticks = 500' "$CONF" && ok "the settings file holds it" \
+    || bad "the settings file does not hold cloud_pause_backtrack_ticks = 500"
+expect 200 "$(post '/settings?cloud_pause_backtrack_ticks=' "$TOKEN")" "an empty cloud_pause_backtrack_ticks is 200"
+cmp -s "$T/conf.before" "$CONF" && ok "the key is gone: the file is as it was before" \
+    || bad "the cleared key left the file as: $(cat "$CONF")"
 expect 200 "$(post /settings "$TOKEN" -d laser_disarm_s=120)" "laser_disarm_s=120 is 200"
 grep -qx 'laser_disarm_s = 120' "$CONF" && ok "the settings file holds it" \
     || bad "the settings file does not hold laser_disarm_s = 120"
