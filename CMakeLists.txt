@@ -277,11 +277,15 @@ add_executable(airflow_test tests/airflow_test.c src/airflow.c)
 target_compile_options(airflow_test PRIVATE -Wall -Wextra)
 target_link_libraries(airflow_test m)
 
-# Host unit test for the crash-watch tier logic: the alert raised once
-# and released by the quiet count, the abort latched for the session,
-# the session reset, the axis names. CI runs it after the build.
-add_executable(accel_test tests/accel_test.c src/accel.c)
+# Host unit test for the crash watch: the tier logic (the alert raised
+# once and released by the quiet count, the abort latched for the
+# session, axis bits without IA as noise, the session reset, the axis
+# names), and the head accelerometer's bus handle between the engine and
+# the setup checks. Includes accel.c over a fake bus that carries a model
+# of the part. CI runs it after the build.
+add_executable(accel_test tests/accel_test.c)
 target_compile_options(accel_test PRIVATE -Wall -Wextra)
+target_link_libraries(accel_test pthread)
 
 # Host unit test for the lens hall-edge reference: the failures that
 # gate a controller spawn (no head, a sensor stuck either way) cannot be

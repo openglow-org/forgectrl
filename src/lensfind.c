@@ -170,11 +170,15 @@ int lensfind_run(lensfind_t *st, json_t *r)
             goto done;
         }
     }
-    /* The listener takes the crash watch's bus handle, or opens its
-     * own for the finding and closes it after. */
-    opened = crash_hw_listen(1) == 0;
+    /* The listener borrows the crash watch's part (accel.h): the bus
+     * handle the watch holds, or one opened for the finding and closed
+     * after. */
+    int lent = crash_hw_listen(1);
+    opened = lent == 0;
     if (!opened) {
-        snprintf(st->why, sizeof(st->why), "the head accelerometer does not answer on its bus");
+        snprintf(st->why, sizeof(st->why), "%s",
+                 lent == -2 ? "a job's crash watch holds the head accelerometer"
+                            : "the head accelerometer does not answer on its bus");
         goto done;
     }
     int c;

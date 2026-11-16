@@ -590,13 +590,12 @@ static void run_sensors(void)
     long ir_max[4] = { -1, -1, -1, -1 };
     long hv_max = 0;
     double ex_sum = 0, in_sum = 0;
-    int accel_events = 0, have_temp = 0;
-    int crash = crash_hw_open() == 0;
-    crash_watch_t cw;
-    crash_reset(&cw);
-    if (crash)
-        crash_hw_arm((int)gate_value("cool_accel_x_alert"), (int)gate_value("cool_accel_y_alert"),
-                     (int)gate_value("cool_accel_abort"));
+    int have_temp = 0;
+    /* The crash watch's part, borrowed (accel.h): not while a job's watch
+     * is armed, and a window that opens during the check takes it back. */
+    crash_check_t acc;
+    crash_check_begin(&acc, (int)gate_value("cool_accel_x_alert"), (int)gate_value("cool_accel_y_alert"),
+                      (int)gate_value("cool_accel_abort"));
     phase("sampling the sensors at rest for %d s", secs);
     for (int i = 0; i < n; i++) {
         if (aborted())
@@ -619,16 +618,7 @@ static void run_sensors(void)
             hv_max = hv;
         ex_sum += airflow_rpm(rd_long("thermal/tach_exhaust", 0), 1e9, 2);
         in_sum += airflow_rpm(rd_long("thermal/tach_intake_1", 0), 1e9, 2);
-        if (crash) {
-            /* The engine's interpreter decides what a source register
-             * means; the raw bits alone read as motion on a still head. */
-            unsigned s1 = 0, s2 = 0;
-            if (crash_hw_poll(&s1, &s2) == 0) {
-                crash_event_t e = crash_tick(&cw, s1, s2);
-                if (e == CrashEv_Alert || e == CrashEv_Alarm)
-                    accel_events++;
-            }
-        }
+        crash_check_poll(&acc);
         progress(5 + i * 80 / n);
         msleep(1000 / hz);
     }
@@ -641,7 +631,7 @@ static void run_sensors(void)
         .soc_c = soc > -50.0 ? soc : NAN,
         .ir = { ir_max[0], ir_max[1], ir_max[2], ir_max[3] },
         .ir_alert = fmin(gate_value("cool_fire_q1_alert"), gate_value("cool_fire_q2_alert")),
-        .accel_events = crash ? accel_events : 0,
+        .accel_events = acc.events,
         .pgood = rd_long("cnc/laser_pgood_sampled", -1),
         .hv_current = hv_max,
         /* The fans are off at idle (duty 0), so the tachs are reported,
@@ -661,7 +651,7 @@ static void run_sensors(void)
         json_array_append_new(ir, json_integer(ir_max[k]));
     json_object_set_new(r, "lid_ir_max", ir);
     json_object_set_new(r, "accel_events", json_integer(s.accel_events));
-    json_object_set_new(r, "accel_watched", json_boolean(crash));
+    json_object_set_new(r, "accel_watched", json_boolean(acc.watched));
     json_object_set_new(r, "laser_pgood", json_integer(s.pgood > 0 ? 1 : 0));
     json_object_set_new(r, "hv_current_max", json_integer(hv_max));
     json_object_set_new(r, "exhaust_rpm_idle", json_real(round(ex_sum / n)));
@@ -679,10 +669,7 @@ static void run_sensors(void)
     finish_ok(1, r, NULL);
     json_decref(r);
 out:
-    if (crash) {
-        crash_hw_disarm();
-        crash_hw_close();
-    }
+    crash_check_end(&acc);
 }
 
 /* -------------------------------------------------------- the airflow */
@@ -1429,16 +1416,19 @@ static void run_motion(void)
     grbl_send(fd, "$X");
     grbl_expect(fd, "ok", line, sizeof(line), 5);
     /* The crash watch is armed for the jogs, and its i2c path is the
-     * witness's sampler, so the part must answer. */
+     * witness's sampler, so the part must answer. The part is the
+     * engine's crash watch's, borrowed (accel.h). */
     crash_watch_t cw;
     crash_reset(&cw);
-    if (crash_hw_open() != 0) {
-        finish_err("the head accelerometer does not answer on its i2c bus");
+    int lent = crash_hw_borrow();
+    if (lent != 0) {
+        finish_err(lent == -2 ? "a job's crash watch holds the head accelerometer: run the check when the job is done"
+                              : "the head accelerometer does not answer on its i2c bus");
         goto out;
     }
-    if (crash_hw_arm((int)gate_value("cool_accel_x_alert"), (int)gate_value("cool_accel_y_alert"),
-                     (int)gate_value("cool_accel_abort")) != 0) {
-        crash_hw_close();
+    if (crash_hw_check_arm((int)gate_value("cool_accel_x_alert"), (int)gate_value("cool_accel_y_alert"),
+                           (int)gate_value("cool_accel_abort")) != 0) {
+        crash_hw_return();
         finish_err("the head accelerometer could not be armed");
         goto out;
     }
@@ -1488,7 +1478,7 @@ static void run_motion(void)
         }
         unsigned s1 = 0, s2 = 0;
         int crash = 0;
-        if (crash_hw_poll(&s1, &s2) == 0) {
+        if (crash_hw_check_poll(&s1, &s2) == 0) {
             crash_event_t e = crash_tick(&cw, s1, s2);
             crash = e == CrashEv_Alarm;         /* the fail tier; a jog rings the alert tier */
         }
@@ -1521,10 +1511,8 @@ static void run_motion(void)
     progress(100);
     finish_ok(1, r, NULL);
 out:
-    if (watch) {
-        crash_hw_disarm();
-        crash_hw_close();
-    }
+    if (watch)
+        crash_hw_return();
     if (fd >= 0)
         close(fd);
     if (local) {

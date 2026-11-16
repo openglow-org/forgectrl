@@ -355,7 +355,7 @@ static float accel_x_alert = 132.0f;
 static float accel_y_alert = 112.0f;
 static float accel_abort = 133.0f;
 static crash_watch_t crash_w;
-static int crash_hw_state = 0;      /* 0 unprobed, 1 open, -1 absent */
+static int crash_hw_state = 0;      /* 0 untried this session, 1 armed, -1 off for the session */
 static int crash_hw_armed = 0;
 static int crash_poll_errs = 0;     /* consecutive; 3 stands the watch down */
 static const char *pub_accel_watch = "watch";
@@ -1651,6 +1651,7 @@ static void flood_apply(int on, double now)
         fire_alarm = 0;
         crash_reset(&crash_w);
         crash_poll_errs = 0;
+        crash_hw_state = 0;         /* a watch that could not open or arm tries again */
         pgood_warned = 0;
     } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
         if (cool_state == Cool_Warmup) {
@@ -1986,31 +1987,34 @@ static void engine_tick(void)
      * alert) is the pause tier, released after quiet polls; IG2
      * (shared abort) is the fail tier: motion stopped, latch locked,
      * a fault for the rest of the run session. A head that stops
-     * answering stands the watch down for the session, said once. */
+     * answering, or that cannot be opened or armed, stands the watch
+     * down for the session, said once; the next session tries again.
+     * The engine owns the bus handle: every arm claims it first, opening
+     * it when none is open, and a setup check only borrows the part,
+     * never while the watch is armed (accel.h). */
     {
         int want = armed && (accel_x_alert > 0 || accel_y_alert > 0 ||
                              accel_abort > 0);
         if (want && !crash_hw_armed && crash_hw_state >= 0 &&
             crash_poll_errs < 3) {
-            if (crash_hw_state == 0) {
-                crash_hw_state = crash_hw_open() == 0 ? 1 : -1;
-                if (crash_hw_state < 0)
-                    warn("head accelerometer not answering - crash watch off");
-            }
-            if (crash_hw_state > 0) {
-                if (crash_hw_arm((int)accel_x_alert, (int)accel_y_alert,
-                                 (int)accel_abort) == 0) {
-                    crash_hw_armed = 1;
-                    char msg[96];
-                    snprintf(msg, sizeof(msg),
-                             "crash watch armed (alert x=%d y=%d abort=%d)",
-                             (int)accel_x_alert, (int)accel_y_alert,
-                             (int)accel_abort);
-                    info(msg);
-                } else {
-                    crash_hw_state = -1;
-                    warn("head accelerometer arm failed - crash watch off");
-                }
+            if (crash_hw_open() != 0) {
+                crash_hw_state = -1;
+                warn("head accelerometer not answering - crash watch off "
+                     "for this session");
+            } else if (crash_hw_arm((int)accel_x_alert, (int)accel_y_alert,
+                                    (int)accel_abort) == 0) {
+                crash_hw_state = 1;
+                crash_hw_armed = 1;
+                char msg[96];
+                snprintf(msg, sizeof(msg),
+                         "crash watch armed (alert x=%d y=%d abort=%d)",
+                         (int)accel_x_alert, (int)accel_y_alert,
+                         (int)accel_abort);
+                info(msg);
+            } else {
+                crash_hw_state = -1;
+                warn("head accelerometer arm failed - crash watch off "
+                     "for this session");
             }
         } else if (!want && crash_hw_armed) {
             crash_hw_disarm();
@@ -2690,8 +2694,8 @@ void cool_shutdown(void)
     /* The heater is the warm-up's heat source; off is always the right
      * parting state, job or no job. */
     heater_set_pct(0);
-    /* The crash watch borrowed the accel's ODR and full scale; hand
-     * them back so st_accel's next one-shot reads at its own scale. */
+    /* The crash watch took the accel's ODR and full scale; hand them
+     * back so st_accel's next one-shot reads at its own scale. */
     if (crash_hw_armed) {
         crash_hw_disarm();
         crash_hw_armed = 0;

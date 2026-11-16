@@ -78,7 +78,8 @@
  *   gates D.   a fan floor no fan meets: AIRFLOW after the grace and three
  *              ticks, gone with the session; a floor of 0 is off
  *   crash watch: never armed in an unarmed session; its thresholds at 0
- *              are its gates off
+ *              are its gates off; a watch that cannot open or arm is off
+ *              for its session alone
  *   TEC.       fitted: on with the run airflow, off at idle, a dwell before
  *              it comes on again; not fitted: never
  *
@@ -227,15 +228,27 @@ void senslog_event(const char *msg) { (void)msg; events++; }
 
 /* The faked crash watch hardware: armed on request, and the next poll
    reports what the test put in src1/src2, or fails (a head that stopped
-   answering). */
+   answering). An arm needs the handle a successful open gave; an open
+   that fails leaves no handle (the part does not answer), and an arm can
+   be made to fail on a handle that is there. */
 static int crash_armed_fake;
 static int crash_arm_calls;
 static int crash_poll_fail;
+static int crash_handle_fake;
+static int crash_open_fail, crash_arm_fail;
+static int crash_open_calls;
 static unsigned crash_src1, crash_src2;
-int fake_crash_open(void) { return 0; }
+int fake_crash_open(void)
+{
+    crash_open_calls++;
+    crash_handle_fake = !crash_open_fail;
+    return crash_handle_fake ? 0 : -1;
+}
 int fake_crash_arm(int x, int y, int abort)
 {
     (void)x; (void)y; (void)abort;
+    if (!crash_handle_fake || crash_arm_fail)
+        return -1;
     crash_armed_fake = 1;
     crash_arm_calls++;
     return 0;
@@ -249,7 +262,7 @@ int fake_crash_poll(unsigned *s1, unsigned *s2)
     return 0;
 }
 void fake_crash_disarm(void) { crash_armed_fake = 0; }
-void fake_crash_close(void) { }
+void fake_crash_close(void) { crash_handle_fake = 0; }
 
 /* The supervisor's stop, counted: what the kernel attributes read at
    the moment of the call is the proof the writes came first. */
@@ -1647,6 +1660,28 @@ static void crash_watch_stands_down(loop_t *L)
     run_tick(L);
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "and the job may go on");
     crash_poll_fail = 0;
+
+    /* A watch that cannot open or arm at its window is off for that
+     * session alone: the next session's window claims the handle again,
+     * opening it when it is gone, and arms. */
+    close_session(L);
+    crash_open_fail = 1;
+    int opens = crash_open_calls;
+    open_session(L);
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    CHECK(!crash_armed_fake && !strcmp(pub_accel_watch, "off") && crash_open_calls == opens + 1,
+          "the handle is gone and does not open at the window: the watch is off for the session, "
+          "tried once");
+    crash_open_fail = 0;
+    crash_arm_fail = 1;
+    open_session(L);
+    CHECK(!crash_armed_fake && !strcmp(pub_accel_watch, "off"),
+          "the next session's window opens it and the arm fails: off for that session");
+    crash_arm_fail = 0;
+    open_session(L);
+    CHECK(crash_armed_fake && !strcmp(pub_accel_watch, "armed"),
+          "and the session after that arms the watch");
 
     /* The fail tier's alarm is the session's, not the watch's. */
     close_session(L);
