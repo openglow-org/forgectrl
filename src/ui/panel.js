@@ -822,7 +822,7 @@ function rpm(v) {
   return v > 0 ? v + ' rpm' : 'stopped';
 }
 function degc(v) {
-  return v > -100 ? dTa(v).toFixed(1) + ' ' + uT() : '\u2014';
+  return typeof v === 'number' && v > -100 ? dTa(v).toFixed(1) + ' ' + uT() : '\u2014';
 }
 var CL = null;          /* GET /cool/status: the engine's verdict */
 var FL = null;          /* GET /cool/flow: the coolant flow watch */

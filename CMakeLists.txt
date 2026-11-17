@@ -406,6 +406,12 @@ target_link_libraries(camkey_test pthread)
 # Host unit test for the certificate: made once, loaded back, the
 # fingerprint stable across a reload, the names on it. CI runs it after
 # the build.
+# The cooling diagnostic's calibration window (diag.c, included whole): a count
+# that is no temperature is no sample.
+add_executable(diag_test tests/diag_test.c)
+target_compile_options(diag_test PRIVATE -Wall -Wextra)
+target_link_libraries(diag_test m pthread)
+
 add_executable(wizcalc_test tests/wizcalc_test.c src/wizcalc.c)
 target_compile_options(wizcalc_test PRIVATE -Wall -Wextra)
 target_link_libraries(wizcalc_test m)

@@ -43,9 +43,17 @@ typedef struct {
 const gate_setting_t *gate_settings(size_t *n);
 const gate_setting_t *gate_setting_find(const char *key);
 
+/* The longest value text a gate setting takes: every reader takes the
+ * same text whole (the engine's reads of the settings file hold more), so
+ * a padded value cannot read as one number to the panel and another to
+ * the engine. */
+#define GATE_VALUE_MAX_LEN 16
+
 /* Parse a setting's text as a number inside its legal range. Returns 1
  * and stores the value, or 0 for anything else (garbage, out of range,
- * trailing text). An empty string is not a value. */
+ * trailing text, longer than GATE_VALUE_MAX_LEN). An empty string is not
+ * a value. The settings route and the panel validate with it, and the
+ * cooling engine reads every gate setting through it. */
 int gate_parse(const gate_setting_t *g, const char *text, double *out);
 
 /* Classify a value. Off wins over warn; a value outside the legal

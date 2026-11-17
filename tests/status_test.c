@@ -33,7 +33,8 @@
  *
  * The coolant conversion the engine, the flow watch and the sensors
  * logger share: the thermistor's 25 C at mid-scale, and the sampler's
- * fractional counts converted as whole ones.
+ * fractional counts converted as whole ones. The counts that are no
+ * temperature (coolant.h), and the status document's null for one.
  *
  * machine_is_idle() fails closed: not idle on any read failure, the
  * fd-table exhaustion a connection flood can cause (EMFILE) included. A
@@ -63,6 +64,7 @@
  */
 #define _GNU_SOURCE
 #include "../src/status.h"
+#include "../src/coolant.h"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -271,6 +273,67 @@ static void coolant_conversion(void)
     CHECK(fabs(coolant_degc_counts(665.6) - 25.0) < 1e-9 && coolant_degc(694) == coolant_degc_counts(694.0) &&
           coolant_degc_counts(694.5) < coolant_degc(694) && coolant_degc_counts(694.5) > coolant_degc(695),
           "mid-scale (665.6 counts) is 25 C; a whole count converts as the fractional one, between its neighbors");
+    /* No temperature (coolant.h): a short's 0, the converter's 1023 rail
+     * and anything a 16-bit register carries past it, and every count that
+     * converts under 0 C (982.94 and up); 982 and 1 are readings. */
+    CHECK(coolant_no_reading(0) && coolant_no_reading(-1) && coolant_no_reading(1023) &&
+          coolant_no_reading(1332) && coolant_no_reading(65535) && coolant_no_reading(983) &&
+          coolant_no_reading_counts(982.95) && !coolant_no_reading_counts(982.9) &&
+          !coolant_no_reading(982) && !coolant_no_reading(1) && !coolant_no_reading(665),
+          "0, the rail and past it, and every count under 0 C are no reading; 1 to 982 are");
+}
+
+static double json_num(const char *doc, const char *key);
+static int json_is_null(const char *doc, const char *key);
+static int json_intact(const char *doc);
+
+/* The engine's air-assist lift on the coolant counts, as the status
+ * document reads it (status.c's weak default is 0). */
+static long lift_counts;
+long cool_coolant_offset_counts(void)
+{
+    return lift_counts;
+}
+
+/* The status document shows a coolant count that is no temperature as
+ * none: null, never a temperature the conversion makes of it. Run after
+ * the sys block, whose first document must be the first one made. */
+static void coolant_in_status(void)
+{
+    char doc[3072], path[320];
+    printf("the coolant in the status document:\n");
+    snprintf(path, sizeof(path), "%spic", root);
+    mkdir(path, 0755);
+    snprintf(path, sizeof(path), "%spic/water_temp_1", root);
+    FILE *f = fopen(path, "w");
+    if (f) { fputs("1023\n", f); fclose(f); }
+    snprintf(path, sizeof(path), "%spic/water_temp_2", root);
+    f = fopen(path, "w");
+    if (f) { fputs("982\n", f); fclose(f); }
+    CHECK(machine_status_json(doc, sizeof(doc), "\"gates_off\":[]") == 0 && json_intact(doc),
+          "the document renders");
+    CHECK(json_is_null(doc, "down_c") && !json_is_null(doc, "up_c") && json_num(doc, "up_c") > 0.0,
+          "downstream at the rail: null; upstream at 982 counts: its temperature");
+    /* Judged on the count as read: the full 60-count lift would carry 1023
+     * to +1.7 C and 990 to +4.4 C. */
+    lift_counts = 60;
+    snprintf(path, sizeof(path), "%spic/water_temp_2", root);
+    f = fopen(path, "w");
+    if (f) { fputs("990\n", f); fclose(f); }
+    CHECK(machine_status_json(doc, sizeof(doc), "\"gates_off\":[]") == 0 && json_is_null(doc, "down_c") &&
+          json_is_null(doc, "up_c"), "at a 60-count lift, 1023 and 990 counts: both null");
+    f = fopen(path, "w");
+    if (f) { fputs("900\n", f); fclose(f); }
+    CHECK(machine_status_json(doc, sizeof(doc), "\"gates_off\":[]") == 0 &&
+          fabs(json_num(doc, "up_c") - coolant_c_of_counts(840.0)) < 0.051,
+          "at a 60-count lift, 900 counts: the reading, the lift taken off");
+    lift_counts = 0;
+    snprintf(path, sizeof(path), "%spic/water_temp_2", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%spic/water_temp_1", root);
+    unlink(path);
+    snprintf(path, sizeof(path), "%spic", root);
+    rmdir(path);
 }
 
 /* --- the switch word's decode ------------------------------------------- */
@@ -574,6 +637,7 @@ int main(void)
     coolant_conversion();
     idle_fails_closed();
     sys_block();
+    coolant_in_status();
     grbl_block();
 
     rmdir(dir);

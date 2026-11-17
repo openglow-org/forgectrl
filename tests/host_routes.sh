@@ -268,6 +268,12 @@ SHORT=${SEC%?}
 echo "  the controller is up; its secret is ${#SEC} characters"
 
 echo "== the report channel"
+# The coolant readable (694 counts, 22.8 C) for the run session: a session
+# opened with no upstream reading holds its warm-up undecided, at the idle
+# duties.
+mkdir -p "$SYS/pic"
+echo 694 > "$SYS/pic/water_temp_1"
+echo 694 > "$SYS/pic/water_temp_2"
 EXH=$SYS/thermal/exhaust_pwm
 cp "$EXH" "$T/exh.start"
 expect 200 "$(report run "$SEC")" "a run report with the secret is taken"
@@ -297,6 +303,8 @@ echo running > "$SYS/cnc/state"
 expect 200 "$(report idle "$SEC")" "an idle report with the secret is taken"
 if until_ok 25 eval '[ "$(cat "$EXH")" = 32768 ]'; then ok "the session ends: exhaust 65535 -> 32768"
 else bad "the exhaust stayed at '$(cat "$EXH")' after the idle report"; fi
+# No reading again, so the thermal phase cannot see the loop recovered.
+rm -f "$SYS/pic/water_temp_1" "$SYS/pic/water_temp_2"
 echo idle > "$SYS/cnc/state"
 # The machine idle and the engine cooling down after the session: a quiet
 # hold may not take the pump.
@@ -456,6 +464,10 @@ refused "laser_disarm_s=99999" -d laser_disarm_s=99999
 refused "pulse_reject_threshold_bytes=2000000000" -d pulse_reject_threshold_bytes=2000000000
 refused "a key that is no setting" -d no_such_key_hostroutes=1
 for v in 256 -1 bright; do refused "lid_lamp_idle=$v" -d lid_lamp_idle=$v; done
+# A number padded past 16 characters is no value, whatever it parses to:
+# every reader takes the value whole or not at all.
+refused "a padded cool_fire_q1_critical" -d cool_fire_q1_critical=0000000000000000688
+refused "a padded cool_temp_offset_c" -d cool_temp_offset_c=00000000000000001
 # The cloud pause's floor: no value under 500 ticks, for either key; 500
 # itself is taken, then cleared.
 for k in cloud_pause_backtrack_ticks cloud_resume_lead_ticks; do refused "$k=499" -d $k=499; done

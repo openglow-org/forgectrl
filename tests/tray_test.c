@@ -93,6 +93,7 @@ int main(void)
     /* What the setting takes. */
     const struct { const char *v; int ok; } val[] = {
         { "13", 1 }, { "60", 1 }, { "60.01", 0 }, { "34mm", 0 },
+        { "34.2900000000000", 1 }, { "34.29000000000000", 0 },   /* 16 characters, and one past */
     };
     for (size_t i = 0; i < sizeof(val) / sizeof(val[0]); i++)
         CHECK(tray_offset_valid(val[i].v) == val[i].ok, "'%s' is %s", val[i].v, val[i].ok ? "valid" : "refused");

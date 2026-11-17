@@ -163,6 +163,8 @@ jobs:
         run: ./build/tls_test
       - name: Dark wizard decisions
         run: ./build/wizcalc_test
+      - name: "diag_test (the cooling diagnostic's calibration window: a count that is no temperature is no sample)"
+        run: ./build/diag_test
       - name: "wizlive_test (the live session's exit: the lens stepped only with no controller and the engine idle, else the marker dropped; the posture and the controller handed back)"
         run: ./build/wizlive_test
       - name: Camera key

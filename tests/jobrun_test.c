@@ -17,7 +17,8 @@
  * leaves the lease free and its staging file gone; a program that ends
  * in M2 gets no second one; the runner's $X goes out first when asked
  * for, and never otherwise; a program is done when the kernel is idle,
- * not at its last ok; the abort sends the soft reset and frees the
+ * not at its last ok nor while its state cannot be read, and at once on an
+ * underrun; the abort sends the soft reset and frees the
  * lease; a connected Grbl sender refuses the start with nothing sent; a
  * run on the caller's thread stands inside a wizard's hold and gives the
  * machine back to the wizard, and is not the abort route's to stop; the
@@ -328,20 +329,36 @@ static void kernel_state(const char *word)
 }
 
 /* Every line is acknowledged while the kernel still plays the last of
- * the ring: the record must not say done until it is idle. */
+ * the ring: the record must not say done until it is idle. A state that
+ * cannot be read is not idle either. A fault or an underrun has nothing
+ * left to play: the job is done at once. */
 static void test_done_is_idle(void)
 {
-    char err[160] = "", who[64];
+    char err[160] = "", who[64], path[192];
     mock_clear();
-    kernel_state("running");
+    snprintf(path, sizeof(path), "%s/cnc/state", root);
+    unlink(path);
     STAGE("G21\nG1 X5 F600\n");
     CHECK(jobrun_program_start(staged, "tail", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
-    msleep(1000);
+    msleep(600);
     CHECK(strstr(status(), "\"acked\":3") && strstr(status(), "\"state\":\"running\""),
-          "with the kernel still playing: %s", status());
+          "with the kernel's state unreadable: %s", status());
+    kernel_state("running");
+    msleep(400);
+    CHECK(strstr(status(), "\"state\":\"running\""), "with the kernel still playing: %s", status());
     CHECK(lease_holder(who, sizeof(who)), "the lease went back while the kernel played");
     kernel_state("idle");
     CHECK(wait_state("done", 2000), "the job did not end once the kernel was idle: %s", status());
+
+    static const char *const ended[] = { "underrun", "fault" };
+    for (int i = 0; i < 2; i++) {
+        mock_clear();
+        kernel_state(ended[i]);
+        STAGE("G21\n");
+        CHECK(jobrun_program_start(staged, ended[i], NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+        CHECK(wait_state("done", 2000), "a kernel in %s left the job waiting: %s", ended[i], status());
+    }
+    kernel_state("idle");
 }
 
 static void test_abort(void)
@@ -720,6 +737,7 @@ int main(void)
         snprintf(a, sizeof(a), "pic/lid_ir_%d", i);
         sysfs_write(a, 100);
     }
+    kernel_state("idle");               /* an unreadable state is not idle */
     snprintf(staged, sizeof(staged), "%s/job.upload", root);
     lease_sender_connected = client_connected;
     mock_start();

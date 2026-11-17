@@ -24,6 +24,7 @@
  */
 #define _GNU_SOURCE
 #include "cool.h"
+#include "coolant.h"
 #include "diag.h"
 #include "fflog.h"
 #include "lease.h"
@@ -306,7 +307,9 @@ static int aa_window(struct aa_win *w)
         long r1 = rd_long("pic/water_temp_1");
         usleep(1000000 / AA_HZ / 2);
         long r2 = rd_long("pic/water_temp_2");
-        if (r1 > 0 && r2 > 0) {
+        /* A count that is no temperature (coolant.h: 0, the rail, under
+         * 0 C) is no sample: an open sensor's rail would read as a step. */
+        if (r1 >= 0 && r2 >= 0 && !coolant_no_reading(r1) && !coolant_no_reading(r2)) {
             w->v1[w->n] = r1;
             w->v2[w->n] = r2;
             w->n++;

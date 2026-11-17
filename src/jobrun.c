@@ -383,23 +383,38 @@ static int program_gen(void *ctx, char *buf, size_t len)
 
 /* The controller acknowledges M2 when its planner is empty; the pulse
  * engine still has the last of the ring to play, a few tenths of a
- * second of it. "done" is said when the head has stopped. */
+ * second of it. "done" is said when the head has stopped: the state reads
+ * idle, or fault or underrun (nothing left to play, said in its own
+ * words). A state that cannot be read is not idle: the wait goes on to
+ * its limit and says so. */
 static void kernel_idle_wait(double limit_s)
 {
     const char *r = ff_test_hook("GF_SYSFS_ROOT");
     char path[192], text[24];
     struct timespec tick = { 0, 20 * 1000000L };
+    int unreadable = 0;
     snprintf(path, sizeof(path), "%s/cnc/state", r ? r : "/sys/glowforge");
     for (double t0 = mono_s(); mono_s() - t0 < limit_s; nanosleep(&tick, NULL)) {
         FILE *f = fopen(path, "r");
-        if (!f)
+        int got = f && fgets(text, sizeof(text), f);
+        if (f)
+            fclose(f);
+        unreadable = !got;
+        if (!got)
+            continue;
+        if (!strncmp(text, "idle", 4))
             return;
-        int idle = !fgets(text, sizeof(text), f) || !strncmp(text, "idle", 4);
-        fclose(f);
-        if (idle)
+        if (!strncmp(text, "fault", 5) || !strncmp(text, "underrun", 8)) {
+            text[strcspn(text, "\n")] = '\0';
+            fflog(LOG_WARNING, "jobrun: the kernel reads %s at the program's end", text);
             return;
+        }
     }
-    fflog(LOG_WARNING, "jobrun: the kernel was still playing %.0f s after the program's end", limit_s);
+    if (unreadable)
+        fflog(LOG_WARNING, "jobrun: the kernel's state could not be read %.0f s after the program's end",
+              limit_s);
+    else
+        fflog(LOG_WARNING, "jobrun: the kernel was still playing %.0f s after the program's end", limit_s);
 }
 
 static void program_done(void *ctx, int rc, const jobstream_run_t *run, const char *err)

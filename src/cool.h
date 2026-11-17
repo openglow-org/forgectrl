@@ -46,6 +46,11 @@ int cool_quiet_pump_held(void);
 #define COOL_EXHAUST_RUN     65535
 #define COOL_INTAKE_RUN      43278
 
+/* cool_temp_offset_c, the coolant sensors' per-machine correction: within
+ * this many degrees either way, for the settings route and the engine
+ * alike. */
+#define COOL_TEMP_OFFSET_MAX_C 5.0
+
 /* Start the engine: resolve tunables (GFCOOL_* env > cool_* settings >
  * compiled defaults), take the idle posture (pump on, TEC off, purge
  * on, heater off, fans idle), and launch the 1 Hz policy thread that
@@ -143,7 +148,7 @@ typedef struct {
 } cool_view_t;
 void cool_view(cool_view_t *v);
 /* A raw coolant count in degrees, converted as the engine converts its
- * own readings. */
+ * own readings; NAN for a count that is no temperature (coolant.h). */
 double cool_coolant_c(long raw);
 /* The slowest engine tick, in ms, since the last call (NAN: none). */
 double cool_tick_max_ms(void);

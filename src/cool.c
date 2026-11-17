@@ -57,7 +57,18 @@
  *   brings the run fans up. Either at its off end (0) is no gate.
  *   A warm-up that stops making progress (the heater's plateau in a
  *   cold room) is named once and keeps holding: no release under the
- *   gate.
+ *   gate. A session that opens with no upstream reading to decide on
+ *   holds WARMUP undecided, heater off and the window unacknowledged,
+ *   until the first reading decides. An upstream reading over 70 C (a
+ *   short reads hundreds of degrees) releases neither cold-side gate
+ *   and drives no TEC.
+ * - SENSOR: a coolant sensor with no reading - a read that fails, or a
+ *   count that is no temperature (coolant.h: 0, 1023 or more, under 0 C,
+ *   judged before the corrections) - on two ticks in a row, on two ticks
+ *   with one good tick between, or on six ticks within 60 s, blocks fire
+ *   and holds, heater off, until three or four good ticks in a row
+ *   (SENSOR_FAIL_*, SENSOR_WINDOW_*); so does a lid
+ *   IR channel unreadable for two ticks in the fire watch's phases.
  * - OVER-TEMP: if the upstream temp exceeds the run ceiling the
  *   verdict goes OVERTEMP with hold=true and cooling airflow forced;
  *   it recovers (resume_ok) once the temp is back under the resume
@@ -129,6 +140,7 @@
 #include "accel.h"
 #include "airflow.h"
 #include "cool.h"
+#include "coolant.h"
 #include "setup.h"
 #include "coolfmt.h"
 #include "fflog.h"
@@ -206,11 +218,40 @@ static const char *sysfs_root(void)
 #define WARMUP_HEAT_MAX_S   1800        /* the heater's budget in one warm-up; the hold stays after */
 #define WARMUP_DOWN_OFF_C     45.0f     /* downstream at this: the warm-up heater off */
 #define WARMUP_DOWN_ON_C      40.0f     /* ...and back on under this */
-/* A coolant sensor read that fails (a sysfs error, not a rail value)
- * leaves every coolant gate blind. One failed tick is tolerated: the
- * gates keep their state and the sample is skipped. This many in a row
- * is the SENSOR verdict. */
-#define SENSOR_FAIL_TICKS      2
+/* A coolant sensor with no reading (a read that fails, or a count that is
+ * no temperature: coolant.h) leaves every coolant gate blind for that
+ * tick: the gates keep their state and the sample is skipped. Such a tick
+ * adds SENSOR_FAIL_UP to a score that every tick with both sensors reading
+ * takes one from; the score is held to SENSOR_FAIL_CAP. SENSOR rises at
+ * SENSOR_FAIL_SCORE (two no-reading ticks in a row, or two with one good
+ * tick between: a sensor that drops out every other tick) and is released
+ * once the score is back to 0 (three or four good ticks in a row). One
+ * no-reading tick alone is tolerated, and said at most once a minute with
+ * the count of the minute's tolerated ticks. SENSOR_WINDOW_N tolerated
+ * ticks within SENSOR_WINDOW_S raise SENSOR too, with the score set to its
+ * cap, so a sensor failing at a lasting rate is noticed; the same score
+ * rule releases it. */
+#define SENSOR_FAIL_UP         2
+#define SENSOR_FAIL_SCORE      3
+#define SENSOR_FAIL_CAP        4
+#define SENSOR_TOLERATED_SAY_S 60.0     /* a tolerated tick is said at most this often */
+#define SENSOR_WINDOW_N        6
+#define SENSOR_WINDOW_S        60.0
+/* The highest upstream reading the cold side takes as a temperature: the
+ * critical line's highest setting (gates.c). A short reads a few counts
+ * over 0, hundreds of degrees, and with the ceiling and the critical line
+ * at their off ends nothing else would judge it: so a reading over this
+ * clears neither cold-side gate. The floor stands shut on it, a warm-up's
+ * decision waits for a reading under it, and the TEC stays off. */
+#define COLD_SIDE_MAX_C       70.0f
+/* The lid IR fire watch with a channel unreadable (a read that fails, or
+ * a count past the converter's 1023): this many judged ticks in a row is
+ * the SENSOR verdict, released once all four read again. */
+#define IR_BLIND_TICKS         2
+/* cnc/state unreadable counts as running (the ring may be playing) for
+ * this long, then as not running, said once: a module that has gone plays
+ * nothing, and the safing writes behind it fail as its reads do. */
+#define CNC_UNREADABLE_S       5.0
 #define TEC_ON_C_DEFAULT       20.0f    /* chosen, not the factory's (unknown on a Pro) */
 #define TEC_OFF_C_DEFAULT      18.0f
 #define TEC_DWELL_S            30       /* minimum off-to-on spacing */
@@ -318,14 +359,27 @@ static int warmup_stall_warned = 0;
 static double warmup_started_at = 0;    /* the warm-up's start, for the heater's budget */
 static int warmup_spent = 0;            /* the budget ran out: heater off, the hold stays */
 static int warmup_hot = 0;              /* downstream at the cutoff: heater off until it cools */
+static float warmup_open_up = 0;        /* the upstream reading the warm-up began on */
+static int warmup_heat_said = -1;       /* the heater as the warm-up said it: -1 not said yet */
+static int warmup_saw_sensor = 0;       /* a SENSOR stood over the warm-up since it was last said */
 /* The release judges the mixed bulk, not the heater's slug passing the
  * sensor: the minimum of the upstream reading over the last WARMUP_WIN
  * seconds (between slugs the reading falls back to the bulk). */
 static float warmup_win[WARMUP_WIN];
 static uint32_t warmup_win_n = 0;
 static int critical_alarm = 0;      /* latched coolant fault, this run session */
-static uint32_t sensor_fail_ticks = 0;  /* consecutive ticks with a coolant read failed */
+static uint32_t sensor_fail_score = 0;  /* the no-reading score (SENSOR_FAIL_*) */
+static uint32_t sensor_fail_ticks = 0;  /* no-reading ticks since the score was last 0 */
+static double sensor_tolerated_said = -1e9;
+static double sensor_tolerated_at[SENSOR_WINDOW_N];    /* the last tolerated ticks, a ring */
+static unsigned sensor_tolerated_n = 0;                  /* tolerated ticks ever (the ring's head) */
 static int sensor_alarm = 0;        /* SENSOR: blind on the coolant, fire blocked, hold */
+/* A session opened with the warm-up gate on and no upstream reading the
+ * cold side takes: WARMUP with the heater off and the armed window not
+ * acknowledged, until the first reading decides between the warm-up and
+ * the run. */
+static int warmup_pending = 0;
+static int cold_side_named = 0;     /* an upstream reading over COLD_SIDE_MAX_C, said once */
 static long throttle_state = 0;     /* the kernel's CPU cooling state last seen */
 static int critical_would_warned = 0;   /* off gate, would have tripped: once */
 static int forced_cool = 0;         /* over-temp overrode the phase fans */
@@ -348,6 +402,9 @@ static int pgood_warned = 0;        /* once per run session */
 static long last_faults = 0;
 static int ir_over_ticks = 0;
 static int fire_alarm = 0;          /* latched lid-IR fire signal */
+static int ir_blind_ticks = 0;      /* judged ticks in a row with a lid IR channel unreadable */
+static int ir_blind_alarm = 0;      /* SENSOR: a lid IR channel unreadable, fire blocked, hold */
+static char ir_blind_reason[COOL_REASON_MAX];
 static const char *pub_fire_watch = "watch";
 
 /* The head-accelerometer crash watch (accel.c): the LIS2HH12's own
@@ -516,10 +573,16 @@ static long rd_long(const char *attr)
     return strtol(buf, NULL, 10);
 }
 
-static int read_temp(const char *attr, float *c)
+/* A coolant reading: 1 with *c in degrees, 0 for none. None is a read
+ * that fails, and a count that is no temperature (coolant.h: 0, 1023 or
+ * more, or under 0 C), judged on the count as the sensor gave it. *rawp,
+ * when given, gets the count read (-1 for a read that failed). */
+static int read_temp(const char *attr, float *c, long *rawp)
 {
     long raw = rd_long(attr);
-    if (raw < 0)
+    if (rawp)
+        *rawp = raw;
+    if (raw < 0 || coolant_no_reading(raw))
         return 0;
     /* The air-assist ground shift lifts the raw counts (more counts read
      * colder): take them off before the conversion. */
@@ -530,22 +593,47 @@ static int read_temp(const char *attr, float *c)
 }
 
 /* cnc/state == "running" is the one state in which the machine can be
- * depositing energy (the ring is being clocked). A read failure counts
- * as not-running here: this feeds extra protective actions, and the
- * fire gate itself fails closed elsewhere. */
-static int cnc_is_running(void)
+ * depositing energy (the ring is being clocked). It feeds protective
+ * actions (the hang dead-man's running case, the cooldown's airflow), so
+ * a state that cannot be read counts as running, for CNC_UNREADABLE_S
+ * from the first failed read; past that it counts as not running, said
+ * once, until it reads again. The state is read once at the top of every
+ * tick (cnc_state_sample), so the bound runs on wall time, and every
+ * caller in the tick gets that sample (cnc_is_running). */
+static double cnc_unreadable_since = -1.0;
+static int cnc_unreadable_named = 0;
+static int cnc_running = 0;             /* this tick's sample */
+
+static void cnc_state_sample(double now)
 {
     char path[128], buf[16];
     snprintf(path, sizeof(path), "%scnc/state", sysfs_root());
     int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return 0;
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0)
-        return 0;
+    ssize_t n = -1;
+    if (fd >= 0) {
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+    }
+    if (n <= 0) {
+        if (cnc_unreadable_since < 0.0)
+            cnc_unreadable_since = now;
+        cnc_running = now - cnc_unreadable_since < CNC_UNREADABLE_S;
+        if (!cnc_running && !cnc_unreadable_named) {
+            cnc_unreadable_named = 1;
+            fflog(LOG_WARNING, "cool: cnc/state unreadable for %.0f s: taken as not running",
+                  now - cnc_unreadable_since);
+        }
+        return;
+    }
+    cnc_unreadable_since = -1.0;
+    cnc_unreadable_named = 0;
     buf[n] = '\0';
-    return strncmp(buf, "running", 7) == 0;
+    cnc_running = strncmp(buf, "running", 7) == 0;
+}
+
+static int cnc_is_running(void)
+{
+    return cnc_running;
 }
 
 static uint32_t heater_pct = 0;     /* the duty last commanded */
@@ -558,7 +646,8 @@ static void heater_set_pct(uint32_t pct)
 
 /* The three fans the engine drives, every write to them read back. The
  * head's air-assist register and the two thermal PWMs report the duty in
- * force, so a write the bus dropped, or a value the device did not take,
+ * force (a thermal PWM the last duty its device took: a refused write
+ * fails and leaves it), so a write the bus dropped, or a value the device did not take,
  * is caught here, tried again at once, and named when the tries run out.
  * Without this a lost write left the engine believing its command while
  * the fan sat at the idle duty it had, and the fan was then judged
@@ -803,12 +892,30 @@ static const char *ext_safe_file = EXT_SAFE_FILE;
 static int ext_held;                    /* a hold stood at the last tick */
 static int ext_dropped;                 /* stale advisory holds were dropped at the last tick */
 static char ext_reason[COOL_REASON_MAX];
+static int ext_enabled_last = -1;       /* ext_enabled as last read; -1 never read */
+static int ext_unreadable_named;
 
+/* A settings file that cannot be read is not "extensions off": the value
+ * last read stands, so a hold a package asked for keeps standing through
+ * a failed read; before the first read (a daemon start) the hold files
+ * are honored. An absent key is off. */
 static void ext_holds_read(double now, holds_t *h)
 {
     char v[8];
     memset(h, 0, sizeof(*h));
-    if (access(ext_safe_file, F_OK) == 0 || settings_get("ext_enabled", v, sizeof(v)) != 0 || strcmp(v, "1") != 0)
+    int rc = settings_get("ext_enabled", v, sizeof(v));
+    if (rc == SETTINGS_UNREADABLE) {
+        if (!ext_unreadable_named) {
+            ext_unreadable_named = 1;
+            fflog(LOG_WARNING, "cool: the settings file could not be read; %s",
+                  ext_enabled_last < 0 ? "the extension holds stand until it reads"
+                  : ext_enabled_last ? "extensions stay on" : "extensions stay off");
+        }
+    } else {
+        ext_unreadable_named = 0;
+        ext_enabled_last = rc == 0 && strcmp(v, "1") == 0;
+    }
+    if (access(ext_safe_file, F_OK) == 0 || !ext_enabled_last)
         return;
     holds_read(holds_dir, holds_required_dir, now, h);
 }
@@ -1085,15 +1192,40 @@ static void conf_reload(void)
         char v[32];
         char *end;
         float f = tunables[i].def;
-        if (settings_get(tunables[i].key, v, sizeof(v)) == 0) {
+        int rc = settings_get(tunables[i].key, v, sizeof(v));
+        const gate_setting_t *g = gate_setting_find(tunables[i].key);
+        double gv;
+        /* A value is taken whole or not at all: one longer than the read
+         * holds is never read as its prefix. The default stands, and the
+         * line says so at every run start. */
+        if (rc == SETTINGS_TOO_LONG) {
+            fflog(LOG_WARNING, "cool: %s is longer than %zu characters; the default %g stands",
+                  tunables[i].key, sizeof(v) - 1, (double)tunables[i].def);
+        } else if (rc == 0 && g) {
+            /* A gate setting is read by the parse the settings route
+             * validates with (gates.c), so the engine, the route and the
+             * panel read one value: text it refuses (too long, out of the
+             * legal range, not a finite number) leaves the default. */
+            if (gate_parse(g, v, &gv))
+                f = (float)gv;
+            else
+                fflog(LOG_WARNING, "cool: %s = %s is not a value the setting takes; the default %g stands",
+                      tunables[i].key, v, (double)tunables[i].def);
+        } else if (rc == 0) {
             float parsed = strtof(v, &end);
             /* "nan" and "inf" parse as numbers. Every comparison against a
              * NaN is false, so a limit set to one never trips and never
              * reads as off: the default stands instead, and the line says
-             * so at every run start. */
+             * so at every run start. The coolant correction holds to the
+             * range the route takes. */
             if (end != v && *end == '\0' && !isfinite(parsed))
                 fflog(LOG_WARNING, "cool: %s = %s is not a finite number; the default %g stands",
                       tunables[i].key, v, (double)tunables[i].def);
+            else if (end != v && *end == '\0' && tunables[i].f == &temp_offset_c &&
+                     fabsf(parsed) > (float)COOL_TEMP_OFFSET_MAX_C)
+                fflog(LOG_WARNING, "cool: %s = %s is outside %g to %g; the default %g stands",
+                      tunables[i].key, v, -COOL_TEMP_OFFSET_MAX_C, COOL_TEMP_OFFSET_MAX_C,
+                      (double)tunables[i].def);
             else if (end != v && *end == '\0')
                 f = parsed;
         }
@@ -1365,7 +1497,9 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
                             int have_up, float up)
 {
     char body[VERDICT_BODY_MAX];
-    int armed_ack = eff_armed && fans_up;
+    /* Never while a session's warm-up decision waits for a reading: an arm
+     * waits for it rather than read the undecided hold as a refusal. */
+    int armed_ack = eff_armed && fans_up && !warmup_pending;
     pthread_mutex_lock(&mu);
     int ack_wait = attn_ack_waits();
     snprintf(pub_verdict, sizeof(pub_verdict), "%s", verdict);
@@ -1651,6 +1785,50 @@ static void crash_alert_stand_down(void)
     pthread_mutex_unlock(&mu);
 }
 
+/* The warm-up hold proper, on an upstream reading under the gate: the
+ * loop heater on, the fans idle (their airflow cools the loop), fire
+ * blocked, until the upstream reading reaches the gate. */
+static void warmup_begin(double now, float up)
+{
+    cool_state = Cool_Warmup;
+    warmup_pending = 0;
+    warmup_gate_c = temp_start_c;
+    warmup_last_up = up;
+    warmup_progress_at = now;
+    warmup_stall_warned = 0;
+    warmup_win_n = 0;
+    warmup_started_at = now;
+    warmup_spent = 0;
+    warmup_hot = 0;
+    warmup_open_up = up;
+    warmup_heat_said = -1;      /* said by the tick's heater block, with the heater it writes */
+    warmup_saw_sensor = 0;
+    fans_idle();
+    flowrun_yield("warm-up");
+}
+
+/* A session that opens with the warm-up gate on and no upstream reading
+ * the cold side takes (none, or one over COLD_SIDE_MAX_C) is not decided
+ * on it: it holds as WARMUP with the heater off, and the armed window is
+ * not acknowledged, so a controller's arm waits for the decision instead
+ * of reading the hold as the warm-up's refusal. The first reading decides
+ * (engine_tick); a reading that never comes is SENSOR after its ticks. */
+static void warmup_hold_pending(double now)
+{
+    cool_state = Cool_Warmup;
+    warmup_pending = 1;
+    warmup_gate_c = temp_start_c;
+    warmup_win_n = 0;
+    warmup_started_at = now;
+    warmup_spent = 0;
+    warmup_hot = 0;
+    fans_idle();
+    flowrun_yield("warm-up");
+    heater_set_pct(0);
+    warn("WARM-UP: no upstream coolant reading at the session's start - heater off, "
+         "hold until one decides");
+}
+
 static void flood_apply(int on, double now)
 {
     if (on) {
@@ -1667,30 +1845,18 @@ static void flood_apply(int on, double now)
         critical_alarm = 0;
         critical_would_warned = 0;
         fan_grace_until = now + (double)fan_grace_s;
-        /* A session that opens under the warm-up gate holds there: the
-         * loop heater on, the fans idle (their airflow cools the loop),
-         * fire blocked, until the upstream reading reaches the gate. */
+        /* A session that opens under the warm-up gate holds there
+         * (warmup_begin); one that opens with no reading to decide on
+         * holds undecided (warmup_hold_pending). */
         float up_now = 0;
-        int have_up_now = read_temp("pic/water_temp_2", &up_now);
-        if (!gate_warmup_off && have_up_now && up_now < temp_start_c) {
-            cool_state = Cool_Warmup;
-            warmup_gate_c = temp_start_c;
-            warmup_last_up = up_now;
-            warmup_progress_at = now;
-            warmup_stall_warned = 0;
-            warmup_win_n = 0;
-            warmup_started_at = now;
-            warmup_spent = 0;
-            warmup_hot = 0;
-            fans_idle();
-            flowrun_yield("warm-up");
-            heater_set_pct(WARMUP_HEATER_PCT);
-            char msg[96];
-            snprintf(msg, sizeof(msg),
-                     "WARM-UP: coolant %.1f C under the %.0f C start gate - "
-                     "heater on, hold", up_now, temp_start_c);
-            warn(msg);
+        int have_up_now = read_temp("pic/water_temp_2", &up_now, NULL) &&
+                          up_now <= COLD_SIDE_MAX_C;
+        if (!gate_warmup_off && !have_up_now) {
+            warmup_hold_pending(now);
+        } else if (!gate_warmup_off && up_now < temp_start_c) {
+            warmup_begin(now, up_now);
         } else {
+            warmup_pending = 0;
             cool_state = Cool_Run;
             fans_run();
         }
@@ -1708,6 +1874,7 @@ static void flood_apply(int on, double now)
     } else if (cool_state == Cool_Run || cool_state == Cool_Warmup) {
         if (cool_state == Cool_Warmup) {
             heater_set_pct(0);
+            warmup_pending = 0;
             info("warm-up ended with the session");
             pthread_mutex_lock(&mu);
             pub_reason[0] = '\0';
@@ -1759,6 +1926,7 @@ static void flood_apply(int on, double now)
 static void engine_tick(void)
 {
     double now = wall_s();
+    cnc_state_sample(now);
 
     /* Diagnostics own the hardware between cool_diag_take and
      * cool_diag_release: publish the phase, keep fire blocked, and
@@ -1944,21 +2112,58 @@ static void engine_tick(void)
      * quartiles) against the factory-shaped thresholds through the whole
      * session tail. What the channels read over a job is the sensors
      * logger's job record (senslog.h). */
-    long ir[4];
-    int have_ir = 1;
+    /* A channel that cannot be read, or that reads past the converter's
+     * 1023, is unreadable. 0 is a reading (a dark lid reads a count or
+     * two). The readable channels are judged on their own while one is
+     * not: with two or three, their quartiles sit at or over those of all
+     * four, so nothing the four would trip goes unjudged; with one, its
+     * reading stands for both quartiles and can sit under the four's
+     * second, for the tick before SENSOR. A tick that is missing a channel
+     * is not a clean one, and two in a row is SENSOR (pause tier: fire
+     * blocked, hold), released once all four read. */
+    long ir[4], q[4];
+    int nq = 0, blind_ch = 0;
     for (int i = 0; i < 4; i++) {
         char attr[20];
         snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i + 1);
         ir[i] = rd_long(attr);
-        if (ir[i] < 0)
-            have_ir = 0;
+        if (ir[i] < 0 || ir[i] > 1023) {
+            if (!blind_ch)
+                blind_ch = i + 1;
+        } else {
+            q[nq++] = ir[i];
+        }
     }
-    if (have_ir && (cool_state == Cool_Run || cool_state == Cool_Smoke ||
-                    cool_state == Cool_Thermal)) {
-        long q[4] = {ir[0], ir[1], ir[2], ir[3]};
-        for (int i = 0; i < 3; i++)         /* four values: sort them */
-            for (int j = i + 1; j < 4; j++)
+    int have_ir = nq == 4;
+    int ir_judged_phase = cool_state == Cool_Run || cool_state == Cool_Smoke ||
+                          cool_state == Cool_Thermal;
+    if (ir_judged_phase && !have_ir) {
+        ir_blind_ticks++;
+        if (!ir_blind_alarm && ir_blind_ticks >= IR_BLIND_TICKS) {
+            ir_blind_alarm = 1;
+            snprintf(ir_blind_reason, sizeof(ir_blind_reason),
+                     "SENSOR: lid IR channel %d unreadable for %d s - fire blocked, hold",
+                     blind_ch, ir_blind_ticks);
+            warn(ir_blind_reason);
+        }
+    } else {
+        ir_blind_ticks = 0;
+        if (ir_blind_alarm) {
+            ir_blind_alarm = 0;
+            info(have_ir ? "lid IR channels reading again - released"
+                         : "lid IR watch stood down at idle with a channel unreadable");
+            pthread_mutex_lock(&mu);
+            if (!strcmp(pub_reason, ir_blind_reason))
+                pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+        }
+    }
+    if (nq > 0 && ir_judged_phase) {
+        for (int i = 0; i < nq - 1; i++)    /* the readings: sort them */
+            for (int j = i + 1; j < nq; j++)
                 if (q[j] < q[i]) { long t = q[i]; q[i] = q[j]; q[j] = t; }
+        if (nq == 1)
+            q[1] = q[0];
         int crit = (fire_q1_critical > 0 && q[0] > (long)fire_q1_critical) ||
                    (fire_q2_critical > 0 && q[1] > (long)fire_q2_critical);
         int alert = crit ||
@@ -1990,7 +2195,8 @@ static void engine_tick(void)
                      "fire blocked until the signal clears", q[0], q[1]);
             warn(msg);
         }
-        if (flame_alert && !alert) {
+        /* Only a tick with all four channels read is a clean one. */
+        if (flame_alert && !alert && have_ir) {
             if (++flame_clear_ticks >= FIRE_CLEAR_TICKS) {
                 flame_alert = 0;
                 info("lid IR flame alert cleared - released");
@@ -2006,9 +2212,9 @@ static void engine_tick(void)
         flame_alert = 0;
         flame_clear_ticks = 0;
     } else if (flame_alert) {
-        /* Not judged this tick (a lid IR read failed): the hold stands, and
-         * the tick is not a clean one. The release is FIRE_CLEAR_TICKS clean
-         * readings in a row, so the count starts over. */
+        /* Not judged this tick (no lid IR channel read): the hold stands,
+         * and the tick is not a clean one. The release is FIRE_CLEAR_TICKS
+         * clean readings in a row, so the count starts over. */
         flame_clear_ticks = 0;
     }
     /* The fire alarm is the session's, its tail included: once the engine
@@ -2235,19 +2441,36 @@ static void engine_tick(void)
     }
 
     float down = 0, up = 0;
-    int have_down = read_temp("pic/water_temp_1", &down);
-    int have_up = read_temp("pic/water_temp_2", &up);
+    long down_raw = -1, up_raw = -1;
+    int have_down = read_temp("pic/water_temp_1", &down, &down_raw);
+    int have_up = read_temp("pic/water_temp_2", &up, &up_raw);
+    /* The cold side's reading (COLD_SIDE_MAX_C): an upstream reading over
+     * it releases neither the floor nor a warm-up, and drives no TEC. */
+    int up_cold_ok = have_up && up <= COLD_SIDE_MAX_C;
+    if (have_up && !up_cold_ok && !cold_side_named) {
+        cold_side_named = 1;
+        fflog(LOG_WARNING, "cool: upstream coolant reads %.1f C (count %ld), over %.0f C: "
+              "a shorted sensor or a loop past every gate; it releases no cold-side gate "
+              "and the TEC stays off", up, up_raw, COLD_SIDE_MAX_C);
+    } else if (up_cold_ok) {
+        cold_side_named = 0;
+    }
 
-    /* The sensors themselves. Blind on either coolant sensor, the
-     * ceiling, the floor, the critical line and the warm-up can none of
-     * them judge, so past SENSOR_FAIL_TICKS the engine says so (SENSOR:
-     * fire blocked, hold) and takes the heater off: a warm-up gets its
-     * heater back once the readings are. The gates keep their state
-     * throughout; the verdict is released the moment both sensors read
-     * again. */
+    /* The sensors themselves. Blind on either coolant sensor (a read that
+     * fails, or a count that is no temperature), the ceiling, the floor,
+     * the critical line and the warm-up can none of them judge, so at
+     * SENSOR_FAIL_SCORE the engine says so (SENSOR: fire blocked, hold)
+     * and takes the heater off: a warm-up gets its heater back once the
+     * readings are. The gates keep their state throughout; the verdict is
+     * released once the score has decayed to 0. */
+    const char *which = !have_down && !have_up ? "sensors"
+                      : !have_up ? "upstream sensor" : "downstream sensor";
     if (have_down && have_up) {
-        sensor_fail_ticks = 0;
-        if (sensor_alarm) {
+        if (sensor_fail_score > 0)
+            sensor_fail_score--;
+        if (sensor_fail_score == 0)
+            sensor_fail_ticks = 0;
+        if (sensor_alarm && sensor_fail_score == 0) {
             sensor_alarm = 0;
             info("coolant sensors reading again");
             if (over_temp_gate)
@@ -2259,17 +2482,51 @@ static void engine_tick(void)
             }
         }
     } else {
+        sensor_fail_score += SENSOR_FAIL_UP;
+        if (sensor_fail_score > SENSOR_FAIL_CAP)
+            sensor_fail_score = SENSOR_FAIL_CAP;
         if (sensor_fail_ticks < UINT32_MAX)
             sensor_fail_ticks++;
-        if (!sensor_alarm && sensor_fail_ticks >= SENSOR_FAIL_TICKS) {
+        /* The counts read (down, up), when one read as none: 0 is a
+         * short, 1023 and over the rail an open sensor sits on; -1 a read
+         * that failed. */
+        char counts[24] = "";
+        if ((!have_up && up_raw >= 0) || (!have_down && down_raw >= 0))
+            snprintf(counts, sizeof(counts), " (counts %d, %d)",
+                     (int)(down_raw > 65535 ? 65535 : down_raw < -1 ? -1 : down_raw),
+                     (int)(up_raw > 65535 ? 65535 : up_raw < -1 ? -1 : up_raw));
+        /* A tick the score tolerates joins the window; the window's
+         * SENSOR_WINDOW_N-th within SENSOR_WINDOW_S is not tolerated. */
+        unsigned in_window = 0;
+        if (!sensor_alarm && sensor_fail_score < SENSOR_FAIL_SCORE) {
+            sensor_tolerated_at[sensor_tolerated_n % SENSOR_WINDOW_N] = now;
+            sensor_tolerated_n++;
+            unsigned have = sensor_tolerated_n < SENSOR_WINDOW_N ? sensor_tolerated_n : SENSOR_WINDOW_N;
+            for (unsigned i = 0; i < have; i++)
+                if (now - sensor_tolerated_at[i] < SENSOR_WINDOW_S)
+                    in_window++;
+            if (in_window >= SENSOR_WINDOW_N)
+                sensor_fail_score = SENSOR_FAIL_CAP;
+            else if (now - sensor_tolerated_said >= SENSOR_TOLERATED_SAY_S) {
+                sensor_tolerated_said = now;
+                fflog(LOG_WARNING, "cool: coolant %s gave no reading for a tick%s: tolerated, "
+                      "the gates keep their state (%u tolerated in the last %.0f s)",
+                      which, counts, in_window, SENSOR_WINDOW_S);
+            }
+        }
+        if (!sensor_alarm && sensor_fail_score >= SENSOR_FAIL_SCORE) {
             sensor_alarm = 1;
-            char msg[112];
-            snprintf(msg, sizeof(msg),
-                     "SENSOR: coolant %s unreadable for %u s - fire blocked, "
-                     "hold, heater off",
-                     !have_down && !have_up ? "sensors"
-                     : !have_up ? "upstream sensor" : "downstream sensor",
-                     (unsigned)sensor_fail_ticks);
+            char msg[COOL_REASON_MAX];
+            if (in_window >= SENSOR_WINDOW_N)
+                snprintf(msg, sizeof(msg),
+                         "SENSOR: coolant %s unreadable on %u ticks in %.0f s - fire blocked, "
+                         "hold, heater off",
+                         which, in_window, SENSOR_WINDOW_S);
+            else
+                snprintf(msg, sizeof(msg),
+                         "SENSOR: coolant %s unreadable on %u ticks%s - fire blocked, "
+                         "hold, heater off",
+                         which, (unsigned)sensor_fail_ticks, counts);
             warn(msg);
             flowrun_yield("a coolant sensor is unreadable");
             heater_set_pct(0);
@@ -2327,9 +2584,19 @@ static void engine_tick(void)
      * (set under the floor, clear a degree above it). At its off end
      * it is no gate. */
     if (have_up && !gate_floor_off) {
+        /* A reading over COLD_SIDE_MAX_C stands for none on the cold side:
+         * it holds the floor shut, so a short that reads hundreds of
+         * degrees permits no fire into a loop the engine cannot see. */
         int was = cold_gate;
-        cold_gate = gate_floor_trip(cold_gate, up, eff_temp_min_c, TEMP_MIN_HYST_C);
-        if (cold_gate && !was) {
+        cold_gate = !up_cold_ok ||
+                    gate_floor_trip(cold_gate, up, eff_temp_min_c, TEMP_MIN_HYST_C);
+        if (cold_gate && !was && !up_cold_ok) {
+            char msg[COOL_REASON_MAX];
+            snprintf(msg, sizeof(msg),
+                     "COLD: coolant reads %.0f C, over %.0f C: no reading for the "
+                     "%.1f C floor - fire blocked", up, COLD_SIDE_MAX_C, eff_temp_min_c);
+            warn(msg);
+        } else if (cold_gate && !was) {
             char msg[96];
             snprintf(msg, sizeof(msg),
                      "COLD: coolant %.1f C under the %.1f C floor%s - fire "
@@ -2350,10 +2617,33 @@ static void engine_tick(void)
         pthread_mutex_unlock(&mu);
     }
 
+    /* A session that opened undecided (warmup_hold_pending) is decided by
+     * its first reading the cold side takes: under the gate, the warm-up
+     * proper; at it or over, the run, with the fans' spin-up grace. */
+    if (cool_state == Cool_Warmup && warmup_pending && up_cold_ok) {
+        if (up < warmup_gate_c) {
+            warmup_begin(now, up);
+        } else {
+            warmup_pending = 0;
+            cool_state = Cool_Run;
+            fans_run();
+            fan_grace_until = now + (double)fan_grace_s;
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "warm-up not needed: coolant %.1f C at the %.0f C start gate - run",
+                     up, warmup_gate_c);
+            info(msg);
+            pthread_mutex_lock(&mu);
+            pub_reason[0] = '\0';
+            pthread_mutex_unlock(&mu);
+        }
+    }
+
     /* The warm-up hold: released at the gate into a normal run session
      * (run fans, the spin-up grace). Under the gate a loop that stops
-     * warming is named once and keeps holding. */
-    if (cool_state == Cool_Warmup && have_up) {
+     * warming is named once and keeps holding. A reading over
+     * COLD_SIDE_MAX_C is no sample of it. */
+    if (cool_state == Cool_Warmup && !warmup_pending && up_cold_ok) {
         warmup_win[warmup_win_n % WARMUP_WIN] = up;
         warmup_win_n++;
         float bulk = up;
@@ -2396,9 +2686,11 @@ static void engine_tick(void)
      * Off with a blind sensor (SENSOR above), past the downstream cutoff
      * (on again 5 C under it: every gate reads upstream, which sits before
      * the heater), once the budget is spent (the hold stays: a loop that
-     * has not reached the gate in 30 minutes is not going to), and with
-     * the pump held off by a quiet hold. */
-    if (cool_state == Cool_Warmup) {
+     * has not reached the gate in 30 minutes is not going to), with the
+     * pump held off by a quiet hold, and while the session is undecided. */
+    if (cool_state == Cool_Warmup && warmup_pending) {
+        heater_set_pct(0);
+    } else if (cool_state == Cool_Warmup) {
         if (have_down && !warmup_hot && down >= WARMUP_DOWN_OFF_C) {
             warmup_hot = 1;
             fflog(LOG_WARNING, "cool: warm-up: downstream coolant %.1f C at the %.0f C cutoff - heater off "
@@ -2417,6 +2709,25 @@ static void engine_tick(void)
         }
         int heat = have_down && !sensor_alarm && !warmup_hot && !warmup_spent && !cool_quiet_pump_held();
         heater_set_pct(heat ? WARMUP_HEATER_PCT : 0);
+        /* The warm-up is said, as the hold's reason, with the heater as
+         * written here: on its first tick, when the heater first comes on,
+         * and once a SENSOR that stood over it is released (the release
+         * empties the reason). Under a standing SENSOR the line is only
+         * logged, and SENSOR keeps its words. */
+        if (sensor_alarm)
+            warmup_saw_sensor = 1;
+        if (warmup_heat_said < 0 || (heat && !warmup_heat_said) || (warmup_saw_sensor && !sensor_alarm)) {
+            char msg[112];
+            snprintf(msg, sizeof(msg), "WARM-UP: coolant %.1f C under the %.0f C start gate - %s, hold",
+                     warmup_open_up, warmup_gate_c, heat ? "heater on" : "heater off for now");
+            if (sensor_alarm)
+                fflog(LOG_WARNING, "cool: %s", msg);
+            else {
+                warn(msg);
+                warmup_saw_sensor = 0;
+            }
+            warmup_heat_said = heat;
+        }
     }
 
     /* The SoC's own thermal governor: it throttles the CPU at its
@@ -2513,7 +2824,9 @@ static void engine_tick(void)
     {
         int airflow = cool_state == Cool_Run || cool_state == Cool_Smoke ||
                       cool_state == Cool_Thermal || forced_cool;
-        int want = tec_present && have_up && airflow &&
+        /* A reading over COLD_SIDE_MAX_C drives no TEC: a short that reads
+         * hot would otherwise chill a loop the floor cannot see. */
+        int want = tec_present && up_cold_ok && airflow &&
                    up > (tec_on_state ? tec_off_c : tec_on_c);
         if (!gate_floor_off && have_up &&
             up <= eff_temp_min_c + TEMP_MIN_HYST_C)
@@ -2531,7 +2844,9 @@ static void engine_tick(void)
             else
                 snprintf(msg, sizeof(msg), "TEC off: %s",
                          !airflow ? "no airflow" : !tec_present ? "not fitted"
-                         : have_up && up <= eff_temp_min_c + TEMP_MIN_HYST_C
+                         : !have_up ? "no coolant reading"
+                         : !up_cold_ok ? "the coolant reading is over 70 C"
+                         : up <= eff_temp_min_c + TEMP_MIN_HYST_C
                            ? "at the coolant floor" : "coolant cooled");
             info(msg);
         }
@@ -2557,7 +2872,7 @@ static void engine_tick(void)
                         : crash_w.alert ? "BUMP"
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
-                        : sensor_alarm ? "SENSOR"
+                        : sensor_alarm || ir_blind_alarm ? "SENSOR"
                         : over_temp_gate ? "OVERTEMP"
                         : cold_gate ? "COLD"
                         : warming ? "WARMUP"
@@ -2575,19 +2890,25 @@ static void engine_tick(void)
     if (ack_wait && !strcmp(verdict, "OK"))
         verdict = "ACK";
     int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
-             || airflow_alarm || critical_alarm || sensor_alarm
+             || airflow_alarm || critical_alarm || sensor_alarm || ir_blind_alarm
              || over_temp_gate || cold_gate || warming
              || ext.standing || (ack_wait && eff_armed);
     int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
                 && !crash_w.alert && !airflow_alarm
-                && !critical_alarm && !sensor_alarm
+                && !critical_alarm && !sensor_alarm && !ir_blind_alarm
                 && !over_temp_gate && !cold_gate && !warming
                 && !ext.standing && !ack_wait;
     /* The reason is the hold's while the verdict is: it says which package
-     * and why, and another event's words may have stood there since. */
+     * and why, and another event's words may have stood there since. The
+     * lid IR channels' SENSOR keeps its own words the same way (a coolant
+     * sensor's SENSOR, when both stand, keeps the coolant's). */
     if (!strcmp(verdict, "EXT")) {
         pthread_mutex_lock(&mu);
         snprintf(pub_reason, sizeof(pub_reason), "%s", ext.reason);
+        pthread_mutex_unlock(&mu);
+    } else if (!strcmp(verdict, "SENSOR") && ir_blind_alarm && !sensor_alarm) {
+        pthread_mutex_lock(&mu);
+        snprintf(pub_reason, sizeof(pub_reason), "%s", ir_blind_reason);
         pthread_mutex_unlock(&mu);
     }
 
@@ -2872,7 +3193,10 @@ void cool_view(cool_view_t *v)
 double cool_coolant_c(long raw)
 {
     /* read_temp's conversion, the air-assist shift and the per-machine
-     * correction included. */
+     * correction included; NAN for a count that is no temperature
+     * (coolant.h). */
+    if (coolant_no_reading(raw))
+        return NAN;
     long raw_c = raw - cool_coolant_offset_counts();
     return coolant_degc(raw_c > 0 ? raw_c : raw) + (double)temp_offset_c;
 }

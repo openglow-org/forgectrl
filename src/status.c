@@ -19,6 +19,7 @@
  */
 #define _GNU_SOURCE
 #include "status.h"
+#include "coolant.h"
 #include "super.h"
 #include "cool.h"
 #include "diag.h"
@@ -151,12 +152,7 @@ double coolant_degc(long raw)
 /* The same conversion for a fractional count (the sampler's means). */
 double coolant_degc_counts(double raw)
 {
-    static const double adc_f = 1024.0 * 1.3;
-    if (raw <= 0.0 || raw >= adc_f)
-        return -273.15;
-    double r = 10000.0 / (adc_f / raw - 1.0);
-    double rinf = 10000.0 * exp(-3380.0 / 298.15);
-    return 3380.0 / log(r / rinf) - 273.15;
+    return coolant_c_of_counts(raw);
 }
 
 /* Tach period -> RPM. The air-assist tach reports a microsecond period
@@ -664,13 +660,21 @@ int machine_status_json(char *buf, size_t len, const char *extra)
 
     long t1 = rd_attr_long("pic/water_temp_1", -1);
     long t2 = rd_attr_long("pic/water_temp_2", -1);
-    /* The air-assist ground shift lifts the raw counts (more counts read
-     * colder); take them off, the same correction the engine applies. */
+    /* A count that is no temperature (coolant.h, judged on the count as
+     * read) is shown as none: null. The air-assist ground shift lifts the
+     * raw counts (more counts read colder); it comes off a reading, the
+     * same correction the engine applies. */
+    int no1 = coolant_no_reading(t1), no2 = coolant_no_reading(t2);
     long aa_off = cool_coolant_offset_counts();
     if (t1 > aa_off)
         t1 -= aa_off;
     if (t2 > aa_off)
         t2 -= aa_off;
+    char down_c[16] = "null", up_c[16] = "null";
+    if (!no1)
+        snprintf(down_c, sizeof(down_c), "%.1f", coolant_degc(t1));
+    if (!no2)
+        snprintf(up_c, sizeof(up_c), "%.1f", coolant_degc(t2));
     long ilk = rd_attr_long("cnc/interlock_circuit", -1);
     machine_switches_t sw = machine_switches_decode(read_switches());
 
@@ -747,8 +751,8 @@ int machine_status_json(char *buf, size_t len, const char *extra)
         fan_rpm(rd_attr_long("thermal/tach_intake_1", 0)),
         fan_rpm(rd_attr_long("thermal/tach_intake_2", 0)));
     append(buf, len, &off,
-        "\"coolant\":{\"down_c\":%.1f,\"up_c\":%.1f,\"pump\":%s,\"tec\":%s},",
-        coolant_degc(t1), coolant_degc(t2),
+        "\"coolant\":{\"down_c\":%s,\"up_c\":%s,\"pump\":%s,\"tec\":%s},",
+        down_c, up_c,
         rd_attr_long("thermal/water_pump_on", 0) ? "true" : "false",
         rd_attr_long("thermal/tec_on", 0) ? "true" : "false");
     /* Watched, not gated: the chassis in degrees, the supply as the raw

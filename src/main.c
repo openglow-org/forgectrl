@@ -688,12 +688,12 @@ static int valid_tec_present(const char *v){ return !strcmp(v, "0") || !strcmp(v
 /* The intake fans fitted: the setup's airflow check writes it. */
 static int valid_intake_fans(const char *v){ return !strcmp(v, "1") || !strcmp(v, "2"); }
 /* The coolant sensors' per-machine correction, a settings-file value
- * within 5 C either way; no setup step writes it. */
+ * within COOL_TEMP_OFFSET_MAX_C either way, held to the same length as
+ * every numeric value; no setup step writes it. The engine reads it to
+ * the same rule. */
 static int valid_temp_offset(const char *v)
 {
-    char *end;
-    double d = strtod(v, &end);
-    return end != v && *end == '\0' && d >= -5.0 && d <= 5.0;
+    return valid_range(v, -COOL_TEMP_OFFSET_MAX_C, COOL_TEMP_OFFSET_MAX_C);
 }
 static int valid_fire_q1a(const char *v)   { return valid_gate("cool_fire_q1_alert", v); }
 static int valid_fire_q1c(const char *v)   { return valid_gate("cool_fire_q1_critical", v); }

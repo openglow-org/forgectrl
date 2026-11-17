@@ -53,9 +53,15 @@ double tray_shift_mm(void)
     return tray_is_out() ? tray_grid_mm() : 0.0;
 }
 
+/* The settings validator's length bound (main.c): a padded value is no
+ * value, so no reader can take a prefix of it for the whole. */
+#define TRAY_OFFSET_MAX_LEN 16
+
 int tray_offset_valid(const char *v)
 {
     char *end;
+    if (strlen(v) > TRAY_OFFSET_MAX_LEN)
+        return 0;
     double mm = strtod(v, &end);
     return end != v && *end == '\0' && mm >= TRAY_OFFSET_MIN_MM && mm <= TRAY_OFFSET_MAX_MM;
 }

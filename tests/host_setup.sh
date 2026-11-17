@@ -768,6 +768,14 @@ expect '200|True|True|0' "$(run '"%s|%s|%s|%d" % (d["start"], bool(d["dark"]["er
     "a failing judge ends the check with an error, no result, and no question"
 expect '' "$(recv sensors)" "and the record carries no sensors"
 at_rest
+# Both coolant channels at the converter's rail (an open sensor): a count
+# that is no temperature is no sample, so the check has no coolant reading
+echo 1023 > "$SYS/pic/water_temp_1"
+echo 1023 > "$SYS/pic/water_temp_2"
+check sensors
+expect '200|True|True' "$(run '"%s|%s|%s" % (d["start"], "unreadable" in (d["dark"]["error"] or ""), d["dark"]["result"] is None)')" \
+    "coolant at the rail: the check ends with the sensor unreadable, no result"
+at_rest
 check sensors
 expect '200||0' "$(run '"%s|%s|%d" % (d["start"], d["dark"]["error"], len(d["prompts"]))')" "at rest: no error, no question"
 expect 'True|1' "$(run '"%s|%s" % (all(k in d["dark"]["result"] for k in ("coolant_down_c", "coolant_up_c", "lid_ir_max", "laser_pgood", "hv_current_max", "exhaust_rpm_idle", "intake_rpm_idle")), d["dark"]["result"]["laser_pgood"])')" \

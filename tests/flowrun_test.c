@@ -12,7 +12,8 @@
  *      the sampler's file never read
  *   B. turned on with no readings: the heater off, the missing sampler named
  *      once; then readings, a rest, and the hold heats; a 1 s window short
- *      of half the sampler's rate is no reading
+ *      of half the sampler's rate is no reading, and so is a mean that is
+ *      no temperature, judged before the corrections
  *   C. the kernel's lease: a heater above zero is written again every second
  *   D. the engine takes the heater: off at once and unstamped, never
  *      overwritten while the engine holds it, and back only after a rest; a
@@ -253,6 +254,15 @@ int main(void)
         means_put(730, 730, 25);
         CHECK(means(&d, &u, 0.0, 0.0) && fabs(d - coolant_degc_counts(730.0)) < 1e-9,
               "25 reads: the window's mean is the reading");
+        /* A mean that is no temperature (coolant.h), judged on the counts
+         * before either correction: the full 60-count lift and a +5 C
+         * correction would carry 990 counts to about +9.4 C. */
+        means_put(1023, 730, 50);
+        CHECK(!means(&d, &u, 0.0, 0.0), "the downstream mean at the 1023 rail: no reading");
+        means_put(730, 990, 50);
+        CHECK(!means(&d, &u, 60.0, 5.0), "the upstream mean at 990 counts, under 0 C as read: no reading, whatever the corrections");
+        means_put(982, 982, 50);
+        CHECK(means(&d, &u, 0.0, 0.0), "982 counts, over 0 C: a reading");
     }
     means_file(1);
     step(12.0);

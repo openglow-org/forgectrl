@@ -121,7 +121,7 @@ const gate_setting_t *gate_setting_find(const char *key)
 
 int gate_parse(const gate_setting_t *g, const char *text, double *out)
 {
-    if (!g || !text || !text[0])
+    if (!g || !text || !text[0] || strlen(text) > GATE_VALUE_MAX_LEN)
         return 0;
     char *end;
     double v = strtod(text, &end);

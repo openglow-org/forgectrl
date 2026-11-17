@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 #include "flowrun.h"
 
+#include "coolant.h"
 #include "fflog.h"
 #include "paths.h"
 #include "settings.h"
@@ -101,7 +102,9 @@ static int means(double *down_c, double *up_c, double offset_counts, double temp
             n2 = in_1s;
         }
     }
-    if (isnan(m1) || isnan(m2) || m1 <= 0.0 || m2 <= 0.0)
+    /* A mean that is no temperature (coolant.h), judged on the counts as
+     * read, before either correction, is no reading. */
+    if (coolant_no_reading_counts(m1) || coolant_no_reading_counts(m2))
         return 0;
     if (!hz || 2 * n1 < hz || 2 * n2 < hz)
         return 0;

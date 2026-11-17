@@ -10,7 +10,15 @@
 #include <stddef.h>
 
 /* Read a key from the shared config file (FORGECTRL_CONF, default
- * /data/forgefirm/forgefirm.conf). Returns 0 and fills val, or -1 if absent. */
+ * /data/forgefirm/forgefirm.conf). Returns 0 and fills val, or a negative
+ * code and leaves val as it was: SETTINGS_ABSENT (no such key, or no
+ * file), SETTINGS_UNREADABLE (the file is there and could not be read),
+ * or SETTINGS_TOO_LONG (the value does not fit val, or its line does not
+ * fit the reader: never a prefix of it). The last occurrence of a key
+ * wins. */
+#define SETTINGS_ABSENT     (-1)
+#define SETTINGS_UNREADABLE (-2)
+#define SETTINGS_TOO_LONG   (-3)
 int settings_get(const char *key, char *val, size_t len);
 /* A 0/1 key: 1 when the value is "1", 0 when "0", def when absent or
  * anything else. */

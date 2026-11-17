@@ -18,6 +18,7 @@
 #include "cam.h"
 #include "setup.h"
 #include "cool.h"
+#include "coolant.h"
 #include "diag.h"
 #include "fflog.h"
 #include "gates.h"
@@ -624,7 +625,9 @@ static void run_sensors(void)
         if (aborted())
             goto out;
         long t1 = rd_long("pic/water_temp_1", -1), t2 = rd_long("pic/water_temp_2", -1);
-        if (t1 > 0 && t2 > 0) {
+        /* A count that is no temperature (coolant.h) is no sample: a check
+         * of sensors that read none has no coolant reading to report. */
+        if (t1 >= 0 && t2 >= 0 && !coolant_no_reading(t1) && !coolant_no_reading(t2)) {
             down += coolant_degc(t1);
             up += coolant_degc(t2);
             have_temp++;

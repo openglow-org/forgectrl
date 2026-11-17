@@ -19,6 +19,7 @@
 #include "settings.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -104,18 +105,33 @@ int settings_get(const char *key, char *val, size_t len)
 {
     FILE *f = fopen(settings_path(), "r");
     if (!f)
-        return -1;
+        return errno == ENOENT ? SETTINGS_ABSENT : SETTINGS_UNREADABLE;
 
     char line[LINE_MAX_LEN];
-    int found = -1;
+    int found = SETTINGS_ABSENT;
+    int rest = 0;                       /* inside a line longer than the buffer */
     while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        int whole = (n > 0 && line[n - 1] == '\n') || feof(f);
+        if (rest) {
+            /* The rest of a long line is no line of its own. */
+            rest = !whole;
+            continue;
+        }
+        rest = !whole;
         char *k, *v;
         if (parse_line(line, &k, &v) == 0 && !strcmp(k, key)) {
-            snprintf(val, len, "%s", v);
-            found = 0;
             /* keep scanning: the last occurrence wins */
+            if (rest || strlen(v) >= len) {
+                found = SETTINGS_TOO_LONG;
+            } else {
+                snprintf(val, len, "%s", v);
+                found = 0;
+            }
         }
     }
+    if (ferror(f))
+        found = SETTINGS_UNREADABLE;
     fclose(f);
     return found;
 }
