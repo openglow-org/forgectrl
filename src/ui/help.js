@@ -248,7 +248,7 @@ var HELP = {
     t: 'Motor rail',
     d: 'usage/settings/',
     p: [
-      'Off period observed before the 40 V motor rail is re-enabled on a controller takeover, so the stepper drivers always power up from a settled supply. 0 disables.'
+      'Used only when the GRBL controller runs on its own, outside forgectrl (a bench setup): the off period before it turns the 40 V motor rail back on. forgectrl does not read it. 0 disables.'
     ]
   },
   lamp: {

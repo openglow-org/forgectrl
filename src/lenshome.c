@@ -8,9 +8,12 @@
  * sensor's rising edge, whose focal height the focus card measured. Until
  * the lens sits on it the controller cannot know the focal height, so its
  * Z soft limit pins Z where it stands and every Z move is refused. The
- * hunt runs here, in the motion-verify window: the enclosure is already
- * checked, the 40 V rail is up, the broker holds the pulse device, and no
- * controller has started, so nothing else is driving the machine.
+ * hunt runs behind the motion probe, and again before every GRBL
+ * controller that would otherwise start without a marker (every
+ * controller exit drops it): the enclosure is already checked, the broker
+ * holds the pulse device, and no controller runs, so nothing else is
+ * driving the machine. The supervisor's stop lever reaches the hunt
+ * between two steps.
  *
  * The sweep is the factory-path sequence the cloud runner uses (gfhardware
  * ZAxis.home): full steps at the drive current, away from the sensor until
@@ -23,8 +26,9 @@
  * lens motor is wedged, the carriage is jammed, or the hall sensor is
  * dead, and a laser whose focal height is a guess does not get to run. The
  * bound also keeps a dead sensor from driving the carriage onto a stop.
- * The caller turns a fault into the motion-fault gate, so no controller
- * spawns and the panel says why.
+ * Behind the probe the caller turns a fault into the motion-fault gate, so
+ * no controller spawns and the panel says why; before a respawn a fault
+ * leaves the marker absent, and the controller holds Z unreferenced.
  */
 #define _GNU_SOURCE
 #include "lenshome.h"
@@ -118,14 +122,16 @@ static int over_sensor(void)
     return buf[0] == '0';
 }
 
-/* Step until the sensor reads `want`, at most MAX_SWEEP_STEPS. Returns the
- * steps taken, or -1 if the bound was reached, -2 if the head went away
- * mid-sweep. Toward the sensor is up, away from it is down: the same
- * senses the cloud runner uses. */
-static int sweep_until(int want, int *steps_out)
+/* Step until the sensor reads `want`, at most MAX_SWEEP_STEPS. Returns 0
+ * with the steps taken, or -1 if the bound was reached, -2 if the head
+ * went away mid-sweep, -3 if stop asked for the end. Toward the sensor is
+ * up, away from it is down: the same senses the cloud runner uses. */
+static int sweep_until(int want, int *steps_out, int (*stop)(void))
 {
     const char *dir = want ? DIR_UP : DIR_DOWN;
     for (int steps = 0; steps <= MAX_SWEEP_STEPS; steps++) {
+        if (stop && stop())
+            return -3;
         int at = over_sensor();
         if (at < 0)
             return -2;
@@ -160,10 +166,17 @@ void lenshome_clear(void)
     unlink(path);
 }
 
+int lenshome_present(void)
+{
+    char path[256];
+    marker_path(path, sizeof(path));
+    return access(path, F_OK) == 0;
+}
+
 /* The marker the controller reads at its start: the lens is standing on
- * the hall edge, referenced in this broker hold. The controller turns
- * that into a focal height from its own settings; the counts here are for
- * the log and the panel, not for the controller. */
+ * the hall edge, referenced since the last controller left. The
+ * controller turns that into a focal height from its own settings; the
+ * counts here are for the log and the panel, not for the controller. */
 static void marker_write(int off_steps, int on_steps)
 {
     char path[256], tmp[288];
@@ -186,7 +199,7 @@ static void marker_write(int off_steps, int on_steps)
     }
 }
 
-int lenshome_run(char *detail, size_t dlen)
+int lenshome_run(char *detail, size_t dlen, int (*stop)(void))
 {
     lenshome_clear();
 
@@ -209,11 +222,15 @@ int lenshome_run(char *detail, size_t dlen)
     wr_attr(ATTR_Z_MODE, Z_MODE_FULL);
 
     int off_steps = 0, on_steps = 0;
-    int rc = sweep_until(0, &off_steps);
+    int rc = sweep_until(0, &off_steps, stop);
     if (rc == 0)
-        rc = sweep_until(1, &on_steps);
+        rc = sweep_until(1, &on_steps, stop);
     rest_motor();
 
+    if (rc == -3) {
+        snprintf(detail, dlen, "the hunt was ended between two steps");
+        return LENSHOME_STOPPED;
+    }
     if (rc == -2) {
         snprintf(detail, dlen, "the head went away during the hunt");
         return 0;

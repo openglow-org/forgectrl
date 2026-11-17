@@ -9,7 +9,8 @@
  * none); the host's mcode command run as an argument vector with the
  * code and the words, its refusal passed on in its words; and the answer
  * line, ok for a 2xx with the body's message and fail for everything else,
- * held to the port's form (printable, no brackets, bounded). The daemon
+ * held to the port's form (printable, no brackets, bounded); the relay's
+ * memory of what it answered, kept per controller pid. The daemon
  * set: neither operation is open to a package or a panel caller, and
  * nothing is written when one tries.
  */
@@ -74,6 +75,15 @@ int main(void)
     snprintf(big, sizeof(big), "{\"status\":200,\"body\":{\"message\":\"%0300d\"}}", 0);
     l = line(15, big, NULL);
     CHECK(strlen(l) == strlen("15 ok ") + MCODE_TEXT_MAX, "a long message is cut to %d bytes: %zu", MCODE_TEXT_MAX, strlen(l));
+
+    /* The relay's memory is one controller's: each numbers its M-codes from
+     * 1, so a respawned controller (a new pid, even between two polls)
+     * starts it empty, and its first M-code is answered. */
+    mcode_memory_t mem = { 0, 0 };
+    CHECK(mcode_memory_for(&mem, 4001) == 1 && mem.done == 0, "a first controller starts the memory empty");
+    mem.done = 1;
+    CHECK(mcode_memory_for(&mem, 4001) == 0 && mem.done == 1, "the same controller keeps what was answered");
+    CHECK(mcode_memory_for(&mem, 4002) == 1 && mem.done == 0, "a new controller's sequence 1 is not taken for answered");
 
     /* The table, from the host's own status, only while that host is alive. */
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);

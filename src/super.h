@@ -29,11 +29,25 @@ int super_motion_fault(void);
  * inside its own hold), or NULL for anybody else. */
 int super_mode_switch(const char *mode, const char *as, char *err, size_t elen);
 
-/* Diagnostics takeover: stop the active controller without changing the
- * selected mode (returns 0 once it is down), and start it again. The
- * controller that comes back is the selected mode's - whichever that is. */
+/* The stop lever (POST /controller/stop): stop the active controller
+ * without changing the selected mode and hold supervision suspended
+ * (returns 0 once it is down); and the start that resumes supervision,
+ * clears a motion fault (the operator's retry) and lets the selected
+ * mode's controller come back, whichever that is. */
 int super_controller_stop(void);
 void super_controller_start(void);
+/* A setup check's or a diagnostic's takeover: the controller stopped for
+ * the check's own reason (0 once it is down), and the hand-back, which
+ * ends that reason alone. A stop lever pulled meanwhile, or a motion
+ * fault the check found or found standing, outlives the hand-back. */
+int super_takeover_begin(void);
+void super_takeover_end(void);
+/* What keeps the controllers down whatever a check does: the stop lever's
+ * hold, a motion fault. A check that needs a controller of its own refuses
+ * to start under them, in their words. */
+#define SUPER_HELD    1u
+#define SUPER_FAULTED 2u
+unsigned super_holds(void);
 /* The cooling engine's fail tier (a fire signal, a head crash): the
  * controller is stopped the deliberate way (the safing pair before the
  * signal) and started again at once by the lifecycle thread. Never
@@ -44,8 +58,11 @@ void super_controller_restart(const char *why);
 void super_sigchld_init(void);
 
 /* {"mode":"grbl","controller":"running|stopped|standby|waiting|gated|motion-fault",
- *  "pid":N,"motion":"verified|unverified|fault","gated":bool,"local":bool,
- *  "why":"..."}
+ *  "pid":N,"motion":"verified|unverified|fault","stepper_fault":bool,
+ *  "gated":bool,"local":bool,"why":"..."}
+ * stepper_fault: a motion fault stands and the kernel reads fault, however
+ * the fault was found: POST /mode refuses it, and POST /controller/start is
+ * the retry.
  * waiting: the motion gate holds the spawn until a lid or the interlock
  * closes. why names what holds the machine (the gate, the enclosure),
  * else the probe's own words behind a faulted or unverified verdict. */
@@ -54,10 +71,16 @@ int super_status_json(char *buf, size_t len);
  * apply and the Grbl controller binds to loopback only. A change
  * restarts a running Grbl controller with the new bind. */
 void super_set_local(int on);
-/* The motion wizard's visible probe: with the controller stopped, run
- * the liveness probe sequence on the broker's device. 1 verified, 0 no
- * motion (the drivers did not recover), 2 could not run; detail says
- * why. The supervisor's own gate takes the outcome too. */
+/* The motion wizard's visible probe: with the controller stopped and any
+ * homing runner it left ended, run the liveness probe sequence on the
+ * broker's device; under the stop lever's hold it answers 4 and moves
+ * nothing. 1 verified, 0 a motion fault (no motion after the
+ * ladder, a lens with no edge, a stepper enable the kernel refused, or a
+ * probe the machine failed), 2 could not run, 3 it ended before a
+ * verdict (the enclosure, a busy kernel), 4 the stop lever ended it;
+ * detail says why. The supervisor's own gate takes the outcome too, and
+ * 3 and 4 leave motion unverified, so the lifecycle probes again before
+ * any controller starts. */
 int super_probe_motion(char *detail, size_t dlen);
 /* Whether the gate holds controllers back right now, and why. */
 int super_gated(char *why, size_t len);
@@ -66,6 +89,9 @@ int super_gated(char *why, size_t len);
  * alive: the gate for echoing the controller's published state files
  * (a dead controller's files must read as absent, not as truth). */
 int super_grbl_running(void);
+/* The running GRBL controller's pid, 0 with none: a new pid is a new
+ * controller, whatever lay between. */
+long super_grbl_pid(void);
 
 /* The controller's report channel: whether presented is the secret the
  * running controller was handed at its spawn. Never true with no

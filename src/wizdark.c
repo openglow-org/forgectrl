@@ -120,6 +120,7 @@ static void finish_err(const char *fmt, ...);
 static char lease_owner[LEASE_OWNER_MAX];    /* the machine lease the running wizard holds */
 static int lease_held;                        /* a package's check holds none */
 static int machine_held;
+static volatile int shutting;           /* the daemon's shutdown has begun */
 
 static uint8_t *shot_jpeg[2];
 static size_t shot_len[2];
@@ -473,9 +474,12 @@ static int lid_closed_wait(const char *text)
 
 /* --------------------------------------- the controller and the LED */
 
+/* The check takes the machine for its own reason and hands back only
+ * that: an operator's stop made before or during the check, and a motion
+ * fault, stand after it (super.h). */
 int wiz_controller_stop(void)
 {
-    int rc = super_controller_stop();
+    int rc = super_takeover_begin();
     if (rc == 0) {
         machine_held = 1;
         led_set(LED_SOLID_WHITE);
@@ -487,7 +491,26 @@ void wiz_controller_start(void)
 {
     machine_held = 0;
     led_release();
-    super_controller_start();
+    super_takeover_end();
+}
+
+/* A check that needs a controller of its own (its loopback controller,
+ * the cloud client) cannot get one while the stop lever holds the
+ * controllers down, nor, unless it is the Motion check (the retry), while
+ * a motion fault does: the hand-back keeps both. It ends at its start in
+ * those words. 0 when it may run. */
+int wiz_refuse_held(int fault_too)
+{
+    unsigned h = super_holds();
+    if (h & SUPER_HELD) {
+        finish_err("the controller was stopped (POST /controller/stop): start it again first");
+        return -1;
+    }
+    if (fault_too && (h & SUPER_FAULTED)) {
+        finish_err("a motion fault holds the controllers: run the Motion check first");
+        return -1;
+    }
+    return 0;
 }
 
 void wiz_led_attention(int on)
@@ -1275,6 +1298,24 @@ static int kernel_idle(void)
     return strncmp(text, "idle", 4) == 0;
 }
 
+/* Whether cnc/state reads exactly word. */
+static int kernel_state_is(const char *word)
+{
+    char path[192], text[32];
+    snprintf(path, sizeof(path), "%s/cnc/state", sysfs_root());
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == ' '))
+        n--;
+    text[n] = '\0';
+    return strcmp(text, word) == 0;
+}
+
 /* Then wait for the pulse engine to finish playing it, still sampling:
  * the controller's Idle comes when the stream is produced, and the
  * kernel plays the rest of it afterward. */
@@ -1368,6 +1409,8 @@ static void run_motion(void)
 {
     int stopped = 0, local = 0, watch = 0, fd = -1;
     json_t *r = json_object();
+    if (wiz_refuse_held(0) != 0)
+        goto out;
     phase("stopping the motion controller");
     if (wiz_controller_stop() != 0) {
         finish_err("could not stop the motion controller");
@@ -1380,7 +1423,10 @@ static void run_motion(void)
     wlog("liveness probe: %s", detail);
     json_object_set_new(r, "probe", json_string(detail));
     if (rc != 1) {
-        finish_err(rc == 2 ? "the probe could not run: %s" : "no motion on the probe: %s", detail);
+        finish_err(rc == 2   ? "the probe could not run: %s"
+                   : rc == 3 ? "the probe ended before a verdict: %s"
+                   : rc == 4 ? "the probe was stopped: %s"
+                             : "no motion on the probe: %s", detail);
         goto out;
     }
     progress(20);
@@ -1389,6 +1435,11 @@ static void run_motion(void)
     phase("the lens hall reference");
     rc = z_reference(r, 5);
     if (rc != 0) {
+        /* The probe's hunt left the lens on its edge and the marker
+         * saying so; passes that ended early leave it anywhere. The
+         * marker goes, and the supervisor sweeps the lens again before
+         * the next controller. */
+        lenshome_clear();
         finish_err(rc == -2 ? "the lens never reached the hall sensor in 200 steps"
                    : rc == -3 ? "the lens reference passes disagree"
                               : "the lens reference could not run");
@@ -1632,10 +1683,13 @@ out:
     /* The next controller takes its Z frame from the reference marker,
      * and an abort stops the finder wherever the lens is: whatever the
      * exit, the lens goes back on its hall edge first, or the marker
-     * goes and the controller holds Z unreferenced. */
+     * goes and the controller holds Z unreferenced. An engine that does
+     * not go idle keeps the lens where it stands. */
     if (stopped) {
-        wiz_kernel_settle(30.0);
-        if (wiz_lens_rehome() != 0)
+        if (wiz_kernel_settle(30.0) != 0) {
+            lenshome_clear();
+            wlog("the pulse engine did not go idle: the lens stays where it is, Z unreferenced");
+        } else if (wiz_lens_rehome() != 0)
             wlog("the lens could not find its reference: Z stays unreferenced until it does");
         wiz_controller_start();
     }
@@ -1730,6 +1784,11 @@ static void run_cloud_header(void)
     if (!settings_get_bool("cloud_enabled", 0)) {
         json_object_set_new(r, "skipped", json_string("cloud mode is off"));
         finish_ok(1, r, NULL);
+        json_decref(r);
+        return;
+    }
+    /* Its mode switch would end the operator's stop and a motion fault. */
+    if (wiz_refuse_held(1) != 0) {
         json_decref(r);
         return;
     }
@@ -2059,7 +2118,7 @@ static const wiz_entry_t wizards[] = {
     { "sensors",             run_sensors,             1 },
     { "airflow",             run_airflow,             1 },
     { "cooling.aa-offset",   run_cooling_aa,          1 },
-    { "motion",              run_motion,              1 },
+    { "motion",              run_motion,              2 },
     { "cameras",             run_cameras,             1 },
     { "motion.envelope",     run_envelope,            1 },
     { "lens.travel",         run_lens_travel,         1 },
@@ -2143,7 +2202,11 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
         snprintf(err, elen, "a wizard is already running (%s)", S.id);
         return -1;
     }
-    if (entry(ix)->needs_idle && !machine_is_idle()) {
+    /* The Motion check also runs over a stepper fault: its probe gives
+     * the fault its one enable and verifies the gantry after it, the way
+     * out of the fault short of a reboot. */
+    if (entry(ix)->needs_idle && !machine_is_idle() &&
+        !(entry(ix)->needs_idle == 2 && kernel_state_is("fault"))) {
         pthread_mutex_unlock(&mu);
         snprintf(err, elen, "the machine is not idle");
         return -1;
@@ -2357,6 +2420,7 @@ void wizdark_init(void)
 
 void wizdark_shutdown(void)
 {
+    shutting = 1;
     wizdark_abort(NULL);
     pthread_mutex_lock(&mu);
     struct timespec until;
@@ -2475,10 +2539,19 @@ int wiz_kernel_settle(double timeout_s)
     }
     return -1;
 }
+/* An exit's rehome runs after an abort on purpose, so the abort does not
+ * end it; the daemon's shutdown does, between two steps, before its bound
+ * on the wizard's thread: the motor goes back to its hold current and
+ * half step, and the marker stays absent. */
+static int rehome_stop(void)
+{
+    return shutting;
+}
+
 int wiz_lens_rehome(void)
 {
     char detail[96];
-    int rc = lenshome_run(detail, sizeof(detail));
+    int rc = lenshome_run(detail, sizeof(detail), rehome_stop);
     wlog("lens: %s", detail);
     return rc == 1 ? 0 : -1;
 }

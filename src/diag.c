@@ -118,17 +118,19 @@ static void sample(double *down, double *up)
 
 /* ------------------------------------------------- controller service */
 
-/* The supervisor owns the controller lifecycle: suspend takes the
- * hardware (the active mode's controller stops), resume gives it back
- * (the selected mode's controller returns - whichever that is). */
+/* The supervisor owns the controller lifecycle: the takeover takes the
+ * hardware (the active mode's controller stops), the hand-back gives it
+ * back (the selected mode's controller returns - whichever that is). The
+ * hand-back ends the diagnostic's own reason alone: an operator's stop
+ * made meanwhile, and a motion fault, stand. */
 static int controller_stop(void)
 {
-    return super_controller_stop();
+    return super_takeover_begin();
 }
 
 static void controller_start(void)
 {
-    super_controller_start();
+    super_takeover_end();
 }
 
 /* ------------------------------------------------------ log + status */

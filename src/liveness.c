@@ -32,6 +32,7 @@
 #include "liveness.h"
 #include "testhook.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <stdint.h>
@@ -162,6 +163,7 @@ int liveness_enclosure(char *why, size_t wlen)
 #define B_X_STEP        0x01
 #define B_X_DIR         0x02    /* set = negative X */
 
+/* 0, or -1 with errno saying why. */
 static int wr_attr(const char *attr, const char *val)
 {
     char path[96];
@@ -170,8 +172,20 @@ static int wr_attr(const char *attr, const char *val)
     if (fd < 0)
         return -1;
     int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
+    int err = errno;
     close(fd);
+    errno = err;
     return ret;
+}
+
+/* A probe setup write: -1 with detail naming the attribute and the
+ * error when it does not land. */
+static int setup_wr(const char *attr, const char *val, char *detail, size_t dlen)
+{
+    if (wr_attr(attr, val) == 0)
+        return 0;
+    snprintf(detail, dlen, "cannot write %s: %s", attr, strerror(errno));
+    return -1;
 }
 
 static int rd_attr(const char *attr, char *buf, size_t len)
@@ -198,12 +212,22 @@ static double wall_s(void)
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* The iio device directory: the test hook GF_IIO_ROOT moves it in a
+ * host-test run (testhook.h), so a host test can stand in for the head
+ * accelerometer; on a machine it is always this one. */
+static const char *iio_root(void)
+{
+    const char *r = ff_test_hook("GF_IIO_ROOT");
+    return r ? r : "/sys/bus/iio/devices";
+}
+
 /* Find the head accel's iio sysfs directory by its i2c bus address. */
 static int head_accel_path(char *buf, size_t len)
 {
     for (int i = 0; i < 8; i++) {
         char link[128], resolved[256];
-        snprintf(link, sizeof(link), "/sys/bus/iio/devices/iio:device%d", i);
+        if (snprintf(link, sizeof(link), "%s/iio:device%d", iio_root(), i) >= (int)sizeof(link))
+            return -1;
         ssize_t n = readlink(link, resolved, sizeof(resolved) - 1);
         if (n < 0)
             continue;
@@ -244,7 +268,7 @@ int liveness_accel_read(long *x, long *y)
     return 0;
 }
 
-int liveness_probe(int pulse_fd, char *detail, size_t dlen)
+int liveness_probe(int pulse_fd, char *detail, size_t dlen, int (*stop)(void))
 {
     char accel[128], st[24];
 
@@ -254,7 +278,7 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
     }
     if (rd_attr("cnc/state", st, sizeof(st)) != 0) {
         snprintf(detail, dlen, "kernel state unreadable");
-        return -1;
+        return -4;
     }
     if (strcmp(st, "idle")) {
         /* The last program is still playing (a controller that died
@@ -278,18 +302,25 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
      * masked (a leftover motor_lock would read as a dead driver), x8
      * microstep mode, slow decay, run current on X. The controller
      * re-applies its full config at its own start. The current step
-     * jolts the head; let it settle before the accelerometer is read. */
-    wr_attr("cnc/motor_lock", "0");
-    wr_attr("cnc/x_mode", "8");
-    wr_attr("cnc/x_decay", "1");
-    wr_attr("pic/x_step_current", "135");
+     * jolts the head; let it settle before the accelerometer is read.
+     * Every write is checked: one that does not land would make a live
+     * gantry read as dead (a motor still masked, the X motor at its hold
+     * current), so it is a fault of its own, named, and nothing moves. */
+    if (setup_wr("cnc/motor_lock", "0", detail, dlen) || setup_wr("cnc/x_mode", "8", detail, dlen) ||
+        setup_wr("cnc/x_decay", "1", detail, dlen) || setup_wr("pic/x_step_current", "135", detail, dlen))
+        goto setup_failed;
     usleep(CURRENT_SETTLE_US);
 
     char freq[16];
     snprintf(freq, sizeof(freq), "%d", STEP_FREQ_HZ);
-    wr_attr("cnc/step_freq", freq);
-    lseek(pulse_fd, 1, SEEK_SET);       /* clear program + byte counters */
-    wr_attr("cnc/streaming", "0");      /* complete program: EOD = done */
+    if (setup_wr("cnc/step_freq", freq, detail, dlen))
+        goto setup_failed;
+    if (lseek(pulse_fd, 1, SEEK_SET) < 0) {     /* clear program + byte counters */
+        snprintf(detail, dlen, "cannot clear the pulse program: %s", strerror(errno));
+        goto setup_failed;
+    }
+    if (setup_wr("cnc/streaming", "0", detail, dlen))      /* complete program: EOD = done */
+        goto setup_failed;
 
     /* The pattern: lead-in, +X out, pause, -X back, tail. One byte per
      * tick; a set X_STEP bit is one microstep that tick. */
@@ -298,7 +329,7 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
     uint8_t *pat = calloc(1, total);
     if (!pat) {
         snprintf(detail, dlen, "out of memory");
-        return -1;
+        goto setup_failed;
     }
     size_t off = LEAD_TICKS;
     for (int i = 0; i < PROBE_STEPS; i++, off += TICKS_PER_STEP)
@@ -311,22 +342,54 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
     free(pat);
     if (wr != (ssize_t)total) {
         snprintf(detail, dlen, "pulse write failed (%zd of %zu)", wr, total);
-        return -1;
+        lseek(pulse_fd, 1, SEEK_SET);
+        goto setup_failed;
+    }
+
+    /* The last look before the move: the kernel is idle, so a stop the
+     * lever wrote during the settle was lost, and an enclosure that opened
+     * since the check above has not been read. Either one, and the run
+     * does not start. */
+    if (stop && stop()) {
+        snprintf(detail, dlen, "the probe was ended before its move");
+        lseek(pulse_fd, 1, SEEK_SET);
+        wr_attr("pic/x_step_current", "33");
+        return -6;
+    }
+    if (liveness_enclosure(why, sizeof(why)) != 0) {
+        snprintf(detail, dlen, "%s - motion probe skipped", why);
+        lseek(pulse_fd, 1, SEEK_SET);
+        wr_attr("pic/x_step_current", "33");
+        return -2;
     }
 
     if (wr_attr("cnc/run", "1") != 0) {
-        snprintf(detail, dlen, "cannot start the probe run");
+        snprintf(detail, dlen, "cannot start the probe run: %s", strerror(errno));
         lseek(pulse_fd, 1, SEEK_SET);
-        return -1;
+        goto setup_failed;
     }
 
     /* Sample the head accel until the run completes (~3.5 s). The raw
      * sysfs reads are slow (~150 ms); that still lands ~10 samples in
-     * the window, plenty for a peak-to-peak verdict. */
+     * the window, plenty for a peak-to-peak verdict. The enclosure is
+     * read with every sample: a lid or the interlock opening under the
+     * move, or switches that stop answering, stop it (the kernel's
+     * controlled deceleration), and the probe answers -5: the head stands
+     * where the stop caught it. */
     long minx = 0, maxx = 0, miny = 0, maxy = 0;
-    int have = 0;
+    int have = 0, opened = 0;
     double deadline = wall_s() + 12.0;
     while (wall_s() < deadline) {
+        if (!opened && liveness_enclosure(why, sizeof(why)) != 0) {
+            opened = 1;
+            wr_attr("cnc/stop", "1");
+        }
+        if (opened) {
+            if (rd_attr("cnc/state", st, sizeof(st)) == 0 && strcmp(st, "idle") == 0)
+                break;      /* the stop has ended the run */
+            usleep(20000);
+            continue;
+        }
         long x, y;
         if (accel_read(accel, "x", &x) == 0 && accel_read(accel, "y", &y) == 0) {
             if (!have) {
@@ -347,15 +410,28 @@ int liveness_probe(int pulse_fd, char *detail, size_t dlen)
 
     /* Stand down: hold current, program cleared. Position counters are
      * net unchanged (equal steps out and back). */
-    wr_attr("pic/x_step_current", "33");
+    int down = setup_wr("pic/x_step_current", "33", detail, dlen);
     lseek(pulse_fd, 1, SEEK_SET);
+    if (down)
+        return -4;
+    if (opened) {
+        snprintf(detail, dlen, "%s - the probe's move was stopped", why);
+        return -5;
+    }
 
     long p2px = maxx - minx, p2py = maxy - miny;
     long p2p = p2px > p2py ? p2px : p2py;
+    if (!have) {
+        snprintf(detail, dlen, "no head accelerometer sample during the probe's move");
+        return -4;
+    }
     snprintf(detail, dlen, "head accel p2p x=%ld y=%ld (moving>=%d dead<=%d)",
              p2px, p2py, P2P_MOVING, P2P_DEAD);
-
-    if (!have)
-        return -1;
     return p2p >= P2P_MOVING ? 1 : 0;
+
+setup_failed:
+    /* Nothing moved; the X motor goes back to its hold current, as far as
+     * the PIC takes it. */
+    wr_attr("pic/x_step_current", "33");
+    return -4;
 }

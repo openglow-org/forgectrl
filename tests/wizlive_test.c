@@ -42,6 +42,7 @@ static void note(const char *what)
 int wiz_kernel_settle(double timeout_s) { (void)timeout_s; note("settle"); return settle_rc; }
 int wiz_controller_stop(void) { note("stop"); return stop_rc; }
 void wiz_controller_start(void) { note("start"); }
+int wiz_refuse_held(int fault_too) { (void)fault_too; return 0; }
 int wiz_lens_rehome(void) { note("rehome"); return rehome_rc; }
 void lenshome_clear(void) { note("clear"); }
 void super_set_local(int on) { note(on ? "local1" : "local0"); }

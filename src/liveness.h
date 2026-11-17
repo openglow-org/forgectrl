@@ -13,13 +13,21 @@
  * PHYSICALLY happened via the head accelerometer. Requires the kernel
  * idle and no motion controller running (the supervisor guarantees
  * both). Returns 1 = motion confirmed, 0 = the gantry did not move
- * (wedged stepper drivers), -1 = probe could not run (no head
- * accelerometer, a write failed), -2 = a lid or the interlock is open
- * (or the switches cannot be read), -3 = the kernel is still playing
- * a program: with -2 and -3 the gantry was not moved and the caller
- * waits and asks again. detail gets a short human-readable result
- * line either way. */
-int liveness_probe(int pulse_fd, char *detail, size_t dlen);
+ * (wedged stepper drivers), -1 = the probe cannot run here (no head
+ * accelerometer), -2 = a lid or the interlock is open (or the switches
+ * cannot be read) before the move: nothing moved, -3 = the kernel is
+ * still playing a program, -4 = the probe failed on the machine: a setup
+ * write, the pulse program, the run, or the accelerometer's samples, with
+ * detail naming which and why (a fault of its own: a live gantry would
+ * read as dead), -5 = the enclosure opened (or stopped answering) under
+ * the move, which was stopped where it stood, toward +X of its start,
+ * -6 = stop answered just before the move, which never started. stop (may
+ * be NULL) is asked there, after the current settle and the program
+ * write, as the enclosure is: a kernel at idle loses a stop written to
+ * it, so the caller's own stop cannot end a move that has not begun. With
+ * -2, -3 and -5 the caller waits and asks again. detail gets a short
+ * human-readable result line either way. */
+int liveness_probe(int pulse_fd, char *detail, size_t dlen, int (*stop)(void));
 /* The enclosure as the probe sees it: 0 = closed (the gantry may move),
  * 1 = a lid or the interlock is open, -1 = the switch device cannot be
  * read (no license to move: treated as open). why gets the reason in

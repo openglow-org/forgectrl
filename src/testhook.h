@@ -11,7 +11,9 @@
  * with '/'), GF_SWITCH_DEV the switch device, GF_RUN_DIR the run
  * directory, GF_DEV_MARKER the dev-image marker (/etc/forgefirm-dev),
  * GF_DATA_STATE the boot's data record (/run/forgefirm-data.state),
- * GF_LED_ROOT the LED class (/sys/class/leds). Two stand in for a
+ * GF_LED_ROOT the LED class (/sys/class/leds), GF_IIO_ROOT the iio
+ * devices the motion probe finds the head accelerometer among
+ * (/sys/bus/iio/devices). Two stand in for a
  * program a host test must not run: GF_SLOT_LIST names a file that holds
  * the slot inventory in place of `ffboot -l`, and GF_REBOOT_FILE a file
  * a reboot the daemon schedules is written to in place of the reboot.

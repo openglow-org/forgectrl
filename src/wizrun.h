@@ -17,7 +17,7 @@
 typedef struct {
     const char *id;
     void (*run)(void);
-    int needs_idle;
+    int needs_idle;     /* 0 any machine, 1 an idle one, 2 an idle one or a stepper fault */
 } wiz_entry_t;
 
 /* The live wizards' table (wizlive.c), searched after the dark ones. */
@@ -83,6 +83,10 @@ double wiz_len_mm(const char *text);
  * while the wizard waits for the lid, and puts the working light back. */
 int wiz_controller_stop(void);
 void wiz_controller_start(void);
+/* The check needs a controller of its own: -1, the step ended in the
+ * words of what holds the controllers down (the stop lever's hold, or with
+ * fault_too a motion fault), else 0. */
+int wiz_refuse_held(int fault_too);
 void wiz_led_attention(int on);
 
 /* sysfs and the controller. */

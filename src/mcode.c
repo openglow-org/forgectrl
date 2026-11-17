@@ -59,6 +59,15 @@ void mcode_answer_line(unsigned seq, const char *doc, const char *why, char *out
     snprintf(out, len, "%u %s%s%s", seq, ok ? "ok" : "fail", text[0] ? " " : "", text);
 }
 
+int mcode_memory_for(mcode_memory_t *m, long ctl)
+{
+    if (m->ctl == ctl)
+        return 0;
+    m->ctl = ctl;
+    m->done = 0;
+    return 1;
+}
+
 #ifndef MCODE_NO_THREAD
 #include "super.h"
 
@@ -79,15 +88,17 @@ static void *relay(void *arg)
 {
     char want[128], pushed[128] = "", reply[512], line[200], why[300];
     double pushed_at = 0;
-    unsigned done = 0;
+    mcode_memory_t mem = { 0, 0 };
     (void)arg;
     for (;;) {
         double wait = MCODE_IDLE_S;
-        if (!super_grbl_running()) {
-            pushed[0] = '\0';               /* a controller starts knowing none */
+        long ctl = super_grbl_pid();
+        if (!ctl) {
             nap(wait);
             continue;
         }
+        if (mcode_memory_for(&mem, ctl))
+            pushed[0] = '\0';               /* a controller starts knowing none */
         extpkg_mcode_table(want, sizeof(want));
         if (strcmp(want, pushed) != 0 || mono() - pushed_at >= MCODE_REPUSH_S) {
             if (grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_MCODES, want, reply, sizeof(reply)) == GRBLPORT_OK
@@ -110,7 +121,7 @@ static void *relay(void *arg)
                 unsigned seq = (unsigned)json_integer_value(json_object_get(m, "seq"));
                 int code = (int)json_integer_value(json_object_get(m, "code"));
                 char *words = json_dumps(json_object_get(m, "words"), JSON_COMPACT);
-                if (seq && seq != done && words) {
+                if (seq && seq != mem.done && words) {
                     fflog(LOG_INFO, "mcode: M%d (seq %u) goes to its extension", code, seq);
                     why[0] = '\0';
                     char *doc = extpkg_mcode_json(code, words, why, sizeof(why));
@@ -119,7 +130,7 @@ static void *relay(void *arg)
                     int rc = grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_MCODE_RESULT, line, reply, sizeof(reply));
                     fflog(rc == GRBLPORT_OK && strcmp(reply, "ok") == 0 ? LOG_INFO : LOG_WARNING,
                           "mcode: M%d: told the GRBL controller %s (%s)", code, line, reply);
-                    done = seq;
+                    mem.done = seq;
                 }
                 free(words);
                 wait = 0.02;

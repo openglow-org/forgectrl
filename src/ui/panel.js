@@ -1341,7 +1341,26 @@ function applyChanged() {
 }
 /* The wizard titles by id, from the last GET /wiz. */
 var W_TITLES = {};
+/* Retry after a motion fault. A stepper fault the kernel holds is not idle,
+ * so POST /mode refuses it: the controller start retries instead, and its
+ * probe gives the fault the enable that clears it once its lines have
+ * cleared. */
 function retryMode() {
+  if (MD && MD.stepper_fault) {
+    var el = $('msg-mode');
+    el.textContent = 'retrying…';
+    fx('/controller/start', { method: 'POST' })
+      .then(function (r) {
+        return r.text().then(function (t) {
+          el.textContent = r.ok ? '' : t;
+          loadMode();
+        });
+      })
+      .catch(function () {
+        el.textContent = 'the retry did not reach the machine';
+      });
+    return;
+  }
   setMode(MD && MD.mode ? MD.mode : 'grbl');
 }
 /* What the button's red flash is about. A failure that ended a job blocks the

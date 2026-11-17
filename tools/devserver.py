@@ -813,6 +813,8 @@ class Mock:
         self.controller = 'running'
         self.pid = 412
         self.motion = 'verified'
+        self.stepper_fault = False      # the motion fault is a stepper fault the kernel holds
+        self.retried = ''               # the route the last supervisor start came by
         self.report_at = self.t0
         self.rep_armed = False
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
@@ -1446,10 +1448,13 @@ class Mock:
         # unverified or faulted verdict; the mock's probe never fails).
         why = self.wiz_why() if gated else (
             getattr(self, 'wait_why', '') if self.controller == 'waiting' else '')
+        if self.stepper_fault:
+            why = 'stepper fault (faults 2): Retry, or the Motion check, clears it'
         return {'mode': self.mode,
                 'controller': 'gated' if gated and self.controller != 'running'
                 else self.controller,
                 'pid': self.pid, 'motion': self.motion,
+                'stepper_fault': self.stepper_fault,
                 'gated': gated, 'local': False,
                 'why': why}
 
@@ -2991,8 +2996,11 @@ class Mock:
                 return T(400, 'mode must be grbl or cloud')
             if self.lease_refusal():
                 return T(409, self.lease_refusal())
-            if not self.idle():
+            # the kernel in a stepper fault is not idle
+            if not self.idle() or self.stepper_fault:
+                self.retried = '/mode'
                 return T(409, 'machine is not idle')
+            self.retried = '/mode'
             self.mode = m
             self.settings['controller_mode'] = m
             self.controller = 'running'
@@ -3013,6 +3021,12 @@ class Mock:
         if path == '/controller/start':
             if self.lease_refusal(locks=True):
                 return T(409, self.lease_refusal(locks=True))
+            # the retry: the probe's enable clears a stepper fault whose
+            # lines have cleared, and the controller starts behind it
+            self.retried = '/controller/start'
+            self.stepper_fault = False
+            if self.motion == 'fault':
+                self.motion = 'verified'
             self.controller_start()
             return J(200, {'started': True})
         if path.startswith('/diag/') and path != '/diag/abort':

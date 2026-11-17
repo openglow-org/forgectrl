@@ -27,7 +27,9 @@
  *
  * The enclosure check (the lid and the interlock closed, the switches
  * readable) runs before every spawn, respawns included; the motion
- * probe runs once per broker hold.
+ * probe runs once per broker hold. The lens reference marker goes at
+ * every controller exit, and the lens is swept onto its hall edge again
+ * before the next GRBL controller starts.
  *
  * The mode-switch sequence (POST /mode) is idle-gated: stop the active
  * controller, persist controller_mode, start the other, wait for its
@@ -103,6 +105,7 @@
 #define RUNNER_TERM_WAIT_S 5      /* the homing runner's SIGTERM grace */
 #define RESPAWN_IDLE_WAIT_S 10    /* a respawn waits this long for the kernel */
 #define BROKER_RETRY_S     2      /* the broker open is tried again after this */
+#define PROBE_BUSY_WAIT_S  10     /* the probe waits this long for a kernel still playing */
 #define WR_ATTR_TRIES      3      /* a safing write is tried this often... */
 #define WR_ATTR_RETRY_US   10000  /* ...this far apart */
 
@@ -148,7 +151,14 @@ static pthread_t th;
 static int th_run = 0;
 
 static ctl_t want = Ctl_None;      /* selected mode */
-static int suspended = 0;          /* diag takeover / standby */
+/* Why supervision is suspended, one bit per reason: each is set and
+ * cleared by its own owner, and a controller runs only with none. A
+ * setup check's or a diagnostic's hand-back clears its takeover and
+ * nothing else, so an operator's stop made meanwhile stands. */
+#define SUSP_HOLD     1u           /* the stop lever (POST /controller/stop) */
+#define SUSP_TAKEOVER 2u           /* a setup check or a diagnostic has the machine */
+#define SUSP_STANDBY  4u           /* an unmanaged controller, or the daemon's shutdown */
+static unsigned suspended = 0;
 static pid_t child_pid = 0;
 static ctl_t child_ctl = Ctl_None;
 static double spawned_at = 0.0;
@@ -201,6 +211,7 @@ static int broker_warned = 0;      /* the broker's refusal is said once per epis
 static int probed = 0;             /* liveness gate passed since broker open */
 static int probe_skipped = 0;      /* ...but the probe itself could not run */
 static int motion_fault = 0;       /* probe failed after recovery - no spawn */
+static int sweep_failed = 0;       /* a lens sweep found no edge in this hold: none again */
 static int probing = 0;            /* a probe sequence is in flight (under mu) */
 static int probe_abort = 0;        /* ...and the stop lever asked it to end */
 static int standby_takeover = 0;   /* unmanaged controller found: retake at idle */
@@ -219,6 +230,38 @@ static double wall_s(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* One kernel attribute's word, trailing white space dropped: 0, or -1
+ * (buf empty) when it cannot be read. */
+static int rd_attr(const char *attr, char *buf, size_t len)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
+    buf[0] = '\0';
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, buf, len - 1);
+    close(fd);
+    if (n <= 0) {
+        buf[0] = '\0';
+        return -1;
+    }
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == ' '))
+        n--;
+    buf[n] = '\0';
+    return 0;
+}
+
+/* The kernel is playing a program, so stopping its controller now would
+ * cut it. A state that cannot be read counts as playing: the callers
+ * then leave the machine as it is. fault, underrun and disabled play
+ * nothing. */
+static int kernel_playing(void)
+{
+    char st[24];
+    return rd_attr("cnc/state", st, sizeof(st)) != 0 || strcmp(st, "running") == 0;
 }
 
 /* Stop an unmanaged (legacy- or orphan-started) controller the legacy
@@ -347,6 +390,7 @@ static void broker_open_locked(void)
     broker_warned = 0;
     probed = 0;     /* a fresh hold means unverified motion */
     probe_skipped = 0;
+    sweep_failed = 0;
     lenshome_clear();   /* ...and an unreferenced lens */
     fflog(LOG_INFO, "super: holding %s (broker)", dev);
 }
@@ -414,35 +458,79 @@ static int probe_wait(unsigned s)
     return 0;
 }
 
+/* The lens hunts' stop inputs, asked between two steps (mu NOT held). A
+ * lid or the interlock that opens, or switches that stop answering, end
+ * the hunt as the lever does, and hunt_lid says it was the enclosure. The
+ * lever is probe_abort: the stop lever, a check's takeover and the
+ * daemon's shutdown each set it when they find a probe or a sweep in
+ * flight (probing), and one that lands before either begins finds the
+ * suspension it set refusing it. */
+static int hunt_lid;
+
+static int enclosure_opened(void)
+{
+    char why[48];
+    if (liveness_enclosure(why, sizeof(why)) == 0)
+        return 0;
+    hunt_lid = 1;
+    return 1;
+}
+
+static int probe_hunt_stop(void)
+{
+    return probe_aborted() || enclosure_opened();
+}
+
+static int sweep_stop(void)
+{
+    return probe_aborted() || enclosure_opened();
+}
+
 /* Motion-liveness gate, run with mu NOT held (takes seconds; the
  * recovery ladder takes a minute). The DRV8825 drivers can come out of
  * a rail power-up unserviceable; each recovery attempt gives them a
- * longer true power-off before re-probing. Returns 1 verified, 0 fault,
- * 2 when the probe could not run (no accelerometer): the machine is not
- * blocked, but motion stays UNVERIFIED and is reported so; 3 when the
- * probe must wait and run again - the enclosure opened between the
- * gate's own check and the move, or the kernel is still playing the
- * last program: nothing moved, nothing is decided; 4 when the stop
- * lever ended it. The fans are not quieted for the probe: its verdict
- * is peak-to-peak over a commanded move, and the moving and dead
- * thresholds sit twice away from what the bench reference reads with
- * its fans at their idle duty. */
+ * longer true power-off before re-probing. Returns 1 verified, 0 fault
+ * (dead drivers after the ladder, a lens with no edge, a stepper enable
+ * the kernel refuses, or a probe the machine fails, each with its own
+ * words), 2 when the probe could not run (no accelerometer): the machine
+ * is not blocked, but motion stays UNVERIFIED and is reported so; 3 when
+ * the probe must wait and run again - the enclosure opened between the
+ * gate's own check and the move, under the move, or before or during the
+ * lens hunt, or the kernel is still playing the last program: nothing is
+ * decided (a third move stopped under an opening with no whole move
+ * between is a fault); 4 when the stop lever ended it, the move unstarted
+ * when it landed before the run. The fans are not quieted for
+ * the probe: its verdict is peak-to-peak over a commanded move, and the
+ * moving and dead thresholds sit twice away from what the bench
+ * reference reads with its fans at their idle duty. */
 static char probe_detail[96];       /* the last probe's outcome text */
 
 /* The X and Y motors are released ($MD in the GRBL controller): their
  * step currents are at 0 and an operator's hands may be on the gantry.
  * The release outlives its controller as a marker in the run directory,
- * and nothing that starts here may energize the motors under it. The
- * two things that would are the probe, which is skipped (motion stays
+ * and nothing that starts here may energize X or Y under it. The two
+ * things that would are the probe, which is skipped (motion stays
  * unverified; the controller still starts, and takes the release over),
  * and a switch to cloud mode, whose homing moves the head, which is
- * refused. */
+ * refused. The lens motor is not released: it stays at its hold
+ * current, and the lens sweep before a GRBL controller
+ * (lens_sweep_locked) still runs under the marker. It steps Z alone,
+ * behind the enclosure check every spawn passes. */
 static int motors_released(void)
 {
     char path[256];
     snprintf(path, sizeof(path), "%s/motors.released", ff_run_dir());
     return access(path, F_OK) == 0;
 }
+
+/* Moves an opening enclosure stopped since the last move that ran whole.
+ * Each one leaves the head where the stop caught it, toward +X of its
+ * start, and the next probe goes +X first from there; a probe that moved
+ * nothing (the enclosure open before its move, a busy kernel, the lever)
+ * brings the head no nearer its start, so only a whole move ends the
+ * count. The count bounds the walk to PROBE_STOPPED_MAX out legs. */
+#define PROBE_STOPPED_MAX 3
+static int moves_stopped;
 
 static int probe_sequence(int fd)
 {
@@ -455,6 +543,38 @@ static int probe_sequence(int fd)
         return 2;
     }
 
+    /* The kernel as the last holder left it. A program still playing is
+     * waited for, bounded, and then halted, as a respawn does. An
+     * underrun is acknowledged: the enable below is refused in it. A
+     * latched stepper fault is cleared by the enable below once its lines
+     * have cleared, and the mask is said either way. */
+    char st[24], faults[16] = "";
+    rd_attr("cnc/state", st, sizeof(st));
+    if (!strcmp(st, "running")) {
+        double until = wall_s() + PROBE_BUSY_WAIT_S;
+        while (rd_attr("cnc/state", st, sizeof(st)) == 0 && !strcmp(st, "running")) {
+            if (wall_s() >= until) {
+                fflog(LOG_CRIT, "super: the kernel is still running %d s before the "
+                                "motion probe - halting it", PROBE_BUSY_WAIT_S);
+                wr_attr("cnc/halt", "1");
+                break;
+            }
+            if (probe_wait(1))
+                goto aborted;
+        }
+    }
+    if (!strcmp(st, "underrun")) {
+        fflog(LOG_NOTICE, "super: the kernel reads underrun - acknowledged before the motion probe");
+        wr_attr("cnc/stop", "1");
+    }
+    int cleared = 0;
+    if (!strcmp(st, "fault")) {
+        rd_attr("cnc/faults", faults, sizeof(faults));
+        fflog(LOG_WARNING, "super: the kernel holds a stepper fault (faults %s) - the probe's "
+                           "enable clears it once its lines have cleared", faults[0] ? faults : "unreadable");
+        cleared = 1;
+    }
+
     for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
         if (ladder_s[i] > 0) {
             fflog(LOG_WARNING, "super: motion dead - rail off %d s "
@@ -465,27 +585,87 @@ static int probe_sequence(int fd)
         }
         if (probe_aborted())
             goto aborted;
-        wr_attr("cnc/enable", "1");
+        if (wr_attr("cnc/enable", "1") != 0) {
+            /* One enable, never a loop: a kernel that refuses it (a
+             * stepper fault whose lines still read asserted, or a fault
+             * latched while the rail was off) keeps the controllers down,
+             * in its own words, until the operator retries. */
+            rd_attr("cnc/state", st, sizeof(st));
+            rd_attr("cnc/faults", faults, sizeof(faults));
+            snprintf(detail, sizeof(probe_detail), "the kernel refused the stepper enable "
+                     "(state %s, faults %s)", st[0] ? st : "unreadable", faults[0] ? faults : "unreadable");
+            fflog(LOG_CRIT, "super: MOTION FAULT - %s. Controllers stay down (Retry, or the "
+                            "Motion check, once the drivers' fault lines clear).", detail);
+            return 0;
+        }
+        if (cleared) {
+            fflog(LOG_WARNING, "super: the stepper fault is cleared (faults %s)",
+                  faults[0] ? faults : "unreadable");
+            cleared = 0;
+        }
         if (probe_wait(1))
             goto aborted;
         led_set(LED_SOLID_WHITE);       /* the machine is moving */
-        int rc = liveness_probe(fd, detail, sizeof(probe_detail));
+        int rc = liveness_probe(fd, detail, sizeof(probe_detail), probe_aborted);
         led_release();
         fflog(rc == -3 ? LOG_NOTICE : LOG_INFO, "super: liveness probe: %s - %s",
               rc == 1 ? "MOTION OK" : rc == 0 ? "NO MOTION"
               : rc == -3 ? "WAITS" : "ERROR", detail);
+        /* A lever that landed while the probe ran, before its move (which
+         * then never started) or under it: what it stopped says nothing
+         * about the drivers, and the lens stays where it is. */
+        if (probe_aborted() || rc == -6)
+            goto aborted;
+        if (rc == -5) {
+            /* The move was stopped under an opening: wait for the
+             * enclosure and probe again, but not without bound. */
+            if (++moves_stopped < PROBE_STOPPED_MAX)
+                return 3;
+            moves_stopped = 0;
+            snprintf(detail, sizeof(probe_detail), "the enclosure opened under the probe's move %d "
+                     "times", PROBE_STOPPED_MAX);
+            fflog(LOG_CRIT, "super: MOTION FAULT - %s with no whole move between: the head stands "
+                            "off its start. Controllers stay down (retry via POST /mode).", detail);
+            return 0;
+        }
+        if (rc == 0 || rc == 1)
+            moves_stopped = 0;  /* a move that ran whole, out and back */
         if (rc == -3)
             return 3;   /* the kernel is busy: wait for it, then probe */
+        if (rc == -4) {
+            /* The probe failed on the machine (a write the kernel or the
+             * PIC refused, the run, the samples): no rail cycle would
+             * mend that, and a live gantry would read as dead. */
+            fflog(LOG_CRIT, "super: MOTION FAULT - the motion probe failed: %s. "
+                            "Controllers stay down (retry via POST /mode).", detail);
+            return 0;
+        }
         if (rc == 1) {
             /* The gantry moves; now the lens takes its one reference,
              * while the machine is still ours. A lens that cannot reach
              * its hall edge is broken hardware, so it gates the spawn the
              * same way dead drivers do: the focal height would otherwise
-             * be a guess. */
+             * be a guess. The lens does not move with a lid or the
+             * interlock open: the probe waits and runs again. */
+            char why[48];
+            if (liveness_enclosure(why, sizeof(why)) != 0) {
+                snprintf(detail, sizeof(probe_detail), "%s - the lens waits for it", why);
+                fflog(LOG_NOTICE, "super: %s", detail);
+                return 3;
+            }
             /* Sized to leave room for the prefix below inside
              * probe_detail, which this shares with the probe. */
             char lens[80];
-            int lrc = lenshome_run(lens, sizeof(lens));
+            hunt_lid = 0;
+            int lrc = lenshome_run(lens, sizeof(lens), probe_hunt_stop);
+            if (lrc == LENSHOME_STOPPED) {
+                if (!hunt_lid)
+                    goto aborted;
+                snprintf(detail, sizeof(probe_detail), "the enclosure opened during the lens "
+                         "reference - the probe waits for it");
+                fflog(LOG_NOTICE, "super: %s", detail);
+                return 3;
+            }
             fflog(lrc == 0 ? LOG_CRIT : LOG_INFO,
                   "super: lens reference: %s - %s",
                   lrc == 1 ? "ON EDGE" : lrc == 0 ? "NO EDGE" : "SKIPPED", lens);
@@ -496,9 +676,9 @@ static int probe_sequence(int fd)
             return 1;
         }
         if (rc == -2)
-            return 3;   /* the enclosure opened under the probe: wait for it */
+            return 3;   /* the enclosure open before the move: wait for it */
         if (rc < 0)
-            return 2;   /* cannot probe (no accel?): do not block the machine */
+            return 2;   /* no head accelerometer: do not block the machine */
     }
     fflog(LOG_CRIT, "super: MOTION FAULT - the stepper drivers "
                    "did not recover; a full power cycle may be required. "
@@ -865,6 +1045,11 @@ static void reap_locked(int status)
      * it anchors) or into a respawn. A fresh GRBL controller starts
      * unreferenced and re-homes. */
     unlink(HOMED_ANCHOR);
+    /* So does the lens reference: a controller moves the lens (a sender's
+     * Z, a camera home's park, a cloud session's own homing), so the edge
+     * the marker names is the lens's position no longer. The next GRBL
+     * controller gets a fresh sweep before it starts. */
+    lenshome_clear();
     /* A GRBL controller may have left its homing runner behind, alive
      * on the inherited fd: the loop finds and ends it before anything
      * else may write the ring. */
@@ -951,6 +1136,59 @@ static void stop_locked(void)
     }
 }
 
+/* The lens back on its hall edge before a GRBL controller that would
+ * otherwise start with no marker: every controller exit drops it, and a
+ * hold whose probe was skipped never took one. Called with mu held, no
+ * controller alive, supervision not suspended, behind the enclosure
+ * check; probing is set before the lock is dropped, so a stop lever, a
+ * takeover or the daemon's shutdown from here on reaches the sweep
+ * (sweep_stop, between two steps), or found supervision suspended first
+ * and no sweep began; the lever and the takeover wait for its end. A lid or the interlock opening, or switches that stop
+ * answering, end it too. A hunt that finds no edge leaves the marker
+ * absent, and the controller then holds Z unreferenced: no motion fault,
+ * the lens is never declared where it may not be. Such a hunt is not
+ * repeated in this hold (a sensor stuck clear would drive the carriage
+ * onto its stop at every start) until a fresh hold or a hunt that finds
+ * the edge. A standing motor release does not skip it: the release is X
+ * and Y's, the lens motor stays at its hold current, and the sweep writes
+ * the lens motor's attributes alone, behind the same enclosure check.
+ * 1 when the spawn goes ahead, 0 when it waits: the sweep was ended,
+ * supervision suspended, or the enclosure is open. */
+static int lens_sweep_locked(void)
+{
+    if (sweep_failed) {
+        fflog(LOG_NOTICE, "super: lens reference before the controller: SKIPPED - a sweep found "
+                          "no edge in this hold; Z stays unreferenced");
+        return 1;
+    }
+    probing = 1;
+    probe_abort = 0;
+    pthread_mutex_unlock(&mu);
+    char lens[80], why[96];
+    int lrc = -3;
+    if (machine_is_idle())
+        lrc = lenshome_run(lens, sizeof(lens), sweep_stop);
+    else
+        snprintf(lens, sizeof(lens), "the kernel is not idle");
+    int enc = liveness_enclosure(why, sizeof(why));
+    pthread_mutex_lock(&mu);
+    probing = 0;
+    pthread_cond_broadcast(&cv);
+    if (lrc == 0)
+        sweep_failed = 1;
+    fflog(lrc == 1 ? LOG_INFO : lrc == LENSHOME_STOPPED ? LOG_NOTICE : LOG_WARNING,
+          "super: lens reference before the controller: %s - %s%s",
+          lrc == 1 ? "ON EDGE" : lrc == LENSHOME_STOPPED ? "ENDED" : lrc == -1 ? "SKIPPED" : "NONE", lens,
+          lrc == 1 || lrc == LENSHOME_STOPPED || lrc == -1 ? "" : "; Z stays unreferenced");
+    if (enc != 0) {
+        wait_enter_locked(why);
+        return 0;
+    }
+    if (lrc == LENSHOME_STOPPED || suspended)
+        return 0;
+    return 1;
+}
+
 /* ------------------------------------------------------ thread body */
 
 /* One pass of the lifecycle. Called with mu held; drops it around
@@ -991,17 +1229,20 @@ static void pass_locked(void)
         }
         /* Standing by next to an unmanaged controller (found at start,
          * or left orphaned by a previous forgectrl): retake supervision
-         * as soon as the machine is idle - a busy one is left to finish
-         * its job first. */
+         * as soon as the kernel plays nothing (idle, disabled, a stepper
+         * fault, an underrun) - a busy one is left to finish its job
+         * first. The probe that follows acknowledges an underrun and
+         * clears a fault whose lines have cleared, or names one that
+         * stays. */
         if (standby_takeover && child_pid == 0 && want != Ctl_None) {
             pthread_mutex_unlock(&mu);
-            int idle = machine_is_idle() && !diag_running();
+            int idle = !kernel_playing() && !diag_running();
             if (idle)
                 takeover_unmanaged();
             pthread_mutex_lock(&mu);
             if (idle) {
                 standby_takeover = 0;
-                suspended = 0;
+                suspended &= ~SUSP_STANDBY;
             }
         }
 
@@ -1048,12 +1289,30 @@ static void pass_locked(void)
                 /* The kernel finishes what the dead controller queued
                  * before another controller may touch it. A kernel
                  * that has not gone idle in the bound is halted: an
-                 * endless ramp is not a state to hand over. */
+                 * endless ramp is not a state to hand over. A stepper
+                 * fault plays nothing and a halt cannot end it: no
+                 * controller starts into it. It is a motion fault in its
+                 * own words, and the probe a retry runs gives it its one
+                 * enable and verifies the gantry after it. */
                 pthread_mutex_unlock(&mu);
                 int idle = machine_is_idle();
+                char st[24] = "", faults[16] = "";
+                if (!idle && rd_attr("cnc/state", st, sizeof(st)) == 0 && !strcmp(st, "fault"))
+                    rd_attr("cnc/faults", faults, sizeof(faults));
                 pthread_mutex_lock(&mu);
                 if (idle)
                     respawn_wait_idle = 0;
+                else if (!strcmp(st, "fault")) {
+                    respawn_wait_idle = 0;
+                    go = 0;
+                    probed = 0;
+                    probe_skipped = 0;
+                    motion_fault = 1;
+                    snprintf(probe_detail, sizeof(probe_detail), "stepper fault (faults %s): Retry, "
+                             "or the Motion check, clears it", faults[0] ? faults : "unreadable");
+                    generation++;
+                    fflog(LOG_CRIT, "super: MOTION FAULT - %s; no controller until then", probe_detail);
+                }
                 else if (wall_s() - died_at < RESPAWN_IDLE_WAIT_S)
                     go = 0;
                 else {
@@ -1080,7 +1339,16 @@ static void pass_locked(void)
                     pthread_mutex_unlock(&mu);
                     int enc = liveness_enclosure(why, sizeof(why));
                     pthread_mutex_lock(&mu);
-                    if (enc != 0) {
+                    if (suspended || motion_fault || gated || child_pid > 0) {
+                        /* The lock was down for the read: a stop lever, a
+                         * check's takeover, a fault or the gate landed in
+                         * it. Nothing moves and nothing starts on what
+                         * the pass saw before; the next pass decides.
+                         * From here to the motion below the lock is held,
+                         * and the probe and the sweep set probing before
+                         * they drop it, so the lever and the takeover
+                         * reach them. */
+                    } else if (enc != 0) {
                         wait_enter_locked(why);
                     } else if (!probed) {
                         wait_leave_locked("runs: the enclosure is closed");
@@ -1101,7 +1369,14 @@ static void pass_locked(void)
                         }
                     } else {
                         wait_leave_locked("no longer waits: the enclosure is closed");
-                        spawn_locked(want);
+                        /* A marker standing is a hunt that found the edge
+                         * since the last controller (a check's, a burn's):
+                         * a failed sweep earlier in the hold is history. */
+                        int marker = lenshome_present();
+                        if (marker)
+                            sweep_failed = 0;
+                        if (want != Ctl_Grbl || marker || lens_sweep_locked())
+                            spawn_locked(want);
                     }
                 }
             }
@@ -1197,7 +1472,7 @@ void super_init(void)
     pthread_mutex_lock(&mu);
     want = configured_mode();
     if (unmanaged_controller_running()) {
-        suspended = 1;
+        suspended |= SUSP_STANDBY;
         standby_takeover = 1;
         fflog(LOG_WARNING, "super: unmanaged controller already "
                            "running - standing by until the machine is idle");
@@ -1218,14 +1493,20 @@ void super_shutdown(void)
     pthread_mutex_lock(&mu);
     int was = th_run;
     th_run = 0;
-    suspended = 1;
+    suspended |= SUSP_STANDBY;
+    /* A probe or a lens sweep in flight ends between its steps, as at the
+     * stop lever: the shutdown's bound never cuts one off mid-step, the
+     * lens motor at its drive current. */
+    if (probing)
+        probe_abort = 1;
     wait_leave_locked("no longer waits: shutdown");
     if (child_pid > 0) {
         /* A busy controller survives a forgectrl stop: it reparents to
          * init and finishes its job (its own device fd carries the
          * dead-man). The restarted supervisor finds it unmanaged and
-         * stands by. Idle controllers stop with us. */
-        if (machine_is_idle())
+         * stands by. A controller over a kernel that plays nothing (a
+         * stepper fault, an underrun included) stops with us. */
+        if (!kernel_playing())
             stop_locked();
         else
             fflog(LOG_WARNING, "super: machine busy - leaving %s "
@@ -1349,22 +1630,28 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
     return 0;
 }
 
-int super_controller_stop(void)
+/* Suspend for one reason and wait for the controller to be gone. A
+ * probe or a lens sweep in flight is the machine moving with no
+ * controller: the stop reaches it too, between its steps. */
+static int suspend_for(unsigned reason)
 {
     pthread_mutex_lock(&mu);
-    suspended = 1;
-    /* A probe in flight is the gantry moving with no controller: the
-     * lever reaches it too. The sequence looks between its steps. */
+    suspended |= reason;
     if (probing) {
         probe_abort = 1;
         wr_attr("cnc/stop", "1");
     }
     int ok = wait_for(pred_child_gone, 15.0) == 0;
     if (!ok)
-        suspended = 0;  /* takeover failed: resume normal supervision so
-                         * the machine is never left controller-less */
+        suspended &= ~reason;   /* takeover failed: resume normal supervision so
+                                 * the machine is never left controller-less */
     pthread_mutex_unlock(&mu);
     return ok ? 0 : -1;
+}
+
+int super_controller_stop(void)
+{
+    return suspend_for(SUSP_HOLD);
 }
 
 void super_controller_start(void)
@@ -1372,6 +1659,29 @@ void super_controller_start(void)
     pthread_mutex_lock(&mu);
     suspended = 0;
     motion_fault = 0;
+    respawn_at = 0.0;
+    backoff_s = RESPAWN_MIN_S;
+    pthread_mutex_unlock(&mu);
+    wake();
+}
+
+int super_takeover_begin(void)
+{
+    return suspend_for(SUSP_TAKEOVER);
+}
+
+unsigned super_holds(void)
+{
+    pthread_mutex_lock(&mu);
+    unsigned h = ((suspended & SUSP_HOLD) ? SUPER_HELD : 0) | (motion_fault ? SUPER_FAULTED : 0);
+    pthread_mutex_unlock(&mu);
+    return h;
+}
+
+void super_takeover_end(void)
+{
+    pthread_mutex_lock(&mu);
+    suspended &= ~SUSP_TAKEOVER;
     respawn_at = 0.0;
     backoff_s = RESPAWN_MIN_S;
     pthread_mutex_unlock(&mu);
@@ -1391,14 +1701,25 @@ void super_controller_restart(const char *why)
 
 int super_grbl_running(void)
 {
+    return super_grbl_pid() > 0;
+}
+
+long super_grbl_pid(void)
+{
     pthread_mutex_lock(&mu);
-    int up = child_pid > 0 && strcmp(ctl_name(child_ctl), "grbl") == 0;
+    long pid = child_pid > 0 && child_ctl == Ctl_Grbl ? (long)child_pid : 0;
     pthread_mutex_unlock(&mu);
-    return up;
+    return pid;
 }
 
 int super_status_json(char *buf, size_t len)
 {
+    /* stepper_fault is what the kernel holds under a motion fault, however
+     * the fault was found: POST /mode refuses a kernel in fault, and the
+     * panel's Retry goes by the controller start instead. Read before the
+     * lock, as every sysfs read here is. */
+    char kst[24];
+    int kfault = rd_attr("cnc/state", kst, sizeof(kst)) == 0 && strcmp(kst, "fault") == 0;
     pthread_mutex_lock(&mu);
     /* why: what holds the machine (the gate's reason, or what is open
      * while the motion check waits), else the probe's own words behind
@@ -1416,7 +1737,7 @@ int super_status_json(char *buf, size_t len)
     why[o] = '\0';
     snprintf(buf, len,
              "{\"mode\":\"%s\",\"controller\":\"%s\",\"pid\":%d,"
-             "\"motion\":\"%s\",\"gated\":%s,\"local\":%s,\"why\":\"%s\"}",
+             "\"motion\":\"%s\",\"stepper_fault\":%s,\"gated\":%s,\"local\":%s,\"why\":\"%s\"}",
              ctl_name(want),
              child_pid > 0 ? "running"
                  : gated ? "gated"
@@ -1426,6 +1747,7 @@ int super_status_json(char *buf, size_t len)
              (int)child_pid,
              motion_fault ? "fault"
                  : probed && !probe_skipped ? "verified" : "unverified",
+             motion_fault && kfault ? "true" : "false",
              gated ? "true" : "false", local_posture ? "true" : "false",
              why);
     pthread_mutex_unlock(&mu);
@@ -1445,15 +1767,36 @@ int super_probe_motion(char *detail, size_t dlen)
         snprintf(detail, dlen, "a motion probe is already running");
         return 2;
     }
+    /* A stop lever pulled before the probe begins: nothing moves after
+     * it answered. From here on it finds probing set and reaches it. */
+    if (suspended & SUSP_HOLD) {
+        pthread_mutex_unlock(&mu);
+        snprintf(detail, dlen, "motion probe ended by the stop lever");
+        return 4;
+    }
+    probing = 1;
+    probe_abort = 0;
+    pthread_mutex_unlock(&mu);
+    /* A stopped GRBL controller's homing runner may still hold the
+     * inherited fd and write the ring: it is gone before the probe
+     * writes it, as it is before a respawn. */
+    runner_reap();
+    pthread_mutex_lock(&mu);
     broker_open_locked();
     int fd = broker_fd;
     if (fd < 0) {
+        probing = 0;
+        pthread_cond_broadcast(&cv);
         pthread_mutex_unlock(&mu);
         snprintf(detail, dlen, "the pulse device is not held");
         return 2;
     }
-    probing = 1;
-    probe_abort = 0;
+    /* The verdict before this probe does not outlive it: a probe that
+     * ends before a verdict (the enclosure, a busy kernel, the lever)
+     * leaves motion unverified, and the lifecycle probes again from the
+     * first rung before any controller starts. */
+    probed = 0;
+    probe_skipped = 0;
     pthread_mutex_unlock(&mu);
     int rc = probe_sequence(fd);
     pthread_mutex_lock(&mu);

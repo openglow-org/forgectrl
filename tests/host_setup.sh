@@ -36,6 +36,9 @@
 #       the head shot, its question; each shot served as captured, and
 #       the result names the engine's sensor; a lid nobody closes ends the
 #       check with its reason
+#     the Motion check over an operator's stop: the stop stands after the
+#       check's hand-back, and the operator's start brings the controller
+#       back
 #     the bed check: an unhomed machine is refused with nothing written
 #       and the envelope never opened; homed, a lid nobody closes ends the
 #       check with its reason, the envelope never opened; every prompt is
@@ -56,6 +59,14 @@
 #     ;keys=floor-off reaches the controller as M102 with the floor 0 and
 #     the dose curve off, the keys are as they were after the burn, and
 #     the pick 8 writes the floor 10
+#   the Motion check ended in its lens passes, its probe passing on a
+#     stand-in head accelerometer: the lens is swept again before the
+#     controller comes back; run whole, the crash watch's borrow for the
+#     jogs is refused (no i2c bus on a host) and the machine is handed
+#     back from the loopback posture
+#   the Lens travel check: the fallback window written (no i2c bus on a
+#     host), and with the pulse engine busy at its end the lens stays
+#     where it stands and the marker goes
 #   the first run, in the page's order: each document accepted at its
 #     hash, the press step breathing teal, and again once a red flash
 #     has left the button dark (the press status puts it back), the
@@ -104,10 +115,11 @@ PID=
 LPID=
 HALL=
 PRESSER=
+STEPPER=
 cleanup() {
     if [ -n "$PID" ]; then kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null; fi
     [ -z "$LPID" ] || kill $LPID 2>/dev/null
-    for p in $HALL $PRESSER; do kill $p 2>/dev/null; done
+    for p in $HALL $PRESSER $STEPPER; do kill $p 2>/dev/null; done
     [ ! -f "$T/ctl.pids" ] || kill $(cat "$T/ctl.pids") 2>/dev/null
     chmod 755 "$T/data" 2>/dev/null
     rm -rf "$T"
@@ -149,7 +161,7 @@ start_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 TIMESHIM_FLAG="$T/timeshift" \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
-        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" \
+        GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" GF_IIO_ROOT="$T/iio" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" LD_PRELOAD="$T/swshim.so $T/timeshim.so" \
         GF_LED_ROOT="$T/leds" FORGECTRL_WIZ_SHOTS="$T/shots" \
         GF_SYSFS_DIR="$LENS_SYS" GF_LENS_STEP_US=20000 HOST_GRBL_PORT=$GRBL_PORT \
@@ -663,12 +675,15 @@ grep -qx 'cool_intake_fans = 1' "$CONF" && ok "the conf file keeps cool_intake_f
 # what is answer:<prompt>=<value> (one answer per prompt shown, in
 # order), on:<prompt>=<command> (run when the prompt shows, before its
 # answer), shot:<prompt>=<cam> (GET /wiz/shot?cam=<cam> when it shows,
-# saved as $T/run.json.<cam>), or diag (GET /diag/status's phases beside
-# the check's).
+# saved as $T/run.json.<cam>), diag (GET /diag/status's phases beside
+# the check's), abortat:<text> (the check aborted, once, at the first
+# phase that holds the text), onphase:<text>=<command> (run once at the
+# first phase that holds the text), or onresult:=<command> (run once
+# when the check has its result and still runs: its exit).
 cat > "$T/drive.py" <<'EOF'
 import json, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 url, token, wid, out = sys.argv[1:5]
-answers, actions, shots, diag = {}, {}, {}, False
+answers, actions, shots, diag, abort_at, on_result, on_phase = {}, {}, {}, False, None, None, {}
 for a in sys.argv[5:]:
     kind, _, rest = a.partition(':')
     pid, _, v = rest.partition('=')
@@ -680,6 +695,12 @@ for a in sys.argv[5:]:
         shots[pid] = v
     elif kind == 'diag':
         diag = True
+    elif kind == 'abortat':
+        abort_at = rest
+    elif kind == 'onphase':
+        on_phase[pid] = v
+    elif kind == 'onresult':
+        on_result = v
 def call(method, path, data=None):
     body = urllib.parse.urlencode(data).encode() if data is not None else None
     req = urllib.request.Request(url + path, data=body, method=method, headers={'X-ForgeFIRM-Token': token})
@@ -697,6 +718,15 @@ done, t0 = set(), time.time()
 while rec['start'] == 200:
     d = json.loads(call('GET', '/wiz/dark')[1])
     seen(rec['phases'], d.get('phase'))
+    if abort_at and abort_at in (d.get('phase') or ''):
+        call('POST', '/wiz/%s/abort' % wid, {})
+        rec['aborted_at'] = d.get('phase')
+        abort_at = None
+    for text in [t for t in on_phase if t in (d.get('phase') or '')]:
+        subprocess.run(on_phase.pop(text), shell=True)
+    if on_result and d.get('running') and d.get('result'):
+        subprocess.run(on_result, shell=True)
+        on_result = None
     if diag:
         seen(rec['diag_phases'], json.loads(call('GET', '/diag/status')[1]).get('phase'))
     p = d.get('prompt')
@@ -846,6 +876,56 @@ expect 'lid-close|the lid was not closed within 10 min|True' \
     "$(run '"%s|%s|%s" % ("|".join(p["id"] for p in d["prompts"]), d["dark"]["error"], d["dark"]["result"] is None)')" \
     "a lid nobody closes ends the check with its reason, and no result"
 sw 8
+
+echo "== a stepper fault, an operator's stop, and the checks"
+# A controller that exits over a stepper fault is not started into it: a
+# motion fault in its own words, named a stepper fault for the panel's
+# Retry. The Cloud header step, whose mode switch would end it, refuses to
+# start under it; the Motion check runs over it (every other check needs
+# an idle machine): its probe is the way out. With no head accelerometer
+# staged the check's probe cannot run, which ends the check at once.
+faulted() { mode; [ "$(jget "$T/mode.json" 'd["controller"]')" = motion-fault ]; }
+echo fault > "$SYS/cnc/state"
+echo 2 > "$SYS/cnc/faults"
+OLD=$(ctl_pid)
+kill "$(ctl_pid)"
+until_ok 100 faulted && ok "the controller exited over a stepper fault: a motion fault, no controller" \
+    || bad "GET /mode reads $(cat "$T/mode.json")"
+expect true "$(jget "$T/mode.json" 'json.dumps(d["stepper_fault"])')" "and GET /mode names it a stepper fault"
+# the fault's lines cleared, the motion fault still standing
+echo idle > "$SYS/cnc/state"
+check cloud.header
+expect '|cloud mode is off' "$(run '"%s|%s" % (d["dark"]["error"], (d["dark"]["result"] or {}).get("skipped"))')" \
+    "with cloud mode off the Cloud header step is skipped, the motion fault or not"
+expect 200 "$(post /settings "$TOKEN" -d cloud_enabled=1 --data-urlencode "phrase=I UNDERSTAND")" "cloud mode on is 200"
+check cloud.header
+expect true "$(run 'json.dumps("motion fault" in (d["dark"]["error"] or ""))')" \
+    "with cloud mode on it refuses to start under the motion fault ($(run 'd["dark"]["error"]'))"
+expect 200 "$(post /settings "$TOKEN" -d cloud_enabled=0)" "cloud mode off again is 200"
+echo fault > "$SYS/cnc/state"
+check motion
+expect 200 "$(run 'd["start"]')" "the Motion check starts over the stepper fault"
+# A plain file is no kernel: the probe's enable does not clear it.
+echo idle > "$SYS/cnc/state"
+echo 0 > "$SYS/cnc/faults"
+up || bad "no controller after the Motion check over a stepper fault"
+# A check takes the machine for its own reason and gives back only that:
+# the operator's stop made before it stands after its hand-back. A check
+# that needs a controller of its own refuses to start under the stop.
+expect 200 "$(post /controller/stop "$TOKEN")" "the operator's stop is 200"
+until_ok 50 ctl_down || bad "the controller did not stop"
+check motion
+expect true "$(run 'json.dumps("was stopped" in (d["dark"]["error"] or ""))')" \
+    "the Motion check refuses to start under the operator's stop ($(run 'd["dark"]["error"]'))"
+check lens.travel
+expect 200 "$(run 'd["start"]')" "the Lens travel check runs (on a host it finds no head)"
+sleep 1
+mode
+expect standby "$(jget "$T/mode.json" 'd["controller"]')" "after the check's hand-back the operator's stop stands"
+ctl_down && ok "and no controller runs" || bad "a controller runs (pid $(ctl_pid))"
+OLD=$(ctl_pid)
+expect 200 "$(post /controller/start "$TOKEN")" "the operator's start is 200"
+up && ok "and brings the controller back" || bad "no controller after the start"
 
 echo "== the bed check"
 cp "$CONF" "$T/conf.before"
@@ -1081,6 +1161,89 @@ expect 1 "$(recv laser.floor)" "the record carries laser.floor at version 1"
 [ ! -e "$T/data/curverec.saved" ] && ok "the saved keys' marker is gone" || bad "the saved keys' marker is left"
 [ ! -s "$SYS/cnc/motor_lock" ] && ok "the session never wrote the lens lock: it is the controller's" \
     || bad "the session wrote cnc/motor_lock $(cat "$SYS/cnc/motor_lock")"
+
+echo "== a burn under an operator's stop, and under a motion fault"
+# A burn needs its loopback controller, which the operator's stop keeps
+# down: it refuses where it would take the machine, in those words.
+expect 200 "$(post /controller/stop "$TOKEN")" "the operator's stop is 200"
+until_ok 50 ctl_down || bad "the controller did not stop"
+check laser.floor answer:gantry-stops=Yes
+expect 'gantry-stops|true' "$(run '"%s|%s" % ("|".join(p["id"] for p in d["prompts"]), json.dumps("was stopped" in (d["dark"]["error"] or "")))')" \
+    "the burn refuses after the gantry stops, before it takes the machine ($(run 'd["dark"]["error"]'))"
+OLD=$(ctl_pid)
+expect 200 "$(post /controller/start "$TOKEN")" "the operator's start is 200"
+up || bad "no controller after the start"
+# ...and under a motion fault: the controller exits over a stepper fault,
+# whose lines then clear with the motion fault still standing.
+echo fault > "$SYS/cnc/state"
+OLD=$(ctl_pid)
+kill "$(ctl_pid)"
+until_ok 100 faulted || bad "no motion fault after the controller exited over a stepper fault"
+echo idle > "$SYS/cnc/state"
+check laser.floor answer:gantry-stops=Yes
+expect true "$(run 'json.dumps("motion fault" in (d["dark"]["error"] or ""))')" \
+    "a burn refuses under a motion fault too ($(run 'd["dark"]["error"]'))"
+expect 200 "$(post /controller/start "$TOKEN")" "the retry is 200"
+up || bad "no controller after the retry"
+
+echo "== the Motion check, ended in its lens passes"
+# The probe passes on a stand-in head accelerometer (its X reading swings
+# as a moving head's does), the lens takes its reference on the hall
+# stand-in, and the check is ended during its lens passes. The marker the
+# probe's hunt wrote no longer says where the lens is: the controller that
+# comes back is preceded by a fresh sweep.
+mkdir -p "$T/accel/3-001e/iio:device0" "$T/iio"
+ln -s "$T/accel/3-001e/iio:device0" "$T/iio/iio:device0"
+echo 0 > "$T/accel/3-001e/iio:device0/in_accel_y_raw"
+for a in cnc/x_mode cnc/x_decay cnc/step_freq cnc/streaming cnc/run pic/x_step_current; do : > "$SYS/$a"; done
+( while :; do for v in 0 1500; do echo $v > "$T/accel/x.new" && mv "$T/accel/x.new" "$T/accel/3-001e/iio:device0/in_accel_x_raw"
+                                 sleep 0.03; done; done ) &
+SWING=$!
+SWEPT=$(grep -c 'lens reference before the controller: ON EDGE' "$T/out")
+OLD=$(ctl_pid)
+check motion "abortat:the lens finds its reference on the hall sensor: pass "
+expect 'True|True' "$(run '"%s|%s" % (bool(d.get("aborted_at")), "lens reference" in (d["dark"]["error"] or ""))')" \
+    "the probe passed, and the check ended during its lens passes ($(run 'd["dark"]["error"]'))"
+up && ok "the controller comes back" || bad "no controller after the check"
+expect $((SWEPT + 1)) "$(grep -c 'lens reference before the controller: ON EDGE' "$T/out")" \
+    "the lens was swept onto its edge again before it"
+# Run whole, the check reaches the crash watch's part, which it borrows
+# for the jogs; a host has no i2c bus, so the borrow is refused, and the
+# check hands the machine back from its loopback posture.
+OLD=$(ctl_pid)
+check motion
+expect true "$(run '"i2c bus" in (d["dark"]["error"] or "")')" \
+    "the probe, the lens passes and the loopback controller, then the borrow refused ($(run 'd["dark"]["error"]'))"
+up && ok "the controller comes back in its normal posture" || bad "no controller after the check"
+mode
+expect false "$(jget "$T/mode.json" 'json.dumps(d["local"])')" "not in loopback posture"
+kill $SWING
+wait $SWING 2>/dev/null
+rm -rf "$T/iio/iio:device0" "$T/accel"
+rm -f "$SYS/cnc/x_mode" "$SYS/cnc/x_decay" "$SYS/cnc/step_freq" "$SYS/cnc/streaming" "$SYS/cnc/run" \
+      "$SYS/pic/x_step_current"
+
+echo "== the Lens travel check, the pulse engine busy at its end"
+# On a host the finder cannot borrow the head accelerometer (no i2c bus):
+# the stops are not found and the fallback window is written. The pulse
+# engine reads running from the finder on, and at the check's end does
+# not go idle: the lens stays where it stands and the marker goes. The
+# clock stand-in's .mono flag stands from the start and comes off at the
+# check's end, so the end's wait for the engine finds its deadline past.
+: > "$T/timeshift.mono"
+OLD=$(ctl_pid)
+check lens.travel "onphase:the fans stop before the listening=echo running > $SYS/cnc/state" \
+    "onresult:=rm -f $T/timeshift.mono"
+rm -f "$T/timeshift.mono"
+expect '200||False' "$(run '"%s|%s|%s" % (d["start"], d["dark"]["error"], d["dark"]["result"]["window"]["found"])')" \
+    "the check ends with the fallback window: the stops are not found on a host"
+grep -q '^lens_stop_below_steps = ' "$CONF" && grep -q '^lens_stop_above_steps = ' "$CONF" \
+    && ok "the window is written" || bad "the conf file has $(grep lens_stop "$CONF" | tr '\n' ' ')"
+up && ok "the controller comes back" || bad "no controller after the check"
+[ ! -e "$T/run/lens.home" ] && ok "the engine did not go idle: the lens kept where it stands, the marker gone" \
+    || bad "the lens was referenced over a busy engine: $(cat "$T/run/lens.home")"
+echo idle > "$SYS/cnc/state"
+
 OLD=$(ctl_pid)
 stop_daemon
 kill $HALL
@@ -1093,6 +1256,48 @@ LENS_SYS=$T/no-head
 at_rest
 cp "$T/conf.before" "$CONF"
 cp "$T/seed.json" "$REC"
+start_daemon
+up || bad "no controller on the seeded record"
+
+echo "== the daemon's stop during a check's lens rehome"
+# A check's exit puts the lens back on its edge, after an abort too; the
+# daemon's stop ends that rehome between two steps, before its bound on
+# the check's thread, with the lens motor back at its hold current. The
+# lens stand-in's sensor is stuck clear, so the rehome would step its
+# 200-step bound; its steps go to a pipe a reader counts.
+STUCK=$T/stuck
+mkdir -p "$STUCK/head" "$STUCK/cnc"
+echo 1 > "$STUCK/head/hall_sensor"
+for a in head/z_enable head/z_current head/z_mode; do : > "$STUCK/$a"; done
+mkfifo "$STUCK/cnc/z_step"
+echo 0 > "$T/steps"
+python3 -c 'import os, sys
+fd, n = os.open(sys.argv[1], os.O_RDWR), 0
+while True:
+    n += len(os.read(fd, 64))
+    open(sys.argv[2] + ".new", "w").write(str(n))
+    os.replace(sys.argv[2] + ".new", sys.argv[2])' "$STUCK/cnc/z_step" "$T/steps" &
+STEPPER=$!
+OLD=$(ctl_pid)
+stop_daemon
+LENS_SYS=$STUCK
+start_daemon
+up || bad "no controller with the stuck lens sensor"
+B0=$(cat "$T/steps")
+expect 200 "$(post /wiz/lens.travel/start "$TOKEN")" "POST /wiz/lens.travel/start is 200"
+ending() { dark && [ "$(jget "$T/dark.json" 'json.dumps(bool(d.get("running")) and bool(d.get("error")))')" = true ]; }
+until_ok 100 ending || bad "the check never reached its exit: $(cat "$T/dark.json")"
+sleep 0.3
+stop_daemon
+N=$(( $(cat "$T/steps") - B0 ))
+[ "$N" -gt 0 ] && [ "$N" -lt 200 ] && ok "the rehome ended at the daemon's stop, after $N steps" \
+    || bad "the rehome stepped $N times"
+expect 1 "$(cat "$STUCK/head/z_current")" "and the lens motor is back at its hold current"
+kill $STEPPER
+wait $STEPPER 2>/dev/null
+STEPPER=
+rm -rf "$STUCK" "$T/steps"
+LENS_SYS=$T/no-head
 start_daemon
 up || bad "no controller on the seeded record"
 

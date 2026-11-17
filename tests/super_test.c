@@ -24,8 +24,10 @@
  *   E. a busy kernel makes the probe wait and ask again; a missing
  *      accelerometer skips it and the controller starts unverified
  *   F. the stop lever reaches a probe in flight: the ladder ends
- *      between its steps with motion stopped, and the lever returns
- *      once the probe is gone
+ *      between its steps with motion stopped, within its rail-off wait,
+ *      and the lever returns once the probe is gone; a lever that cuts a
+ *      probe short is followed by no rail-off rung, and one during the
+ *      lens hunt ends the hunt with no marker
  *   G. a safing write is tried three times before it is named;
  *      the stop path lands the stop before the signal and repeats the
  *      pair after it
@@ -38,8 +40,9 @@
  *      the safing pair landed before the SIGTERM, and starts it again
  *      without a backoff
  *   J. a motor release is nobody's to end but the operator's: the probe
- *      is skipped with nothing written, the controller still starts,
- *      and a switch to cloud mode is refused
+ *      is skipped with nothing written to the rail, the lens is still
+ *      swept before the controller and waits for an open lid, the
+ *      controller still starts, and a switch to cloud mode is refused
  *   L. the report channel is the running controller's alone: each spawn
  *      is handed a fresh secret in its environment, an inherited one is
  *      replaced, nothing else passes for it, and a reap ends it
@@ -49,7 +52,42 @@
  *      and a release image is not held by the record
  *   N. the button is solid white while the probe moves the machine and out
  *      after it; a probe that finds no motion is the fault the cooling
- *      engine reads (super_motion_fault), and the retry clears it
+ *      engine reads (super_motion_fault), no pass after it probes or
+ *      starts a controller, and the retry clears it and probes first
+ *   O. switches that cannot be read hold the gate as an open lid does; a
+ *      probe the enclosure ends, and a lid opened before the lens hunt,
+ *      decide nothing and the probe runs again
+ *   P. a probe that fails on the machine, and a lens with no edge, are
+ *      motion faults in their own words, with no rail cycle
+ *   Q. the kernel as the last holder left it: a stepper fault gets one
+ *      enable (named, and a motion fault in its own words when refused,
+ *      never retried by the passes), an underrun is acknowledged, a
+ *      kernel still playing is waited for, bounded, then halted; a
+ *      respawn over a stepper fault is a motion fault, not a halt and a
+ *      spawn; a shutdown and a standby treat a fault as playing nothing
+ *   R. a check's hand-back ends its own takeover alone: an operator's
+ *      stop and a motion fault outlive it; a check's probe that ends
+ *      before a verdict leaves motion unverified, and one the lever ends
+ *      leaves the operator's stop standing; a homing runner is ended
+ *      before the check's probe
+ *   S. the lens marker goes at every reap and the lens is swept again
+ *      before the next GRBL controller; a sweep with no edge starts the
+ *      controller with Z unreferenced and is not repeated in the hold
+ *      until a hunt finds the edge; the real lever, from its own thread,
+ *      ends the sweep between two steps and returns only after it; a
+ *      hold after its last step, and switches that stop answering during
+ *      it, hold the spawn; the cloud client gets no sweep
+ *   T. a lever or a takeover that lands in the pass's enclosure read,
+ *      with the lock down, is followed by no lens step and no spawn
+ *   U. the lever reaches the wait for a busy kernel; an enable refused at
+ *      a later rung is a motion fault; /mode names a stepper fault by what
+ *      the kernel holds; a third move stopped under an opening with no
+ *      whole move between is a motion fault, an opening before a move not
+ *      ending the count; a check's probe under the lever's hold moves
+ *      nothing; the daemon's shutdown ends the sweep; switches that stop
+ *      answering during the probe's lens hunt end it and the probe waits;
+ *      a shutdown leaves a controller over a playing kernel, and a
+ *      standby does not take over a kernel whose state cannot be read
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -83,7 +121,7 @@ int fake_kill(pid_t pid, int sig);
 int fake_system(const char *cmd);
 int fake_flock(int fd, int op);
 int fake_execle(const char *path, const char *arg, ...);
-int fake_liveness_probe(int fd, char *detail, size_t dlen);
+int fake_liveness_probe(int fd, char *detail, size_t dlen, int (*stop)(void));
 int fake_liveness_enclosure(char *why, size_t wlen);
 int fake_machine_is_idle(void);
 
@@ -101,6 +139,7 @@ static double fake_now = 1000.0;
 static const char *create_on_sleep;     /* an attribute a sleep creates (G) */
 static const char *unlink_on_kill;      /* an attribute the first signal removes (G) */
 static int abort_on_sleep;              /* the lever lands this many sleeps on (F) */
+static int hold_on_abort;               /* ...and holds supervision, as POST /controller/stop does */
 static unsigned real_sleep_us;          /* a real pause per fake sleep (F) */
 
 int fake_clock_gettime(clockid_t id, struct timespec *ts)
@@ -121,8 +160,11 @@ int fake_usleep(unsigned us)
         put(create_on_sleep, "0\n");
         create_on_sleep = NULL;
     }
-    if (abort_on_sleep && --abort_on_sleep == 0)
+    if (abort_on_sleep && --abort_on_sleep == 0) {
         probe_abort = 1;
+        if (hold_on_abort)
+            suspended |= SUSP_HOLD;
+    }
     if (real_sleep_us) {
         struct timespec ts = { 0, (long)real_sleep_us * 1000 };
         nanosleep(&ts, NULL);
@@ -250,24 +292,48 @@ int fake_execle(const char *path, const char *arg, ...)
 static int probe_rc = 1;                /* what the probe answers */
 static int probe_rcs[8], nprobe_rcs, probes;    /* ...or a sequence of answers */
 static int probe_led = -1;              /* the button as the last probe found it lit (-1: dark) */
-static int enclosure_open;
+static int probe_lever;                 /* the lever lands while the probe runs */
+static int probe_stop_seen;             /* ...and the probe's stop input answered it */
+static int open_after_probe;            /* the switches stop answering as the probe returns */
+static int enable_gone_after_probe;     /* cnc/enable refuses from the first probe on */
+static int enclosure_open;              /* 1 open, -1 the switches cannot be read, 0 closed */
+static int enclosure_race;              /* the next enclosure read lands 1 the lever, 2 a takeover */
+static int race_rc = -9;                /* ...and what it answered */
 static int machine_idle = 1;
 static int led_lit;                     /* the button lit by led_set, not released since */
 static int led_last = -1;               /* the pattern led_set was last given */
 
-int fake_liveness_probe(int fd, char *detail, size_t dlen)
+int fake_liveness_probe(int fd, char *detail, size_t dlen, int (*stop)(void))
 {
     (void)fd;
     int rc = probes < nprobe_rcs ? probe_rcs[probes] : probe_rc;
     probes++;
+    note("probe");
     probe_led = led_lit ? led_last : -1;
     snprintf(detail, dlen, "fake probe %d", rc);
+    if (probe_lever) {
+        probe_abort = 1;
+        probe_stop_seen = stop && stop();   /* the probe asks it before its move (liveness.c) */
+    }
+    if (open_after_probe)
+        enclosure_open = -1;
+    if (enable_gone_after_probe)
+        unlink(GF_SYSFS "cnc/enable");
     return rc;
 }
 
+/* The read runs with the supervisor's lock down: a stop lever or a
+ * check's takeover may land in it from another thread, as here. */
 int fake_liveness_enclosure(char *why, size_t wlen)
 {
-    snprintf(why, wlen, "%s", enclosure_open ? "the lid is open" : "");
+    int race = enclosure_race;
+    enclosure_race = 0;
+    if (race == 1)
+        race_rc = super_controller_stop();
+    else if (race == 2)
+        race_rc = super_takeover_begin();
+    snprintf(why, wlen, "%s", enclosure_open > 0 ? "the lid is open"
+                              : enclosure_open < 0 ? "the lid switches cannot be read" : "");
     return enclosure_open;
 }
 
@@ -326,8 +392,73 @@ void led_set(led_pattern_t p) { led_last = (int)p; led_lit = 1; }
 void led_release(void) { led_lit = 0; }
 static int led_kept = -1, led_keeps;    /* the pattern led_keep was last given, and how often */
 void led_keep(led_pattern_t p) { led_kept = (int)p; led_keeps++; }
-void lenshome_clear(void) { }
-int lenshome_run(char *detail, size_t dlen) { snprintf(detail, dlen, "fake edge"); return 1; }
+
+/* The lens hunt: its marker, its answer, and the lever or the lid that
+ * may land while it steps. It honors its stop input as lenshome.c does
+ * between two steps (lenshome_test proves that half). */
+static int lens_marker;                 /* run/lens.home stands */
+static int lens_rc = 1;                 /* what a hunt that runs to its end answers */
+static int lens_runs;                   /* hunts started */
+static int lens_lever;                  /* the lever lands during the hunt, holding supervision */
+static int lens_open;                   /* the switches stop answering during the hunt */
+static int lens_hold_late;              /* a hold lands after the hunt's last look at its stop */
+static int lens_real_lever;             /* from a thread during the hunt: 1 the lever, 2 the shutdown */
+static int lens_stopped;                /* the hunt's stop input answered */
+static volatile int lever_returned;     /* the real lever's call has returned */
+static int lever_waited;                /* ...and it had not when the hunt ended */
+static int lever_rc = -9;
+
+static void *lever_thread(void *arg)
+{
+    if (arg) {
+        super_shutdown();
+        lever_rc = 0;
+    } else {
+        lever_rc = super_controller_stop();
+    }
+    lever_returned = 1;
+    return NULL;
+}
+
+void lenshome_clear(void) { lens_marker = 0; }
+int lenshome_present(void) { return lens_marker; }
+int lenshome_run(char *detail, size_t dlen, int (*stop)(void))
+{
+    lens_runs++;
+    note("lens-hunt");
+    lens_marker = 0;
+    if (lens_lever) {
+        probe_abort = 1;
+        suspended |= SUSP_HOLD;
+    }
+    if (lens_open)
+        enclosure_open = -1;
+    if (lens_real_lever) {
+        /* The lever arrives while the hunt steps, and the hunt asks its
+         * stop between steps, a millisecond apart, for up to 2 s. */
+        pthread_t t;
+        lever_returned = 0;
+        pthread_create(&t, NULL, lever_thread, lens_real_lever == 2 ? (void *)1 : NULL);
+        pthread_detach(t);
+        for (int i = 0; i < 2000 && !(stop && stop()); i++) {
+            struct timespec ts = { 0, 1000000 };
+            nanosleep(&ts, NULL);
+        }
+        struct timespec ts = { 0, 20000000 };
+        nanosleep(&ts, NULL);           /* a lever that does not wait has returned by now */
+        lever_waited = !lever_returned;
+    }
+    if (stop && stop()) {
+        lens_stopped = 1;
+        snprintf(detail, dlen, "fake hunt ended");
+        return LENSHOME_STOPPED;
+    }
+    if (lens_hold_late)
+        suspended |= SUSP_HOLD;
+    snprintf(detail, dlen, "fake hunt %d", lens_rc);
+    lens_marker = lens_rc == 1;
+    return lens_rc;
+}
 void cam_lamp_apply_idle(void) { }
 int setup_gate_open(char *why, size_t len) { if (len) why[0] = '\0'; return 1; }
 static int dev_image;                   /* the image carries the dev marker (M) */
@@ -378,6 +509,8 @@ static void make_tree(void)
     put("cnc/halt", "0\n");
     put("cnc/enable", "0\n");
     put("cnc/disable", "0\n");
+    put("cnc/state", "idle\n");
+    put("cnc/faults", "0\n");
     FILE *f = fopen(PULSE_DEV, "w");
     if (f)
         fclose(f);
@@ -392,6 +525,15 @@ static void clear_safing(void)
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     put("cnc/halt", "0\n");
+}
+
+/* The kernel at rest, its rail writes forgotten. */
+static void kernel_at_rest(void)
+{
+    put("cnc/state", "idle\n");
+    put("cnc/faults", "0\n");
+    put("cnc/enable", "0\n");
+    put("cnc/disable", "0\n");
 }
 
 static int safed(void)
@@ -478,9 +620,32 @@ static void reset_state(void)
     led_last = -1;
     led_lit = 0;
     probe_led = -1;
+    probe_lever = 0;
+    open_after_probe = 0;
+    enable_gone_after_probe = 0;
+    enclosure_race = 0;
+    race_rc = -9;
+    abort_on_sleep = 0;
+    hold_on_abort = 0;
+    lens_marker = 0;
+    lens_rc = 1;
+    lens_runs = 0;
+    lens_lever = 0;
+    lens_open = 0;
+    lens_hold_late = 0;
+    lens_real_lever = 0;
+    lens_stopped = 0;
+    lever_waited = 0;
+    lever_rc = -9;
+    probe_stop_seen = 0;
+    pthread_mutex_lock(&mu);
+    sweep_failed = 0;
+    moves_stopped = 0;
+    pthread_mutex_unlock(&mu);
     calls[0] = '\0';
     logs[0] = '\0';
     clear_safing();
+    kernel_at_rest();
 }
 
 /* A controller up and verified: the broker held, the probe passed, the
@@ -499,6 +664,18 @@ static void die(int status)
 {
     death_pid = child_pid;
     death_status = status;
+}
+
+/* A check takes the machine from a running controller: the stop the
+ * lifecycle thread makes once the takeover is asked for, then the ask,
+ * which finds the controller gone. */
+static int take_over(void)
+{
+    pthread_mutex_lock(&mu);
+    suspended |= SUSP_TAKEOVER;
+    stop_locked();
+    pthread_mutex_unlock(&mu);
+    return super_takeover_begin();
 }
 
 static double now_real(void)
@@ -643,6 +820,7 @@ int main(void)
     pthread_mutex_lock(&mu);
     probing = 1;
     pthread_mutex_unlock(&mu);
+    double t_lever = fake_now;
     int rc = probe_sequence(3);
     pthread_mutex_lock(&mu);
     probing = 0;
@@ -650,7 +828,19 @@ int main(void)
     CHECK(rc == 4, "the sequence ends with the lever's code");
     CHECK(get_long("cnc/stop") == 1, "with motion stopped");
     CHECK(probes == 1, "before the second rung probed");
+    CHECK(fake_now - t_lever < 5.0, "within the rail-off wait, not at its end");
     CHECK(strstr(probe_detail, "stop lever") != NULL, "and says why");
+    reset_state();
+    probe_rc = 0;
+    probe_lever = 1;                    /* the lever lands before the head has moved */
+    rc = probe_sequence(3);
+    CHECK(rc == 4 && probes == 1 && get_long("cnc/disable") == 0,
+          "a lever that cuts a probe short ends the sequence there: no rail-off rung follows");
+    CHECK(probe_stop_seen, "the probe's own stop input answers the lever, before its move");
+    reset_state();
+    lens_lever = 1;                     /* the lever lands during the lens hunt */
+    rc = probe_sequence(3);
+    CHECK(rc == 4 && lens_runs == 1 && !lens_marker, "the lever reaches the lens hunt: it ends, no marker");
     clear_safing();
     reset_state();
     pthread_mutex_lock(&mu);
@@ -765,8 +955,15 @@ int main(void)
         if (f)
             fclose(f);
     }
+    tick();                             /* the probe's turn, the lid closed */
+    int probe_turn = probed && lens_runs == 0 && forks == 0;
+    enclosure_open = 1;                 /* the lid opens before the sweep's turn */
+    CHECK(probe_turn && !run_until_spawned(3.0) && lens_runs == 0 && enclosure_wait,
+          "an open lid holds the lens sweep under the release, and the spawn");
+    enclosure_open = 0;
     CHECK(run_until_spawned(5.0), "the controller still comes up: it is what takes the release over");
-    CHECK(probes == 0, "the motion probe never ran");
+    CHECK(probes == 0 && lens_runs == 1,
+          "the motion probe never ran; the lens was swept (Z alone: the lens motor is not released)");
     CHECK(get_long("cnc/enable") == 0 && get_long("cnc/disable") == 0, "and nothing was written to the rail");
     CHECK(probed && probe_skipped, "motion is unverified, not faulted");
     {
@@ -842,9 +1039,11 @@ int main(void)
         CHECK(!super_report_secret_ok(near) && !super_report_secret_ok(""), "nor a part of it, nor nothing");
         CHECK(!strstr(logs, first), "the secret is in no log line");
 
+        CHECK(super_grbl_pid() == (long)child_pid, "the M-code relay's key is the running controller's pid");
         die(0x0900);
         tick();
         CHECK(child_pid == 0 && !super_report_secret_ok(first), "a reap ends it");
+        CHECK(super_grbl_pid() == 0, "and with no controller the key is none");
         CHECK(run_until_spawned(30.0), "the respawn comes up");
         CHECK(strcmp(report_secret, first) && strlen(report_secret) == REPORT_SECRET_HEX &&
               !super_report_secret_ok(first) && super_report_secret_ok(report_secret),
@@ -898,8 +1097,415 @@ int main(void)
     probe_rc = 0;                       /* NO MOTION at every rung of the ladder */
     tick();
     CHECK(probes == 4 && super_motion_fault() == 1, "no motion after the ladder: the fault, as the engine reads it");
+    for (int i = 0; i < 10; i++) {
+        tick();
+        fake_now += 1.0;
+    }
+    CHECK(probes == 4 && forks == 0, "ten passes later: no probe and no controller");
+    probe_rc = 1;
     super_controller_start();           /* the operator's retry */
     CHECK(super_motion_fault() == 0, "the retry clears it");
+    tick();
+    CHECK(probes == 5 && forks == 0, "the pass after the retry probes before any controller starts");
+    reset_state();
+
+    printf("O. the gate's enclosure inputs, and a probe the enclosure ends\n");
+    reset_state();
+    enclosure_open = -1;
+    CHECK(!run_until_spawned(3.0) && probes == 0 && forks == 0,
+          "switches that cannot be read: no probe and no controller");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "\"controller\":\"waiting\"") && strstr(st, "cannot be read"),
+              "/mode says waiting, and that the switches cannot be read");
+    }
+    reset_state();
+    probe_rcs[0] = -2;                  /* the lid opened under the probe */
+    probe_rcs[1] = 1;
+    nprobe_rcs = 2;
+    tick();
+    CHECK(probes == 1 && forks == 0 && !probed, "a probe the enclosure ended decides nothing, starts nothing");
+    CHECK(run_until_spawned(3.0) && probes == 2 && probed && !probe_skipped,
+          "the next probe runs, and the controller starts behind it");
+    reset_state();
+    open_after_probe = 1;               /* the lid opens between the probe and the lens hunt */
+    tick();
+    CHECK(probes == 1 && lens_runs == 0 && forks == 0 && !probed,
+          "the lens does not move with the lid open: the probe waits");
+    open_after_probe = 0;
+    enclosure_open = 0;
+    CHECK(run_until_spawned(3.0) && probes == 2 && lens_runs == 1 && lens_marker,
+          "with the lid closed: the probe, the lens, the controller");
+
+    printf("P. a probe that fails on the machine, and a lens with no edge\n");
+    reset_state();
+    probe_rc = -4;
+    tick();
+    CHECK(probes == 1 && super_motion_fault() && get_long("cnc/disable") == 0 && forks == 0,
+          "a probe that fails on the machine is a motion fault at once: no rail cycle, no controller");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "fake probe -4") != NULL, "/mode carries the probe's words");
+    }
+    reset_state();
+    lens_rc = 0;                        /* the hunt finds no hall edge */
+    CHECK(!run_until_spawned(3.0) && forks == 0 && super_motion_fault(),
+          "a lens with no edge behind a moving probe is a motion fault: no controller");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "\"why\":\"lens:") != NULL, "/mode says it is the lens");
+    }
+
+    printf("Q. the kernel as the last holder left it\n");
+    reset_state();
+    put("cnc/state", "fault\n");
+    put("cnc/faults", "2\n");
+    unlink(GF_SYSFS "cnc/enable");      /* the kernel refuses the enable: a line still asserted */
+    tick();
+    CHECK(probes == 0 && super_motion_fault() && forks == 0 && get_long("cnc/disable") == 0,
+          "a stepper fault the enable cannot clear is a motion fault: no probe, no rail cycle");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "fault") && strstr(st, "faults 2"), "/mode names the state and the lines");
+    }
+    int crits = crit_logs;
+    for (int i = 0; i < 10; i++) {
+        tick();
+        fake_now += 2.0;
+    }
+    CHECK(crit_logs == crits && probes == 0, "and the enable is not tried again until a retry");
+    reset_state();
+    put("cnc/state", "fault\n");
+    put("cnc/faults", "1\n");           /* latched, its line cleared */
+    CHECK(run_until_spawned(3.0) && get_long("cnc/enable") == 1 && probes == 1,
+          "a stepper fault whose lines have cleared: the one enable, then the probe and the controller");
+    CHECK(strstr(logs, "faults 1") != NULL, "the mask it cleared is logged");
+    reset_state();
+    put("cnc/state", "underrun\n");
+    CHECK(run_until_spawned(3.0) && get_long("cnc/stop") == 1 && probes == 1,
+          "an underrun left behind is acknowledged before the probe");
+    reset_state();
+    put("cnc/state", "running\n");
+    alarm(20);                          /* an unbounded wait fails here, not in CI's timeout */
+    double t_busy = fake_now;
+    CHECK(run_until_spawned(30.0) && get_long("cnc/halt") == 1 && probes == 1,
+          "a kernel still playing at the probe is waited for, then halted, then probed");
+    alarm(0);
+    CHECK(fake_now - t_busy >= PROBE_BUSY_WAIT_S && strstr(logs, "halting it") && crit_logs > 0,
+          "after the bound, said at the highest severity");
+    bring_up();
+    put("cnc/state", "fault\n");
+    put("cnc/faults", "4\n");
+    machine_idle = 0;
+    die(0x0900);
+    tick();
+    fake_now += 2.0;
+    CHECK(!run_until_spawned(15.0) && get_long("cnc/halt") == 0 && super_motion_fault() && !probed,
+          "a respawn over a stepper fault: no halt, no controller, a motion fault");
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(strstr(st, "faults 4") && strstr(st, "\"stepper_fault\":true"),
+              "/mode names the lines, and a stepper fault for the panel's Retry");
+    }
+    machine_idle = 1;
+    put("cnc/faults", "0\n");
+    put("cnc/enable", "0\n");
+    super_controller_start();           /* the retry, once the lines have cleared */
+    int before_probes = probes;
+    CHECK(run_until_spawned(3.0) && probes == before_probes + 1 && get_long("cnc/enable") == 1,
+          "the retry probes, with its one enable, before the controller starts");
+    bring_up();
+    put("cnc/state", "fault\n");
+    machine_idle = 0;
+    nkills = 0;
+    super_shutdown();
+    CHECK(nkills >= 1 && kills[0] == SIGTERM && child_pid == 0,
+          "a shutdown stops a controller over a stepper fault: it plays nothing");
+    machine_idle = 1;
+    reset_state();
+    put("cnc/state", "fault\n");
+    machine_idle = 0;
+    standby_takeover = 1;
+    suspended = SUSP_STANDBY;
+    tick();
+    CHECK(strstr(calls, "/etc/init.d/grblhal stop") && !standby_takeover && !suspended,
+          "standing by over a stepper fault: the machine is taken over");
+    machine_idle = 1;
+
+    printf("R. a check's hand-back is its own; the check's probe\n");
+    bring_up();
+    CHECK(take_over() == 0 && child_pid == 0, "a check takes the machine");
+    CHECK(super_controller_stop() == 0, "the operator pulls the stop lever during it");
+    super_takeover_end();
+    int f0 = forks;
+    CHECK(!run_until_spawned(3.0) && forks == f0, "the check's hand-back leaves the operator's stop standing");
+    super_controller_start();
+    CHECK(run_until_spawned(3.0), "the operator's start brings the controller back");
+    reset_state();
+    probe_rc = 0;
+    CHECK(super_takeover_begin() == 0, "a check takes the machine");
+    {
+        char d[96];
+        CHECK(super_probe_motion(d, sizeof(d)) == 0 && super_motion_fault(), "its probe finds no motion");
+    }
+    super_takeover_end();
+    int p0 = probes;
+    for (int i = 0; i < 10; i++) {
+        tick();
+        fake_now += 1.0;
+    }
+    CHECK(probes == p0 && forks == 0 && super_motion_fault(),
+          "the motion fault it found outlives the hand-back: no ladder, no controller");
+    bring_up();                         /* motion verified at the boot */
+    CHECK(take_over() == 0, "a check takes the machine");
+    probe_rcs[0] = 0;                   /* the check's probe: no motion, then the lid open */
+    probe_rcs[1] = -2;
+    nprobe_rcs = 2;
+    probes = 0;
+    {
+        char d[96];
+        CHECK(super_probe_motion(d, sizeof(d)) == 3 && !probed, "a check's probe the lid ends leaves motion unverified");
+    }
+    super_takeover_end();
+    probe_rc = 1;
+    nprobe_rcs = 0;
+    probes = 0;
+    forks = 0;
+    calls[0] = '\0';
+    CHECK(run_until_spawned(3.0) && probes == 1 && strstr(calls, "probe") < strstr(calls, "fork-controller"),
+          "the lifecycle probes from the first rung before the controller starts");
+    bring_up();
+    CHECK(take_over() == 0, "a check takes the machine");
+    probe_rc = 0;
+    abort_on_sleep = 12;                /* the operator's stop lands in the rail-off wait */
+    hold_on_abort = 1;
+    probes = 0;
+    {
+        char d[96];
+        CHECK(super_probe_motion(d, sizeof(d)) == 4 && !probed, "the lever ends the check's probe");
+    }
+    super_takeover_end();
+    probe_rc = 1;
+    probes = 0;
+    forks = 0;
+    CHECK(!run_until_spawned(3.0) && probes == 0 && forks == 0,
+          "the check's hand-back: the operator's stop stands, nothing moves, nothing starts");
+    reset_state();
+    runner_alive = 1;                   /* a stopped controller's homing runner */
+    {
+        char d[96];
+        super_probe_motion(d, sizeof(d));
+    }
+    CHECK(strstr(calls, "pkill -TERM -x gfhome.py") && strstr(calls, "pkill -TERM -x gfhome.py") < strstr(calls, "probe"),
+          "the check's probe ends a homing runner before it writes the ring");
+
+    printf("S. the lens reference goes with every controller and comes back before the next\n");
+    bring_up();
+    CHECK(lens_marker && lens_runs == 1, "the probe's hunt referenced the lens");
+    die(0x0900);
+    tick();
+    CHECK(child_pid == 0 && !lens_marker, "the reap drops the marker");
+    calls[0] = '\0';
+    CHECK(run_until_spawned(5.0) && lens_runs == 2 && lens_marker &&
+          strstr(calls, "lens-hunt") && strstr(calls, "lens-hunt") < strstr(calls, "fork-controller"),
+          "the respawn sweeps the lens onto its edge before the controller starts");
+    die(0x0900);
+    tick();
+    lens_rc = 0;                        /* the sweep finds no edge */
+    int l1 = lens_runs;
+    CHECK(run_until_spawned(10.0) && lens_runs == l1 + 1 && !lens_marker && !super_motion_fault(),
+          "a sweep that finds no edge: the controller starts, Z unreferenced, no motion fault");
+    die(0x0900);
+    tick();
+    CHECK(run_until_spawned(10.0) && lens_runs == l1 + 1, "and no start after it in the hold sweeps again");
+    CHECK(take_over() == 0, "a check takes the machine");
+    lens_marker = 1;                    /* its hunt finds the edge */
+    super_takeover_end();
+    CHECK(run_until_spawned(5.0) && lens_runs == l1 + 1, "the controller comes back on the check's reference");
+    lens_rc = 1;
+    die(0x0900);
+    tick();
+    CHECK(run_until_spawned(10.0) && lens_runs == l1 + 2 && lens_marker,
+          "a hunt that found the edge lets the sweep run again");
+    reset_state();
+    bring_up();
+    die(0x0900);
+    tick();
+    fake_now += 2.0;                    /* past the respawn's backoff */
+    lens_real_lever = 1;                /* the operator's stop, from its own thread, while the sweep steps */
+    real_sleep_us = 1000;
+    f0 = forks;
+    tick();
+    real_sleep_us = 0;
+    for (int i = 0; i < 1000 && !lever_returned; i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    CHECK(lens_stopped && lever_waited && lever_rc == 0 && forks == f0 && !lens_marker,
+          "the lever reaches the sweep between two steps, and returns only once the sweep has ended; no controller");
+    lens_real_lever = 0;
+    reset_state();
+    bring_up();
+    die(0x0900);
+    tick();
+    lens_hold_late = 1;                 /* a hold lands after the sweep's last step */
+    f0 = forks;
+    CHECK(!run_until_spawned(5.0) && forks == f0, "a hold after the sweep's last step: no controller");
+    reset_state();
+    bring_up();
+    die(0x0900);
+    tick();
+    fake_now += 2.0;
+    lens_open = 1;                      /* the switches stop answering during the sweep */
+    f0 = forks;
+    tick();
+    CHECK(lens_stopped && forks == f0 && enclosure_wait,
+          "switches that stop answering during the sweep end it, and the spawn waits for them");
+    lens_open = 0;
+    enclosure_open = 0;
+    CHECK(run_until_spawned(3.0), "the controller starts once they read closed");
+    bring_up();
+    int l0 = lens_runs;
+    pthread_mutex_lock(&mu);
+    want = Ctl_Cloud;
+    pthread_mutex_unlock(&mu);
+    die(0x0900);
+    tick();
+    CHECK(run_until_spawned(5.0) && lens_runs == l0, "the cloud client homes the lens itself: no sweep before it");
+    reset_state();
+
+    printf("T. a lever or a takeover in the pass's enclosure read: nothing moves, nothing starts\n");
+    bring_up();
+    die(0x0900);
+    tick();
+    fake_now += 5.0;                    /* past the respawn's backoff */
+    int l2 = lens_runs;
+    f0 = forks;
+    enclosure_race = 1;
+    tick();
+    CHECK(race_rc == 0 && lens_runs == l2 && forks == f0,
+          "the lever answered stopped, and no sweep stepped the lens after it, no controller started");
+    super_controller_start();
+    CHECK(run_until_spawned(5.0) && lens_runs == l2 + 1, "the operator's start: the sweep, then the controller");
+    die(0x0900);
+    tick();
+    fake_now += 5.0;
+    l2 = lens_runs;
+    f0 = forks;
+    enclosure_race = 2;
+    tick();
+    CHECK(race_rc == 0 && lens_runs == l2 && forks == f0,
+          "a check's takeover: the check has the machine, and no sweep steps the lens under it");
+    super_takeover_end();
+    CHECK(run_until_spawned(5.0), "its hand-back brings the controller back");
+    reset_state();
+
+    printf("U. what the kernel's state, the switches and the bounds leave alone\n");
+    reset_state();
+    put("cnc/state", "running\n");
+    abort_on_sleep = 5;                 /* the lever lands in the wait for the busy kernel */
+    double t_wait = fake_now;
+    rc = probe_sequence(3);
+    CHECK(rc == 4 && get_long("cnc/halt") == 0 && fake_now - t_wait < PROBE_BUSY_WAIT_S,
+          "the lever reaches the probe's wait for a busy kernel: it ends there, nothing halted");
+    reset_state();
+    probe_rc = 0;                       /* no motion at the first rung */
+    enable_gone_after_probe = 1;        /* the second rung's enable is refused */
+    tick();
+    CHECK(probes == 1 && super_motion_fault(),
+          "an enable refused at a later rung (a fault latched with the rail off) is a motion fault, no second probe");
+    reset_state();
+    probe_rc = 0;                       /* the ladder ends with no motion... */
+    tick();
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        int calm = strstr(st, "\"stepper_fault\":false") != NULL;
+        put("cnc/state", "fault\n");    /* ...and a driver fault latched during its last move */
+        super_status_json(st, sizeof(st));
+        CHECK(calm && super_motion_fault() && strstr(st, "\"stepper_fault\":true"),
+              "/mode names a stepper fault by what the kernel holds, however the motion fault was found");
+    }
+    reset_state();
+    put("cnc/state", "fault\n");
+    unlink(GF_SYSFS "cnc/enable");      /* the check's probe meets a refused enable */
+    {
+        char d[96], st[256];
+        int prc = super_probe_motion(d, sizeof(d));
+        super_status_json(st, sizeof(st));
+        CHECK(prc == 0 && strstr(st, "\"stepper_fault\":true"),
+              "a check's probe whose enable the kernel refuses: /mode names a stepper fault");
+    }
+    reset_state();
+    probe_rc = -5;                      /* the enclosure opens under every probe's move */
+    run_until_spawned(10.0);
+    CHECK(probes == PROBE_STOPPED_MAX && super_motion_fault() && forks == 0,
+          "a third probe in a row stopped under its move is a motion fault: the head walks no further");
+    reset_state();
+    {
+        static const int alt[] = { -5, -2, -5, -2, -5 };    /* a lid that flickers through the starts */
+        for (int i = 0; i < 5; i++)
+            probe_rcs[i] = alt[i];
+        nprobe_rcs = 5;
+    }
+    run_until_spawned(15.0);
+    CHECK(probes == 5 && super_motion_fault() && forks == 0,
+          "an opening before a move does not end the count: the third stopped move is the fault");
+    reset_state();
+    {
+        static const int whole[] = { -5, -5, 1, -5 };       /* a whole move between stops */
+        for (int i = 0; i < 4; i++)
+            probe_rcs[i] = whole[i];
+        nprobe_rcs = 4;
+        char d[96];
+        int r1 = super_probe_motion(d, sizeof(d)), r2 = super_probe_motion(d, sizeof(d));
+        int r3 = super_probe_motion(d, sizeof(d)), r4 = super_probe_motion(d, sizeof(d));
+        CHECK(r1 == 3 && r2 == 3 && r3 == 1 && r4 == 3 && !super_motion_fault(),
+              "a move that ran whole ends the count: the stop after it is the first again");
+    }
+    reset_state();
+    CHECK(super_controller_stop() == 0, "the operator's stop, with no controller running");
+    {
+        char d[96];
+        CHECK(super_probe_motion(d, sizeof(d)) == 4 && probes == 0,
+              "a check's probe after the stop lever answered: rc 4, nothing moved");
+    }
+    reset_state();
+    bring_up();
+    die(0x0900);
+    tick();
+    fake_now += 2.0;
+    lens_real_lever = 2;                /* the daemon's shutdown, from its own thread, during the sweep */
+    real_sleep_us = 1000;
+    tick();
+    real_sleep_us = 0;
+    for (int i = 0; i < 1000 && !lever_returned; i++) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    CHECK(lens_stopped && !lens_marker, "the daemon's shutdown ends the sweep between two steps");
+    lens_real_lever = 0;
+    reset_state();
+    lens_open = 1;                      /* the switches stop answering during the probe's lens hunt */
+    rc = probe_sequence(3);
+    CHECK(rc == 3 && lens_stopped, "the probe's lens hunt ends on switches that stop answering, and the probe waits");
+    bring_up();
+    put("cnc/state", "running\n");
+    nkills = 0;
+    super_shutdown();
+    CHECK(nkills == 0 && child_pid > 0, "a shutdown leaves a controller whose kernel plays: its job finishes");
+    reset_state();
+    unlink(GF_SYSFS "cnc/state");
+    standby_takeover = 1;
+    suspended = SUSP_STANDBY;
+    tick();
+    CHECK(standby_takeover && !strstr(calls, "/etc/init.d/grblhal stop"),
+          "standing by over a kernel whose state cannot be read: no takeover");
     reset_state();
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);

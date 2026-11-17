@@ -249,6 +249,8 @@ static int engine_ready(void *ctx)
 static int live_begin(live_t *L, json_t *r)
 {
     memset(L, 0, sizeof(*L));
+    if (wiz_refuse_held(1) != 0)
+        return -1;
     wiz_phase("stopping the motion controller");
     if (wiz_controller_stop() != 0) {
         wiz_finish_err("could not stop the motion controller");

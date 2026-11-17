@@ -616,6 +616,18 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () {
         ack.click();
         return until('the banner gone, the Acknowledge taken', function () { return !shown('#attn-banner'); }, 5000); }); }],
+  /* A motion fault that is a stepper fault the kernel holds: POST /mode
+   * refuses it (not idle), so the Retry beside the controller's state
+   * starts the controller instead, whose probe gives the fault its enable. */
+  ['Retry over a stepper fault goes through the controller start, and the controller comes back', function () {
+    return walkMock('stepper_fault=1')
+      .then(function () { w().loadMode(); return until('the Retry', function () { return shown('#ctl-retry'); }, 5000); })
+      .then(function () { click('#ctl-retry'); return untilGot('the retry taken', function () { return walkMock(''); }, function (s) { return s.retried; }, 5000); })
+      .then(function (s) {
+        if (s.retried !== '/controller/start' || s.controller !== 'running')
+          throw new Error('the Retry went by ' + JSON.stringify(s.retried) + ', the controller ' + JSON.stringify(s.controller));
+        w().loadMode();
+        return until('the Retry gone', function () { return !shown('#ctl-retry'); }, 5000); }); }],
   /* Two notices, seq 1 and 3: one Dismiss takes both, so it sends the newest. */
   ['the notices banner lists each notice, and its Dismiss takes every one shown', function () {
     return walkMock('cool=notice')
@@ -759,8 +771,15 @@ class Walk(devserver.Handler):
                         Walk.mock.upload_unsigned = True
                     if q.get("job_end") == "1" and Walk.mock.update["running"]:
                         Walk.mock._job_end()
+                    if q.get("stepper_fault") == "1":
+                        Walk.mock.stepper_fault = True
+                        Walk.mock.controller = "motion-fault"
+                        Walk.mock.motion = "fault"
+                        Walk.mock.pid = 0
+                        Walk.mock.retried = ""
                 Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
-            return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"]})
+            return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"],
+                                    "retried": Walk.mock.retried, "controller": Walk.mock.controller})
         if Walk.daemon:
             return self._proxy(u)
         if self.command in ("GET", "HEAD") and (u.path in ("/setup", "/login") or (u.path == "/" and "action" not in q)):

@@ -182,11 +182,13 @@ target_link_libraries(curverec_test -Wl,--wrap=fopen -Wl,--wrap=unlink m pthread
 add_executable(sanitize_test tests/sanitize_test.c src/sanitize.c)
 target_compile_options(sanitize_test PRIVATE -Wall -Wextra)
 
-# Host unit test for the motion gate's enclosure read: the EV_SW word
-# maps to the verdict and the operator's words, and every way the read
-# can fail lands on "open" (the gate then waits rather than move the
-# gantry blind). CI runs it after the build.
-add_executable(enclosure_wait_test tests/enclosure_wait_test.c src/liveness.c)
+# Host unit test for the motion gate's enclosure read and the probe: the
+# EV_SW word maps to the verdict and the operator's words, every way the
+# read can fail lands on "open" (the gate then waits rather than move the
+# gantry blind), and the probe's own checks and faults run over a stand-in
+# accelerometer and sysfs tree on a fake clock. Includes liveness.c
+# directly. CI runs it after the build.
+add_executable(enclosure_wait_test tests/enclosure_wait_test.c)
 target_compile_options(enclosure_wait_test PRIVATE -Wall -Wextra)
 
 # Host unit test for the controller-mode supervisor: one lifecycle pass

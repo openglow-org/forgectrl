@@ -43,4 +43,18 @@ void mcode_init(void);
  * turned into parentheses, at most MCODE_TEXT_MAX bytes. */
 void mcode_answer_line(unsigned seq, const char *doc, const char *why, char *out, size_t len);
 
+/* What the relay remembers, for one controller: each controller numbers
+ * its M-codes from 1, so a memory carried into the next one would take
+ * that controller's first numbers for answered ones. */
+typedef struct {
+    long ctl;           /* the controller's pid this memory is for (0: none yet) */
+    unsigned done;      /* the last sequence answered for it */
+} mcode_memory_t;
+
+/* The memory for controller ctl: 1 when ctl is not the controller it
+ * held, and it then starts empty (the relay then pushes the table
+ * again). A respawn between two polls is a new pid, so it is never
+ * mistaken for the controller before it. */
+int mcode_memory_for(mcode_memory_t *m, long ctl);
+
 #endif

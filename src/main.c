@@ -3641,8 +3641,8 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_LED_ROOT", "GF_REBOOT_FILE", "GF_RUN_DIR", "GF_SLOT_LIST",
-    "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_IIO_ROOT", "GF_LED_ROOT", "GF_REBOOT_FILE", "GF_RUN_DIR",
+    "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
