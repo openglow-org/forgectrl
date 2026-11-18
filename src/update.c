@@ -276,7 +276,7 @@ static const char *param(const struct _u_request *req, const char *key)
 /* fwup -m meta-version of an archive (empty string if unreadable). */
 static void fw_meta_version(const char *file, char *out, size_t len)
 {
-    char cmd[256], raw[192];
+    char cmd[512], raw[192];
     out[0] = '\0';
     snprintf(cmd, sizeof(cmd),
              "fwup -m -i %s 2>/dev/null | sed -n 's/^meta-version=\"\\{0,1\\}\\([^\"]*\\).*/\\1/p'",
