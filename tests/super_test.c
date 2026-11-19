@@ -86,8 +86,13 @@
  *      ending the count; a check's probe under the lever's hold moves
  *      nothing; the daemon's shutdown ends the sweep; switches that stop
  *      answering during the probe's lens hunt end it and the probe waits;
- *      a shutdown leaves a controller over a playing kernel, and a
- *      standby does not take over a kernel whose state cannot be read
+ *      a shutdown sends no signal to a controller over a playing kernel,
+ *      and a standby does not take over a kernel whose state cannot be
+ *      read
+ *   V. every reap makes the head safe, after the safing pair, and so does
+ *      a daemon's first spawn, once; a controller dies (SIGKILL) when the
+ *      thread that forked it ends, and a child whose daemon is already gone
+ *      does not run
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -105,12 +110,19 @@
 #define liveness_enclosure fake_liveness_enclosure
 #define machine_is_idle fake_machine_is_idle
 
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
+
+/* The supervisor's opens, passed through; a write of head/safe notes what
+   the safing pair read at that moment (V). Defined after <fcntl.h>, so
+   the fortified open stays the library's. */
+int fake_open(const char *path, int flags, ...);
+#define open fake_open
 
 int fake_clock_gettime(clockid_t id, struct timespec *ts);
 int fake_usleep(unsigned us);
@@ -124,10 +136,30 @@ int fake_execle(const char *path, const char *arg, ...);
 int fake_liveness_probe(int fd, char *detail, size_t dlen, int (*stop)(void));
 int fake_liveness_enclosure(char *why, size_t wlen);
 int fake_machine_is_idle(void);
+pid_t fake_getppid(void);
+#define getppid fake_getppid
 
 #include "../src/super.c"
 
 #include <sys/stat.h>
+#include <sys/resource.h>
+
+/* The real fork, for the cases that need a real child (V); every fork the
+ * supervisor makes still goes through fake_fork. (<unistd.h> declared it
+ * under the fake's name.) */
+#undef fork
+extern pid_t fork(void);
+
+/* The parent a child sees, or another one (V: a daemon gone before the
+ * child armed its parent-death signal). */
+static int ppid_lie;
+#undef getppid
+extern pid_t getppid(void);
+pid_t fake_getppid(void)
+{
+    pid_t p = getppid();
+    return ppid_lie ? p + 1 : p;
+}
 
 /* The real clock, for the wait the SIGCHLD case measures. */
 #undef clock_gettime
@@ -202,6 +234,9 @@ static void note(const char *what)
     snprintf(calls + n, sizeof(calls) - n, "%s;", what);
 }
 
+static int real_fork_controller;        /* the next controller fork is a real one (V) */
+static int in_real_child;               /* this process is that real controller (V) */
+
 pid_t fake_fork(void)
 {
     static int relay = 1;
@@ -213,9 +248,45 @@ pid_t fake_fork(void)
     else {
         forks++;
         note("fork-controller");
+        if (real_fork_controller) {
+            real_fork_controller = 0;
+            relay = !relay;
+            pid = fork();
+            if (pid == 0)
+                in_real_child = 1;
+            return pid;
+        }
     }
     relay = !relay;
     return pid;
+}
+
+static long safe_seen_stop = -1, safe_seen_latch = -1;  /* the pair as head/safe's first write found it */
+static int safe_writes;                                 /* head/safe's writes, every one */
+static int safe_forks = -1;                             /* controller forks at head/safe's last write */
+static int safe_probes = -1;                            /* motion probes at head/safe's last write */
+static int probes;                                      /* (the probe fake's count, below) */
+
+int fake_open(const char *path, int flags, ...)
+{
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    size_t lp = strlen(path), la = strlen("head/safe");
+    if ((flags & O_WRONLY) && lp >= la && !strcmp(path + lp - la, "head/safe")) {
+        safe_writes++;
+        safe_forks = forks;
+        safe_probes = probes;
+        if (safe_seen_stop < 0) {
+            safe_seen_stop = get_long("cnc/stop");
+            safe_seen_latch = get_long("cnc/laser_latch");
+        }
+    }
+    return openat(AT_FDCWD, path, flags, mode);
 }
 
 pid_t fake_waitpid(pid_t pid, int *status, int flags)
@@ -284,6 +355,17 @@ int fake_execle(const char *path, const char *arg, ...)
 {
     (void)path;
     (void)arg;
+    /* The real controller (V) stops here, its parent-death signal armed
+     * (it comes before the exec), so the thread that forked it knows it
+     * may end; it waits there to be killed. With no parent-death signal
+     * the case's SIGCONT lets it go on, and SIGALRM ends it instead, which
+     * the case sees. */
+    if (in_real_child) {
+        alarm(2);
+        raise(SIGSTOP);
+        for (;;)
+            pause();
+    }
     return -1;
 }
 
@@ -504,6 +586,7 @@ static void make_tree(void)
     mkdir("super-test/data", 0755);
     mkdir(GF_SYSFS, 0755);
     mkdir(GF_SYSFS "cnc", 0755);
+    mkdir(GF_SYSFS "head", 0755);
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     put("cnc/halt", "0\n");
@@ -511,6 +594,7 @@ static void make_tree(void)
     put("cnc/disable", "0\n");
     put("cnc/state", "idle\n");
     put("cnc/faults", "0\n");
+    put("head/safe", "0\n");
     FILE *f = fopen(PULSE_DEV, "w");
     if (f)
         fclose(f);
@@ -525,6 +609,8 @@ static void clear_safing(void)
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     put("cnc/halt", "0\n");
+    put("head/safe", "0\n");
+    safe_seen_stop = safe_seen_latch = -1;
 }
 
 /* The kernel at rest, its rail writes forgotten. */
@@ -688,6 +774,21 @@ static double now_real(void)
 static void *stop_thread(void *arg)
 {
     *(int *)arg = super_controller_stop();
+    return NULL;
+}
+
+/* A cloud controller spawned from this thread (no data directory to enter
+ * first), which ends once the child has stopped at its exec (V). */
+static void *spawn_from_thread(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&mu);
+    spawn_locked(Ctl_Cloud);
+    pid_t c = child_pid;
+    pthread_mutex_unlock(&mu);
+    int st;
+    if (c > 0)
+        wait4(c, &st, WUNTRACED, NULL);
     return NULL;
 }
 
@@ -1498,7 +1599,8 @@ int main(void)
     put("cnc/state", "running\n");
     nkills = 0;
     super_shutdown();
-    CHECK(nkills == 0 && child_pid > 0, "a shutdown leaves a controller whose kernel plays: its job finishes");
+    CHECK(nkills == 0 && child_pid > 0,
+          "a shutdown sends no signal to a controller whose kernel plays (it ends with the lifecycle thread, V)");
     reset_state();
     unlink(GF_SYSFS "cnc/state");
     standby_takeover = 1;
@@ -1506,6 +1608,217 @@ int main(void)
     tick();
     CHECK(standby_takeover && !strstr(calls, "/etc/init.d/grblhal stop"),
           "standing by over a kernel whose state cannot be read: no takeover");
+    reset_state();
+
+    printf("V. the head made safe at every reap; a controller dies with the thread that forked it\n");
+    bring_up();
+    die(0x0900);
+    tick();
+    CHECK(child_pid == 0 && get_long("head/safe") == 1,
+          "the reap makes the head safe: emitters off, the lens driver disabled");
+    CHECK(safe_seen_stop == 1 && safe_seen_latch == 1, "after the safing pair: motion stopped and the latch locked first");
+    {
+        int n;
+        /* A daemon's start with no unmanaged controller: the head made
+         * safe there, before the lifecycle thread's probe and any fork. */
+        reset_state();
+        pthread_mutex_lock(&mu);
+        head_safed = 0;
+        n = safe_writes;
+        init_locked();
+        int safed_at_start = head_safed;
+        pthread_mutex_unlock(&mu);
+        CHECK(safe_writes == n + 1 && safed_at_start && safe_probes == 0 && safe_forks == 0,
+              "a daemon's start makes the head safe before the probe and the sweep");
+        n = safe_writes;
+        CHECK(run_until_spawned(5.0) && safe_writes == n, "its first spawn writes it no second time");
+        /* One that found an unmanaged controller leaves that one's head
+         * alone, and makes it safe before its own first fork. */
+        reset_state();
+        runner_alive = 1;
+        pthread_mutex_lock(&mu);
+        head_safed = 0;
+        n = safe_writes;
+        init_locked();
+        int standing_by = standby_takeover && !head_safed;
+        standby_takeover = 0;
+        suspended = 0;
+        pthread_mutex_unlock(&mu);
+        runner_alive = 0;
+        CHECK(standing_by && safe_writes == n, "an unmanaged controller at the start: its head is left alone");
+        n = safe_writes;
+        bring_up();
+        CHECK(safe_writes == n + 1 && safe_forks == 0,
+              "the daemon's first spawn makes the head safe first, once, before the fork");
+        n = safe_writes;
+        die(0x0900);
+        tick();
+        pthread_mutex_lock(&mu);
+        respawn_at = 0.0;
+        pthread_mutex_unlock(&mu);
+        CHECK(run_until_spawned(5.0) && safe_writes == n + 1, "a respawn of the same daemon: only the reap's");
+    }
+    reset_state();
+    bring_up();
+    {
+        int n = safe_writes;
+        put("head/safe", "0\n");
+        pthread_mutex_lock(&mu);
+        suspended |= SUSP_HOLD;         /* the stop lever, as the pass stops the controller for it */
+        stop_locked();
+        pthread_mutex_unlock(&mu);
+        CHECK(child_pid == 0 && safe_writes == n + 1 && get_long("head/safe") == 1,
+              "an expected reap (the stop lever's stop) makes the head safe too");
+        /* A head that did not probe has no attribute: said below the
+         * safing writes' severity, and the reap goes on. */
+        unlink(GF_SYSFS "head/safe");
+        super_controller_start();
+        CHECK(run_until_spawned(5.0), "the controller comes back");
+        int c = crit_logs;
+        die(0x0900);
+        tick();
+        CHECK(child_pid == 0 && crit_logs == c, "no head/safe: the reap names no safing failure");
+        put("head/safe", "0\n");
+    }
+    reset_state();
+    {
+        /* The supervisor's spawn, from a thread of its own that then ends,
+         * as the lifecycle thread ends with the daemon; the controller is
+         * a real child that waits at its exec. */
+        pthread_t th_spawn;
+        int status = 0;
+        real_fork_controller = 1;
+        pthread_create(&th_spawn, NULL, spawn_from_thread, NULL);
+        pthread_join(th_spawn, NULL);
+        pid_t ctl = child_pid;
+        if (ctl > 0)
+            sigqueue(ctl, SIGCONT, (union sigval){ 0 });
+        pid_t w = ctl > 0 ? wait4(ctl, &status, 0, NULL) : -1;
+        CHECK(w == ctl && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL,
+              "the controller is killed (SIGKILL) when the thread that forked it ends");
+        pthread_mutex_lock(&mu);
+        child_pid = 0;
+        child_ctl = Ctl_None;
+        pthread_mutex_unlock(&mu);
+        /* A child whose daemon is gone before it armed the signal has
+         * another parent: it does not run. */
+        pid_t c = fork();
+        if (c == 0)
+            _exit(ctl_dies_with_daemon(getppid()) == 0 && ctl_dies_with_daemon(getppid() + 1) == -1 ? 0 : 1);
+        status = 0;
+        w = c > 0 ? wait4(c, &status, 0, NULL) : -1;
+        CHECK(w == c && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "its own daemon as its parent: armed; another parent: refused");
+        /* The spawn's child whose parent check fails runs nothing: it exits
+         * 125 before its exec. */
+        real_fork_controller = 1;
+        ppid_lie = 1;
+        pthread_mutex_lock(&mu);
+        spawn_locked(Ctl_Cloud);
+        pid_t refused = child_pid;
+        child_pid = 0;
+        child_ctl = Ctl_None;
+        pthread_mutex_unlock(&mu);
+        ppid_lie = 0;
+        status = 0;
+        w = refused > 0 ? wait4(refused, &status, WUNTRACED, NULL) : -1;
+        if (w == refused && WIFSTOPPED(status)) {
+            sigqueue(refused, SIGKILL, (union sigval){ 0 });
+            wait4(refused, NULL, 0, NULL);
+        }
+        CHECK(w == refused && WIFEXITED(status) && WEXITSTATUS(status) == 125,
+              "the spawn's child exits 125 before its exec when its parent check fails");
+    }
+    reset_state();
+    {
+        /* A takeover: the head made safe as the unmanaged controller is
+         * ended, before the motion probe, the lens sweep and the fork. */
+        int n = safe_writes;
+        put("cnc/state", "idle\n");
+        put("head/safe", "0\n");
+        calls[0] = '\0';
+        pthread_mutex_lock(&mu);
+        head_safed = 0;                 /* a daemon that stood by at its start */
+        standby_takeover = 1;
+        suspended = SUSP_STANDBY;
+        pthread_mutex_unlock(&mu);
+        CHECK(run_until_spawned(5.0) && strstr(calls, "/etc/init.d/grblhal stop") && safe_writes == n + 1 &&
+              safe_probes == 0 && safe_forks == 0 && get_long("head/safe") == 1,
+              "a takeover makes the head safe as it ends the unmanaged controller, before the probe and the "
+              "fork, and the spawn writes it no second time");
+    }
+    reset_state();
+    {
+        /* A mode switch over a standby whose unmanaged controller ended by
+         * itself: the switch makes the head safe, before the probe. */
+        int n;
+        put("cnc/state", "idle\n");
+        runner_alive = 1;
+        pthread_mutex_lock(&mu);
+        head_safed = 0;
+        init_locked();
+        pthread_mutex_unlock(&mu);
+        runner_alive = 0;               /* it ended on its own */
+        n = safe_writes;
+        switch_takeover();
+        pthread_mutex_lock(&mu);        /* the switch's own state change */
+        want = Ctl_Grbl;
+        suspended = 0;
+        standby_takeover = 0;
+        pthread_mutex_unlock(&mu);
+        CHECK(run_until_spawned(5.0) && safe_writes == n + 1 && safe_probes == 0 && safe_forks == 0,
+              "a mode switch over a standby whose controller ended makes the head safe once, before the probe");
+    }
+    reset_state();
+    {
+        /* A standby beside a live unmanaged controller, a
+         * POST /controller/start that lifts the suspension, then a mode
+         * switch while that controller still runs: taken over, not made
+         * safe under it. */
+        put("cnc/state", "idle\n");
+        runner_alive = 1;
+        pthread_mutex_lock(&mu);
+        head_safed = 0;
+        init_locked();
+        pthread_mutex_unlock(&mu);
+        super_controller_start();
+        calls[0] = '\0';
+        int n = safe_writes;
+        switch_takeover();
+        CHECK(strstr(calls, "/etc/init.d/grblhal stop") != NULL && safe_writes == n + 1,
+              "a mode switch after /controller/start over a live unmanaged controller takes it over");
+    }
+    reset_state();
+    {
+        /* An operator stop (the stop lever), no standby, a controller
+         * started by hand, then a mode switch: taken over, head/safe once. */
+        put("cnc/state", "idle\n");
+        pthread_mutex_lock(&mu);
+        suspended = SUSP_HOLD;
+        standby_takeover = 0;
+        pthread_mutex_unlock(&mu);
+        runner_alive = 1;
+        calls[0] = '\0';
+        int n = safe_writes;
+        switch_takeover();
+        CHECK(strstr(calls, "/etc/init.d/grblhal stop") != NULL && safe_writes == n + 1,
+              "a mode switch over the stop lever's suspension takes a live unmanaged controller over");
+        runner_alive = 0;
+    }
+    reset_state();
+    {
+        /* The daemon's start: super_init makes the head safe before its
+         * lifecycle thread runs. */
+        int n;
+        pthread_mutex_lock(&mu);
+        head_safed = 0;
+        pthread_mutex_unlock(&mu);
+        n = safe_writes;
+        super_init();
+        int at_start = safe_writes - n;
+        super_shutdown();
+        CHECK(at_start == 1 && th_run == 0, "super_init makes the head safe, then its lifecycle thread runs and stops");
+    }
     reset_state();
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);

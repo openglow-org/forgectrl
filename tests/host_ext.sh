@@ -156,7 +156,7 @@ stop_daemon() {
 mkdir -p "$T/data" "$T/run" "$T/bin" "$T/keys" "$SYS/cnc" "$SYS/thermal" "$SYS/head"
 echo idle > "$SYS/cnc/state"
 for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt \
-         head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm; do
+         head/air_assist_pwm head/safe thermal/exhaust_pwm thermal/intake_pwm thermal/tec_on thermal/water_pump_on; do
     : > "$SYS/$a"
 done
 echo 8 > "$T/switches"

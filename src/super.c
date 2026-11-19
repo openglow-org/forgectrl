@@ -40,7 +40,8 @@
  *
  * The boot-time init scripts do not start controllers; they defer here.
  * If an unmanaged controller is found running at startup anyway (legacy
- * scripts, manual start), the supervisor stands by rather than fight
+ * scripts, a manual start, or a homing runner a stopped daemon's GRBL
+ * controller left behind), the supervisor stands by rather than fight
  * over the exclusive-open pulse device and the Grbl port.
  */
 #define _GNU_SOURCE
@@ -72,6 +73,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -264,8 +266,15 @@ static int kernel_playing(void)
     return rd_attr("cnc/state", st, sizeof(st)) != 0 || strcmp(st, "running") == 0;
 }
 
-/* Stop an unmanaged (legacy- or orphan-started) controller the legacy
- * way so the supervisor can take over. Called with mu NOT held. */
+static int head_safe_write(void);
+static int head_safed;
+
+/* Stop an unmanaged controller (one a legacy script or a hand started, or
+ * a GRBL controller's homing runner that outlived its controller and the
+ * daemon) the legacy way so the supervisor can take over, and make the
+ * head safe after it, as a reap does: whatever it left on the head goes
+ * off before the motion probe and the lens sweep that come next. Called
+ * with mu NOT held. */
 static void takeover_unmanaged(void)
 {
     fflog(LOG_WARNING, "super: taking over from unmanaged "
@@ -276,6 +285,10 @@ static void takeover_unmanaged(void)
     (void)!system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
     (void)!system("pkill -x gfhome.py 2>/dev/null");
     sleep(1);
+    pthread_mutex_lock(&mu);
+    head_safe_write();
+    head_safed = 1;
+    pthread_mutex_unlock(&mu);
 }
 
 /* The lifecycle thread's wake: SIGCHLD (a controller exit) and the
@@ -900,6 +913,29 @@ static int spawn_output_relay(const char *tag)
     return p[1];
 }
 
+/* A controller dies with this daemon. The kernel sends it SIGKILL when the
+ * thread that forked it ends, and controllers are forked by the lifecycle
+ * thread alone, which ends with the daemon (an exit or a crash), so no
+ * controller outlives the supervisor that safes its deaths: its exit
+ * closes its share of the pulse device, and with the daemon's share gone
+ * too that is the device's last close, the kernel's dead man's switch (a
+ * run halted, the heat sources and the head made safe, the latch locked).
+ * The exception is a GRBL controller's homing runner, which the controller
+ * forks for a $H in a process group of its own: it inherits the pulse
+ * device and has no parent-death signal, so it homes (motion, the laser
+ * latched) to its own end or its deadline, the device stays open until it
+ * exits, and the next daemon stands by until it is gone.
+ * A daemon gone before the signal is armed leaves the child another
+ * parent: getppid() then names someone else, and it must not run.
+ * Async-signal-safe (two system calls), for the child between fork() and
+ * exec. Returns 0, or -1 when the controller must not run. */
+static int ctl_dies_with_daemon(pid_t daemon)
+{
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0)
+        return -1;
+    return getppid() == daemon ? 0 : -1;
+}
+
 /* Called with mu held. */
 static int lamp_pending;            /* the idle lamp is owed after a spawn (under mu) */
 
@@ -912,9 +948,60 @@ static void grbl_nvs_path(char *buf, size_t len)
     snprintf(buf, len, "%s/%s", dir, GRBL_NVS_FILE);
 }
 
+/* The head made safe (head/safe): the measuring laser and the UV LED off,
+ * the lens driver disabled at low current; the head keeps its registers
+ * across a reset of the SoC, so an emitter left on stays on until written.
+ * A head that did not probe has no attribute: that is said once, below the
+ * safing writes' severity, and there is nothing to make safe. A write that
+ * fails is an error, tried once: the kernel's own write already reads each
+ * register back and tries again, and a reap holds mu. Returns 0 when it
+ * landed. */
+static int head_safe_write(void)
+{
+    static int missing_said;
+    char path[96];
+    snprintf(path, sizeof(path), "%shead/safe", sysfs_root());
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT) {
+        if (!missing_said) {
+            missing_said = 1;
+            fflog(LOG_NOTICE, "super: no head/safe (the head did not probe): no head to make safe");
+        }
+        return -1;
+    }
+    int err = 0;
+    if (fd < 0 || write(fd, "1", 1) < 0)
+        err = errno;
+    if (fd >= 0)
+        close(fd);
+    if (err) {
+        fflog(LOG_ERR, "super: making the head safe failed: %s", strerror(err));
+        return -1;
+    }
+    return 0;
+}
+
+/* The head made safe once by this daemon before any controller of its own
+ * (under mu): whatever the last controller left on it was reaped by nobody
+ * if it died with the last daemon. super_init writes it before the motion
+ * probe and the lens sweep; a daemon that found an unmanaged controller
+ * at its start leaves that controller's head alone, and what ends the
+ * standby writes it, before the probe and the sweep too: the takeover that
+ * ends the unmanaged controller (takeover_unmanaged), from the lifecycle's
+ * own retake once the machine is idle (the usual end) or from a mode
+ * switch, or the mode switch once that controller has ended on its own
+ * (switch_takeover). The spawn writes it if none did. */
+
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
+
+    /* Before the fork: the controller sets its own head state from its
+     * start. */
+    if (!head_safed) {
+        head_safe_write();
+        head_safed = 1;
+    }
 
     const char *data_dir = ff_data_dir();
     char nvs[256] = "";
@@ -939,6 +1026,7 @@ static void spawn_locked(ctl_t ctl)
     const char *bin = ctl_bin(ctl);
     int oom = !ff_host_test();
     int lfd = spawn_output_relay(ctl == Ctl_Grbl ? "grblhal" : "gfcloud");
+    pid_t daemon = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         fflog(LOG_ERR, "super: fork failed: %s",
@@ -951,8 +1039,11 @@ static void spawn_locked(ctl_t ctl)
     }
     if (pid == 0) {
         /* Child: async-signal-safe calls only from here to exec. Own
-         * process group so stop() can signal helpers too. */
+         * process group so stop() can signal helpers too. Dies with the
+         * daemon (ctl_dies_with_daemon). */
         setpgid(0, 0);
+        if (ctl_dies_with_daemon(daemon) != 0)
+            _exit(125);
         if (lfd >= 0) {
             dup2(lfd, 1);
             dup2(lfd, 2);
@@ -1040,6 +1131,13 @@ static void reap_locked(int status)
      * already idle and latched. */
     wr_attr("cnc/stop", "1");
     wr_attr("cnc/laser_latch", "1");
+    /* Then the head, which no close of the device reaches here either: the
+     * measuring laser and the UV LED off, the lens driver disabled at low
+     * current (head/safe). An emitter the controller left on would
+     * otherwise stay on, into the next boot, since the head keeps its
+     * registers across a reset of the SoC. Before any respawn: the next
+     * controller sets its own. */
+    head_safe_write();
     /* The homing anchor belongs to the controller that wrote it: it
      * must not survive into another mode (cloud re-zeros the counters
      * it anchors) or into a respawn. A fresh GRBL controller starts
@@ -1227,8 +1325,9 @@ static void pass_locked(void)
             runner_reap();
             pthread_mutex_lock(&mu);
         }
-        /* Standing by next to an unmanaged controller (found at start,
-         * or left orphaned by a previous forgectrl): retake supervision
+        /* Standing by next to an unmanaged controller (found at start: a
+         * hand-started one, or a homing runner a stopped or crashed daemon's
+         * GRBL controller left behind): retake supervision
          * as soon as the kernel plays nothing (idle, disabled, a stepper
          * fault, an underrun) - a busy one is left to finish its job
          * first. The probe that follows acknowledges an underrun and
@@ -1436,6 +1535,31 @@ static ctl_t configured_mode(void)
     return Ctl_Grbl;
 }
 
+/* A mode switch over a standby or a suspension: an unmanaged controller
+ * still running is taken over (takeover_unmanaged, which makes the head
+ * safe), whether or not a POST /controller/start has lifted the
+ * suspension since; a standby's unmanaged controller that has ended by
+ * itself left its head to nobody, so it is made safe here. Either way
+ * before the motion probe and the lens sweep the switch's controller comes
+ * up behind. Called with mu NOT held. */
+static int unmanaged_controller_running(void);
+static void switch_takeover(void)
+{
+    pthread_mutex_lock(&mu);
+    int running = unmanaged_controller_running();
+    int standby = standby_takeover;
+    int takeover = (suspended || standby) && running;
+    pthread_mutex_unlock(&mu);
+    if (takeover) {
+        takeover_unmanaged();
+    } else if (standby && !running) {
+        pthread_mutex_lock(&mu);
+        head_safe_write();
+        head_safed = 1;
+        pthread_mutex_unlock(&mu);
+    }
+}
+
 /* The bracketed patterns keep pgrep/pkill -f from matching their own
  * sh -c wrapper. */
 static int unmanaged_controller_running(void)
@@ -1466,17 +1590,28 @@ void super_sigchld_init(void)
         fflog(LOG_ERR, "super: sigaction(SIGCHLD): %s", strerror(errno));
 }
 
-void super_init(void)
+/* The supervisor's start, before the lifecycle thread runs. Called with
+ * mu held. */
+static void init_locked(void)
 {
-    super_sigchld_init();
-    pthread_mutex_lock(&mu);
     want = configured_mode();
     if (unmanaged_controller_running()) {
         suspended |= SUSP_STANDBY;
         standby_takeover = 1;
         fflog(LOG_WARNING, "super: unmanaged controller already "
                            "running - standing by until the machine is idle");
+    } else {
+        /* Before the lifecycle thread's probe and sweep (head_safed). */
+        head_safe_write();
+        head_safed = 1;
     }
+}
+
+void super_init(void)
+{
+    super_sigchld_init();
+    pthread_mutex_lock(&mu);
+    init_locked();
     th_run = 1;
     pthread_mutex_unlock(&mu);
     if (pthread_create(&th, NULL, super_main, NULL) != 0) {
@@ -1501,22 +1636,25 @@ void super_shutdown(void)
         probe_abort = 1;
     wait_leave_locked("no longer waits: shutdown");
     if (child_pid > 0) {
-        /* A busy controller survives a forgectrl stop: it reparents to
-         * init and finishes its job (its own device fd carries the
-         * dead-man). The restarted supervisor finds it unmanaged and
-         * stands by. A controller over a kernel that plays nothing (a
-         * stepper fault, an underrun included) stops with us. */
+        /* A controller over a kernel that plays nothing (a stepper fault,
+         * an underrun included) stops here, the deliberate way. A busy one
+         * is not stopped here: it dies when this thread's join below ends
+         * the lifecycle thread (ctl_dies_with_daemon), and its exit is then
+         * the device's last close, the kernel's dead man's switch, which
+         * halts the run; a GRBL controller's homing runner, if one is
+         * homing, holds the device until it ends (ctl_dies_with_daemon). */
         if (!kernel_playing())
             stop_locked();
         else
-            fflog(LOG_WARNING, "super: machine busy - leaving %s "
-                               "controller running (pid %d, unmanaged)",
+            fflog(LOG_WARNING, "super: machine busy - the %s controller "
+                               "(pid %d) ends with the daemon, and the kernel's "
+                               "dead man's switch halts the run",
                   ctl_name(child_ctl), (int)child_pid);
     }
     /* Our reference goes away either way. Idle: the device closes and
-     * the kernel locks the latch. Busy-orphan: the child's dup keeps
-     * the description open (job survives), and the child's own exit
-     * then IS the final close - the kernel dead-man backstop. */
+     * the kernel locks the latch. Busy: the child's share keeps the
+     * description open until the child dies with the lifecycle thread,
+     * and its exit is the final close. */
     if (broker_fd >= 0) {
         close(broker_fd);
         broker_fd = -1;
@@ -1562,11 +1700,7 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
         return -1;
     }
 
-    pthread_mutex_lock(&mu);
-    int takeover = suspended && unmanaged_controller_running();
-    pthread_mutex_unlock(&mu);
-    if (takeover)
-        takeover_unmanaged();
+    switch_takeover();
 
     if (settings_set("controller_mode", mode) != 0) {
         snprintf(err, elen, "cannot persist controller_mode");

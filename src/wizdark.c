@@ -722,8 +722,10 @@ static void run_airflow(void)
         goto out;
     }
     stopped = 1;
-    if (cool_diag_take() != 0) {
-        finish_err("the cooling engine is busy (a session, its cooldown, or another takeover)");
+    if ((took = cool_diag_take()) != 0) {
+        finish_err("%s", took == -2 ? "the coolant is over its temperature limit and the fans are cooling it: try again once it has cooled"
+                   : "the cooling engine is busy (a session, its cooldown, or another takeover)");
+        took = 0;
         goto out;
     }
     took = 1;
@@ -941,8 +943,10 @@ static void run_intakes(void)
         goto out;
     }
     stopped = 1;
-    if (cool_diag_take() != 0) {
-        finish_err("the cooling engine is busy (a session, its cooldown, or another takeover)");
+    if ((took = cool_diag_take()) != 0) {
+        finish_err("%s", took == -2 ? "the coolant is over its temperature limit and the fans are cooling it: try again once it has cooled"
+                   : "the cooling engine is busy (a session, its cooldown, or another takeover)");
+        took = 0;
         goto out;
     }
     took = 1;

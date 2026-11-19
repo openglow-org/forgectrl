@@ -18,10 +18,11 @@ FIFO=/var/run/forgectrl.stderr
 
 # The daemon runs under a small respawn wrapper: forgectrl supervises
 # the motion controllers and holds the pulse-device broker, so a crash
-# must not leave the machine unmanaged. A crashed forgectrl leaves any
-# running controller alive (it finishes its job unmanaged); the
-# respawned daemon stands by and retakes supervision when the machine
-# is idle. Stopping the service stops the wrapper and the daemon both.
+# must not leave the machine unmanaged. A controller dies with the
+# daemon that spawned it, and the kernel's dead man's switch halts a run
+# it was playing; a GRBL controller's homing runner homes on to its own
+# end, and the respawned daemon stands by until it is gone. Stopping the
+# service stops the wrapper and the daemon both.
 #
 # Logging: the daemon emits through syslog itself (rsyslog files it
 # under /data/log/forgefirm/forgectrl). Anything that still reaches its

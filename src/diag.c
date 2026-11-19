@@ -507,13 +507,14 @@ int diag_start(const char *tool, char *why, size_t len)
 
     /* The engine hands the thermal hardware over before the tool's
      * thread exists; a busy engine (a session, its cooldown, another
-     * takeover) refuses here. */
-    if (cool_diag_take() != 0) {
+     * takeover) refuses here, and so does OVERTEMP's cooling airflow. */
+    int took = cool_diag_take();
+    if (took != 0) {
         pthread_mutex_lock(&mu);
         st_running = 0;
         pthread_mutex_unlock(&mu);
         lease_release(st_owner);
-        return -2;
+        return took == -2 ? -5 : -2;
     }
 
     pthread_t th;

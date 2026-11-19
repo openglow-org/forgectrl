@@ -216,7 +216,7 @@ held() {
 mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head" "$SYS/pic" "$T/shots"
 echo idle > "$SYS/cnc/state"
 for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt \
-         head/air_assist_pwm thermal/exhaust_pwm thermal/intake_pwm thermal/heater_pwm; do
+         head/air_assist_pwm head/safe thermal/exhaust_pwm thermal/intake_pwm thermal/tec_on thermal/water_pump_on thermal/heater_pwm; do
     : > "$SYS/$a"
 done
 at_rest() {

@@ -47,7 +47,10 @@
  *   would fight the heater), off within a degree of the coolant floor
  *   (the settings cross-check keeps the pair above the floor). Turning
  *   off is immediate; turning on again waits a short dwell so sensor
- *   noise cannot chatter the part.
+ *   noise cannot chatter the part. The pump and the TEC are written
+ *   every tick, so a write that did not take is put right at the next;
+ *   the kernel holds the TEC on only for its lease, which those writes
+ *   renew, so a TEC the engine stopped writing goes off by itself.
  * - COLD / WARM-UP: the coolant floor (cool_temp_min) is a fire gate
  *   under the ceiling with a degree of hysteresis; the warm-up gate
  *   (cool_temp_start) holds a session that opens under it with the
@@ -70,10 +73,12 @@
  *   (SENSOR_FAIL_*, SENSOR_WINDOW_*); so does a lid
  *   IR channel unreadable for two ticks in the fire watch's phases.
  * - OVER-TEMP: if the upstream temp exceeds the run ceiling the
- *   verdict goes OVERTEMP with hold=true and cooling airflow forced;
- *   it recovers (resume_ok) once the temp is back under the resume
- *   gate. The upstream sensor gates because it reads the coolant
- *   entering the tube.
+ *   verdict goes OVERTEMP with hold=true; an idle or thermal phase runs
+ *   the cooldown airflow for as long as the gate stands (a run or smoke
+ *   phase keeps its higher run duties), and no diagnostic or pump hold
+ *   is taken under it. It recovers (resume_ok) once the temp is back
+ *   under the resume gate. The upstream sensor gates because it reads
+ *   the coolant entering the tube.
  * - GATE SETTINGS (gates.c): the ceiling, its resume gate and the
  *   other limits are plain settings with a wide legal range, a
  *   recommended band and an off end; a ceiling at its top turns that
@@ -334,8 +339,9 @@ static uint32_t tec_present = 0;
 static float tec_on_c = TEC_ON_C_DEFAULT;
 static float tec_off_c = TEC_OFF_C_DEFAULT;
 static int tec_on_state = 0;        /* what the engine wants driven */
-static int tec_written = -1;        /* last value written; -1 = write next */
 static double tec_switched_at = 0;
+static int pump_write_failing = 0;  /* a pump write failed; named once until one takes */
+static int tec_write_failing = 0;   /* a TEC write failed; named once until one takes */
 static float tach_exhaust_min_rpm = TACH_EXHAUST_MIN_RPM;
 static float tach_intake_min_rpm = TACH_INTAKE_MIN_RPM;
 /* The intake fans fitted: 2, or 1 on a machine built with one. Only 1
@@ -347,6 +353,12 @@ static float fan_grace_s = FAN_GRACE_S;
 static int quiet_held = 0;              /* cool_quiet_hold: every fan off for a listening */
 static int quiet_pump_held = 0;         /* ...and the pump and the TEC too (the bench tools) */
 static double quiet_since = 0;          /* when the quiet hold was taken */
+/* The quiet hold as the engine's tick last applied it (quiet_apply, its
+ * fans; quiet_pump_settle, its pump): the hold's callers set the two flags
+ * above, and the posture is written on the engine thread alone.
+ * Engine-thread only. */
+static int quiet_applied = 0;
+static int quiet_pump_applied = 0;
 static float aa_offset_counts = 0.0f;   /* cool_aa_offset_counts, at duty 1023 */
 static long aa_cmd = 204;               /* the air-assist duty last commanded */
 static double phase_until;          /* smoke end / thermal timeout */
@@ -382,7 +394,9 @@ static int warmup_pending = 0;
 static int cold_side_named = 0;     /* an upstream reading over COLD_SIDE_MAX_C, said once */
 static long throttle_state = 0;     /* the kernel's CPU cooling state last seen */
 static int critical_would_warned = 0;   /* off gate, would have tripped: once */
-static int forced_cool = 0;         /* over-temp overrode the phase fans */
+static int forced_cool = 0;         /* over-temp's cooling airflow stands in idle or thermal */
+static int pub_cooling_forced = 0;  /* over_temp_gate || forced_cool, as the tick last published it (under mu) */
+static int pub_session = 0;         /* a run session open, published at its edge before the engine opens it (under mu) */
 static int flood_on = 0;            /* effective run window */
 static int silent_warned = 0;
 static int silent_safed = 0;        /* hang dead-man fired this episode */
@@ -483,11 +497,14 @@ static double wall_s(void)
 
 /* ------------------------------------------------------- hardware io */
 
+/* A sysfs store replaces the attribute's value; O_TRUNC, which sysfs
+ * ignores, makes a plain-file tree (the host tests') hold the value
+ * written and no tail of a longer one. */
 static int wr_attr(const char *attr, const char *val)
 {
     char path[128];
     snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
     if (fd < 0)
         return -1;
     int ret = write(fd, val, strlen(val)) < 0 ? -1 : 0;
@@ -513,8 +530,9 @@ static void safing_write(const char *attr, const char *val)
  * a reason it locked for stands (the release's call at the end of
  * engine_tick names them), and writes the release on every tick on which
  * none stands: the kernel also sets the holder at every final close of
- * the pulse device, which can come at any time (a controller that
- * outlived a daemon restart closing the device later), and a release
+ * the pulse device, which can come at any time (an unmanaged controller,
+ * or a homing runner that outlived a daemon restart, closing the device
+ * later), and a release
  * changes nothing where the engine does not hold. */
 #define COOL_LATCH_ATTR "cnc/laser_latch_cooling"
 static int cool_latch_release_named = 0;
@@ -644,6 +662,24 @@ static void heater_set_pct(uint32_t pct)
     wr_attr_long("thermal/heater_pwm", (long)pct * 65535 / 100);
 }
 
+/* An on/off output the engine holds every tick: written, and a write that
+ * fails is named once, until one takes again (*failing). */
+static void hw_assert(const char *attr, int on, int *failing)
+{
+    if (wr_attr(attr, on ? "1" : "0") == 0) {
+        if (*failing) {
+            *failing = 0;
+            fflog(LOG_INFO, "cool: %s takes writes again", attr);
+        }
+        return;
+    }
+    if (!*failing) {
+        *failing = 1;
+        fflog(LOG_ERR, "cool: writing %s=%d failed: %s; it is written again every tick",
+              attr, on ? 1 : 0, strerror(errno));
+    }
+}
+
 /* The three fans the engine drives, every write to them read back. The
  * head's air-assist register and the two thermal PWMs report the duty in
  * force (a thermal PWM the last duty its device took: a refused write
@@ -686,13 +722,16 @@ static void aa_write(long duty)
     fan_write(Fx_AirAssist, duty);
 }
 
-/* The duties in force, read back once a tick: a value a device lost
- * since it was written (a reset, a dropped transaction) is put back and
- * named, so a fan is never judged against a duty it was not given. A
- * fan whose duty was raised back gets its spin-up grace again, up to a
- * few times a session: a device that keeps losing its value is judged
- * at the tach like any other, not excused forever. fan_back is what each
- * read this tick, for the fault line. */
+/* The duties in force, read back once a tick: a value the head lost since
+ * it was written (its MCU reset, a dropped transaction) is put back and
+ * named, so the air assist is never judged against a duty it was not
+ * given. The two thermal PWMs read back the duty their PWM last took, the
+ * module's record of it, so this catches a write that never took but
+ * cannot see a duty their hardware lost after taking it: the tach floors
+ * judge those two fans. A fan whose duty was raised back gets its spin-up
+ * grace again, up to a few times a session: a device that keeps losing its
+ * value is judged at the tach like any other, not excused forever.
+ * fan_back is what each read this tick, for the fault line. */
 #define FAN_LOST_GRACE_MAX 3
 static long fan_back[3] = {-1, -1, -1};
 static int  fan_lost[3];                /* rewrites this session */
@@ -740,20 +779,9 @@ static void fans_quiet(void)
     wr_attr("head/purge_air", "0");
 }
 
-/* The pump and the TEC off as well, so the machine is silent: the bench's
- * accelerometer tools ask for it, and the operator listens too. Idle
- * only, the laser latched, so the pump-off is dry; the tick leaves the
- * TEC alone while this stands. The finder keeps the pump running: it was
- * proven that way. */
-static void pump_quiet(void)
-{
-    wr_attr("thermal/water_pump_on", "0");
-    wr_attr("thermal/tec_on", "0");
-}
-
 static void fans_idle(void)
 {
-    if (quiet_held) {
+    if (quiet_applied) {
         fans_quiet();
         start_cool = 0;
         return;
@@ -781,19 +809,19 @@ static void fans_log_duty(void)
     static long was[3] = {-2, -2, -2};
     static int was_quiet = -1, was_armed = -1;
     if (cmd_duty[0] == was[0] && cmd_duty[1] == was[1] && cmd_duty[2] == was[2] &&
-        quiet_held == was_quiet && eff_armed == was_armed)
+        quiet_applied == was_quiet && eff_armed == was_armed)
         return;
     was[0] = cmd_duty[0];
     was[1] = cmd_duty[1];
     was[2] = cmd_duty[2];
-    was_quiet = quiet_held;
+    was_quiet = quiet_applied;
     was_armed = eff_armed;
     fflog(LOG_INFO, "cool: fan duty: air assist %ld (machine %d, job %ld), exhaust %ld "
           "(machine %d, job %ld), intake %ld (machine %d, job %ld); armed %d%s",
           cmd_duty[0], AIR_ASSIST_RUN, run_duty[0],
           cmd_duty[1], EXHAUST_RUN, run_duty[1],
           cmd_duty[2], INTAKE_RUN, run_duty[2], eff_armed,
-          quiet_held ? "; the quiet hold stands, the fans are held off instead" : "");
+          quiet_applied ? "; the quiet hold stands, the fans are held off instead" : "");
 }
 
 static void fans_run(void)
@@ -802,7 +830,7 @@ static void fans_run(void)
     cmd_duty[1] = airflow_run_duty(EXHAUST_RUN, run_duty[1], eff_armed);
     cmd_duty[2] = airflow_run_duty(INTAKE_RUN, run_duty[2], eff_armed);
     fans_log_duty();
-    if (quiet_held) {
+    if (quiet_applied) {
         fans_quiet();
         return;
     }
@@ -813,7 +841,7 @@ static void fans_run(void)
 
 static void fans_cool(void)
 {
-    if (quiet_held) {
+    if (quiet_applied) {
         fans_quiet();
         return;
     }
@@ -822,10 +850,20 @@ static void fans_cool(void)
     fan_write(Fx_Intake, INTAKE_COOL);
 }
 
-/* Reapply the fan profile the current phase calls for (used when an
- * over-temp intervention forced cooling airflow and then stood down). */
+/* The fan profile the current phase calls for. OVERTEMP's cooling airflow
+ * is a state, not an edge: while the ceiling's gate stands, an idle or a
+ * thermal phase runs the cooldown duties and says so (forced_cool), so a
+ * phase that ends into idle under the gate, a quiet hold's release and the
+ * busy start's end all land on the cooling airflow, and the gate's
+ * recovery takes it back. A run or a smoke phase keeps its run duties,
+ * which are higher. */
 static void fans_apply_phase(void)
 {
+    forced_cool = over_temp_gate && (cool_state == Cool_Idle || cool_state == Cool_Thermal);
+    if (forced_cool) {
+        fans_cool();
+        return;
+    }
     switch (cool_state) {
     case Cool_Run:
     case Cool_Smoke:
@@ -1271,9 +1309,16 @@ static void conf_reload(void)
 static int diag_owned = 0;
 static int tick_busy = 0;           /* the engine thread is inside a tick (under mu) */
 
+/* Never while OVERTEMP's cooling airflow stands (pub_cooling_forced, -2,
+ * said to the operator as the cooldown it is): the tools would take the
+ * fans off a loop above its ceiling. */
 int cool_diag_take(void)
 {
     pthread_mutex_lock(&mu);
+    if (pub_cooling_forced) {
+        pthread_mutex_unlock(&mu);
+        return -2;
+    }
     if (diag_owned || cool_state != Cool_Idle || strcmp(pub_phase, "idle")) {
         pthread_mutex_unlock(&mu);
         return -1;
@@ -1293,12 +1338,14 @@ int cool_diag_take(void)
     return 0;
 }
 
+/* The fans to the phase's posture (fans_apply_phase): the idle duties, or
+ * OVERTEMP's cooling airflow where a gate rose while the tools held the
+ * hardware. */
 void cool_diag_release(void)
 {
     heater_set_pct(0);
     wr_attr("thermal/water_pump_on", "1");
-    fans_idle();
-    tec_written = -1;               /* the tick rewrites the TEC's state */
+    fans_apply_phase();
     pthread_mutex_lock(&mu);
     diag_owned = 0;
     pub_reason[0] = '\0';
@@ -1317,37 +1364,85 @@ static int diag_guard(const char *what)
     return own ? 0 : -1;
 }
 
+/* The quiet hold: the caller sets the flags, and the engine's next tick
+ * writes the posture (quiet_apply, quiet_pump_settle), so no write of the
+ * hold's races the engine's own. The heater is taken from the flow watch here, at once,
+ * after the hold is published (a tick between the two carries it), so
+ * nothing lets the watch take the heater back before the pump stops. A
+ * hold taken again without the pump gives the pump back: the pump hold is
+ * the hold's that names it. */
 void cool_quiet_hold_ex(int on, int with_pump)
 {
     pthread_mutex_lock(&mu);
-    int was = quiet_held, was_pump = quiet_pump_held;
     quiet_held = on ? 1 : 0;
     quiet_pump_held = (on && with_pump) ? 1 : 0;
     if (on)
         quiet_since = wall_s();
     pthread_mutex_unlock(&mu);
-    /* After the hold is published: a tick between the two then carries it,
-     * so nothing lets the watch take the heater back before the pump stops. */
     if (on)
         flowrun_yield("a quiet hold");
-    if (on) {
-        if (!was) {
-            fans_quiet();
-            info("every fan off for a listening");
-        }
-        if (with_pump && !was_pump) {
-            pump_quiet();
-            info("the pump and the TEC off too: the machine silent");
-        }
-    } else if (was) {
-        if (was_pump) {
-            wr_attr("thermal/water_pump_on", "1");
-            tec_written = -1;           /* the tick rewrites the TEC's state */
-        }
+}
+
+/* The pump hold's terms past the session's and the ceiling's, under mu:
+ * the pump only from an idle phase (never a smoke clear or a thermal
+ * cooldown) with no diagnostic. */
+static int quiet_pump_ok_locked(void)
+{
+    return !diag_owned && !strcmp(pub_phase, "idle");
+}
+
+/* The bench tools' hold (POST /cool/quiet): the terms checked and the
+ * flags set in one hold of mu. A run session publishes its opening under
+ * mu at its edge, before the engine opens it, so a hold set before that is
+ * seen by the opening tick's late look and released with the session's
+ * edge, and one asked for after it is refused: no quiet hold the tools
+ * take ever stands in a run session. None is taken while OVERTEMP's
+ * cooling airflow stands either: the engine releases a hold the moment
+ * the ceiling's gate rises (engine_tick). */
+int cool_quiet_hold_try(int on, int with_pump)
+{
+    pthread_mutex_lock(&mu);
+    if (on && pub_session) {
+        pthread_mutex_unlock(&mu);
+        return -1;
+    }
+    if (on && pub_cooling_forced) {
+        pthread_mutex_unlock(&mu);
+        return -3;
+    }
+    if (on && with_pump && !quiet_pump_ok_locked()) {
+        pthread_mutex_unlock(&mu);
+        return -2;
+    }
+    quiet_held = on ? 1 : 0;
+    quiet_pump_held = (on && with_pump) ? 1 : 0;
+    if (on)
+        quiet_since = wall_s();
+    pthread_mutex_unlock(&mu);
+    if (on)
+        flowrun_yield("a quiet hold");
+    return 0;
+}
+
+/* The quiet hold's fans, on the engine thread, from the flag its callers
+ * set: every fan off while it stands; on its release the purge back on and
+ * the fans to the phase's profile. Its pump hold is the tick's to judge
+ * later, once the phase and the gates are settled (quiet_pump_settle). */
+static void quiet_apply(void)
+{
+    pthread_mutex_lock(&mu);
+    int q = quiet_held;
+    pthread_mutex_unlock(&mu);
+    if (q && !quiet_applied) {
+        quiet_applied = 1;
+        fans_quiet();
+        info("every fan off for a listening");
+    }
+    if (!q && quiet_applied) {
+        quiet_applied = 0;
         wr_attr("head/purge_air", "1");
         fans_apply_phase();
-        info(was_pump ? "the fans and the pump back in their posture after the listening"
-                      : "the fans back in their posture after the listening");
+        info("the fans back in their posture after the listening");
     }
 }
 
@@ -1356,23 +1451,39 @@ void cool_quiet_hold(int on)
     cool_quiet_hold_ex(on, 0);
 }
 
+/* The quiet hold's pump hold, judged once in every tick, after the tick's
+ * session edge, phase and gates are settled and ahead of the warm-up
+ * heater's write and the tick's pump write (the pump and the TEC are
+ * written every tick, engine_tick): the pump and the TEC off only in the
+ * idle phase with no OVERTEMP gate standing, whatever the caller saw
+ * (quiet_pump_ok_locked). Anywhere else, or the moment the hold drops it,
+ * the pump is given back with a write here, before the heater can be
+ * written: the tick that opens a session or raises the gate ends with the
+ * pump on, and a hold that waits through a session applies by itself at
+ * the idle after it. The finder keeps the pump running: it was proven
+ * that way. */
+static void quiet_pump_settle(void)
+{
+    pthread_mutex_lock(&mu);
+    int qp = quiet_pump_held;
+    pthread_mutex_unlock(&mu);
+    int hold = qp && cool_state == Cool_Idle && !over_temp_gate;
+    if (hold && !quiet_pump_applied) {
+        quiet_pump_applied = 1;
+        info("the pump and the TEC off too: the machine silent");
+    } else if (!hold && quiet_pump_applied) {
+        quiet_pump_applied = 0;
+        hw_assert("thermal/water_pump_on", 1, &pump_write_failing);
+        info("the pump back on after the listening");
+    }
+}
+
 int cool_quiet_held(void)
 {
     pthread_mutex_lock(&mu);
     int held = quiet_held;
     pthread_mutex_unlock(&mu);
     return held;
-}
-
-/* The pump only from an idle engine: never under a warm-up (its heater
- * would run on a still loop), a run session, a smoke or thermal phase, or
- * a diagnostic. */
-int cool_quiet_pump_ok(void)
-{
-    pthread_mutex_lock(&mu);
-    int ok = !diag_owned && !strcmp(pub_phase, "idle");
-    pthread_mutex_unlock(&mu);
-    return ok;
 }
 
 int cool_quiet_pump_held(void)
@@ -1848,6 +1959,10 @@ static void flood_apply(int on, double now)
         /* A session that opens under the warm-up gate holds there
          * (warmup_begin); one that opens with no reading to decide on
          * holds undecided (warmup_hold_pending). */
+        /* The session's run duties replace OVERTEMP's cooling airflow;
+         * the gate itself stands, and its recovery or the session's end
+         * puts the phase's profile back. */
+        forced_cool = 0;
         float up_now = 0;
         int have_up_now = read_temp("pic/water_temp_2", &up_now, NULL) &&
                           up_now <= COLD_SIDE_MAX_C;
@@ -1978,7 +2093,8 @@ static void engine_tick(void)
          * episode; the running case repeats until the stop takes, so a
          * failed write cannot be a one-shot miss. Gated on at >= 0: a
          * freshly (re)started engine must not shoot down a healthy
-         * orphaned controller that has not reported to it yet. */
+         * unmanaged controller, or a homing runner a stopped daemon's
+         * controller left behind, that has not reported to it yet. */
         if (at >= 0 && ((armed && !silent_safed) || cnc_is_running())) {
             /* The writes first, the words after: a log line waits for
              * nothing, but nothing waits for a log line. */
@@ -2023,6 +2139,9 @@ static void engine_tick(void)
         cool_quiet_hold(0);
         warn("quiet hold released: it ran out of time");
     }
+    /* The hold's fans, as its flag now stands, before anything below
+     * writes a fan. */
+    quiet_apply();
     /* The session's armed history decides its smoke phase: cleared as
      * a session opens (this tick, before flood_apply), set on any tick
      * the window is open. */
@@ -2048,9 +2167,27 @@ static void engine_tick(void)
     }
 
     if (flood != flood_on) {
+        /* The session's edge published first, under mu: a tools' hold
+         * asked for from here on is refused (cool_quiet_hold_try). */
+        pthread_mutex_lock(&mu);
+        pub_session = flood;
+        pthread_mutex_unlock(&mu);
         flood_on = flood;
         flood_apply(flood, now);
         if (flood) {
+            /* A quiet hold set inside this opening tick, after the edge's
+             * look above and before the edge was published (the route read
+             * the idle phase the tick had not yet left), is released by the
+             * same rule now that the session is open: its fans here, its
+             * pump at the tick's settle. */
+            pthread_mutex_lock(&mu);
+            int late_quiet = quiet_held;
+            pthread_mutex_unlock(&mu);
+            if (late_quiet) {
+                cool_quiet_hold(0);
+                warn("quiet hold released: a run session opened");
+                quiet_apply();
+            }
             /* The session start reloaded the settings: resolve the
              * effective limits from them now, so this tick's gate rows,
              * gates_off and the run-start log line agree. */
@@ -2564,10 +2701,11 @@ static void engine_tick(void)
         if (over_temp_gate && !was) {
             last_up_c = up;
             overtemp_warn(1);
-            if (cool_state != Cool_Run) {
-                fans_cool();
-                forced_cool = 1;
-            }
+            /* Idle and thermal take the cooling airflow and hold it while
+             * the gate stands (fans_apply_phase); a run or a smoke phase
+             * keeps its higher run duties. */
+            if (cool_state == Cool_Idle || cool_state == Cool_Thermal)
+                fans_apply_phase();
         } else if (!over_temp_gate && was) {
             info("coolant temperature recovered");
             pthread_mutex_lock(&mu);
@@ -2577,6 +2715,27 @@ static void engine_tick(void)
                 forced_cool = 0;
                 fans_apply_phase();
             }
+        }
+    }
+
+    /* No quiet hold stands over the ceiling: the gate's rise releases the
+     * whole hold, fans and pump, and so does a hold found standing under
+     * it, so OVERTEMP's cooling airflow and the TEC run from this tick
+     * (quiet_apply puts the phase's fans back; the settle gives the pump
+     * back). The requester finds the hold gone at its next read. The
+     * cooling airflow is published in the same hold of mu as the look, so
+     * a hold the route asks for after it is refused (-3), not set behind
+     * the release for the rest of this tick. The release goes to the log
+     * alone: the reason published stays OVERTEMP's own. */
+    if (over_temp_gate) {
+        pthread_mutex_lock(&mu);
+        pub_cooling_forced = 1;
+        int q = quiet_held;
+        pthread_mutex_unlock(&mu);
+        if (q) {
+            cool_quiet_hold(0);
+            fflog(LOG_WARNING, "cool: quiet hold released: the coolant is over its ceiling");
+            quiet_apply();
         }
     }
 
@@ -2680,6 +2839,10 @@ static void engine_tick(void)
         }
     }
 
+    /* The phase and the gates are settled: the pump hold, before the
+     * heater below and the pump write. */
+    quiet_pump_settle();
+
     /* The warm-up heater, decided every tick, and written every tick it may
      * run: the kernel holds a heater write above zero only for its lease
      * (heater_lease_ms, 5 s), so a daemon that stops ticking leaves it off.
@@ -2707,7 +2870,8 @@ static void engine_tick(void)
                      WARMUP_HEAT_MAX_S / 60, have_up ? up : NAN, warmup_gate_c);
             warn(msg);
         }
-        int heat = have_down && !sensor_alarm && !warmup_hot && !warmup_spent && !cool_quiet_pump_held();
+        int heat = have_down && !sensor_alarm && !warmup_hot && !warmup_spent && !cool_quiet_pump_held() &&
+                   !quiet_pump_applied;
         heater_set_pct(heat ? WARMUP_HEATER_PCT : 0);
         /* The warm-up is said, as the hold's reason, with the heater as
          * written here: on its first tick, when the heater first comes on,
@@ -2790,8 +2954,10 @@ static void engine_tick(void)
      * never re-applies its own duties, so without this the exhaust ran at
      * cooldown duty for good after a kernel drill's takeover. */
     if (start_cool && cool_state == Cool_Idle && machine_is_idle()) {
-        fans_idle();
-        fflog(LOG_INFO, "cool: the machine is idle after the busy start; idle airflow");
+        start_cool = 0;
+        fans_apply_phase();
+        fflog(LOG_INFO, "cool: the machine is idle after the busy start; %s airflow",
+              forced_cool ? "OVERTEMP's cooling" : "idle");
     }
     if (cool_state == Cool_Smoke && now >= phase_until) {
         if ((have_up && up > temp_resume_c) || cnc_is_running()) {
@@ -2800,7 +2966,7 @@ static void engine_tick(void)
             fans_cool();
         } else {
             cool_state = Cool_Idle;
-            fans_idle();
+            fans_apply_phase();
         }
     } else if (cool_state == Cool_Thermal) {
         int recovered = have_up && up <= temp_resume_c;
@@ -2812,18 +2978,17 @@ static void engine_tick(void)
                 senslog_event("thermal cooldown timed out above the resume gate");
             }
             cool_state = Cool_Idle;
-            fans_idle();
+            fans_apply_phase();
         }
     }
 
     /* The TEC. Wanted only with the part declared present, a reading in
-     * hand, the fans running (its heat sink sits in their airflow), the
-     * hysteresis satisfied, and the loop clear of the floor. Off is
-     * immediate; on waits the dwell after the last switch. Written on
-     * change only (and re-written after a diagnostic hand-back). */
+     * hand, the fans running (its heat sink sits in their airflow; a quiet
+     * hold stops them), the hysteresis satisfied, and the loop clear of the
+     * floor. Off is immediate; on waits the dwell after the last switch. */
     {
-        int airflow = cool_state == Cool_Run || cool_state == Cool_Smoke ||
-                      cool_state == Cool_Thermal || forced_cool;
+        int airflow = (cool_state == Cool_Run || cool_state == Cool_Smoke ||
+                       cool_state == Cool_Thermal || forced_cool) && !quiet_applied;
         /* A reading over COLD_SIDE_MAX_C drives no TEC: a short that reads
          * hot would otherwise chill a loop the floor cannot see. */
         int want = tec_present && up_cold_ok && airflow &&
@@ -2850,10 +3015,14 @@ static void engine_tick(void)
                            ? "at the coolant floor" : "coolant cooled");
             info(msg);
         }
-        if (tec_written != tec_on_state && !cool_quiet_pump_held()) {
-            wr_attr("thermal/tec_on", tec_on_state ? "1" : "0");
-            tec_written = tec_on_state;
-        }
+        /* The pump and the TEC, written every tick: the pump on and the
+         * TEC at what the engine wants, both off while a quiet hold's pump
+         * hold stands. A write that fails (or one a device did not keep)
+         * is put right by the next tick's, and the kernel holds a TEC on
+         * only for its lease (heater_lease_ms), which these writes renew:
+         * a TEC whose engine stopped writing goes off by itself. */
+        hw_assert("thermal/water_pump_on", !quiet_pump_applied, &pump_write_failing);
+        hw_assert("thermal/tec_on", quiet_pump_applied ? 0 : tec_on_state, &tec_write_failing);
     }
 
     /* Publish. Enforcement of the pause tier is the controller's: hold
@@ -2917,6 +3086,7 @@ static void engine_tick(void)
               : cool_state == Cool_Warmup ? "warm-up"
               : cool_state == Cool_Smoke ? "smoke"
               : cool_state == Cool_Thermal ? "thermal" : "idle";
+    pub_cooling_forced = over_temp_gate || forced_cool;
     int quiet_now = quiet_held;
     pthread_mutex_unlock(&mu);
 
@@ -3029,9 +3199,10 @@ void cool_init(void)
 
     /* Idle posture. Purge air belongs to the armed/run story the same
      * way air assist does, but the factory holds it on continuously;
-     * keep that. A daemon that starts next to an orphaned controller
-     * mid-job (a respawn over a crash) must not drop the exhaust under
-     * a live cut: a busy machine gets the cooldown duties instead, and
+     * keep that. A daemon that starts next to an unmanaged controller
+     * mid-job, or a homing runner its last controller left behind, must
+     * not drop the exhaust under live motion: a busy machine gets the
+     * cooldown duties instead, and
      * the first fresh report opens the session that sets the run
      * profile (the same rule cool_shutdown follows). */
     wr_attr("thermal/water_pump_on", "1");
@@ -3059,6 +3230,15 @@ void cool_init(void)
 
 void cool_shutdown(void)
 {
+    /* The TEC off before the engine's join as well as after it: an engine
+     * that hangs never returns from the join, and a TEC left on chills a
+     * loop with nothing watching it (the kernel's lease takes it off within
+     * heater_lease_ms of the engine's last write in any case). Off is
+     * always the right parting state: the restarted daemon decides it
+     * again. The pump on, before and after: the pump runs whenever the
+     * machine is on, and a quiet pump hold ends with the daemon. */
+    wr_attr("thermal/tec_on", "0");
+    wr_attr("thermal/water_pump_on", "1");
     pthread_mutex_lock(&mu);
     int was = engine_run;
     engine_run = 0;
@@ -3068,8 +3248,11 @@ void cool_shutdown(void)
     /* The flow watch first: its heater off, whatever it was doing. */
     flowrun_shutdown();
     /* The heater is the warm-up's heat source; off is always the right
-     * parting state, job or no job. */
+     * parting state, job or no job. So is the TEC, after a tick that was
+     * in flight at the first write. */
     heater_set_pct(0);
+    wr_attr("thermal/tec_on", "0");
+    wr_attr("thermal/water_pump_on", "1");
     /* The crash watch took the accel's ODR and full scale; hand them
      * back so st_accel's next one-shot reads at its own scale. */
     if (crash_hw_armed) {
@@ -3077,12 +3260,13 @@ void cool_shutdown(void)
         crash_hw_armed = 0;
     }
     crash_hw_close();
-    /* A busy machine keeps its orphaned controller running (see
-     * super_shutdown), so idling the fans here would drop exhaust under
-     * a live cut, and unlinking the verdict would feed-hold it the
-     * moment a reader notices. Leave both alone: an aging verdict file
-     * reads exactly like a stopped engine within the 2 s staleness
-     * window, and the restarted daemon reasserts the right posture. */
+    /* On a machine still busy (a run the kernel's dead man's switch halts
+     * as the controller goes with the daemon, super_shutdown), idling the
+     * fans here would drop the exhaust under it, and unlinking the verdict
+     * would feed-hold it the moment a reader notices. Leave both alone: an
+     * aging verdict file reads exactly like a stopped engine within the
+     * 2 s staleness window, and the restarted daemon reasserts the right
+     * posture. */
     if (machine_is_idle()) {
         fans_idle();
         unlink(VERDICT_FILE);   /* missing file = fire blocked at readers */

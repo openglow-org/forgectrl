@@ -16,7 +16,8 @@ void diag_init(void);
 /* Launch a tool ("aa-offset-calibrate") on the runner thread. Returns 0
  * on start, -1 if a diagnostic is already running, -2 if the machine is
  * not idle, -3 for an unknown tool, -4 when the machine lease is
- * somebody else's, with the holder in why. */
+ * somebody else's, with the holder in why, -5 while the cooling engine
+ * runs OVERTEMP's cooling airflow. */
 int diag_start(const char *tool, char *why, size_t len);
 
 /* Request an abort; the runner stands down and restarts the controller. */

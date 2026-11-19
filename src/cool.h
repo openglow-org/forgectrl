@@ -11,8 +11,10 @@
 
 /* Diagnostic ownership: a diagnostic tool takes the thermal hardware
  * for a bounded takeover and writes only through the guarded helpers.
- * Take succeeds only from an idle engine; release reasserts the idle
- * posture in one place. */
+ * Take succeeds (0) only from an idle engine with no OVERTEMP cooling
+ * airflow standing: -2 while that airflow stands, -1 for any other busy
+ * engine (a session, its cooldown, another takeover). Release reasserts
+ * the engine's posture in one place. */
 int  cool_diag_take(void);
 void cool_diag_release(void);
 void cool_diag_pump(int on);
@@ -26,17 +28,26 @@ void cool_diag_purge(int on);       /* the head's purge fan */
  * fan writes go to zero as well. cool_quiet_hold_ex with with_pump (the
  * bench's tools through POST /cool/quiet?pump=1): the coolant pump and
  * the TEC off too, so the machine is silent; dry by construction (idle
- * only, the laser latched), the one pump-off state. The release puts the
- * phase's posture back. The engine releases the hold itself when a run
- * session opens (a job never runs with the machine held quiet) and after
+ * only, the laser latched), the one pump-off state. A call sets the hold
+ * and the engine's next tick writes its posture; the release puts the
+ * phase's posture back, and a hold taken again without the pump gives the
+ * pump back. The engine releases the hold itself when a run session opens
+ * (a job never runs with the machine held quiet), when the coolant crosses
+ * its ceiling (the cooling airflow and the TEC run at once), and after
  * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. */
 #define COOL_QUIET_HOLD_MAX_S 600
 void cool_quiet_hold(int on);
 void cool_quiet_hold_ex(int on, int with_pump);
+/* The bench tools' hold, its terms checked and its flags set in one
+ * critical section: 0 when set; -1 while a run session is open, a warm-up
+ * and a run included (the engine publishes a session's opening before it
+ * opens it, so no tools' hold ever stands in one); -3 while OVERTEMP's
+ * cooling airflow stands (the engine releases any hold when the ceiling's
+ * gate rises); -2 for a pump hold outside the idle phase (a smoke clear,
+ * a thermal cooldown) or under a diagnostic. A release (on 0) is always
+ * taken. */
+int cool_quiet_hold_try(int on, int with_pump);
 int cool_quiet_held(void);
-/* Whether a quiet hold may take the pump now: the engine idle (no warm-up,
- * run, smoke or thermal phase, no diagnostic). */
-int cool_quiet_pump_ok(void);
 int cool_quiet_pump_held(void);
 
 /* Factory run fan duties (pulse-header ground truth; also the
@@ -57,9 +68,11 @@ int cool_quiet_pump_held(void);
  * writes /run/forgefirm/cooling.state. */
 void cool_init(void);
 
-/* Stop the thread, stand the hardware down to the idle posture and
- * remove the verdict file (readers treat a missing file as
- * fire-blocked). */
+/* Stop the thread with the heater and the TEC off and the pump on (the
+ * TEC and the pump written before the thread's join as well as after, so
+ * an engine that hangs leaves them so, and a quiet pump hold ends with
+ * the daemon); on an idle machine, idle the fans and remove the verdict
+ * file (readers treat a missing file as fire-blocked). */
 void cool_shutdown(void);
 
 /* Per-job limits a report may carry (cloud mode passes the pulse

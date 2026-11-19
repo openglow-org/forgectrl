@@ -2545,10 +2545,18 @@ static int cb_cool_quiet(const struct _u_request *req,
             return reply_error(res, 409, held);
         if (!machine_is_idle())
             return reply_error(res, 409, "machine is not idle");
-        if (pump && !strcmp(pump, "1") && !cool_quiet_pump_ok())
-            return reply_error(res, 409, "the cooling engine is not idle: the pump stays on");
     }
-    cool_quiet_hold_ex(!strcmp(on, "1"), pump && !strcmp(pump, "1"));
+    switch (cool_quiet_hold_try(!strcmp(on, "1"), pump && !strcmp(pump, "1"))) {
+    case -1:
+        return reply_error(res, 409, "a run session is open");
+    case -2:
+        return reply_error(res, 409, "the cooling engine is not idle: the pump stays on");
+    case -3:
+        return reply_error(res, 409, "the coolant is over its temperature limit and the fans are cooling it: "
+                                     "try again once it has cooled");
+    default:
+        break;
+    }
     char body[48];
     snprintf(body, sizeof(body), "{\"quiet_hold\":%s}",
              cool_quiet_held() ? "true" : "false");
@@ -2607,6 +2615,8 @@ static int cb_diag_start(const struct _u_request *req,
         return reply_error(res, 409, "machine is not idle");
     case -4:
         return reply_error(res, 409, why);      /* the lease's holder, in words */
+    case -5:
+        return reply_error(res, 409, "the coolant is over its temperature limit and the fans are cooling it: try again once it has cooled");
     default:
         return reply_error(res, 400, "unknown diagnostic");
     }

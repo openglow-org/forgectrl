@@ -74,6 +74,7 @@
  *   phases A.  a closed session ends at the idle duties
  *   phases B.  a busy start takes the cooldown duties until the kernel is
  *              idle with no session, then the idle duties
+ *   phases C.  a busy start's end under OVERTEMP keeps the cooling airflow
  *   gates A.   the ceiling under the loop: OVERTEMP at the run start; at
  *              60 it is off, said so
  *   gates B.   the start gate over the loop: WARMUP with the heater on and
@@ -96,13 +97,55 @@
  *              for its session alone
  *   TEC.       fitted: on with the run airflow, off at idle, a dwell before
  *              it comes on again; not fitted: never
+ *   TEC2.      the pump and the TEC written every tick: a refused TEC
+ *              write is written again, a pump found off is put back on
+ *   TEC3.      a write that keeps failing is named once, until one takes
+ *   gates A2.  OVERTEMP's cooling airflow is a state: it outlasts a thermal
+ *              phase that times out and a quiet hold's release, keeps the
+ *              TEC to its airflow, refuses a diagnostic and a pump hold
+ *              (one set past the route's check is not applied), and goes
+ *              with the recovery
+ *   gates A3.  a diagnostic taken inside the tick that raises OVERTEMP:
+ *              its release puts the cooling airflow on
+ *   phases D.  a smoke clear that ends into idle under a standing gate
+ *              lands on the cooling airflow
+ *   quiet A/B. the quiet hold's posture is the engine's: taken again
+ *              without the pump it gives the pump back, and a session's
+ *              opening tick inside its call leaves none of it behind
+ *   quiet C/D. a pump hold set after a session opened is not applied in
+ *              it; one applied at idle is given back before a warm-up's
+ *              heater
+ *   quiet E-G. a pump hold set inside a session's opening tick (into its
+ *              run, into its warm-up, released again inside the tick): the
+ *              tick ends with the pump on and no heater on a stopped pump
+ *   quiet H.   the tick that raises OVERTEMP gives an applied pump hold's
+ *              pump back
+ *   quiet J.   a pump hold standing in a session (set past the route) is
+ *              applied in no warm-up, smoke clear or cooldown, and by
+ *              itself at the idle after them
+ *   quiet K/L. a hold the route asks for in a session's opening tick after
+ *              its edge is refused: the run keeps its fans, the warm-up its
+ *              heater
+ *   quiet M.   a pump hold past its bound is released, the pump back on
+ *   quiet N/O. a fans-only hold in an armed run is refused and a release
+ *              taken; a pump hold in the smoke clear is refused as a busy
+ *              engine
+ *   quiet P.   a hold standing when the coolant crosses its ceiling is
+ *              released in the rising tick: the cooling airflow and the
+ *              TEC as with no hold, the reason OVERTEMP's own; and (Ps) a
+ *              hold taken in a cooldown, the ceiling crossed in it
+ *   quiet Q.   a request right after that release is refused, and a pump
+ *              hold set past the route there is not applied under the gate
+ *   diagnostics B. a tool's fan duties are taken back to the phase's at
+ *              the diagnostic's release
  *
  * And after them: the holds that clear on their own light nothing; at most
  * five notices, their document JSON-safe and never cut; a waiting
  * acknowledgment keeps its record; the flow watch's context (its fans and
  * run session, the two corrections) and the yields that land at once (K3);
  * no engine heat outside a warm-up; the warnings that arm the flight
- * recorder; the retired flow-check settings; the shutdown's order.
+ * recorder; the retired flow-check settings; the shutdown's order, the TEC
+ * off on both sides of the engine's join.
  */
 #define GF_SYSFS    "cool-engine-test/sys/"
 #define VERDICT_DIR "cool-engine-test/run"
@@ -114,13 +157,15 @@
 #define crash_hw_poll   fake_crash_poll
 #define crash_hw_disarm fake_crash_disarm
 #define crash_hw_close  fake_crash_close
-/* The engine's start runs here without its thread: the cases tick it. */
+/* The engine's start runs here without its thread: the cases tick it. The
+ * shutdown's join is noted with the TEC as it found it. */
 #define pthread_create  fake_pthread_create
-/* The fake tree is plain files: a write must truncate, as a sysfs store
- * replaces, or a short duty leaves the tail of a longer one for the
- * engine's readback to find. The one attribute a fan-write case names can
- * drop writes (the device answers, keeps its value) or refuse them (the
- * bus fails). */
+#define pthread_join    fake_pthread_join
+/* The fake tree is plain files, and the engine's writes truncate them
+ * (O_TRUNC, which sysfs ignores), as a sysfs store replaces: without it a
+ * short duty leaves the tail of a longer one for the engine's readback to
+ * find. The one attribute a fan-write case names can drop writes (the
+ * device answers, keeps its value) or refuse them (the bus fails). */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -142,6 +187,8 @@ static long cooling_at_ctl_lock = -2;
    the tick takes back before its end still shows. */
 static int heater_fd = -1;
 static long heater_written_max = 0;
+/* Heater writes above zero that landed while the pump read off. */
+static int heat_with_pump_off = 0;
 static long get_long(const char *attr);
 
 static int fake_open(const char *path, int flags, ...)
@@ -153,8 +200,7 @@ static int fake_open(const char *path, int flags, ...)
     }
     /* A dropped write leaves the device's value where it was: no
      * truncation for that one. */
-    int fd = openat(AT_FDCWD, path,
-                    (flags & O_WRONLY) && !drop ? (flags | O_TRUNC) : flags, 0644);
+    int fd = openat(AT_FDCWD, path, drop ? (flags & ~O_TRUNC) : flags, 0644);
     if (fd >= 0 && drop)
         drop_fd = fd;
     if (fd >= 0 && (flags & O_WRONLY) && strstr(path, ".cooling.state.tmp"))
@@ -189,6 +235,8 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
         long d = strtol(v, NULL, 10);
         if (d > heater_written_max)
             heater_written_max = d;
+        if (d > 0 && get_long("thermal/water_pump_on") == 0)
+            heat_with_pump_off++;
     }
     if (fd == drop_fd && drop_left != 0) {
         if (drop_left > 0)
@@ -265,6 +313,9 @@ static char last_log[256];
 static char logbuf[16384];          /* every line since an intake case began */
 
 static int log_errs;                /* lines at LOG_ERR, counted by level */
+/* Called with each line as it is logged: a case that lands a call at
+   that moment (another thread, on one core). */
+static void (*fflog_hook)(const char *line);
 
 void fflog(int prio, const char *fmt, ...)
 {
@@ -278,6 +329,8 @@ void fflog(int prio, const char *fmt, ...)
     if (n + strlen(last_log) + 2 < sizeof(logbuf))
         snprintf(logbuf + n, sizeof(logbuf) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
+    if (fflog_hook)
+        fflog_hook(last_log);
 }
 
 static int log_has(const char *needle)
@@ -351,6 +404,23 @@ int fake_pthread_create(pthread_t *t, const pthread_attr_t *a, void *(*fn)(void 
     (void)t; (void)a; (void)fn; (void)arg;
     return 0;
 }
+static int joins;
+static long tec_at_join = -1, pump_at_join = -1;
+static int join_writes_tec;             /* the joined tick writes the TEC on and the pump off
+                                           (a pump hold it applied; shutdown_order) */
+static void put_long(const char *attr, long v);
+int fake_pthread_join(pthread_t t, void **ret)
+{
+    (void)t; (void)ret;
+    joins++;
+    tec_at_join = get_long("thermal/tec_on");
+    pump_at_join = get_long("thermal/water_pump_on");
+    if (join_writes_tec) {
+        put_long("thermal/tec_on", 1);
+        put_long("thermal/water_pump_on", 0);
+    }
+    return 0;
+}
 static char last_flag[160];
 int setup_flag(const char *id, const char *reason)
 {
@@ -367,6 +437,10 @@ static int flow_yield_quiet, flow_yield_diag;
 static int flow_stops;
 static long flow_stop_heater = -1;
 static flowrun_ctx_t flow_ctx;
+/* A tick placed inside a quiet hold's call, where its yield falls (a
+   forced schedule): one engine tick of a run session opening. */
+static int yield_ticks_session;
+static void yield_tick(void);
 void flowrun_init(void) { }
 void flowrun_shutdown(void) { flow_stops++; flow_stop_heater = get_long("thermal/heater_pwm"); }
 void flowrun_engine(const flowrun_ctx_t *c) { flow_ctx = *c; }
@@ -378,6 +452,10 @@ void flowrun_yield(const char *why)
     flow_yield_pump = get_long("thermal/water_pump_on");
     flow_yield_quiet = quiet_held && quiet_pump_held;
     flow_yield_diag = diag_owned;
+    if (yield_ticks_session) {
+        yield_ticks_session = 0;
+        yield_tick();
+    }
 }
 /* The button as the engine sees it, and the supervisor's motion check. */
 static int led_red, led_released, led_writes, motion_fault_stub;
@@ -477,6 +555,7 @@ static void make_tree(void)
     put_long("thermal/exhaust_pwm", 0);
     put_long("thermal/intake_pwm", 0);
     put_long("thermal/tec_on", 0);
+    put_long("thermal/water_pump_on", 1);
 }
 
 /* --- the loop model --------------------------------------------------- */
@@ -523,8 +602,8 @@ static void run_idle_tick(loop_t *L)
 }
 
 /* Close the session the way a job's end does: report idle and tick
-   through the cooldown phases until the engine is idle, then take the
-   heater off. */
+   through the cooldown phases until the engine is idle. The heater is the
+   engine's to take off (gates B). */
 static void close_session(loop_t *L)
 {
     L->session = 0;
@@ -536,7 +615,6 @@ static void close_session(loop_t *L)
         if (cool_state == Cool_Idle)
             break;
     }
-    heater_set_pct(0);
     conf_reload();
     /* Only the attention case wants a failure left standing for the next job. */
     if (!attn_keep)
@@ -963,6 +1041,16 @@ static void diag_heater_lease(loop_t *L)
     run_idle_tick(L);
     CHECK(get_long("thermal/heater_pwm") == 0 && heater_pct == 0 && !strcmp(pub_phase, "idle"),
           "the release leaves the heater off and the engine idle");
+
+    printf("diagnostics B. a tool's fans are taken back at the release: the phase's duties\n");
+    CHECK(cool_diag_take() == 0, "a diagnostic takes the thermal hardware");
+    cool_diag_fans_run();
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN, "the tool runs the fans");
+    cool_diag_release();
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_IDLE && get_long("thermal/intake_pwm") == INTAKE_IDLE,
+          "the release writes the idle duties");
+    run_idle_tick(L);
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_IDLE, "and they hold");
 }
 
 static void phases(loop_t *L)
@@ -989,6 +1077,65 @@ static void phases(loop_t *L)
     CHECK(get_long("thermal/exhaust_pwm") == 0 && get_long("thermal/intake_pwm") == 0,
           "idle with no session: the idle duties");
     CHECK(log_has("the machine is idle after the busy start"), "and the line says so");
+
+    printf("phases C. a busy start's end under OVERTEMP keeps the cooling airflow\n");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    machine_idle = 0;
+    cool_init();
+    for (int i = 0; i < 2; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+    }
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && forced_cool, "the ceiling under the loop at idle: OVERTEMP's cooling airflow");
+    machine_idle = 1;
+    loop_tick(L);
+    tick("idle", 0);
+    CHECK(!start_cool && forced_cool && get_long("thermal/exhaust_pwm") == EXHAUST_COOL &&
+          get_long("thermal/intake_pwm") == INTAKE_COOL,
+          "the machine idle: the busy start ends, and the cooling airflow stands");
+    kv[0] = NULL;
+    conf_reload();
+    loop_tick(L);
+    tick("idle", 0);
+    CHECK(!forced_cool && get_long("thermal/exhaust_pwm") == EXHAUST_IDLE, "the ceiling back over the loop: the idle duties");
+
+    printf("phases D. a smoke phase that ends into idle with the gate still standing (the upstream reading lost "
+           "in the smoke clear) lands on the cooling airflow\n");
+    close_session(L);
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    settle_and_open(L);
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP"), "OVERTEMP in the run");
+    L->dead_up = 1;
+    L->session = 0;
+    for (int i = 0; i < 40 && cool_state != Cool_Idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+    }
+    CHECK(cool_state == Cool_Idle && over_temp_gate && get_long("thermal/exhaust_pwm") == EXHAUST_COOL &&
+          get_long("thermal/intake_pwm") == INTAKE_COOL, "idle, the gate standing: the cooling airflow");
+    L->dead_up = 0;
+    kv[0] = NULL;
+    L->bulk_c = -10.0;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    L->bulk_c = 0.0;
+    conf_reload();
+    close_session(L);
+}
+
+/* A diagnostic's take, landed as the tick that raises OVERTEMP logs its
+ * rise: after the rise and before the tick publishes, as an HTTP thread
+ * can land it on one core (warn() drops the lock before it logs). */
+static int take_on_overtemp;
+static int took_in_tick = -1;
+static void take_on_rise(const char *line)
+{
+    if (take_on_overtemp && strstr(line, "limit - hold until")) {
+        take_on_overtemp = 0;
+        took_in_tick = cool_diag_take() == 0;
+    }
 }
 
 static void gate_ceiling(loop_t *L)
@@ -1008,6 +1155,106 @@ static void gate_ceiling(loop_t *L)
           "the ceiling at 60: OK, coolant_max in gates_off");
     CHECK(log_has("gate coolant_max OFF: cool_temp_max = 60"), "the run-start line names the gate off");
     kv[0] = NULL;
+    close_session(L);
+
+    printf("gates A2. OVERTEMP's cooling airflow is a state: past a thermal phase that times out, under a quiet "
+           "hold's release, with the TEC on only in airflow, no diagnostic or pump hold, gone with the recovery\n");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+    kv[4] = "cool_cooldown_max_s"; kv[5] = "5"; kv[6] = "cool_tec_present"; kv[7] = "1";
+    kv[8] = "cool_tec_on_c"; kv[9] = "15"; kv[10] = "cool_tec_off_c"; kv[11] = "13"; kv[12] = NULL;
+    settle_and_open(L);
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP"), "the ceiling under the loop: OVERTEMP in the run");
+    int tec_without_fans = 0;
+    session_end_tick(L);
+    for (int i = 0; i < 120 && cool_state != Cool_Idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+        if (get_long("thermal/tec_on") == 1 && get_long("thermal/exhaust_pwm") == 0)
+            tec_without_fans = 1;
+    }
+    CHECK(cool_state == Cool_Idle && !strcmp(pub_verdict, "OVERTEMP") && forced_cool &&
+          get_long("thermal/exhaust_pwm") == EXHAUST_COOL && get_long("thermal/intake_pwm") == INTAKE_COOL,
+          "the thermal phase timed out over the gate: idle, OVERTEMP, the cooldown duties stand");
+    for (int i = 0; i < 30; i++) {
+        run_idle_tick(L);
+        if (get_long("thermal/tec_on") == 1 && get_long("thermal/exhaust_pwm") == 0)
+            tec_without_fans = 1;
+    }
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_COOL, "and still 30 s later");
+    CHECK(!tec_without_fans, "the TEC never on with the exhaust at 0");
+    int take = cool_diag_take(), took = take == 0;
+    if (took)
+        cool_diag_release();
+    CHECK(take == -2 && cool_quiet_hold_try(1, 1) == -3 && cool_quiet_hold_try(1, 0) == -3 && !quiet_held,
+          "no diagnostic (refused as the over-temp cooldown, not a busy engine), and the route refuses a "
+          "hold, with the pump or fans only, while it stands");
+    cool_quiet_hold_ex(1, 1);           /* set past the route's check */
+    run_idle_tick(L);
+    CHECK(!quiet_held && !quiet_pump_held && get_long("thermal/water_pump_on") == 1 && !quiet_pump_applied,
+          "a pump hold set past the route's check: released at the engine's next tick, the pump on");
+    for (int i = 0; i < 60 && get_long("thermal/tec_on") != 1; i++)
+        run_idle_tick(L);
+    cool_quiet_hold(1);
+    run_idle_tick(L);
+    CHECK(!quiet_held && get_long("thermal/exhaust_pwm") == EXHAUST_COOL && forced_cool &&
+          get_long("thermal/tec_on") == 1,
+          "a fans-only hold set under it: released at the engine's next tick, the cooling airflow and the TEC "
+          "stand"); 
+    L->session = 1;
+    run_tick(L);
+    CHECK(!forced_cool && get_long("thermal/exhaust_pwm") == EXHAUST_RUN,
+          "a session that opens over it: the run duties, and the cooling airflow's flag down");
+    session_end_tick(L);
+    for (int i = 0; i < 120 && cool_state != Cool_Idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+    }
+    CHECK(forced_cool && get_long("thermal/exhaust_pwm") == EXHAUST_COOL, "and at idle again, the cooling airflow");
+    L->bulk_c = -7.0;                   /* 15.3 C: under the resume gate */
+    run_idle_tick(L);
+    CHECK(strcmp(pub_verdict, "OVERTEMP") && !forced_cool &&
+          get_long("thermal/exhaust_pwm") == EXHAUST_IDLE && get_long("thermal/intake_pwm") == INTAKE_IDLE,
+          "the loop recovers: the idle duties");
+    L->bulk_c = 0.0;
+    kv[0] = NULL;
+    close_session(L);
+    conf_reload();
+
+    printf("gates A3. a diagnostic taken inside the tick that raises OVERTEMP: its release puts the cooling "
+           "airflow on, and the TEC never runs with the exhaust at 0\n");
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    CHECK(!over_temp_gate && !strcmp(pub_phase, "idle"), "idle, the ceiling over the loop");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+    kv[4] = "cool_tec_present"; kv[5] = "1"; kv[6] = "cool_tec_on_c"; kv[7] = "15";
+    kv[8] = "cool_tec_off_c"; kv[9] = "13"; kv[10] = NULL;
+    conf_reload();
+    take_on_overtemp = 1;
+    took_in_tick = -1;
+    fflog_hook = take_on_rise;
+    run_idle_tick(L);
+    fflog_hook = NULL;
+    CHECK(took_in_tick == 1, "the take lands between the gate's rise and the tick's publish, and is granted");
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    cool_diag_release();
+    tec_without_fans = 0;
+    for (int i = 0; i < 40; i++) {
+        run_idle_tick(L);
+        if (get_long("thermal/tec_on") == 1 && get_long("thermal/exhaust_pwm") == 0)
+            tec_without_fans = 1;
+    }
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && get_long("thermal/exhaust_pwm") == EXHAUST_COOL &&
+          get_long("thermal/intake_pwm") == INTAKE_COOL, "after the release: OVERTEMP's cooling airflow");
+    CHECK(!tec_without_fans, "the TEC never on with the exhaust at 0");
+    kv[0] = NULL;
+    L->bulk_c = -10.0;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    L->bulk_c = 0.0;
+    conf_reload();
     close_session(L);
 }
 
@@ -1332,6 +1579,14 @@ static void gate_warmup(loop_t *L)
     CHECK(get_long("thermal/heater_pwm") > 0, "the loop heater on");
     CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_IDLE && get_long("thermal/intake_pwm") == INTAKE_IDLE &&
           get_long("head/air_assist_pwm") == AIR_ASSIST_IDLE, "the fans at their idle duties");
+    /* A session that ends in its warm-up: the engine takes its heater off
+     * (nothing else here writes it). */
+    session_end_tick(L);
+    CHECK(get_long("thermal/heater_pwm") == 0 && heater_pct == 0,
+          "a session that ends in its warm-up: the engine's heater off");
+    close_session(L);
+    settle_and_open(L);
+    CHECK(cool_state == Cool_Warmup, "the next session holds its warm-up again");
     for (int i = 0; i < WARMUP_WIN + 10; i++)
         run_tick(L);
     L->bulk_c = 3.0;                    /* one warm sample: a slug passing the sensor */
@@ -1609,16 +1864,19 @@ static void flow_yield_now(loop_t *L)
     run_idle_tick(L);
     put_long("thermal/water_pump_on", 1);
     int y = flow_yields;
-    cool_quiet_hold_ex(1, 1);
-    CHECK(flow_yields == y + 1 && flow_yield_quiet && flow_yield_pump == 1 &&
-          get_long("thermal/water_pump_on") == 0,
-          "a quiet hold with the pump: one yield, the hold already published, the pump not yet stopped");
+    int rc = cool_quiet_hold_try(1, 1);
+    CHECK(rc == 0 && flow_yields == y + 1 && flow_yield_quiet && flow_yield_pump == 1,
+          "the route's pump hold: one yield in its own call, the hold already published, the pump not yet "
+          "stopped");
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0, "the engine's next tick stops the pump");
     cool_quiet_hold(0);
     run_idle_tick(L);
     y = flow_yields;
     CHECK(cool_diag_take() == 0 && flow_yields == y + 1 && flow_yield_diag,
           "a diagnostic's take: one yield, the take already published");
-    CHECK(!cool_quiet_pump_ok(), "a quiet hold may not take the pump from it, before its first tick");
+    CHECK(cool_quiet_hold_try(1, 1) == -2 && !quiet_held,
+          "the route's pump hold refused from it, before its first tick");
     cool_diag_release();
     run_idle_tick(L);
 }
@@ -1879,6 +2137,14 @@ static void tec(loop_t *L)
         run_tick(L);
     CHECK(get_long("thermal/tec_on") == 1 && fake_now - off_at >= TEC_DWELL_S,
           "on again once the dwell has passed, not before");
+    session_end_tick(L);
+    CHECK(cool_state != Cool_Idle && get_long("thermal/tec_on") == 1, "the cooldown keeps it on");
+    CHECK(cool_quiet_hold_try(1, 0) == 0, "the route takes a fans-only hold in the cooldown");
+    loop_tick(L);
+    tick("idle", 0);
+    CHECK(get_long("thermal/exhaust_pwm") == 0 && get_long("thermal/tec_on") == 0,
+          "a fans-only hold in the cooldown: every fan off, and the TEC with them");
+    cool_quiet_hold(0);
     close_session(L);
     kv[1] = "0";
     settle_and_open(L);
@@ -1890,6 +2156,559 @@ static void tec(loop_t *L)
     }
     CHECK(!driven, "not fitted: never written 1");
     kv[0] = NULL;
+    close_session(L);
+}
+
+/* The pump and the TEC are written every tick: a TEC off-write the kernel
+ * refuses is written again at the next tick, and a pump found off is put
+ * back on. */
+static void outputs_every_tick(loop_t *L)
+{
+    printf("TEC2. the pump and the TEC are written every tick: a refused write and a pump left off are put right\n");
+    close_session(L);
+    kv[0] = "cool_tec_present"; kv[1] = "1"; kv[2] = "cool_tec_on_c"; kv[3] = "15";
+    kv[4] = "cool_tec_off_c"; kv[5] = "13"; kv[6] = NULL;
+    settle_and_open(L);
+    for (int i = 0; i < 120 && get_long("thermal/tec_on") != 1; i++)
+        run_tick(L);
+    CHECK(get_long("thermal/tec_on") == 1, "fitted, the loop over its threshold: the TEC on in the run");
+    L->bulk_c = -10.0;                  /* 12.3 C: under cool_tec_off_c */
+    drop_attr = "thermal/tec_on";
+    drop_left = 1;
+    refuse = 1;
+    run_tick(L);
+    CHECK(tec_on_state == 0 && get_long("thermal/tec_on") == 1, "the engine turns it off and the kernel refuses the write");
+    drop_attr = NULL;
+    refuse = 0;
+    run_tick(L);
+    CHECK(get_long("thermal/tec_on") == 0, "the next tick writes it again, and it takes");
+    put_long("thermal/water_pump_on", 0);
+    run_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 1, "a pump found off is put back on at the next tick");
+    L->bulk_c = 0.0;
+    kv[0] = NULL;
+    close_session(L);
+
+    printf("TEC3. a write that keeps failing is named once, until one takes; the next failure is named again\n");
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    int e0 = log_errs;
+    drop_attr = "thermal/water_pump_on";
+    drop_left = -1;
+    refuse = 1;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    CHECK(log_errs - e0 == 1, "five refused pump writes: one line");
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    run_idle_tick(L);
+    drop_attr = "thermal/water_pump_on";
+    drop_left = -1;
+    refuse = 1;
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    CHECK(log_errs - e0 == 2, "one took between them: the next refusal is named again, once");
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    run_idle_tick(L);
+}
+
+/* A quiet hold's posture is the engine's to write (quiet_apply): the hold
+ * taken again without the pump gives the pump back, every release leaves it
+ * on, and a session's opening tick that lands inside the hold's call leaves
+ * no posture of the hold behind (the forced schedule: the tick sits where
+ * the hold's yield falls). */
+static void yield_tick(void);
+static loop_t *yield_L;
+static void yield_tick(void)
+{
+    yield_L->session = 1;
+    loop_tick(yield_L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+}
+
+/* A pump hold the route sets inside the tick that opens a run session: its
+ * check reads the published phase, still idle for the whole tick, and its
+ * call lands after the engine's look at the hold for the session's edge,
+ * here where a fans-only hold that stood is released and the release is
+ * logged. With @drop_inside the route takes the hold back again inside the
+ * engine's own application of it. */
+static int late_arm, late_drop_arm, late_ok = -1;
+static void late_hold_hook(const char *line)
+{
+    if (late_arm && strstr(line, "quiet hold released: a run session opened")) {
+        late_arm = 0;
+        late_ok = cool_quiet_hold_try(1, 1) == 0;  /* the route's call */
+    }
+    if (late_drop_arm && strstr(line, "the pump and the TEC off too")) {
+        late_drop_arm = 0;
+        cool_quiet_hold(0);
+    }
+}
+
+static void late_hold_open(loop_t *L, int into_warmup, int drop_inside)
+{
+    printf("quiet %s. a pump hold the route sets inside the session's opening tick, %s%s: the tick ends with "
+           "the pump on, no heater on a stopped pump, no fire permitted on one\n",
+           drop_inside ? "G" : into_warmup ? "F" : "E", into_warmup ? "into its warm-up" : "into its run",
+           drop_inside ? ", taken back again the moment the engine applies it" : "");
+    close_session(L);
+    kv[0] = into_warmup ? "cool_temp_start" : NULL;
+    kv[1] = "23.3";                     /* 1 C over the loop's 22.3 */
+    kv[2] = NULL;
+    conf_reload();
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    cool_quiet_hold(1);                 /* a fans-only hold stands */
+    run_idle_tick(L);
+    late_arm = 1;
+    late_drop_arm = drop_inside;
+    late_ok = -1;
+    heat_with_pump_off = 0;
+    fflog_hook = late_hold_hook;
+    L->session = 1;
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);     /* opens armed */
+    engine_tick();
+    fflog_hook = NULL;
+    long pump = get_long("thermal/water_pump_on");
+    CHECK(late_ok == 1 && cool_state == (into_warmup ? Cool_Warmup : Cool_Run),
+          "the route's check passed inside the opening tick, and the session opened");
+    CHECK(pump == 1 && !quiet_pump_applied && !(pump == 0 && pub_fire_ok),
+          "the opening tick ends with the pump on and the pump hold not applied");
+    CHECK(drop_inside || !quiet_held, "a hold set inside the opening tick is released with the session's edge");
+    CHECK(get_long("thermal/exhaust_pwm") == (into_warmup ? EXHAUST_IDLE : EXHAUST_RUN) &&
+          get_long("head/air_assist_pwm") == (into_warmup ? AIR_ASSIST_IDLE : COOL_AIR_ASSIST_RUN),
+          "and its fans with it, in that tick: the session's duties, none held off");
+    for (int i = 0; i < 5; i++)
+        run_tick(L);
+    CHECK(heat_with_pump_off == 0 && get_long("thermal/water_pump_on") == 1,
+          "five ticks on: no heater write landed with the pump off, the pump on");
+    cool_quiet_hold(0);
+    kv[0] = NULL;
+    conf_reload();
+    close_session(L);
+}
+
+/* A hold the route asks for in the tick that opens a session, after the
+ * session's edge was published: in the session's own settings reload
+ * (inside flood_apply, before the late look), and again at the run start's
+ * limits line (past the late look). Refused both times, so the session
+ * runs with its fans and, into a warm-up, its heater. */
+static int refuse_arm, refuse_rc = 99, refuse_fans_rc = 99, refuse_late_arm, refuse_late_rc = 99,
+           refuse_late_fans_rc = 99;
+static void refuse_hook(const char *line)
+{
+    if (refuse_arm && strstr(line, "settings in force") && flood_on) {
+        refuse_arm = 0;
+        refuse_rc = cool_quiet_hold_try(1, 1);
+        refuse_fans_rc = cool_quiet_hold_try(1, 0);
+    }
+    if (refuse_late_arm && strstr(line, "effective limits") && flood_on) {
+        refuse_late_arm = 0;
+        refuse_late_rc = cool_quiet_hold_try(1, 1);
+        refuse_late_fans_rc = cool_quiet_hold_try(1, 0);
+    }
+}
+
+static void refused_hold_open(loop_t *L, int into_warmup)
+{
+    printf("quiet %s. a pump hold the route asks for in the session's opening tick after its edge, %s: refused\n",
+           into_warmup ? "L" : "K", into_warmup ? "into its warm-up" : "into its run");
+    close_session(L);
+    kv[0] = NULL;
+    conf_reload();
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    /* A changed ceiling the session's own reload takes, so the run start
+     * names its limits inside the opening tick. */
+    int k = 0;
+    kv[k++] = "cool_temp_max"; kv[k++] = "35"; kv[k++] = "cool_temp_resume"; kv[k++] = "33";
+    if (into_warmup) {
+        kv[k++] = "cool_temp_start"; kv[k++] = "23.3";     /* 1 C over the loop's 22.3 */
+    }
+    kv[k] = NULL;
+    refuse_arm = refuse_late_arm = 1;
+    refuse_rc = refuse_late_rc = refuse_fans_rc = refuse_late_fans_rc = 99;
+    fflog_hook = refuse_hook;
+    L->session = 1;
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);     /* opens armed */
+    engine_tick();
+    fflog_hook = NULL;
+    CHECK(refuse_rc == -1 && refuse_late_rc == -1 && refuse_fans_rc == -1 && refuse_late_fans_rc == -1 &&
+          !quiet_held && !quiet_pump_held,
+          "the route's holds, with the pump and fans only, are refused before the late look and after it: "
+          "no hold stands");
+    int fans_off = 0, heat = 0, pump_off = 0;
+    for (int i = 0; i < 8; i++) {
+        run_tick(L);
+        fans_off += get_long("thermal/exhaust_pwm") == 0 && get_long("head/air_assist_pwm") == 0 &&
+                    get_long("thermal/intake_pwm") == 0;
+        heat += get_long("thermal/heater_pwm") > 0;
+        pump_off += get_long("thermal/water_pump_on") == 0;
+    }
+    if (into_warmup)
+        CHECK(pump_off == 0 && heat > 0, "eight warm-up ticks: the pump on, the heater runs");
+    else
+        CHECK(pump_off == 0 && fans_off == 0, "eight run ticks: the pump on, the fans at their duties");
+    kv[0] = NULL;
+    conf_reload();
+    close_session(L);
+}
+
+/* A hold the route took at idle, standing when the coolant crosses its
+ * ceiling 30 s later, a TEC fitted: the hold is released in the tick the
+ * gate rises, and the cooling airflow and the TEC run as they do with no
+ * hold (@with_hold 0, the control). */
+/* In the rising tick, right after the release puts the fans back: the
+ * route's request (refused, the cooling airflow already published), then a
+ * pump hold set past the route, which the tick's settle must not apply
+ * under the gate. */
+static int late_over_arm, late_over_rc = 99;
+static void late_over_hook(const char *line)
+{
+    if (late_over_arm && over_temp_gate && strstr(line, "the fans back in their posture after the listening")) {
+        late_over_arm = 0;
+        late_over_rc = cool_quiet_hold_try(1, 1);
+        cool_quiet_hold_ex(1, 1);
+    }
+}
+
+static double over_airflow_s = -1, over_tec_s = -1;
+static void quiet_over_ceiling(loop_t *L, int with_hold, int with_pump)
+{
+    printf("quiet P%s. the ceiling crossed at idle 30 s after %s: the cooling airflow in the rising tick\n",
+           with_hold ? (with_pump ? "" : "f") : "c",
+           with_hold ? (with_pump ? "a pump hold" : "a fans-only hold") : "no hold (the control)");
+    close_session(L);
+    kv[0] = "cool_tec_present"; kv[1] = "1"; kv[2] = "cool_tec_on_c"; kv[3] = "15";
+    kv[4] = "cool_tec_off_c"; kv[5] = "13"; kv[6] = NULL;
+    conf_reload();
+    L->bulk_c = 0.0;
+    for (int i = 0; i < 40; i++)
+        run_idle_tick(L);
+    if (with_hold)
+        CHECK(cool_quiet_hold_try(1, with_pump) == 0, "the route takes the hold at idle");
+    for (int i = 0; i < 30; i++)
+        run_idle_tick(L);
+    if (with_hold)
+        CHECK(quiet_applied && get_long("head/air_assist_pwm") == 0 &&
+              get_long("thermal/water_pump_on") == (with_pump ? 0 : 1),
+              "the hold applied at idle: every fan off, the pump off with it or on without it");
+    L->bulk_c = 13.0;                   /* 35.3 C: over the 33 C ceiling */
+    double rise = -1, airflow = -1, tec = -1;
+    int heat = 0, pump_off = 0;
+    for (int i = 0; i < 700 && (airflow < 0 || tec < 0); i++) {
+        run_idle_tick(L);
+        if (rise < 0 && !strcmp(pub_verdict, "OVERTEMP"))
+            rise = fake_now;
+        if (rise < 0)
+            continue;
+        if (airflow < 0 && get_long("thermal/exhaust_pwm") == EXHAUST_COOL &&
+            get_long("thermal/intake_pwm") == INTAKE_COOL)
+            airflow = fake_now - rise;
+        if (tec < 0 && get_long("thermal/tec_on") == 1)
+            tec = fake_now - rise;
+        heat += get_long("thermal/heater_pwm") > 0;
+        pump_off += get_long("thermal/water_pump_on") == 0;
+    }
+    printf("    the cooling airflow %.0f s and the TEC %.0f s after the rise; hold standing %d\n", airflow, tec,
+           quiet_held);
+    CHECK(rise > 0 && airflow == 0 && !quiet_held && !quiet_pump_held && heat == 0 && pump_off == 0 &&
+          !pub_fire_ok,
+          "the rising tick: no hold, the cooling airflow, the pump on, no heater, fire blocked");
+    if (with_hold)
+        CHECK(airflow == over_airflow_s && tec == over_tec_s, "the cooling airflow and the TEC as with no hold");
+    else {
+        over_airflow_s = airflow;
+        over_tec_s = tec;
+    }
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    {
+        char reason[COOL_REASON_MAX];
+        pthread_mutex_lock(&mu);
+        snprintf(reason, sizeof(reason), "%s", pub_reason);
+        pthread_mutex_unlock(&mu);
+        CHECK(!strcmp(pub_verdict, "OVERTEMP") && strstr(reason, "limit") && strstr(reason, "hold until"),
+              "five ticks into the gate the reason is OVERTEMP's own: the coolant, its limit, the resume point");
+    }
+    L->bulk_c = 0.0;
+    kv[0] = NULL;
+    conf_reload();
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    close_session(L);
+    (void)cool_attention_ack();
+}
+
+/* A fans-only hold the route takes in the cooldown after an armed session,
+ * then the coolant crosses its ceiling in that cooldown: released in the
+ * rising tick there too, the fans on over the gate. */
+static void quiet_over_ceiling_cooldown(loop_t *L)
+{
+    printf("quiet Ps. a fans-only hold taken in a cooldown, then the ceiling crossed in it\n");
+    close_session(L);
+    kv[0] = "cool_cooldown_max_s"; kv[1] = "600"; kv[2] = NULL;
+    L->bulk_c = 0.0;
+    settle_and_open(L);
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    session_end_tick(L);
+    int rc = cool_quiet_hold_try(1, 0);
+    loop_tick(L);
+    tick("idle", 0);
+    CHECK(rc == 0 && cool_state != Cool_Idle && quiet_applied && get_long("thermal/exhaust_pwm") == 0,
+          "the hold applied in the cooldown: every fan off");
+    L->bulk_c = 13.0;                   /* 35.3 C: over the 33 C ceiling */
+    int rose = 0, fans_off_over = 0;
+    for (int i = 0; i < 8; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+        rose |= over_temp_gate;
+        fans_off_over += over_temp_gate && get_long("thermal/exhaust_pwm") == 0;
+    }
+    CHECK(rose && cool_state != Cool_Idle && !quiet_held && fans_off_over == 0,
+          "over the ceiling in the cooldown: the hold released in the rising tick, the fans on");
+    L->bulk_c = -10.0;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    L->bulk_c = 0.0;
+    kv[0] = NULL;
+    conf_reload();
+    close_session(L);
+    (void)cool_attention_ack();
+}
+
+static void quiet_posture(loop_t *L)
+{
+    printf("quiet A. a quiet hold taken again without the pump gives the pump back; the release leaves it on\n");
+    close_session(L);
+    run_idle_tick(L);
+    cool_quiet_hold_ex(1, 1);
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0 && get_long("thermal/tec_on") == 0,
+          "a hold with the pump: the pump and the TEC off at the next tick");
+    cool_quiet_hold_ex(1, 0);
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 1, "taken again without the pump: the pump back on");
+    cool_quiet_hold_ex(0, 0);
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 1 && !quiet_held, "released: the pump on");
+
+    printf("quiet B. a session's opening tick inside the hold's call: the session runs with the pump on and its run duties\n");
+    close_session(L);
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    yield_L = L;
+    yield_ticks_session = 1;
+    cool_quiet_hold_ex(1, 1);
+    for (int i = 0; i < 10; i++)
+        run_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 1 && get_long("thermal/exhaust_pwm") == EXHAUST_RUN &&
+          get_long("thermal/intake_pwm") == INTAKE_RUN && !quiet_held,
+          "ten ticks on: the pump on, the run duties, no hold standing");
+    close_session(L);
+
+    printf("quiet C. a pump hold the route took at idle, set after a session opened armed: the session runs "
+           "with the pump on, the hold waiting\n");
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    pthread_mutex_lock(&mu);
+    int ok = quiet_pump_ok_locked();
+    pthread_mutex_unlock(&mu);
+    L->session = 1;
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+    cool_quiet_hold_ex(1, 1);
+    int pump_off_in_run = 0;
+    for (int i = 0; i < 30; i++) {
+        run_tick(L);
+        if (get_long("thermal/water_pump_on") == 0)
+            pump_off_in_run = 1;
+    }
+    CHECK(ok && !pump_off_in_run && !quiet_pump_applied && !strcmp(pub_phase, "run"),
+          "thirty run ticks: the pump on throughout, the pump hold not applied");
+    cool_quiet_hold(0);
+    close_session(L);
+
+    printf("quiet D. a pump hold at idle, then a session that opens into its warm-up: the pump is back on "
+           "before the warm-up heater is written\n");
+    run_idle_tick(L);
+    cool_quiet_hold_ex(1, 1);
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0, "the hold at idle: the pump off");
+    kv[0] = "cool_temp_start"; kv[1] = "23.3"; kv[2] = NULL;     /* 1 C over the loop's 22.3 */
+    heat_with_pump_off = 0;
+    heater_written_max = 0;
+    settle_and_open(L);
+    CHECK(cool_state == Cool_Warmup && heater_written_max > 0 && heat_with_pump_off == 0 &&
+          get_long("thermal/water_pump_on") == 1 && !quiet_held,
+          "the session's opening tick: the hold released, the pump on, then the heater");
+    kv[0] = NULL;
+    close_session(L);
+
+    late_hold_open(L, 0, 0);
+    late_hold_open(L, 1, 0);
+    late_hold_open(L, 1, 1);
+    refused_hold_open(L, 0);
+    refused_hold_open(L, 1);
+
+    printf("quiet N. a fans-only hold the route asks for five ticks into an armed run: refused; a release "
+           "is taken\n");
+    close_session(L);
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    L->session = 1;
+    for (int i = 0; i < 5; i++)
+        run_tick(L);
+    {
+        int rc = cool_quiet_hold_try(1, 0), fans_off_fire = 0;
+        for (int i = 0; i < 8; i++) {
+            run_tick(L);
+            fans_off_fire += get_long("thermal/exhaust_pwm") == 0 && pub_fire_ok;
+        }
+        CHECK(rc == -1 && !quiet_held && fans_off_fire == 0, "refused: the run keeps its fans");
+        CHECK(cool_quiet_hold_try(0, 0) == 0 && !quiet_held, "a release is taken in the session");
+    }
+    close_session(L);
+
+    printf("quiet O. the route's pump hold in the smoke clear after an armed session: refused (-2)\n");
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    L->session = 1;
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    L->session = 0;
+    run_idle_tick(L);                   /* the session's close: the smoke clear */
+    {
+        int rc = cool_quiet_hold_try(1, 1);
+        CHECK(strcmp(pub_phase, "idle") && !pub_session && rc == -2 && !quiet_held,
+              "the cooldown: no session, the pump hold refused as a busy engine");
+    }
+    close_session(L);
+
+    quiet_over_ceiling(L, 0, 0);
+    quiet_over_ceiling(L, 1, 1);
+    quiet_over_ceiling(L, 1, 0);
+    quiet_over_ceiling_cooldown(L);
+
+    printf("quiet Q. a hold asked for right after the release over the ceiling, in the rising tick: the route "
+           "refused, and one set past it not applied\n");
+    close_session(L);
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    CHECK(cool_quiet_hold_try(1, 1) == 0, "the route takes a pump hold at idle");
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0, "applied: the pump off");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    conf_reload();
+    late_over_arm = 1;
+    late_over_rc = 99;
+    fflog_hook = late_over_hook;
+    run_idle_tick(L);
+    fflog_hook = NULL;
+    CHECK(over_temp_gate && late_over_rc == -3, "the rising tick: the route's request after the release refused");
+    CHECK(get_long("thermal/water_pump_on") == 1 && !quiet_pump_applied,
+          "and a pump hold set past the route there is not applied under the gate: the pump on");
+    run_idle_tick(L);
+    CHECK(!quiet_held && get_long("thermal/exhaust_pwm") == EXHAUST_COOL, "the next tick releases it, the cooling airflow");
+    kv[0] = NULL;
+    L->bulk_c = -10.0;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    L->bulk_c = 0.0;
+    conf_reload();
+    close_session(L);
+    (void)cool_attention_ack();
+
+    printf("quiet M. a pump hold that runs past its bound: released, the pump back on\n");
+    close_session(L);
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    CHECK(cool_quiet_hold_try(1, 1) == 0, "the route takes a pump hold at idle");
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0, "the hold at idle: the pump off");
+    pthread_mutex_lock(&mu);
+    quiet_since = fake_now - (COOL_QUIET_HOLD_MAX_S + 1);   /* a listener that died */
+    pthread_mutex_unlock(&mu);
+    run_idle_tick(L);
+    CHECK(!quiet_held && !quiet_pump_held && get_long("thermal/water_pump_on") == 1,
+          "past the bound: the hold released, the pump on");
+
+    printf("quiet H. a pump hold applied at idle, then the tick that raises OVERTEMP: the pump back on in that tick\n");
+    close_session(L);
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    cool_quiet_hold_ex(1, 1);
+    run_idle_tick(L);
+    CHECK(get_long("thermal/water_pump_on") == 0 && quiet_pump_applied, "the hold at idle: the pump off");
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    conf_reload();
+    run_idle_tick(L);
+    CHECK(over_temp_gate && get_long("thermal/water_pump_on") == 1 && !quiet_pump_applied && !quiet_held,
+          "the tick that raises the gate releases the whole hold and ends with the pump on");
+    kv[0] = NULL;
+    L->bulk_c = -10.0;
+    for (int i = 0; i < 5; i++)
+        run_idle_tick(L);
+    L->bulk_c = 0.0;
+    conf_reload();
+    close_session(L);
+    (void)cool_attention_ack();
+
+    printf("quiet J. a pump hold that waits through a session: applied in no warm-up, smoke clear or cooldown, "
+           "the warm-up's heater held off meanwhile, then applied by itself at the idle after them\n");
+    close_session(L);
+    kv[0] = "cool_temp_start"; kv[1] = "23.3"; kv[2] = "cool_temp_max"; kv[3] = "25";
+    kv[4] = "cool_temp_resume"; kv[5] = "20"; kv[6] = "cool_cooldown_max_s"; kv[7] = "5"; kv[8] = NULL;
+    conf_reload();
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    L->session = 1;
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+    cool_quiet_hold_ex(1, 1);           /* landed past the route's check */
+    int warm_pump_off = 0, warm_heat = 0;
+    for (int i = 0; i < 10; i++) {
+        run_tick(L);
+        warm_pump_off += get_long("thermal/water_pump_on") == 0;
+        warm_heat += get_long("thermal/heater_pwm") > 0;
+    }
+    CHECK(cool_state == Cool_Warmup && warm_pump_off == 0 && warm_heat == 0,
+          "ten warm-up ticks: the pump on, the hold not applied, the heater held off");
+    L->session = 0;
+    int seen_smoke = 0, seen_thermal = 0, off_outside_idle = 0, off_at_idle = 0;
+    for (int i = 0; i < 200 && !off_at_idle; i++) {
+        loop_tick(L);
+        tick("idle", 0);
+        seen_smoke |= cool_state == Cool_Smoke;
+        seen_thermal |= cool_state == Cool_Thermal;
+        if (get_long("thermal/water_pump_on") == 0) {
+            if (cool_state == Cool_Idle)
+                off_at_idle = 1;
+            else
+                off_outside_idle = 1;
+        }
+    }
+    CHECK(seen_smoke && seen_thermal && !off_outside_idle,
+          "the smoke clear and the cooldown: the pump on throughout");
+    CHECK(off_at_idle && quiet_pump_applied, "at the idle after them the waiting hold applies by itself");
+    cool_quiet_hold(0);
+    run_idle_tick(L);
+    kv[0] = NULL;
+    conf_reload();
     close_session(L);
 }
 
@@ -2160,20 +2979,30 @@ static void retired_tunables(void)
 /* The shutdown stops the flow watch, its heater off, before the engine
  * writes its own heater off: nothing of the watch's runs after the last
  * write. The engine's heat stands at the watch's stop (a warm-up), so the
- * order shows. Last: the engine is not started again. */
+ * order shows. The TEC goes off before the engine's join (an engine that
+ * hangs never returns from it) and again after it (a tick in flight wrote
+ * it on). Last: the engine is not started again. */
 static void shutdown_order(loop_t *L)
 {
-    printf("the shutdown: the flow watch stopped first, then the engine's heater off\n");
+    printf("the shutdown: the flow watch stopped first, then the engine's heater off; the TEC off before the join and after\n");
     close_session(L);
     kv[0] = "cool_temp_start"; kv[1] = "30"; kv[2] = NULL;
     settle_and_open(L);
     long heat = get_long("thermal/heater_pwm");
     kv[0] = NULL;
     flow_stops = 0;
-    engine_run = 0;                     /* no thread to join: the test ticks the engine itself */
+    put_long("thermal/tec_on", 1);      /* a TEC left on */
+    put_long("thermal/water_pump_on", 0);   /* a pump hold's pump off */
+    join_writes_tec = 1;
+    joins = 0;
+    engine_run = 1;                     /* the fake join stands in for the thread */
     cool_shutdown();
     CHECK(heat > 0 && flow_stops == 1 && flow_stop_heater == heat && get_long("thermal/heater_pwm") == 0,
           "the watch stopped once with the warm-up's heat still on, then the heater off");
+    CHECK(joins == 1 && tec_at_join == 0 && get_long("thermal/tec_on") == 0,
+          "the TEC off before the join, and off again after the tick the join waited for wrote it on");
+    CHECK(pump_at_join == 1 && get_long("thermal/water_pump_on") == 1,
+          "the pump on before the join, and on again after the tick the join waited for wrote it off");
 }
 
 /* A count that is no temperature (coolant.h) is no reading, as a read that
@@ -2779,7 +3608,7 @@ int main(void)
     tick("run", 1);
     CHECK(heater_pct > 0 && cool_state == Cool_Warmup, "downstream at 39.5 C: under it, the heater on again");
     /* The pump held off by a quiet hold: no heat. */
-    CHECK(!cool_quiet_pump_ok(), "a quiet hold may not take the pump under a warm-up");
+    CHECK(cool_quiet_hold_try(1, 1) < 0 && !quiet_held, "the route's pump hold refused under a warm-up");
     quiet_pump_held = 1;
     run_tick(&L);
     CHECK(heater_pct == 0 && get_long("thermal/heater_pwm") == 0, "the pump held off: the warm-up heater off");
@@ -2796,7 +3625,8 @@ int main(void)
     CHECK(heater_pct == 0, "and it stays off");
     kv[0] = NULL;
     close_session(&L);
-    CHECK(cool_quiet_pump_ok(), "idle again: a quiet hold may take the pump");
+    CHECK(cool_quiet_hold_try(1, 1) == 0 && quiet_pump_held, "idle again: the route takes a pump hold");
+    cool_quiet_hold(0);
 
     flow_yields_table(&L);
     flow_yield_now(&L);
@@ -3232,6 +4062,8 @@ int main(void)
     flame_over_session_open(&L);
     nonfinite_tunables(&L);
     tec(&L);
+    outputs_every_tick(&L);
+    quiet_posture(&L);
     cold_side(&L);
     self_clearing_holds(&L);
     notices_cap(&L);
