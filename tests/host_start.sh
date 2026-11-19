@@ -15,14 +15,16 @@
 # nothing may have started a controller or run iw. The data directory
 # holds a setup seed and the image has no dev marker: the seed stays, no
 # record is made of it, and the setup is still a first run. The daemon's start
-# notice names the fourteen overrides set here (the three test hooks
+# notice names the fourteen overrides set here (the four test hooks
 # among them), names only, and none that is not set. Then the daemon is
-# started again with FORGECTRL_HOST_TEST unset and the same three test
-# hooks set: it must answer the read on its machine paths (the sysfs
-# tree and the switch device absent, each read fail-closed; the run
-# directory /run/forgefirm, where no marker is, so the read says the
-# motors are not released, from both readers), name no hook among the
-# overrides in force, and name the three as set and ignored. The read
+# started again with FORGECTRL_HOST_TEST unset, the same four test hooks
+# set, and two more: the switch word as a file holding a closed lid, and
+# the lens hunt's sysfs tree. It must answer the read on its machine paths
+# (the sysfs tree, the switch device and the pulse device absent, each
+# read fail-closed; the run directory /run/forgefirm, where no marker is,
+# so the read says the motors are not released, from both readers), name
+# no hook among the overrides in force, and name the six as set and
+# ignored. The read
 # judges the run-dir readers on their own: the notice's two lines come
 # from the gate the readers take, and a reader past the gate would leave
 # both lines as they are. Runs unprivileged; build.yml runs it:
@@ -141,10 +143,11 @@ echo "  ok: the sensors logger's start records, read through the sysfs root, no 
 # ignored. iw's stand-in runs this time (the radio policy applies off a
 # host test), and the start record shows it once the daemon has stopped.
 mv "$T/out" "$T/out.host-test"
+echo 8 > "$T/closed-word"       # the lid and the interlock closed, as a host start's file says it
 env FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
     FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
     GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$T/sys/" GF_SWITCH_DEV="$T/no-switches" \
-    GF_PULSE_DEV="$T/no-pulse-device" \
+    GF_PULSE_DEV="$T/no-pulse-device" GF_SWITCH_WORD_FILE="$T/closed-word" GF_SYSFS_DIR="$T/sys" \
     FORGECTRL_GRBL_BIN="$T/bin/grblHAL_glowforge" FORGECTRL_CLOUD_BIN="$T/bin/gfcloud.py" \
     FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT PATH="$T/bin:$PATH" \
     "$BUILD/forgectrl" > "$T/out" 2>&1 &
@@ -163,17 +166,17 @@ wait $PID || fail "off a host test, the daemon exited $? on SIGTERM"
 PID=
 line=$(grep -m1 'environment overrides in force: ' "$T/out") || fail "off a host test, no start notice names the overrides"
 named=" ${line##*environment overrides in force: } "
-for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV; do
+for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV GF_PULSE_DEV GF_SWITCH_WORD_FILE GF_SYSFS_DIR; do
     case "$named" in *" $v "*) fail "off a host test, the notice names the test hook $v as in force" ;; esac
 done
 case "$named" in *" FORGECTRL_DATA_DIR "*) ;; *) fail "off a host test, the notice does not name FORGECTRL_DATA_DIR" ;; esac
 line=$(grep -m1 'test hooks set and ignored' "$T/out") || fail "off a host test, no notice names the ignored hooks"
 case "$line" in *=*) fail "the ignored-hooks notice carries a value: $line" ;; esac
 named=" ${line##*: } "
-for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV; do
+for v in GF_RUN_DIR GF_SYSFS_ROOT GF_SWITCH_DEV GF_PULSE_DEV GF_SWITCH_WORD_FILE GF_SYSFS_DIR; do
     case "$named" in *" $v "*) ;; *) fail "off a host test, the ignored-hooks notice does not name $v" ;; esac
 done
-echo "  ok: off a host test, the three test hooks are named as ignored and none as in force"
+echo "  ok: off a host test, the six test hooks are named as ignored and none as in force"
 motors status2.json false "off a host test, the hook's run directory was read"
 echo "  ok: off a host test, the motors read as not released by both readers: the marker in the hook's run directory was not seen"
 grep -q '^iw reg reload' "$T/started" || fail "off a host test, iw was not run: $(cat "$T/started" 2>/dev/null)"

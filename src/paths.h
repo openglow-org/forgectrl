@@ -17,10 +17,19 @@
 #include <stdlib.h>
 #include "testhook.h"
 
+/* The data directory goes into shell lines (update.c): an override with
+ * any character but a letter, a digit, '/', '.', '_' or '-' is not
+ * taken. */
 static inline const char *ff_data_dir(void)
 {
     const char *d = getenv("FORGECTRL_DATA_DIR");
-    return d && *d ? d : "/data/forgefirm";
+    if (!d || !*d)
+        return "/data/forgefirm";
+    for (const char *p = d; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+              *p == '/' || *p == '.' || *p == '_' || *p == '-'))
+            return "/data/forgefirm";
+    return d;
 }
 
 static inline const char *ff_run_dir(void)

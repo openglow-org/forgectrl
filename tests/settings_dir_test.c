@@ -12,8 +12,12 @@
  * And settings_get's answers, which every reader of the file shares: a
  * value whole or refused (too long for the buffer or the reader), an
  * absent key, and a file that cannot be read, told apart.
+ *
+ * And the data directory's override: one with a shell character is not
+ * taken (it goes into shell lines), a plain path is.
  */
 #include "../src/settings.h"
+#include "../src/paths.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +43,14 @@ int main(void)
     }
     snprintf(conf, sizeof(conf), "%s/forgefirm.conf", dir);
     setenv("FORGECTRL_CONF", conf, 1);
+
+    /* The data directory override goes into shell lines: one with a shell
+     * character is not taken; a plain path is. */
+    setenv("FORGECTRL_DATA_DIR", "/tmp/a;b", 1);
+    CHECK(!strcmp(ff_data_dir(), "/data/forgefirm"), "a data directory with a ';' was taken: %s", ff_data_dir());
+    setenv("FORGECTRL_DATA_DIR", dir, 1);
+    CHECK(!strcmp(ff_data_dir(), dir), "a plain data directory was not taken: %s", ff_data_dir());
+    unsetenv("FORGECTRL_DATA_DIR");
 
     /* As an installer under a strict umask leaves it. */
     chmod(dir, 0700);

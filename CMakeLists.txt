@@ -125,6 +125,7 @@ add_executable(forgectrl
   src/session.c
   src/sha256.c
   src/sheetid.c
+  src/stopsig.c
   src/tls.c
   src/tokens.c
   src/tray.c
@@ -197,7 +198,8 @@ target_compile_options(enclosure_wait_test PRIVATE -Wall -Wextra)
 # before a respawn, the respawn's wait for the kernel, the enclosure
 # check before every spawn, the probe's waits and skips, the stop lever
 # reaching a probe, the safing write's retries, the broker failing
-# closed, the engine's fail-tier restart. Includes super.c directly.
+# closed, the engine's fail-tier restart. Includes super.c directly, and
+# stopsig.c, whose fork is then the test's own.
 add_executable(super_test tests/super_test.c src/lease.c)
 target_compile_options(super_test PRIVATE -Wall -Wextra)
 target_link_libraries(super_test pthread)
@@ -317,6 +319,20 @@ target_compile_options(slotcalc_test PRIVATE -Wall -Wextra)
 # read as, beside a dark lamp and a solid white one.
 add_executable(led_test tests/led_test.c src/led.c)
 target_compile_options(led_test PRIVATE -Wall -Wextra)
+# The button's ten-second hold on the clock, and its wait thread joined by
+# one caller alone (a fake clock, a fake switch device).
+add_executable(button_test tests/button_test.c)
+target_compile_options(button_test PRIVATE -Wall -Wextra)
+target_link_libraries(button_test pthread)
+# The log emitter's send: on the socket it holds, under the lock a reconnect
+# closes that socket under.
+add_executable(fflog_test tests/fflog_test.c)
+target_compile_options(fflog_test PRIVATE -Wall -Wextra)
+target_link_libraries(fflog_test pthread)
+# The daemon's termination wait: a SIGTERM handled on another thread ends it.
+add_executable(stopsig_test tests/stopsig_test.c src/stopsig.c)
+target_compile_options(stopsig_test PRIVATE -Wall -Wextra)
+target_link_libraries(stopsig_test pthread)
 add_executable(flowrun_test tests/flowrun_test.c src/flowwatch.c src/flowcalc.c)
 target_compile_options(flowrun_test PRIVATE -Wall -Wextra)
 target_link_libraries(flowrun_test m pthread)
@@ -353,7 +369,7 @@ target_compile_options(sha256_test PRIVATE -Wall -Wextra)
 # the camera key and the addresses gone from it. CI runs both after the
 # build.
 set(LOGS_TEST_SRC src/logs.c src/auth.c src/camkey.c src/extpkg.c src/lease.c
-    src/sanitize.c src/settings.c src/tokens.c src/sha256.c src/peer.c src/fflog.c)
+    src/sanitize.c src/settings.c src/tokens.c src/sha256.c src/peer.c src/fflog.c src/stopsig.c)
 add_executable(logs_test tests/logs_test.c ${LOGS_TEST_SRC})
 target_compile_options(logs_test PRIVATE -Wall -Wextra)
 target_link_libraries(logs_test ulfius jansson z pthread)
@@ -508,11 +524,12 @@ target_compile_options(fwproduct_test PRIVATE -Wall -Wextra)
 # The operator's door to extension packages: the extension host's command
 # line run as an argument vector, a closed list of actions, a package id in
 # the form of one, the host's refusal passed on in its words.
-add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c src/sha256.c)
+add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c src/sha256.c src/stopsig.c)
 
 # The M-code relay's answer line: what the GRBL controller is told, from
 # the host's answer or its refusal, held to the port's form.
-add_executable(mcode_test tests/mcode_test.c src/mcode.c src/extpkg.c src/grblport.c src/sha256.c src/fflog.c)
+add_executable(mcode_test tests/mcode_test.c src/mcode.c src/extpkg.c src/grblport.c src/sha256.c src/fflog.c
+               src/stopsig.c)
 target_compile_options(mcode_test PRIVATE -Wall -Wextra)
 target_compile_definitions(mcode_test PRIVATE MCODE_NO_THREAD=1)
 target_link_libraries(mcode_test jansson pthread)
@@ -528,7 +545,8 @@ target_link_libraries(senderout_test jansson pthread)
 
 # A package's check on the Setup page: each step held to its form, and a
 # check run end to end on stand-ins for the runner and the host.
-add_executable(wizpkg_test tests/wizpkg_test.c src/wizpkg.c src/extpkg.c src/sha256.c src/fflog.c)
+add_executable(wizpkg_test tests/wizpkg_test.c src/wizpkg.c src/extpkg.c src/sha256.c src/fflog.c
+               src/stopsig.c)
 target_compile_options(wizpkg_test PRIVATE -Wall -Wextra)
 target_link_libraries(wizpkg_test jansson pthread)
 target_compile_options(extpkg_test PRIVATE -Wall -Wextra)

@@ -68,6 +68,7 @@
 #include "settings.h"
 #include "sheetid.h"
 #include "status.h"
+#include "stopsig.h"
 #include "super.h"
 #include "tls.h"
 #include "tokens.h"
@@ -104,16 +105,9 @@
 #define BOUNDARY     "forgectrl-frame"
 #define SNAP_Q_DEF   75
 
-static volatile sig_atomic_t quit = 0;
 static unsigned tls_port = DEFAULT_TLS_PORT;
 static int cb_http_redirect(const struct _u_request *req, struct _u_response *res,
                             void *user_data);
-
-static void on_signal(int sig)
-{
-    (void)sig;
-    quit = 1;
-}
 
 /* ------------------------------------------------------------- helpers */
 
@@ -1995,16 +1989,18 @@ static int cb_settings_post(const struct _u_request *req,
     if (setting_param(req, "lid_lamp_idle"))
         cam_lamp_apply_idle();
     if (restart_grbl) {
-        /* Idle by the gate above; the stop is the supervisor's safed
-         * exit, and the start hands supervision back so the controller
-         * respawns with the new mode. A stop that fails leaves the
-         * running controller in place: the key is stored and applies
-         * at its next start. */
-        if (super_controller_stop() == 0) {
-            super_controller_start();
-            fflog(LOG_NOTICE, "xy_microsteps: controller restarted");
-        } else
-            fflog(LOG_WARNING, "xy_microsteps: controller did not stop; "
+        /* Idle by the gate above: the supervisor stops the controller the
+         * deliberate way (its safed exit) and starts it again with the new
+         * mode, as at the engine's fail tier. Whatever holds supervision
+         * (the operator's stop, a check's takeover) stands: with no
+         * controller running nothing starts, and the key applies at the
+         * next start. The reply waits for the old controller to be gone. */
+        long was = super_grbl_pid();
+        super_controller_restart("xy_microsteps changed");
+        for (int i = 0; was && i < 150 && super_grbl_pid() == was; i++)
+            usleep(100 * 1000);
+        if (was && super_grbl_pid() == was)
+            fflog(LOG_WARNING, "xy_microsteps: controller did not stop in 15 s; "
                                "the mode applies at its next start");
     }
     return reply_settings(res);
@@ -2021,8 +2017,14 @@ static int cb_controller_stop(const struct _u_request *req,
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (super_controller_stop() != 0)
-        return reply_error(res, 500, "controller did not stop");
+    int rc = super_controller_stop();
+    if (rc == 1)
+        return reply_error(res, 409, "a controller forgectrl did not start holds the machine: the run in "
+                                     "progress is stopped and the laser latched, and forgectrl ends that "
+                                     "controller once the machine is idle");
+    if (rc != 0)
+        return reply_error(res, 500, "the controller did not exit in 15 s of its stop signal: the stop "
+                                     "stands, and the supervisor ends it");
     ulfius_set_string_body_response(res, 200, "{\"stopped\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
     return U_CALLBACK_CONTINUE;
@@ -3243,7 +3245,7 @@ static int ssh_init(const char *action)
                        "digits, / . _ and -: sshd's init is not run");
         return -1;
     }
-    pid_t pid = fork();
+    pid_t pid = stopsig_fork();
     if (pid < 0)
         return -1;
     if (pid == 0) {
@@ -3640,9 +3642,7 @@ static const char *const ENV_OVERRIDES[] = {
     "GFCOOL_TACH_AIR_MIN", "GFCOOL_TACH_EXHAUST_MIN", "GFCOOL_TACH_INTAKE_MIN", "GFCOOL_TEC_OFF",
     "GFCOOL_TEC_ON", "GFCOOL_TEC_PRESENT", "GFCOOL_TEMP_CRITICAL", "GFCOOL_TEMP_MAX",
     "GFCOOL_TEMP_MIN", "GFCOOL_TEMP_OFFSET_C", "GFCOOL_TEMP_RESUME", "GFCOOL_TEMP_START",
-    "GF_FUSE_SERIAL", "GF_GRBL_PORT", "GF_LENS_STEP_US", "GF_LOGS_EFFECTIVE",
-    "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE", "GF_PROC_STAT", "GF_PULSE_DEV",
-    "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
+    "GF_FUSE_SERIAL", "GF_LOGS_EFFECTIVE", "GF_LOGS_ROOT", "GF_LOGS_RSYSLOG", "GF_LOGS_STAGE",
 };
 
 /* The test hooks, which the sources read only through ff_test_hook
@@ -3651,8 +3651,9 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_IIO_ROOT", "GF_LED_ROOT", "GF_REBOOT_FILE", "GF_RUN_DIR",
-    "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SYSFS_ROOT",
+    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_IIO_ROOT", "GF_LED_ROOT", "GF_LENS_STEP_US",
+    "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RUN_DIR", "GF_SLOT_LIST", "GF_SWITCH_DEV",
+    "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
@@ -3672,7 +3673,7 @@ static int notice_add(char *line, size_t len, size_t *off, const char *name)
  * lazily read ones included. Silent when none is. */
 static void say_env_overrides(void)
 {
-    char line[2048], ignored[256];
+    char line[2048], ignored[512];
     size_t off = 0, ioff = 0;
     int room = 1, iroom = 1;
     for (size_t i = 0; room && i < sizeof(ENV_OVERRIDES) / sizeof(*ENV_OVERRIDES); i++)
@@ -3690,6 +3691,43 @@ static void say_env_overrides(void)
         fflog(LOG_NOTICE, "environment overrides in force: %s", line);
     if (ioff)
         fflog(LOG_WARNING, "test hooks set and ignored, not a host-test run: %s", ignored);
+}
+
+/* The daemon's stop, after a termination signal or a listener that did not
+ * start (the HTTP instances that started, or NULL). The supervisor's stop
+ * begins first: the safing pair lands, a running job decelerates with FIRE
+ * severed, and nothing starts, before anything waits on a connection
+ * thread. Then the wizards, the streams and the listeners; a posted
+ * program, a diagnostic and the controller end in order; the engine, which
+ * watches until then, stops last but the cameras. */
+static void daemon_stop(struct _u_instance *inst, struct _u_instance *tls)
+{
+    fflog(LOG_NOTICE, "shutting down");
+    super_shutdown_begin();
+    wiz_abort_all();
+    wizdark_shutdown();
+    events_shutdown();          /* the open streams end, so their threads can */
+    if (inst) {
+        ulfius_stop_framework(inst);
+        ulfius_clean_instance(inst);
+    }
+    if (tls) {
+        ulfius_stop_framework(tls);
+        ulfius_clean_instance(tls);
+    }
+    /* A recording in progress ends here and puts the floor and curve
+     * it overrode back; left running, the raw curve would be in force
+     * for every job after the restart. A posted program ends with its
+     * soft reset. */
+    curverec_stop();
+    tokens_flush();
+    char none[8];
+    jobrun_program_abort(none, sizeof(none));
+    diag_shutdown();
+    super_shutdown();
+    senslog_stop();
+    cool_shutdown();
+    cam_engine_shutdown();
 }
 
 int main(int argc, char **argv)
@@ -3747,8 +3785,7 @@ int main(int argc, char **argv)
 
     /* Installed before any thread or child exists: a termination that
      * lands during a slow init must still run the shutdown path. */
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
+    stopsig_init();
     signal(SIGPIPE, SIG_IGN);
 
     auth_init();
@@ -3965,8 +4002,14 @@ int main(int argc, char **argv)
 
     struct _u_instance inst, tls;
     /* Dual-stack listeners: one socket each serves IPv4 and IPv6. */
+    /* A listener that does not start ends the daemon through its stop: the
+     * engine and the supervisor run already, and an exit without the stop
+     * would skip the engine's last writes. The supervisor moves nothing and
+     * starts no controller before the HTTP listener is up
+     * (super_listening), so such a daemon has moved nothing. */
     if (ulfius_init_instance_ipv6(&inst, port, NULL, U_USE_ALL, NULL) != U_OK) {
         fflog(LOG_ERR, "ulfius init failed");
+        daemon_stop(NULL, NULL);
         return 1;
     }
     if (have_tls &&
@@ -4044,9 +4087,13 @@ int main(int argc, char **argv)
                                                 mhd_ops) != U_OK) {
         fflog(LOG_ERR, "cannot start HTTP on port %u", port);
         ulfius_clean_instance(&inst);
+        if (have_tls)
+            ulfius_clean_instance(&tls);
+        daemon_stop(NULL, NULL);
         return 1;
     }
     fflog(LOG_NOTICE, "listening on port %u", port);
+    super_listening();
     if (have_tls) {
         /* The same options plus the key, the certificate, and the
          * cipher order (tls.c); TLS is libmicrohttpd's, whatever ulfius
@@ -4074,30 +4121,7 @@ int main(int argc, char **argv)
     if (!have_tls)
         fflog(LOG_WARNING, "HTTPS unavailable: every route is on HTTP");
 
-    while (!quit)
-        pause();
-
-    fflog(LOG_NOTICE, "shutting down");
-    wiz_abort_all();
-    wizdark_shutdown();
-    events_shutdown();          /* the open streams end, so their threads can */
-    ulfius_stop_framework(&inst);
-    ulfius_clean_instance(&inst);
-    if (have_tls) {
-        ulfius_stop_framework(&tls);
-        ulfius_clean_instance(&tls);
-    }
-    /* A recording in progress ends here and puts the floor and curve
-     * it overrode back; left running, the raw curve would be in force
-     * for every job after the restart. A posted program ends with its
-     * soft reset. */
-    curverec_stop();
-    tokens_flush();
-    char none[8];
-    jobrun_program_abort(none, sizeof(none));
-    super_shutdown();
-    senslog_stop();
-    cool_shutdown();
-    cam_engine_shutdown();
+    stopsig_wait();
+    daemon_stop(&inst, have_tls ? &tls : NULL);
     return 0;
 }

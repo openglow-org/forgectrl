@@ -40,7 +40,7 @@
  *
  * The boot-time init scripts do not start controllers; they defer here.
  * If an unmanaged controller is found running at startup anyway (legacy
- * scripts, a manual start, or a homing runner a stopped daemon's GRBL
+ * scripts, a manual start, or a homing runner a crashed daemon's GRBL
  * controller left behind), the supervisor stands by rather than fight
  * over the exclusive-open pulse device and the Grbl port.
  */
@@ -58,6 +58,7 @@
 #include "paths.h"
 #include "settings.h"
 #include "status.h"
+#include "stopsig.h"
 #include "super.h"
 #include "update.h"
 #include "testhook.h"
@@ -74,6 +75,7 @@
 #include <sys/eventfd.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -85,11 +87,11 @@
  * data directory. */
 #define GRBL_NVS_FILE "EEPROM-glowforge.DAT"
 /* The sysfs tree and the pulse device: the host unit test points both
- * at a directory of plain files. At run time the test hook GF_SYSFS_ROOT
- * moves the tree in a host-test run (testhook.h) and GF_PULSE_DEV
- * overrides the device, as FORGECTRL_GRBL_BIN and FORGECTRL_CLOUD_BIN
- * override the two controllers; unset, each is the path below.
- * GF_PULSE_DEV must be an absolute path, or the broker refuses it. */
+ * at a directory of plain files. At run time the test hooks GF_SYSFS_ROOT
+ * and GF_PULSE_DEV move the tree and the device in a host-test run
+ * (testhook.h), and FORGECTRL_GRBL_BIN and FORGECTRL_CLOUD_BIN override
+ * the two controllers; unset, each is the path below. GF_PULSE_DEV and
+ * the two binaries must be absolute paths, or they are refused. */
 #ifndef GF_SYSFS
 #define GF_SYSFS "/sys/glowforge/"
 #endif
@@ -110,6 +112,12 @@
 #define PROBE_BUSY_WAIT_S  10     /* the probe waits this long for a kernel still playing */
 #define WR_ATTR_TRIES      3      /* a safing write is tried this often... */
 #define WR_ATTR_RETRY_US   10000  /* ...this far apart */
+#define LEVER_WAIT_S       15     /* the stop lever's and a takeover's wait */
+/* The daemon's stop waits this long for the lifecycle thread to end the
+ * controller (stop_locked: its SIGTERM grace, then SIGKILL and as long
+ * again) and a probe or a sweep in flight, before it stops the controller
+ * from its own thread. */
+#define SHUTDOWN_WAIT_S    (2 * STOP_TERM_WAIT_S + 5)
 
 typedef enum { Ctl_None = 0, Ctl_Grbl, Ctl_Cloud } ctl_t;
 
@@ -126,22 +134,27 @@ static const char *sysfs_root(void)
     return r ? r : GF_SYSFS;
 }
 
-/* The pulse device: GF_PULSE_DEV when it is set and an absolute path;
- * NULL when it is set and is not, which the broker refuses (a relative
- * path would be read against whatever directory the daemon was started
- * in); else PULSE_DEV. */
+/* The pulse device: the test hook GF_PULSE_DEV in a host-test run
+ * (testhook.h) when it is an absolute path; NULL when it is set there and
+ * is not, which the broker refuses (a relative path would be read against
+ * whatever directory the daemon was started in); else PULSE_DEV. */
 static const char *pulse_dev(void)
 {
-    const char *v = getenv("GF_PULSE_DEV");
-    if (v && *v)
+    const char *v = ff_test_hook("GF_PULSE_DEV");
+    if (v)
         return v[0] == '/' ? v : NULL;
     return PULSE_DEV;
 }
 
+/* The controller's binary: FORGECTRL_GRBL_BIN and FORGECTRL_CLOUD_BIN
+ * override the two when they are set and absolute paths; NULL when one is
+ * set and is not, which the spawn refuses (a relative path would be found
+ * against whatever directory and search path the daemon started with). */
 static const char *ctl_bin(ctl_t ctl)
 {
-    return ctl == Ctl_Grbl ? env_or("FORGECTRL_GRBL_BIN", GRBL_BIN)
-                           : env_or("FORGECTRL_CLOUD_BIN", CLOUD_BIN);
+    const char *v = ctl == Ctl_Grbl ? env_or("FORGECTRL_GRBL_BIN", GRBL_BIN)
+                                    : env_or("FORGECTRL_CLOUD_BIN", CLOUD_BIN);
+    return v[0] == '/' ? v : NULL;
 }
 
 /* In a host-test run (FORGECTRL_HOST_TEST=1, testhook.h) no process the
@@ -159,9 +172,11 @@ static ctl_t want = Ctl_None;      /* selected mode */
  * nothing else, so an operator's stop made meanwhile stands. */
 #define SUSP_HOLD     1u           /* the stop lever (POST /controller/stop) */
 #define SUSP_TAKEOVER 2u           /* a setup check or a diagnostic has the machine */
-#define SUSP_STANDBY  4u           /* an unmanaged controller, or the daemon's shutdown */
+#define SUSP_STANDBY  4u           /* an unmanaged controller */
+#define SUSP_SHUTDOWN 8u           /* the daemon's stop: nothing clears it */
 static unsigned suspended = 0;
 static pid_t child_pid = 0;
+static pid_t stop_pid = 0;         /* the controller a deliberate stop ends */
 static ctl_t child_ctl = Ctl_None;
 static double spawned_at = 0.0;
 static unsigned backoff_s = RESPAWN_MIN_S;
@@ -223,6 +238,11 @@ static int runner_check = 0;       /* a GRBL reap: look for its homing runner */
 static int respawn_wait_idle = 0;  /* the respawn waits for the kernel to finish */
 static double died_at = 0.0;       /* ...counted from this unexpected death */
 static int restart_pending = 0;    /* the engine asked for a stop and a respawn */
+/* The daemon's HTTP listener is not up yet (super_init to super_listening):
+ * nothing moves and no controller starts before it is, so a daemon that
+ * cannot start its listener, and leaves through its stop, has moved
+ * nothing. Under mu. */
+static int await_listener = 0;
 static int chld_efd = -1;          /* SIGCHLD lands here; the loop waits on it */
 
 static int wr_attr(const char *attr, const char *val);
@@ -798,6 +818,25 @@ int super_report_secret_ok(const char *presented)
     return live && n == REPORT_SECRET_HEX && diff == 0;
 }
 
+/* What a controller inherits of the daemon's environment: the search path,
+ * the locale and the time zone, and the daemon's port, which its reports
+ * go to. Nothing else passes on a machine: an override, a bench knob or a
+ * proxy setting in the environment of whoever started the daemon reaches
+ * no controller. A host-test run (testhook.h) passes every variable, so a
+ * host test's stand-ins get their own. */
+static int child_env_passes(const char *kv)
+{
+    static const char *const keep[] = { "PATH", "LANG", "LC_ALL", "TZ", "FORGECTRL_PORT" };
+    if (ff_host_test())
+        return 1;
+    for (size_t i = 0; i < sizeof(keep) / sizeof(*keep); i++) {
+        size_t n = strlen(keep[i]);
+        if (!strncmp(kv, keep[i], n) && kv[n] == '=')
+            return 1;
+    }
+    return 0;
+}
+
 static char **build_child_env(ctl_t ctl, int pulse_fd)
 {
     size_t n = 0;
@@ -811,7 +850,8 @@ static char **build_child_env(ctl_t ctl, int pulse_fd)
         /* Our own entries replace any inherited value of the same key. */
         if (!strncmp(environ[i], "GF_PULSE_FD=", 12) ||
             !strncmp(environ[i], "GF_REPORT_SECRET=", 17) ||
-            !strncmp(environ[i], "GFSINK=", 7))
+            !strncmp(environ[i], "GFSINK=", 7) ||
+            !child_env_passes(environ[i]))
             continue;
         env[k] = strdup(environ[i]);
         if (!env[k])
@@ -860,6 +900,34 @@ static void free_child_env(char **env)
     free(env);
 }
 
+/* The descriptor numbers a child can hold, read before its fork: the
+ * fallback below closes up to here. */
+static int fd_ceiling(void)
+{
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur > 65536)
+        return 65536;
+    return (int)rl.rlim_cur;
+}
+
+/* Every descriptor past the three standard ones closed but keep (-1: none),
+ * in a child between fork() and exec: close_range, and where a kernel or a
+ * sandbox refuses it, close() one by one up to ceiling (fd_ceiling, read
+ * before the fork). Async-signal-safe. */
+static void close_past_stdio(int keep, int ceiling)
+{
+    int ok;
+    if (keep < 3)
+        ok = close_range(3, ~0U, 0) == 0;
+    else
+        ok = (keep == 3 || close_range(3, (unsigned)keep - 1, 0) == 0) &&
+             close_range((unsigned)keep + 1, ~0U, 0) == 0;
+    if (!ok)
+        for (int fd = 3; fd < ceiling; fd++)
+            if (fd != keep)
+                close(fd);
+}
+
 /* A controller's stray stdout/stderr - interpreter tracebacks, library
  * messages, anything not sent through its own syslog emitter - flows
  * through a `logger` relay into syslog under the controller's program
@@ -867,21 +935,23 @@ static void free_child_env(char **env)
  * double-forked (init reaps it) and lives as long as the pipe has a
  * writer, so it outlives this daemon whenever the controller does.
  * Returns the pipe's write end, or -1 (the controller then runs with
- * its output discarded rather than not at all). */
+ * its output discarded rather than not at all). The daemon's stop signals
+ * are held across each fork and default in the child (stopsig_fork). */
 static int spawn_output_relay(const char *tag)
 {
     int p[2];
     int oom = !ff_host_test();
+    int ceiling = fd_ceiling();
     if (pipe2(p, O_CLOEXEC) != 0)
         return -1;
-    pid_t pid = fork();
+    pid_t pid = stopsig_fork();
     if (pid < 0) {
         close(p[0]);
         close(p[1]);
         return -1;
     }
     if (pid == 0) {
-        pid_t g = fork();
+        pid_t g = stopsig_fork();
         if (g != 0)
             _exit(g < 0 ? 127 : 0);
         dup2(p[0], 0);
@@ -890,11 +960,7 @@ static int spawn_output_relay(const char *tag)
             dup2(nul, 1);
             dup2(nul, 2);
         }
-        long maxfd = sysconf(_SC_OPEN_MAX);
-        if (maxfd < 0 || maxfd > 4096)
-            maxfd = 4096;
-        for (int fd = 3; fd < (int)maxfd; fd++)
-            close(fd);
+        close_past_stdio(-1, ceiling);
         /* Reclaimed no sooner than the controller it serves: a dead
          * relay turns the controller's stray writes into EPIPE. */
         int ofd = oom ? open("/proc/self/oom_score_adj", O_WRONLY) : -1;
@@ -915,16 +981,25 @@ static int spawn_output_relay(const char *tag)
 
 /* A controller dies with this daemon. The kernel sends it SIGKILL when the
  * thread that forked it ends, and controllers are forked by the lifecycle
- * thread alone, which ends with the daemon (an exit or a crash), so no
- * controller outlives the supervisor that safes its deaths: its exit
- * closes its share of the pulse device, and with the daemon's share gone
- * too that is the device's last close, the kernel's dead man's switch (a
- * run halted, the heat sources and the head made safe, the latch locked).
+ * thread alone, which ends with the daemon, so no controller outlives the
+ * supervisor that safes its deaths. A daemon's stop stops the controller
+ * first, busy or idle (super_shutdown), and the thread ends after it; at a
+ * crash, or a stop killed before it got there, the signal finds the
+ * controller whatever it is doing: its exit closes its share of the pulse
+ * device, and with the daemon's share gone too that is the device's last
+ * close, the kernel's dead man's switch (a run halted, the heat sources and
+ * the head made safe, the latch locked).
  * The exception is a GRBL controller's homing runner, which the controller
  * forks for a $H in a process group of its own: it inherits the pulse
- * device and has no parent-death signal, so it homes (motion, the laser
- * latched) to its own end or its deadline, the device stays open until it
- * exits, and the next daemon stands by until it is gone.
+ * device and has no parent-death signal. A daemon's stop ends it with its
+ * controller (the safing pair stops its move, and the controller's own stop
+ * ends its homing session: SIGTERM to the runner's group, SIGKILL 5 s
+ * later, before the controller exits; a runner a killed controller left is
+ * ended by the supervisor's stop itself, runner_reap). After a crash, or a
+ * stop killed
+ * before it got there, it homes (motion, the laser latched) to its own end
+ * or its deadline, the device stays open until it exits, and the next
+ * daemon stands by until it is gone.
  * A daemon gone before the signal is armed leaves the child another
  * parent: getppid() then names someone else, and it must not run.
  * Async-signal-safe (two system calls), for the child between fork() and
@@ -995,6 +1070,19 @@ static int head_safe_write(void)
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
+    /* No broker, no controller (broker_open_locked): one started without
+     * the fd would open the device itself. */
+    if (broker_fd < 0) {
+        respawn_at = wall_s() + BROKER_RETRY_S;
+        return;
+    }
+    const char *bin = ctl_bin(ctl);
+    if (!bin) {
+        fflog(LOG_ERR, "super: the %s controller's binary override is not an absolute path - no "
+                       "controller until it is", ctl_name(ctl));
+        respawn_at = wall_s() + BROKER_RETRY_S;
+        return;
+    }
 
     /* Before the fork: the controller sets its own head state from its
      * start. */
@@ -1023,11 +1111,18 @@ static void spawn_locked(ctl_t ctl)
         return;
     }
 
-    const char *bin = ctl_bin(ctl);
     int oom = !ff_host_test();
+    int ceiling = fd_ceiling();
     int lfd = spawn_output_relay(ctl == Ctl_Grbl ? "grblhal" : "gfcloud");
     pid_t daemon = getpid();
-    pid_t pid = fork();
+    /* A stop's SIGTERM can reach the child before its exec (the lever's or
+     * the daemon's stop, sent by another thread the moment this one drops
+     * mu). The daemon's stop signals are held across the fork, and the
+     * child's first act gives them their default action (stopsig_fork):
+     * the signal ends it there, a death its stop already expects
+     * (stop_pid), never taken by the daemon's own handler in the child
+     * and lost. */
+    pid_t pid = stopsig_fork();
     if (pid < 0) {
         fflog(LOG_ERR, "super: fork failed: %s",
               strerror(errno));
@@ -1038,7 +1133,8 @@ static void spawn_locked(ctl_t ctl)
         return;
     }
     if (pid == 0) {
-        /* Child: async-signal-safe calls only from here to exec. Own
+        /* Child: async-signal-safe calls only from here to exec. The
+         * stop signals are at their default action already (above). Own
          * process group so stop() can signal helpers too. Dies with the
          * daemon (ctl_dies_with_daemon). */
         setpgid(0, 0);
@@ -1056,13 +1152,9 @@ static void spawn_locked(ctl_t ctl)
         /* The broker fd is the only descriptor a controller inherits.
          * Everything else the daemon holds - listening and client
          * sockets, capture and encoder nodes - would otherwise stay
-         * pinned for the whole life of the child. */
-        long maxfd = sysconf(_SC_OPEN_MAX);
-        if (maxfd < 0 || maxfd > 4096)
-            maxfd = 4096;
-        for (int fd = 3; fd < (int)maxfd; fd++)
-            if (fd != broker_fd)
-                close(fd);
+         * pinned for the whole life of the child. Every number, whatever
+         * the descriptor limit. */
+        close_past_stdio(broker_fd, ceiling);
         /* A controller must be a less-preferred OOM victim than
          * ordinary processes, but a MORE preferred one than the daemon
          * (which is its dead-man and respawns it). */
@@ -1111,13 +1203,18 @@ static void reap_locked(int status)
 {
     ctl_t died = child_ctl;
     double up = wall_s() - spawned_at;
+    /* A death the supervisor asked for (stop_locked: the lever, a takeover,
+     * a mode switch, the gate closing, a posture change, the fail tier, the
+     * shutdown) is expected, whatever stands once it lands. */
+    int deliberate = stop_pid != 0 && stop_pid == child_pid;
+    stop_pid = 0;
     report_secret_end();            /* nobody reports for a controller that is gone */
     child_pid = 0;
     child_ctl = Ctl_None;
     generation++;
     pthread_cond_broadcast(&cv);
 
-    int expected = suspended || want != died || restart_pending;
+    int expected = deliberate || suspended || want != died || restart_pending;
     fflog(expected ? LOG_NOTICE : LOG_WARNING,
           "super: %s controller exited (status 0x%x, up %.0f s)%s",
           ctl_name(died), (unsigned)status, up,
@@ -1168,8 +1265,26 @@ static void reap_locked(int status)
         backoff_s = RESPAWN_MIN_S;
     respawn_at = wall_s() + backoff_s;
     fflog(LOG_WARNING, "super: respawn in %u s", backoff_s);
-    if (backoff_s < RESPAWN_MAX_S)
-        backoff_s *= 2;
+    backoff_s = backoff_s * 2 < RESPAWN_MAX_S ? backoff_s * 2 : RESPAWN_MAX_S;
+}
+
+/* The stop's SIGTERM from the thread that asks for the stop (the lever,
+ * the daemon's stop), right after its safing pair: the controller's own
+ * handler ends its run in order (the kernel's ramp, the latch relocked) and
+ * leaves, whatever the lifecycle thread is doing; one still before its exec
+ * (spawn_locked) is ended by the signal there. The lifecycle thread's
+ * stop_locked follows: the pair and the signal again (a repeated SIGTERM is
+ * a no-op in both controllers' handlers), SIGKILL past its grace, the reap.
+ * The pid is marked first, so its death is expected whichever thread reaps
+ * it. Called with mu held. */
+static void term_child_locked(void)
+{
+    if (child_pid <= 0)
+        return;
+    stop_pid = child_pid;
+    kill(-child_pid, SIGTERM);
+    kill(child_pid, SIGTERM);
+    cool_controller_stopped();
 }
 
 /* Stop the child: SIGTERM its group, escalate to SIGKILL. Called with
@@ -1180,6 +1295,7 @@ static void stop_locked(void)
     if (child_pid <= 0)
         return;
     pid_t pid = child_pid;
+    stop_pid = pid;
     fflog(LOG_INFO, "super: stopping %s controller (pid %d)",
           ctl_name(child_ctl), (int)pid);
     /* Safe the machine BEFORE the signal, not only after the reap: this
@@ -1326,14 +1442,14 @@ static void pass_locked(void)
             pthread_mutex_lock(&mu);
         }
         /* Standing by next to an unmanaged controller (found at start: a
-         * hand-started one, or a homing runner a stopped or crashed daemon's
-         * GRBL controller left behind): retake supervision
+         * hand-started one, or a homing runner a crashed daemon's GRBL
+         * controller left behind): retake supervision
          * as soon as the kernel plays nothing (idle, disabled, a stepper
          * fault, an underrun) - a busy one is left to finish its job
          * first. The probe that follows acknowledges an underrun and
          * clears a fault whose lines have cleared, or names one that
          * stays. */
-        if (standby_takeover && child_pid == 0 && want != Ctl_None) {
+        if (standby_takeover && child_pid == 0 && want != Ctl_None && !(suspended & SUSP_SHUTDOWN)) {
             pthread_mutex_unlock(&mu);
             int idle = !kernel_playing() && !diag_running();
             if (idle)
@@ -1378,10 +1494,11 @@ static void pass_locked(void)
         /* Converge on the wanted state. Every spawn passes the
          * enclosure check first; the first spawn after taking the
          * broker passes the motion-liveness gate as well (unlocked -
-         * the probe and its recovery ladder take a while). */
+         * the probe and its recovery ladder take a while). Nothing of
+         * it runs before the daemon's listener is up. */
         if (child_pid > 0 && (suspended || child_ctl != want)) {
             stop_locked();
-        } else if (child_pid == 0 && !suspended && !motion_fault && !gated
+        } else if (child_pid == 0 && !suspended && !motion_fault && !gated && !await_listener
                    && want != Ctl_None && wall_s() >= respawn_at) {
             int go = 1;
             if (respawn_wait_idle) {
@@ -1399,7 +1516,9 @@ static void pass_locked(void)
                 if (!idle && rd_attr("cnc/state", st, sizeof(st)) == 0 && !strcmp(st, "fault"))
                     rd_attr("cnc/faults", faults, sizeof(faults));
                 pthread_mutex_lock(&mu);
-                if (idle)
+                if (suspended)
+                    go = 0;     /* a stop landed while the lock was down: the next pass decides */
+                else if (idle)
                     respawn_wait_idle = 0;
                 else if (!strcmp(st, "fault")) {
                     respawn_wait_idle = 0;
@@ -1541,12 +1660,13 @@ static ctl_t configured_mode(void)
  * suspension since; a standby's unmanaged controller that has ended by
  * itself left its head to nobody, so it is made safe here. Either way
  * before the motion probe and the lens sweep the switch's controller comes
- * up behind. Called with mu NOT held. */
+ * up behind. Called with mu NOT held; the process search runs before the
+ * lock is taken, so no taker of the lock waits behind it. */
 static int unmanaged_controller_running(void);
 static void switch_takeover(void)
 {
-    pthread_mutex_lock(&mu);
     int running = unmanaged_controller_running();
+    pthread_mutex_lock(&mu);
     int standby = standby_takeover;
     int takeover = (suspended || standby) && running;
     pthread_mutex_unlock(&mu);
@@ -1590,12 +1710,13 @@ void super_sigchld_init(void)
         fflog(LOG_ERR, "super: sigaction(SIGCHLD): %s", strerror(errno));
 }
 
-/* The supervisor's start, before the lifecycle thread runs. Called with
- * mu held. */
-static void init_locked(void)
+/* The supervisor's start, before the lifecycle thread runs, given whether
+ * an unmanaged controller runs (looked for before the lock is taken).
+ * Called with mu held. */
+static void init_locked(int unmanaged)
 {
     want = configured_mode();
-    if (unmanaged_controller_running()) {
+    if (unmanaged) {
         suspended |= SUSP_STANDBY;
         standby_takeover = 1;
         fflog(LOG_WARNING, "super: unmanaged controller already "
@@ -1610,8 +1731,10 @@ static void init_locked(void)
 void super_init(void)
 {
     super_sigchld_init();
+    int unmanaged = unmanaged_controller_running();
     pthread_mutex_lock(&mu);
-    init_locked();
+    init_locked(unmanaged);
+    await_listener = 1;
     th_run = 1;
     pthread_mutex_unlock(&mu);
     if (pthread_create(&th, NULL, super_main, NULL) != 0) {
@@ -1623,45 +1746,92 @@ void super_init(void)
           ctl_name(want), suspended ? " (standby)" : "");
 }
 
-void super_shutdown(void)
+/* The daemon's HTTP listener is up (main.c): the motion probe, the lens
+ * sweep and the controller may run from here on. */
+void super_listening(void)
 {
     pthread_mutex_lock(&mu);
-    int was = th_run;
-    th_run = 0;
-    suspended |= SUSP_STANDBY;
-    /* A probe or a lens sweep in flight ends between its steps, as at the
-     * stop lever: the shutdown's bound never cuts one off mid-step, the
-     * lens motor at its drive current. */
-    if (probing)
+    await_listener = 0;
+    pthread_mutex_unlock(&mu);
+    wake();
+}
+
+/* The daemon's stop begins (main.c, before the listeners close). The safing
+ * pair lands first, from this thread, before it waits on anything, the
+ * supervisor's lock included: a running job decelerates and FIRE is severed
+ * at the kernel at once, whatever the lifecycle thread is doing. Then
+ * nothing starts from here on, a live controller is sent its SIGTERM from
+ * this thread (term_child_locked), and the lifecycle thread is woken to
+ * finish the stop the deliberate way. A probe or a lens sweep in flight
+ * ends between its steps, as at the stop lever, never cut off mid-step with
+ * the lens motor at its drive current. A wait that would hold a connection
+ * thread (a mode switch) ends. Called once or more: the pair is a harmless
+ * no-op again, and at idle. */
+void super_shutdown_begin(void)
+{
+    wr_attr("cnc/stop", "1");
+    wr_attr("cnc/laser_latch", "1");
+    pthread_mutex_lock(&mu);
+    int first = !(suspended & SUSP_SHUTDOWN);
+    suspended |= SUSP_SHUTDOWN;
+    if (probing) {
         probe_abort = 1;
-    wait_leave_locked("no longer waits: shutdown");
-    if (child_pid > 0) {
-        /* A controller over a kernel that plays nothing (a stepper fault,
-         * an underrun included) stops here, the deliberate way. A busy one
-         * is not stopped here: it dies when this thread's join below ends
-         * the lifecycle thread (ctl_dies_with_daemon), and its exit is then
-         * the device's last close, the kernel's dead man's switch, which
-         * halts the run; a GRBL controller's homing runner, if one is
-         * homing, holds the device until it ends (ctl_dies_with_daemon). */
-        if (!kernel_playing())
-            stop_locked();
-        else
-            fflog(LOG_WARNING, "super: machine busy - the %s controller "
-                               "(pid %d) ends with the daemon, and the kernel's "
-                               "dead man's switch halts the run",
-                  ctl_name(child_ctl), (int)child_pid);
+        wr_attr("cnc/stop", "1");   /* a probe run begun since the first write */
     }
-    /* Our reference goes away either way. Idle: the device closes and
-     * the kernel locks the latch. Busy: the child's share keeps the
-     * description open until the child dies with the lifecycle thread,
-     * and its exit is the final close. */
+    if (first)
+        term_child_locked();
+    wait_leave_locked("no longer waits: shutdown");
+    pthread_mutex_unlock(&mu);
+    if (first)
+        wake();
+}
+
+static int pred_stopped(void) { return child_pid == 0 && !probing; }
+
+/* The daemon's stop ends (main.c, after the listeners): the controller
+ * stopped, busy or idle, the deliberate way (stop_locked: the safing pair,
+ * SIGTERM, SIGKILL past its grace), and only then the lifecycle thread and
+ * the broker. A controller dies with the thread that forked it
+ * (ctl_dies_with_daemon), so that thread runs until the controller is
+ * reaped: its end would otherwise SIGKILL a controller still inside its
+ * SIGTERM grace, finishing its job. The thread does the stop; one that does
+ * not get to it within SHUTDOWN_WAIT_S (blocked elsewhere) is overtaken by
+ * this thread's own stop_locked. The broker closes after the thread has
+ * ended, so a probe in flight never writes a closed number. A GRBL
+ * controller's homing runner ends with its controller (ctl_dies_with_daemon);
+ * one that outlived it (the controller killed past its grace while the
+ * runner still had its own) is looked for and ended here, once the thread
+ * has ended, before the broker closes: the thread leaves at the reap,
+ * without the pass that would look. */
+void super_shutdown(void)
+{
+    super_shutdown_begin();
+    pthread_mutex_lock(&mu);
+    int was = th_run;
+    if (wait_for(pred_stopped, SHUTDOWN_WAIT_S) != 0)
+        fflog(LOG_ERR, "super: the lifecycle thread did not end the controller and the probe in "
+                       "%d s - the shutdown stops what is left itself", SHUTDOWN_WAIT_S);
+    if (child_pid > 0)
+        stop_locked();
+    th_run = 0;
+    pthread_mutex_unlock(&mu);
+    wake();
+    if (was)
+        pthread_join(th, NULL);
+    pthread_mutex_lock(&mu);
+    int runner = runner_check;
+    runner_check = 0;
+    pthread_mutex_unlock(&mu);
+    if (runner)
+        runner_reap();
+    pthread_mutex_lock(&mu);
+    /* Our reference goes last: the device's last close, the kernel locks
+     * the latch. */
     if (broker_fd >= 0) {
         close(broker_fd);
         broker_fd = -1;
     }
     pthread_mutex_unlock(&mu);
-    if (was)
-        pthread_join(th, NULL);
 }
 
 int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
@@ -1681,7 +1851,15 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
     }
     {
         char why[256];
-        if (!controller_gate_open(why, sizeof(why)) && !local_posture) {
+        int open = controller_gate_open(why, sizeof(why));
+        pthread_mutex_lock(&mu);
+        int local = local_posture, stopping = (suspended & SUSP_SHUTDOWN) != 0;
+        pthread_mutex_unlock(&mu);
+        if (stopping) {
+            snprintf(err, elen, "forgectrl is stopping");
+            return -1;
+        }
+        if (!open && !local) {
             snprintf(err, elen, "controllers are gated: %s", why);
             return -1;
         }
@@ -1709,14 +1887,26 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
 
     pthread_mutex_lock(&mu);
     want = target;
-    suspended = 0;
+    suspended &= SUSP_SHUTDOWN;     /* the daemon's stop outlives a switch */
     standby_takeover = 0;
     motion_fault = 0;   /* a switch is also the retry lever after a fault */
     /* The thread stops the old controller and starts the new one; wait
      * until the running child IS the target. A pending liveness
-     * (re-)probe runs first, so allow for it. */
+     * (re-)probe runs first, so allow for it. A probe that ends in a
+     * motion fault, and the daemon's stop, end the wait with their own
+     * answers. */
     double sw_deadline = wall_s() + 90.0;
     while (!(child_pid > 0 && child_ctl == target)) {
+        if (suspended & SUSP_SHUTDOWN) {
+            pthread_mutex_unlock(&mu);
+            snprintf(err, elen, "forgectrl is stopping");
+            return -1;
+        }
+        if (motion_fault) {
+            snprintf(err, elen, "motion fault: %s", probe_detail);
+            pthread_mutex_unlock(&mu);
+            return -1;
+        }
         if (enclosure_wait) {
             /* The gate waits for the enclosure: the switch itself is
              * done (the mode is stored, the controller starts when the
@@ -1764,21 +1954,45 @@ int super_mode_switch(const char *mode, const char *as, char *err, size_t elen)
     return 0;
 }
 
-/* Suspend for one reason and wait for the controller to be gone. A
- * probe or a lens sweep in flight is the machine moving with no
- * controller: the stop reaches it too, between its steps. */
+/* Suspend for one reason, wake the lifecycle thread, and wait for the
+ * controller to be gone. A probe or a lens sweep in flight is the machine
+ * moving with no controller: the stop reaches it too, between its steps.
+ * The stop lever lands the safing pair from this thread before it waits,
+ * and then sends the controller its SIGTERM (term_child_locked), so the run
+ * in progress decelerates, FIRE is severed at the kernel and the
+ * controller's own stop follows at once, whatever the lifecycle thread is
+ * doing; beside an unmanaged controller (standing by) it answers 1 at once:
+ * the pair is in, the hold stands, and the lifecycle's takeover ends that
+ * controller once the machine is idle. A wait that runs out leaves the
+ * lever's hold standing (the lifecycle ends the controller when it gets to
+ * it) and answers -1; a takeover that runs out drops its reason if this
+ * call set it, and answers -1. */
 static int suspend_for(unsigned reason)
 {
     pthread_mutex_lock(&mu);
+    int had = (suspended & reason) != 0;
     suspended |= reason;
+    if (reason == SUSP_HOLD) {
+        wr_attr("cnc/stop", "1");
+        wr_attr("cnc/laser_latch", "1");
+        term_child_locked();
+    }
     if (probing) {
         probe_abort = 1;
         wr_attr("cnc/stop", "1");
     }
-    int ok = wait_for(pred_child_gone, 15.0) == 0;
-    if (!ok)
-        suspended &= ~reason;   /* takeover failed: resume normal supervision so
-                                 * the machine is never left controller-less */
+    int beside = reason == SUSP_HOLD && standby_takeover && child_pid == 0 && !probing;
+    pthread_mutex_unlock(&mu);
+    wake();
+    if (beside)
+        return 1;
+    pthread_mutex_lock(&mu);
+    int ok = wait_for(pred_child_gone, LEVER_WAIT_S) == 0;
+    if (!ok && reason == SUSP_HOLD)
+        fflog(LOG_WARNING, "super: the controller did not exit in %d s of its stop - the stop stands",
+              LEVER_WAIT_S);
+    else if (!ok && !had)
+        suspended &= ~reason;   /* the takeover did not begin: nobody ends it */
     pthread_mutex_unlock(&mu);
     return ok ? 0 : -1;
 }
@@ -1791,7 +2005,7 @@ int super_controller_stop(void)
 void super_controller_start(void)
 {
     pthread_mutex_lock(&mu);
-    suspended = 0;
+    suspended &= SUSP_SHUTDOWN;     /* the daemon's stop outlives a start */
     motion_fault = 0;
     respawn_at = 0.0;
     backoff_s = RESPAWN_MIN_S;
@@ -1901,9 +2115,10 @@ int super_probe_motion(char *detail, size_t dlen)
         snprintf(detail, dlen, "a motion probe is already running");
         return 2;
     }
-    /* A stop lever pulled before the probe begins: nothing moves after
-     * it answered. From here on it finds probing set and reaches it. */
-    if (suspended & SUSP_HOLD) {
+    /* A stop lever pulled, or the daemon's stop begun, before the probe
+     * begins: nothing moves after it answered. From here on it finds
+     * probing set and reaches it. */
+    if (suspended & (SUSP_HOLD | SUSP_SHUTDOWN)) {
         pthread_mutex_unlock(&mu);
         snprintf(detail, dlen, "motion probe ended by the stop lever");
         return 4;

@@ -15,14 +15,28 @@
 DAEMON=/usr/bin/forgectrl
 PIDFILE=/var/run/forgectrl.pid
 FIFO=/var/run/forgectrl.stderr
+# The daemon's own stop takes seconds: its controller ended in order, the
+# listeners' connections ended, the cooling engine's last writes. Its own
+# bounds, one after another, reach about a minute. This long, and then it
+# is killed.
+STOP_WAIT_S=90
 
 # The daemon runs under a small respawn wrapper: forgectrl supervises
 # the motion controllers and holds the pulse-device broker, so a crash
-# must not leave the machine unmanaged. A controller dies with the
-# daemon that spawned it, and the kernel's dead man's switch halts a run
-# it was playing; a GRBL controller's homing runner homes on to its own
-# end, and the respawned daemon stands by until it is gone. Stopping the
-# service stops the wrapper and the daemon both.
+# must not leave the machine unmanaged. Stopping the service stops the
+# wrapper, then waits for the daemon: the daemon's own stop ends its
+# controller in order, busy or idle (the safing pair at once, motion
+# decelerating and the laser latched; then SIGTERM, and SIGKILL past its
+# grace), and only after the daemon has gone does anything else run, a
+# restart's start included. A daemon still running STOP_WAIT_S after the
+# stop is killed; a controller still running then dies with it, and the
+# kernel's dead man's switch halts a run it was playing, as at a crash. A
+# GRBL controller's homing runner ends with its controller; after such a
+# kill it can home on to its own end, and the next daemon stands by until
+# it is gone. A stop that leaves the daemon running exits 1.
+#
+# The daemon starts with a fixed environment (env -i, the search path
+# alone): nothing the caller's shell exports reaches it or a controller.
 #
 # Logging: the daemon emits through syslog itself (rsyslog files it
 # under /data/log/forgefirm/forgectrl). Anything that still reaches its
@@ -31,11 +45,33 @@ FIFO=/var/run/forgectrl.stderr
 # name. The relay holds the fifo open read-write so it never sees EOF
 # and survives daemon respawns.
 
+# The daemon's processes. Match the actual executable, never the process
+# name: this script - and the parent shell of a "restart", which runs stop
+# as a child - are also named forgectrl. Only a process whose exe IS the
+# daemon binary is the daemon.
+daemon_pids() {
+    for p in $(pidof forgectrl 2>/dev/null); do
+        [ "$(readlink -f /proc/$p/exe 2>/dev/null)" = "$DAEMON" ] && echo "$p"
+    done
+}
+
+# Waits up to $1 s for every daemon process to be gone; 0 when they are.
+daemon_gone_within() {
+    i=0
+    while [ -n "$(daemon_pids)" ]; do
+        [ $i -lt "$1" ] || return 1
+        sleep 1
+        i=$((i + 1))
+    done
+    return 0
+}
+
 case "$1" in
   start)
     echo "Starting forgectrl"
     rm -f "$FIFO"
     mkfifo -m 600 "$FIFO"
+    env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
     start-stop-daemon -S -q -p $PIDFILE -m -b -x /bin/sh -- -c "
       trap 'kill \$CHILD \$RELAY 2>/dev/null; exit 0' TERM
       # The wrapper must survive memory pressure to respawn the daemon
@@ -57,21 +93,24 @@ case "$1" in
     ;;
   stop)
     echo "Stopping forgectrl"
+    # The wrapper's trap sends the daemon SIGTERM and leaves; a daemon a
+    # dead wrapper orphaned gets its own.
     start-stop-daemon -K -q -p $PIDFILE
-    # Catch a daemon orphaned by a dead wrapper. Match the actual
-    # executable, never the process name: this script - and the parent
-    # shell of a "restart", which runs stop as a child - are also named
-    # forgectrl, and a name match killed the restart before it could
-    # reach start. Only a process whose exe IS the daemon binary dies.
-    for p in $(pidof forgectrl 2>/dev/null); do
-      [ "$(readlink -f /proc/$p/exe 2>/dev/null)" = "$DAEMON" ] && \
-        kill $p 2>/dev/null
-    done
+    pids=$(daemon_pids)
+    [ -z "$pids" ] || kill $pids 2>/dev/null
+    if ! daemon_gone_within $STOP_WAIT_S; then
+        echo "forgectrl did not stop in $STOP_WAIT_S s - killing it"
+        pids=$(daemon_pids)
+        [ -z "$pids" ] || kill -9 $pids 2>/dev/null
+        if ! daemon_gone_within 5; then
+            echo "forgectrl is still running"
+            exit 1
+        fi
+    fi
     rm -f $PIDFILE
     ;;
   restart)
-    $0 stop
-    sleep 1
+    $0 stop || exit 1
     $0 start
     ;;
   *)

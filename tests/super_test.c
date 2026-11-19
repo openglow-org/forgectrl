@@ -35,7 +35,8 @@
  *      open that fails keeps trying instead of a self-opening controller;
  *      GF_PULSE_DEV moves the device, and the refusal names the path
  *      it tried; one that is not an absolute path is refused by its
- *      form, the device it would reach left unopened
+ *      form, the device it would reach left unopened; so is a controller
+ *      binary override that is not an absolute path
  *   I. the engine's fail tier stops the controller the deliberate way,
  *      the safing pair landed before the SIGTERM, and starts it again
  *      without a backoff
@@ -45,7 +46,8 @@
  *      controller still starts, and a switch to cloud mode is refused
  *   L. the report channel is the running controller's alone: each spawn
  *      is handed a fresh secret in its environment, an inherited one is
- *      replaced, nothing else passes for it, and a reap ends it
+ *      replaced, nothing else passes for it, and a reap ends it; off a
+ *      host-test run a controller inherits the allow list alone
  *   M. a dev image starts a controller only when the boot's data record
  *      says where its settings are (emmc, card, card-none): a record
  *      that is missing or holds any other word holds the controllers,
@@ -85,14 +87,42 @@
  *      whole move between is a motion fault, an opening before a move not
  *      ending the count; a check's probe under the lever's hold moves
  *      nothing; the daemon's shutdown ends the sweep; switches that stop
- *      answering during the probe's lens hunt end it and the probe waits;
- *      a shutdown sends no signal to a controller over a playing kernel,
- *      and a standby does not take over a kernel whose state cannot be
- *      read
+ *      answering during the probe's lens hunt end it and the probe waits,
+ *      the broker held until the sweep has ended; a standby does not take
+ *      over a kernel whose state cannot be read
  *   V. every reap makes the head safe, after the safing pair, and so does
  *      a daemon's first spawn, once; a controller dies (SIGKILL) when the
  *      thread that forked it ends, and a child whose daemon is already gone
- *      does not run
+ *      does not run; a controller inherits the broker fd, open, and no
+ *      other descriptor, above or below it, whatever the descriptor limit,
+ *      close_range refused or not; a SIGTERM that reaches the controller
+ *      before its exec ends it, the daemon's handler not run in it, and it
+ *      reaches its exec with SIGTERM and SIGINT default and unblocked, the
+ *      forking thread's mask as it was, after a fork that fails too; a
+ *      mode switch looks for an unmanaged controller with the supervisor's
+ *      lock free
+ *   W. the daemon's stop lands the safing pair at once from its own
+ *      thread, before it takes the supervisor's lock, whoever holds it,
+ *      then sends the controller its SIGTERM, to its group and to its pid,
+ *      its death expected, and wakes the lifecycle thread, which stops a
+ *      busy controller the deliberate way and ends only after it; a homing
+ *      runner the stopped GRBL controller left is ended before the broker
+ *      closes, and none is looked for after the cloud client; nothing
+ *      starts after the stop has begun: no controller, no mode switch (no
+ *      process search, no mode persisted, one in flight ended at once), no
+ *      probe
+ *   X. the stop lever lands the pair, then sends the controller its SIGTERM,
+ *      to its group and to its pid,
+ *      before its first poll, and wakes the lifecycle thread; beside an
+ *      unmanaged controller it answers so at once and its hold stands
+ *      through the takeover; a lever whose wait runs out keeps its hold; a
+ *      takeover's drops only the reason it set
+ *   Y. a stop the gate makes is no unexpected death; the backoff caps at
+ *      30 s; a mode switch answers a motion fault when the probe finds it
+ *   Z. a spawn the broker refuses forks nothing; a lever that lands in the
+ *      respawn's idle read halts nothing and starts nothing; before the
+ *      daemon's listener is up nothing moves and no controller starts (V:
+ *      super_init leaves it waiting)
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -109,6 +139,7 @@
 #define liveness_probe fake_liveness_probe
 #define liveness_enclosure fake_liveness_enclosure
 #define machine_is_idle fake_machine_is_idle
+#define close_range fake_close_range
 
 #include <fcntl.h>
 #include <stdarg.h>
@@ -136,13 +167,31 @@ int fake_execle(const char *path, const char *arg, ...);
 int fake_liveness_probe(int fd, char *detail, size_t dlen, int (*stop)(void));
 int fake_liveness_enclosure(char *why, size_t wlen);
 int fake_machine_is_idle(void);
+int fake_close_range(unsigned int lo, unsigned int hi, int flags);
 pid_t fake_getppid(void);
 #define getppid fake_getppid
 
+/* The daemon's fork helper, built here so that its fork is fake_fork: the
+ * real child of V is forked inside it, under its hold. */
+#include "../src/stopsig.c"
 #include "../src/super.c"
 
 #include <sys/stat.h>
 #include <sys/resource.h>
+
+/* close_range as the kernel answers it, or refused as a kernel or a sandbox
+ * without it answers (V: the one-by-one fallback). */
+static int close_range_refused;
+#undef close_range
+extern int close_range(unsigned int lo, unsigned int hi, int flags);
+int fake_close_range(unsigned int lo, unsigned int hi, int flags)
+{
+    if (close_range_refused) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return close_range(lo, hi, flags);
+}
 
 /* The real fork, for the cases that need a real child (V); every fork the
  * supervisor makes still goes through fake_fork. (<unistd.h> declared it
@@ -217,8 +266,10 @@ static pid_t death_pid;                 /* waitpid finds this one dead... */
 static int death_status;                /* ...with this status */
 static int forks;                       /* controller spawns (relay forks excluded) */
 static int kills[64];                   /* the signals sent, in order */
+static pid_t kill_to[64];               /* ...and to whom: a pid, or a group as its negative */
 static int nkills;
 static long kill_stop[64], kill_latch[64];  /* cnc/stop and cnc/laser_latch as each signal found them */
+static int kill_thrun[64];              /* ...and whether the lifecycle thread was still to run (W) */
 static int crit_logs;                   /* the safing failures named (fflog at LOG_CRIT) */
 static char crit_named[64];             /* ...the write each names, in order: S cnc/stop, L cnc/laser_latch, ? another */
 static int kill_crit[64];               /* ...as each signal found them */
@@ -236,6 +287,11 @@ static void note(const char *what)
 
 static int real_fork_controller;        /* the next controller fork is a real one (V) */
 static int in_real_child;               /* this process is that real controller (V) */
+static int child_fd_probe = -1;         /* ...which exits 0 when this descriptor is closed (V), */
+static int child_low_probe = -1;        /* ...this one below the broker's too, and the broker's
+                                           open without close-on-exec */
+static int child_sig_at_fork;           /* this signal reaches that child before its first instruction (V) */
+static int fork_fails;                  /* the next controller fork makes no child (V) */
 
 pid_t fake_fork(void)
 {
@@ -246,14 +302,23 @@ pid_t fake_fork(void)
     if (relay)
         note("fork-relay");
     else {
+        if (fork_fails) {
+            fork_fails = 0;
+            relay = !relay;
+            errno = EAGAIN;
+            return -1;
+        }
         forks++;
         note("fork-controller");
         if (real_fork_controller) {
             real_fork_controller = 0;
             relay = !relay;
             pid = fork();
-            if (pid == 0)
+            if (pid == 0) {
                 in_real_child = 1;
+                if (child_sig_at_fork)
+                    raise(child_sig_at_fork);
+            }
             return pid;
         }
     }
@@ -289,13 +354,21 @@ int fake_open(const char *path, int flags, ...)
     return openat(AT_FDCWD, path, flags, mode);
 }
 
+static int death_polls;                 /* the dying controller takes this many polls to exit (W) */
+static int reap_thrun = -1;             /* whether the lifecycle thread was still to run at the reap (W) */
+
 pid_t fake_waitpid(pid_t pid, int *status, int flags)
 {
     if (flags == 0) {
         *status = 0;
         return pid;             /* the relay's intermediate child */
     }
+    if (pid == death_pid && death_polls > 0) {
+        death_polls--;
+        return 0;               /* still finishing its SIGTERM */
+    }
     if (pid == death_pid) {
+        reap_thrun = th_run;
         *status = death_status;
         death_pid = 0;
         reap_crit = crit_logs;          /* the notices named before the reap's own writes */
@@ -308,11 +381,13 @@ int fake_kill(pid_t pid, int sig)
 {
     if (nkills < 64) {
         kills[nkills] = sig;
+        kill_to[nkills] = pid;
         /* What the kernel attributes read at the moment of the signal:
          * the proof the safing pair came first. */
         kill_stop[nkills] = get_long("cnc/stop");
         kill_latch[nkills] = get_long("cnc/laser_latch");
         kill_crit[nkills] = crit_logs;
+        kill_thrun[nkills] = th_run;
     }
     if (unlink_on_kill) {
         char path[160];
@@ -327,12 +402,23 @@ int fake_kill(pid_t pid, int sig)
     return 0;
 }
 
+static int check_pgrep_lock;            /* note a process search made under mu (V) */
+static int pgrep_under_mu;
+static int runner_term_broker = -2;     /* the broker fd as the runner's SIGTERM found it (W; -2: none sent) */
+
 int fake_system(const char *cmd)
 {
     note(cmd);
+    if (check_pgrep_lock && strstr(cmd, "pgrep")) {
+        if (pthread_mutex_trylock(&mu) == 0)
+            pthread_mutex_unlock(&mu);
+        else
+            pgrep_under_mu++;
+    }
     if (strstr(cmd, "pgrep -x gfhome.py"))
         return runner_alive ? 0 : 1;
     if (strstr(cmd, "pkill -TERM -x gfhome.py")) {
+        runner_term_broker = broker_fd;
         if (!runner_term_ignored)
             runner_alive = 0;
         return 0;
@@ -360,6 +446,20 @@ int fake_execle(const char *path, const char *arg, ...)
      * may end; it waits there to be killed. With no parent-death signal
      * the case's SIGCONT lets it go on, and SIGALRM ends it instead, which
      * the case sees. */
+    if (in_real_child && child_sig_at_fork)
+        _exit(8);               /* it reached its exec: the signal did not end it */
+    if (in_real_child && child_fd_probe >= 0) {
+        struct sigaction st, si;
+        sigset_t m;
+        sigaction(SIGTERM, NULL, &st);
+        sigaction(SIGINT, NULL, &si);
+        pthread_sigmask(SIG_SETMASK, NULL, &m);
+        _exit(fcntl(child_fd_probe, F_GETFD) != -1 ? 3
+              : child_low_probe >= 0 && fcntl(child_low_probe, F_GETFD) != -1 ? 4
+              : fcntl(broker_fd, F_GETFD) != 0 ? 5
+              : st.sa_handler != SIG_DFL || si.sa_handler != SIG_DFL ? 6
+              : sigismember(&m, SIGTERM) || sigismember(&m, SIGINT) ? 7 : 0);
+    }
     if (in_real_child) {
         alarm(2);
         raise(SIGSTOP);
@@ -419,8 +519,14 @@ int fake_liveness_enclosure(char *why, size_t wlen)
     return enclosure_open;
 }
 
+static int idle_lever;                  /* the lever lands in the next idle read (Z) */
+
 int fake_machine_is_idle(void)
 {
+    if (idle_lever) {
+        idle_lever = 0;
+        race_rc = super_controller_stop();
+    }
     return machine_idle;
 }
 
@@ -486,6 +592,7 @@ static int lens_open;                   /* the switches stop answering during th
 static int lens_hold_late;              /* a hold lands after the hunt's last look at its stop */
 static int lens_real_lever;             /* from a thread during the hunt: 1 the lever, 2 the shutdown */
 static int lens_stopped;                /* the hunt's stop input answered */
+static int lens_broker_at_stop = -1;    /* ...and the broker was still held then (W) */
 static volatile int lever_returned;     /* the real lever's call has returned */
 static int lever_waited;                /* ...and it had not when the hunt ended */
 static int lever_rc = -9;
@@ -529,6 +636,7 @@ int lenshome_run(char *detail, size_t dlen, int (*stop)(void))
         struct timespec ts = { 0, 20000000 };
         nanosleep(&ts, NULL);           /* a lever that does not wait has returned by now */
         lever_waited = !lever_returned;
+        lens_broker_at_stop = broker_fd >= 0;
     }
     if (stop && stop()) {
         lens_stopped = 1;
@@ -550,7 +658,19 @@ int update_job_running(void) { return 0; }
 int settings_get(const char *key, char *val, size_t len) { (void)key; (void)val; (void)len; return -1; }
 static int cloud_enabled;
 int settings_get_bool(const char *key, int def) { return !strcmp(key, "cloud_enabled") ? cloud_enabled : def; }
-int settings_set(const char *key, const char *val) { (void)key; (void)val; return 0; }
+static int settings_sets;               /* the settings a mode switch persisted (W) */
+static int stop_in_persist;             /* the daemon's stop begins while a switch persists its mode (W) */
+int settings_set(const char *key, const char *val)
+{
+    (void)key;
+    (void)val;
+    settings_sets++;
+    if (stop_in_persist) {
+        stop_in_persist = 0;
+        super_shutdown_begin();
+    }
+    return 0;
+}
 
 /* --- the fake tree ---------------------------------------------------- */
 
@@ -682,6 +802,7 @@ static void reset_state(void)
     respawn_wait_idle = 0;
     restart_pending = 0;
     standby_takeover = 0;
+    stop_pid = 0;
     gated = 0;
     if (broker_fd >= 0) {
         close(broker_fd);
@@ -690,6 +811,7 @@ static void reset_state(void)
     broker_warned = 0;
     pthread_mutex_unlock(&mu);
     death_pid = 0;
+    death_polls = 0;
     nkills = 0;
     forks = 0;
     probes = 0;
@@ -723,10 +845,19 @@ static void reset_state(void)
     lens_stopped = 0;
     lever_waited = 0;
     lever_rc = -9;
+    lens_broker_at_stop = -1;
+    idle_lever = 0;
+    check_pgrep_lock = 0;
+    pgrep_under_mu = 0;
+    real_sleep_us = 0;
     probe_stop_seen = 0;
+    settings_sets = 0;
+    stop_in_persist = 0;
+    close_range_refused = 0;
     pthread_mutex_lock(&mu);
     sweep_failed = 0;
     moves_stopped = 0;
+    await_listener = 0;
     pthread_mutex_unlock(&mu);
     calls[0] = '\0';
     logs[0] = '\0';
@@ -774,6 +905,24 @@ static double now_real(void)
 static void *stop_thread(void *arg)
 {
     *(int *)arg = super_controller_stop();
+    return NULL;
+}
+
+/* Another thread holds the supervisor's lock (W): it says so, then looks
+ * for the safing pair, up to 1 s, while it still holds it. */
+static volatile int lock_held;
+static int pair_under_lock;
+static void *lock_holder(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&mu);
+    lock_held = 1;
+    for (int i = 0; i < 1000 && !pair_under_lock; i++) {
+        pair_under_lock = get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1;
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    pthread_mutex_unlock(&mu);
     return NULL;
 }
 
@@ -1032,6 +1181,11 @@ int main(void)
           "a GF_PULSE_DEV that is not an absolute path starts no controller");
     CHECK(strstr(logs, "not an absolute path") != NULL && crit_logs == 1, "the refusal names the rule, once");
     unsetenv("GF_PULSE_DEV");
+    reset_state();
+    setenv("FORGECTRL_GRBL_BIN", "bin/grblHAL_glowforge", 1);
+    CHECK(!run_until_spawned(3.0) && forks == 0,
+          "a controller binary override that is not an absolute path starts no controller");
+    unsetenv("FORGECTRL_GRBL_BIN");
 
     printf("I. the engine's fail tier stops the controller and starts it again\n");
     bring_up();
@@ -1128,6 +1282,24 @@ int main(void)
             }
         free_child_env(env);
         CHECK(n == 1 && !strcmp(handed, first), "the child's environment carries it once, the inherited one gone");
+        /* Off a host-test run the controller inherits the allow list alone. */
+        setenv("http_proxy", "http://proxy.invalid:3128", 1);
+        setenv("FORGECTRL_PORT", "18080", 1);
+        unsetenv("FORGECTRL_HOST_TEST");
+        env = build_child_env(Ctl_Grbl, 5);
+        setenv("FORGECTRL_HOST_TEST", "1", 1);
+        int proxy = 0, path = 0, port = 0;
+        for (size_t i = 0; env && env[i]; i++) {
+            proxy += !strncmp(env[i], "http_proxy=", 11);
+            path += !strncmp(env[i], "PATH=", 5);
+            port += !strcmp(env[i], "FORGECTRL_PORT=18080");
+        }
+        free_child_env(env);
+        unsetenv("http_proxy");
+        unsetenv("FORGECTRL_PORT");
+        CHECK(!proxy && path == (getenv("PATH") != NULL) && port == 1,
+              "on a machine a controller inherits the allow list alone: the search path and the daemon's port, "
+              "no proxy setting");
         CHECK(super_report_secret_ok(first), "the secret passes");
         CHECK(!super_report_secret_ok("0123456789abcdef0123456789abcdef"), "the inherited one does not");
         char near[REPORT_SECRET_HEX + 2];
@@ -1590,17 +1762,13 @@ int main(void)
         nanosleep(&ts, NULL);
     }
     CHECK(lens_stopped && !lens_marker, "the daemon's shutdown ends the sweep between two steps");
+    CHECK(lens_broker_at_stop == 1 && broker_fd < 0,
+          "and the broker stays held until the sweep has ended, then closes");
     lens_real_lever = 0;
     reset_state();
     lens_open = 1;                      /* the switches stop answering during the probe's lens hunt */
     rc = probe_sequence(3);
     CHECK(rc == 3 && lens_stopped, "the probe's lens hunt ends on switches that stop answering, and the probe waits");
-    bring_up();
-    put("cnc/state", "running\n");
-    nkills = 0;
-    super_shutdown();
-    CHECK(nkills == 0 && child_pid > 0,
-          "a shutdown sends no signal to a controller whose kernel plays (it ends with the lifecycle thread, V)");
     reset_state();
     unlink(GF_SYSFS "cnc/state");
     standby_takeover = 1;
@@ -1625,7 +1793,7 @@ int main(void)
         pthread_mutex_lock(&mu);
         head_safed = 0;
         n = safe_writes;
-        init_locked();
+        init_locked(unmanaged_controller_running());
         int safed_at_start = head_safed;
         pthread_mutex_unlock(&mu);
         CHECK(safe_writes == n + 1 && safed_at_start && safe_probes == 0 && safe_forks == 0,
@@ -1639,7 +1807,7 @@ int main(void)
         pthread_mutex_lock(&mu);
         head_safed = 0;
         n = safe_writes;
-        init_locked();
+        init_locked(unmanaged_controller_running());
         int standing_by = standby_takeover && !head_safed;
         standby_takeover = 0;
         suspended = 0;
@@ -1687,6 +1855,7 @@ int main(void)
          * a real child that waits at its exec. */
         pthread_t th_spawn;
         int status = 0;
+        stopsig_init();                 /* the daemon's stop signals handled, as in the daemon */
         real_fork_controller = 1;
         pthread_create(&th_spawn, NULL, spawn_from_thread, NULL);
         pthread_join(th_spawn, NULL);
@@ -1728,6 +1897,88 @@ int main(void)
         }
         CHECK(w == refused && WIFEXITED(status) && WEXITSTATUS(status) == 125,
               "the spawn's child exits 125 before its exec when its parent check fails");
+        /* The broker fd is the one descriptor a controller inherits,
+         * whatever the descriptor limit: one numbered past 4096 is closed
+         * before the exec, and one numbered below the broker's, and the
+         * broker's stays open without close-on-exec; the same where
+         * close_range is refused, one by one up to the limit. */
+        struct rlimit rl, was_rl;
+        if (getrlimit(RLIMIT_NOFILE, &was_rl) == 0 && was_rl.rlim_max > 5001) {
+            rl = was_rl;
+            rl.rlim_cur = 5002;
+            setrlimit(RLIMIT_NOFILE, &rl);
+            for (int refused = 0; refused < 2; refused++) {
+                pthread_mutex_lock(&mu);
+                if (broker_fd >= 0) {
+                    close(broker_fd);           /* the spawn opens it again, above the low one */
+                    broker_fd = -1;
+                }
+                pthread_mutex_unlock(&mu);
+                child_fd_probe = dup2(1, 5000);
+                child_low_probe = dup(1);       /* the lowest free number: the broker's is above it */
+                close_range_refused = refused;
+                real_fork_controller = 1;
+                pthread_mutex_lock(&mu);
+                spawn_locked(Ctl_Cloud);
+                pid_t probe_child = child_pid;
+                int below = child_low_probe < broker_fd;
+                child_pid = 0;
+                child_ctl = Ctl_None;
+                pthread_mutex_unlock(&mu);
+                close_range_refused = 0;
+                status = 0;
+                w = probe_child > 0 ? wait4(probe_child, &status, 0, NULL) : -1;
+                close(child_fd_probe);
+                close(child_low_probe);
+                child_fd_probe = child_low_probe = -1;
+                CHECK(below && w == probe_child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                      refused ? "with close_range refused, the same, one descriptor at a time up to the limit"
+                              : "a descriptor numbered 5000 and one below the broker's are closed in the "
+                                "controller before its exec, and the broker's is open in it, SIGTERM and "
+                                "SIGINT default and unblocked");
+            }
+            setrlimit(RLIMIT_NOFILE, &was_rl);
+        } else {
+            printf("  skip: the descriptor limit's ceiling is too low for a descriptor past 4096\n");
+        }
+        /* A stop's SIGTERM (or a SIGINT) that reaches the controller
+         * before its first instruction: held until the child has given it
+         * its default action, it ends the child before its exec; the
+         * daemon's handler never takes it in the child. */
+        sigset_t before, after;
+        pthread_sigmask(SIG_SETMASK, NULL, &before);
+        int ended = 0;
+        for (int i = 0; i < 2; i++) {
+            int sig = i ? SIGINT : SIGTERM;
+            child_sig_at_fork = sig;
+            real_fork_controller = 1;
+            pthread_mutex_lock(&mu);
+            spawn_locked(Ctl_Cloud);
+            pid_t early = child_pid;
+            child_pid = 0;
+            child_ctl = Ctl_None;
+            pthread_mutex_unlock(&mu);
+            child_sig_at_fork = 0;
+            status = 0;
+            w = early > 0 ? wait4(early, &status, 0, NULL) : -1;
+            ended += w == early && WIFSIGNALED(status) && WTERMSIG(status) == sig;
+        }
+        pthread_sigmask(SIG_SETMASK, NULL, &after);
+        CHECK(ended == 2, "a SIGTERM or a SIGINT that reaches the controller before its exec ends it there");
+        CHECK(!sigismember(&before, SIGTERM) && !sigismember(&before, SIGINT) &&
+              !sigismember(&after, SIGTERM) && !sigismember(&after, SIGINT),
+              "and the forking thread's signal mask is as it was");
+        /* A fork that makes no child: the mask is put back there too. */
+        fork_fails = 1;
+        pthread_mutex_lock(&mu);
+        spawn_locked(Ctl_Cloud);
+        pid_t none = child_pid;
+        pthread_mutex_unlock(&mu);
+        pthread_sigmask(SIG_SETMASK, NULL, &after);
+        CHECK(none == 0 && !fork_fails && !sigismember(&after, SIGTERM) && !sigismember(&after, SIGINT),
+              "and after a fork that fails, with no controller");
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGINT, SIG_DFL);
     }
     reset_state();
     {
@@ -1756,7 +2007,7 @@ int main(void)
         runner_alive = 1;
         pthread_mutex_lock(&mu);
         head_safed = 0;
-        init_locked();
+        init_locked(unmanaged_controller_running());
         pthread_mutex_unlock(&mu);
         runner_alive = 0;               /* it ended on its own */
         n = safe_writes;
@@ -1779,7 +2030,7 @@ int main(void)
         runner_alive = 1;
         pthread_mutex_lock(&mu);
         head_safed = 0;
-        init_locked();
+        init_locked(unmanaged_controller_running());
         pthread_mutex_unlock(&mu);
         super_controller_start();
         calls[0] = '\0';
@@ -1800,9 +2051,13 @@ int main(void)
         runner_alive = 1;
         calls[0] = '\0';
         int n = safe_writes;
+        check_pgrep_lock = 1;
         switch_takeover();
+        check_pgrep_lock = 0;
         CHECK(strstr(calls, "/etc/init.d/grblhal stop") != NULL && safe_writes == n + 1,
               "a mode switch over the stop lever's suspension takes a live unmanaged controller over");
+        CHECK(strstr(calls, "pgrep") != NULL && pgrep_under_mu == 0,
+              "and its process search runs with the supervisor's lock free, so no taker of the lock waits on it");
         runner_alive = 0;
     }
     reset_state();
@@ -1816,9 +2071,276 @@ int main(void)
         n = safe_writes;
         super_init();
         int at_start = safe_writes - n;
+        pthread_mutex_lock(&mu);
+        int awaiting = await_listener;
+        pthread_mutex_unlock(&mu);
         super_shutdown();
         CHECK(at_start == 1 && th_run == 0, "super_init makes the head safe, then its lifecycle thread runs and stops");
+        CHECK(awaiting, "and its passes wait for the daemon's listener");
     }
+    reset_state();
+
+    printf("W. the daemon's stop: the pair at once, the controller ended in order, then the thread\n");
+    bring_up();
+    put("cnc/state", "running\n");      /* a busy job */
+    machine_idle = 0;
+    nkills = 0;
+    {
+        uint64_t drain;
+        while (read(chld_efd, &drain, sizeof(drain)) > 0)
+            ;                           /* earlier wakes, read: only the stop's counts here */
+        pid_t busy = child_pid;
+        super_shutdown_begin();
+        struct pollfd pw = { .fd = chld_efd, .events = POLLIN };
+        CHECK(safed() && nkills >= 1 && kills[0] == SIGTERM && kill_stop[0] == 1 && kill_latch[0] == 1,
+              "the stop's first step lands the safing pair from its own thread, then sends the controller "
+              "its SIGTERM itself, before any pass");
+        CHECK(nkills == 2 && kills[1] == SIGTERM && kill_to[0] == -busy && kill_to[1] == busy,
+              "to the controller's group and to the controller itself, which a child before its setpgid "
+              "takes by its pid alone");
+        CHECK(stop_pid == busy && poll(&pw, 1, 0) > 0,
+              "its death expected, and the lifecycle thread woken to finish the stop");
+    }
+    reset_state();
+    {
+        /* The pair before the supervisor's lock: another thread holds it
+         * when the stop begins, and sees the pair land while it does. */
+        pthread_t lh;
+        lock_held = 0;
+        pair_under_lock = 0;
+        pthread_create(&lh, NULL, lock_holder, NULL);
+        while (!lock_held) {
+            struct timespec ts = { 0, 1000000 };
+            nanosleep(&ts, NULL);
+        }
+        super_shutdown_begin();
+        pthread_join(lh, NULL);
+        CHECK(pair_under_lock, "the pair lands before the stop takes the supervisor's lock, whoever holds it");
+    }
+    reset_state();
+    bring_up();
+    put("cnc/state", "running\n");
+    machine_idle = 0;
+    nkills = 0;
+    real_sleep_us = 2000;
+    {
+        pthread_mutex_lock(&mu);
+        th_run = 1;
+        pthread_mutex_unlock(&mu);
+        pthread_create(&th, NULL, super_main, NULL);
+        double t_stop = fake_now;
+        death_polls = 5;                /* the controller takes its time over its SIGTERM */
+        reap_thrun = -1;
+        super_shutdown();
+        CHECK(nkills >= 1 && kills[0] == SIGTERM && kill_stop[0] == 1 && kill_latch[0] == 1,
+              "a busy controller is stopped the deliberate way: its SIGTERM found motion stopped and the latch locked");
+        CHECK(kill_thrun[0] == 1 && reap_thrun == 1 && fake_now - t_stop < SHUTDOWN_WAIT_S,
+              "the lifecycle thread is still to run when the controller exits: it ends only after the controller, "
+              "which dies with it");
+        CHECK(child_pid == 0 && th_run == 0 && broker_fd < 0, "then the thread ends and the broker closes");
+    }
+    bring_up();
+    runner_alive = 1;                   /* the GRBL controller's homing runner, which outlives it */
+    runner_term_broker = -2;
+    {
+        /* No lifecycle thread gets to the controller: the stop's own
+         * stop_locked reaps it, and no pass follows the reap. */
+        super_shutdown();
+        CHECK(child_pid == 0 && !runner_alive && strstr(calls, "pkill -TERM -x gfhome.py"),
+              "a homing runner the stopped GRBL controller left is ended by the stop itself");
+        CHECK(runner_term_broker >= 0 && broker_fd < 0, "while the broker is still open, which closes after it");
+    }
+    bring_up();
+    pthread_mutex_lock(&mu);
+    want = Ctl_Cloud;                   /* the controller the stop finds is the cloud client */
+    child_ctl = Ctl_Cloud;
+    pthread_mutex_unlock(&mu);
+    calls[0] = '\0';
+    super_shutdown();
+    CHECK(child_pid == 0 && !strstr(calls, "gfhome.py"),
+          "a stop that reaps the cloud client looks for no homing runner");
+    reset_state();
+    super_shutdown_begin();
+    super_controller_start();
+    CHECK(!run_until_spawned(3.0) && forks == 0, "once the stop has begun, a start lets no controller start");
+    {
+        char err[128] = "";
+        double t_sw = fake_now;
+        calls[0] = '\0';
+        CHECK(super_mode_switch("grbl", NULL, err, sizeof(err)) == -1 && forks == 0 &&
+              (suspended & SUSP_SHUTDOWN) && fake_now - t_sw < 1.0 && settings_sets == 0 &&
+              !strstr(calls, "pgrep"),
+              "and a mode switch is refused at once, the stop standing: no process search, no mode persisted");
+        char d[96];
+        calls[0] = '\0';
+        CHECK(super_probe_motion(d, sizeof(d)) == 4 && probes == 0 && calls[0] == '\0',
+              "and a setup check's motion probe moves nothing");
+    }
+    reset_state();
+    {
+        /* A switch already past its refusal when the stop begins (the stop
+         * lands while it persists the mode): its wait ends at once, and the
+         * stop stands after it. */
+        char err[128] = "";
+        stop_in_persist = 1;
+        double t_sw = fake_now;
+        int src = super_mode_switch("grbl", NULL, err, sizeof(err));
+        CHECK(src == -1 && settings_sets == 1 && (suspended & SUSP_SHUTDOWN) && fake_now - t_sw < 1.0 &&
+              forks == 0, "a mode switch in flight when the stop begins answers at once, the stop standing");
+    }
+    reset_state();
+    super_shutdown_begin();
+    pthread_mutex_lock(&mu);
+    standby_takeover = 1;
+    suspended |= SUSP_STANDBY;
+    pthread_mutex_unlock(&mu);
+    calls[0] = '\0';
+    tick();
+    CHECK(standby_takeover && !strstr(calls, "/etc/init.d/grblhal stop"), "and a standby takes nothing over");
+    reset_state();
+
+    printf("X. the stop lever: the pair at once; beside an unmanaged controller; a wait that runs out\n");
+    bring_up();
+    real_sleep_us = 2000;
+    {
+        uint64_t drain;
+        while (read(chld_efd, &drain, sizeof(drain)) > 0)
+            ;                           /* earlier wakes, read: only the lever's counts here */
+        int lrc = -9;
+        pthread_t lt;
+        pthread_create(&lt, NULL, stop_thread, &lrc);
+        int held = 0;
+        for (int i = 0; i < 1000 && !held; i++) {
+            pthread_mutex_lock(&mu);
+            held = (suspended & SUSP_HOLD) != 0;
+            pthread_mutex_unlock(&mu);
+            if (!held) {
+                struct timespec ts = { 0, 1000000 };
+                nanosleep(&ts, NULL);
+            }
+        }
+        pid_t busy = child_pid;
+        int pair = safed(), signaled = nkills, expected = stop_pid == busy;
+        int to_both = signaled == 2 && kills[1] == SIGTERM && kill_to[0] == -busy && kill_to[1] == busy;
+        struct pollfd pw = { .fd = chld_efd, .events = POLLIN };
+        int woke = 0;
+        for (int i = 0; i < 1000 && !woke; i++)
+            woke = poll(&pw, 1, 1) > 0;
+        CHECK(held && pair && signaled >= 1 && kills[0] == SIGTERM && kill_stop[0] == 1 && kill_latch[0] == 1,
+              "the lever lands the safing pair, then sends the controller its SIGTERM itself, before any pass");
+        CHECK(to_both, "to the controller's group and to the controller itself");
+        CHECK(expected && woke, "its death expected, and the lifecycle thread woken");
+        tick();
+        pthread_join(lt, NULL);
+        CHECK(lrc == 0 && child_pid == 0, "the pass that follows stops it, and the lever answers stopped");
+    }
+    reset_state();
+    pthread_mutex_lock(&mu);
+    standby_takeover = 1;
+    suspended = SUSP_STANDBY;
+    pthread_mutex_unlock(&mu);
+    {
+        int lrc = super_controller_stop();
+        CHECK(lrc == 1 && safed() && (suspended & SUSP_HOLD),
+              "beside an unmanaged controller the lever answers so at once, the pair in and the hold standing");
+        calls[0] = '\0';
+        tick();
+        CHECK(strstr(calls, "/etc/init.d/grblhal stop") && !standby_takeover && !run_until_spawned(3.0),
+              "the takeover at idle ends that controller, and the hold leaves no controller after it");
+    }
+    reset_state();
+    bring_up();
+    CHECK(super_controller_stop() == -1 && (suspended & SUSP_HOLD),
+          "a lever whose wait runs out (no pass stopped the controller) answers so, and its hold stands");
+    tick();
+    CHECK(child_pid == 0 && !run_until_spawned(3.0), "the next pass stops the controller, and nothing starts again");
+    reset_state();
+    bring_up();
+    pthread_mutex_lock(&mu);
+    suspended |= SUSP_TAKEOVER;         /* a check's takeover already stands */
+    pthread_mutex_unlock(&mu);
+    {
+        int kept = super_takeover_begin() == -1 && (suspended & SUSP_TAKEOVER);
+        pthread_mutex_lock(&mu);
+        suspended = 0;
+        pthread_mutex_unlock(&mu);
+        int dropped = super_takeover_begin() == -1 && !(suspended & SUSP_TAKEOVER);
+        CHECK(kept && dropped, "a takeover whose wait runs out drops its reason only when that call set it");
+    }
+    reset_state();
+
+    printf("Y. a deliberate stop is no unexpected death; the backoff's cap; a switch's motion fault\n");
+    bring_up();
+    dev_image = 1;                      /* a dev image with no data record: the gate closes */
+    setenv("GF_DATA_STATE", "super-test/no-state", 1);
+    pthread_mutex_lock(&mu);
+    backoff_s = 4;
+    pthread_mutex_unlock(&mu);
+    logs[0] = '\0';
+    tick();
+    CHECK(child_pid == 0 && !strstr(logs, "unexpected") && !strstr(logs, "respawn in") && backoff_s == 4,
+          "the gate's stop at idle is an expected exit: no warning, no backoff");
+    dev_image = 0;
+    unsetenv("GF_DATA_STATE");
+    reset_state();
+    bring_up();
+    pthread_mutex_lock(&mu);
+    backoff_s = 16;
+    spawned_at = fake_now;              /* short-lived */
+    pthread_mutex_unlock(&mu);
+    die(0x0900);
+    tick();
+    CHECK(strstr(logs, "respawn in 16 s") && backoff_s == RESPAWN_MAX_S, "the backoff after 16 s is the 30 s cap");
+    reset_state();
+    probe_rc = -4;                      /* the probe fails on the machine: a motion fault */
+    real_sleep_us = 2000;
+    {
+        pthread_mutex_lock(&mu);
+        th_run = 1;
+        pthread_mutex_unlock(&mu);
+        pthread_create(&th, NULL, super_main, NULL);
+        char err[160] = "";
+        double t_sw = fake_now;
+        int src = super_mode_switch("grbl", NULL, err, sizeof(err));
+        CHECK(src == -1 && super_motion_fault() && fake_now - t_sw < 90.0,
+              "a mode switch whose probe ends in a motion fault answers then, not at its 90 s bound");
+        super_shutdown();
+    }
+    reset_state();
+
+    printf("Z. what lands while the lock is down; no broker, no controller; nothing before the listener\n");
+    reset_state();
+    flock_fails = 1;
+    pthread_mutex_lock(&mu);
+    spawn_locked(Ctl_Grbl);
+    double later = respawn_at;
+    pthread_mutex_unlock(&mu);
+    CHECK(forks == 0 && child_pid == 0 && later > fake_now,
+          "a spawn the broker refuses forks nothing, and tries again later");
+    flock_fails = 0;
+    reset_state();
+    bring_up();
+    machine_idle = 0;
+    die(0x0900);
+    tick();
+    fake_now += RESPAWN_IDLE_WAIT_S + 1.0;  /* past the respawn's bound for the kernel */
+    put("cnc/halt", "0\n");
+    idle_lever = 1;                     /* the lever lands in the respawn's idle read */
+    tick();
+    CHECK(race_rc == 0 && get_long("cnc/halt") == 0 && child_pid == 0,
+          "a lever that lands in the respawn's idle read: nothing is halted, nothing starts");
+    machine_idle = 1;
+    reset_state();
+    pthread_mutex_lock(&mu);
+    head_safed = 0;
+    init_locked(0);
+    await_listener = 1;                 /* as super_init leaves it */
+    pthread_mutex_unlock(&mu);
+    calls[0] = '\0';
+    CHECK(!run_until_spawned(3.0) && probes == 0 && lens_runs == 0 && forks == 0 && broker_fd < 0,
+          "before the daemon's listener is up nothing moves: no probe, no sweep, no controller, no broker");
+    super_listening();
+    CHECK(run_until_spawned(5.0) && probes == 1, "once it is up, the probe, then the controller");
     reset_state();
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);

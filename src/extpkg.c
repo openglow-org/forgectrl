@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "sha256.h"
+#include "stopsig.h"
 
 static const char *bin(void)
 {
@@ -64,7 +65,7 @@ static int spawn(const char *prog, const char *const argv_in[], char **out, int 
     argv[n] = NULL;
     if (pipe2(pfd, O_CLOEXEC) != 0)
         return -1;
-    pid_t pid = fork();
+    pid_t pid = stopsig_fork();
     if (pid < 0) {
         close(pfd[0]);
         close(pfd[1]);

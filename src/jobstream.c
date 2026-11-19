@@ -37,10 +37,11 @@ static const char *sysfs_root(void)
     return r ? r : "/sys/glowforge";
 }
 
+/* The Grbl port, or the test hook GF_GRBL_PORT in a host-test run. */
 static int grbl_port(void)
 {
-    const char *p = getenv("GF_GRBL_PORT");
-    int port = p && *p ? atoi(p) : 23;
+    const char *p = ff_test_hook("GF_GRBL_PORT");
+    int port = p ? atoi(p) : 23;
     return port > 0 && port < 65536 ? port : 23;
 }
 

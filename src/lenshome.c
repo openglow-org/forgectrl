@@ -70,17 +70,19 @@
 #define STEP_DELAY_US   180000
 
 /* Host tests point the head's sysfs at a scratch tree and shorten the
- * cadence; on the machine both are the real ones. */
+ * cadence, through the test hooks GF_SYSFS_DIR and GF_LENS_STEP_US, which
+ * only a host-test run honors (testhook.h): on a machine both are the real
+ * ones whatever the environment says. */
 static const char *sysfs_dir(void)
 {
-    const char *d = getenv("GF_SYSFS_DIR");
-    return d && *d ? d : "/sys/glowforge";
+    const char *d = ff_test_hook("GF_SYSFS_DIR");
+    return d ? d : "/sys/glowforge";
 }
 
 static unsigned step_delay_us(void)
 {
-    const char *d = getenv("GF_LENS_STEP_US");
-    if (d && *d) {
+    const char *d = ff_test_hook("GF_LENS_STEP_US");
+    if (d) {
         long v = strtol(d, NULL, 10);
         if (v >= 0 && v <= STEP_DELAY_US)
             return (unsigned)v;
@@ -182,7 +184,7 @@ static void marker_write(int off_steps, int on_steps)
     char path[256], tmp[288];
     marker_path(path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
+    FILE *f = fopen(tmp, "we");
     if (!f) {
         fflog(LOG_ERR, "lenshome: cannot write %s", tmp);
         return;

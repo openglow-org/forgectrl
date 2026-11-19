@@ -44,6 +44,7 @@
 #include "mp4mux.h"
 #include "settings.h"
 #include "status.h"
+#include "stopsig.h"
 #include "vpu_h264.h"
 #include "vpu_jpeg.h"
 #include "testhook.h"
@@ -61,6 +62,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -507,9 +509,15 @@ static int xioctl(int fd, unsigned long req, void *arg)
 static pid_t child_spawn(const char *cmd, int *outfd)
 {
     int pfd[2] = {-1, -1};
+    /* The descriptor numbers the child can hold, for the close below where
+     * close_range is refused (read before the fork). */
+    struct rlimit rl;
+    int ceiling = getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur > 65536 ? 65536 : (int)rl.rlim_cur;
     if (outfd && pipe2(pfd, O_CLOEXEC) < 0)
         return -1;
-    pid_t pid = fork();
+    /* The daemon's stop signals held across the fork, default in the
+     * child (stopsig_fork). */
+    pid_t pid = stopsig_fork();
     if (pid < 0) {
         if (outfd) {
             close(pfd[0]);
@@ -529,6 +537,12 @@ static pid_t child_spawn(const char *cmd, int *outfd)
         } else if (devnull >= 0) {
             dup2(devnull, STDOUT_FILENO);
         }
+        /* Nothing of the daemon's past the three standard ones: a socket
+         * or a file opened without close-on-exec stays out of the child,
+         * one by one where a kernel or a sandbox refuses close_range. */
+        if (close_range(3, ~0U, 0) != 0)
+            for (int fd = 3; fd < ceiling; fd++)
+                close(fd);
         execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }

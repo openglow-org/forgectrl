@@ -85,9 +85,11 @@ jobs:
         run: sudo sh tests/fflog_e2e.sh build forgefirm-layer/meta-forgefirm/recipes-extended/rsyslog/rsyslog/rsyslog.conf
       - name: "host_start (the built daemon on a host: its machine paths in a temporary directory, one read answered from the hooks' paths, no controller started, iw not run, a setup seed with no dev marker left untaken; then with the host-test gate unset and the hooks still set, the read answered from its machine paths, the hooks named as ignored, and iw's stand-in run)"
         run: sh tests/host_start.sh build
+      - name: "host_init (the init script: a stop that waits for the daemon, a restart that never runs two, a daemon whose wrapper is gone ended through its own stop, a fixed environment, a bounded kill)"
+        run: sh tests/host_init.sh
       - name: "The image's ulfius for host_routes (the recipe's revision and patch: a request carries the whole peer address)"
         run: sh tests/ulfius_image.sh forgefirm-layer/meta-forgefirm/recipes-extended/ulfius build/ulfius-image
-      - name: "host_routes (the controller up on a host: the report channel and its secret, the quiet hold's pump, the event streams' cap, the motion routes to the port, the extension and setup routes, the write routes without the token, the cooling engine's Acknowledge, notices and flow watch, a login with no session, and the routes that take the button held: each one's 403 with the button up, its 409 under an armed or running job or a GRBL controller arming before the button is asked for, the reset's refusals and failures with the button held, the reset taken, the reboot route; a dev image's seed, card gate and dev bar)"
+      - name: "host_routes (the controller up on a host: the report channel and its secret, the daemon's stop landing its safing pair while a request it waits on is open, a listener that cannot start leaving a daemon that moved nothing, the quiet hold's pump, the event streams' cap, the motion routes to the port, the extension and setup routes, the write routes without the token, the cooling engine's Acknowledge, notices and flow watch, a login with no session, and the routes that take the button held: each one's 403 with the button up, its 409 under an armed or running job or a GRBL controller arming before the button is asked for, the reset's refusals and failures with the button held, the reset taken, the reboot route; a dev image's seed, card gate and dev bar)"
         run: sh tests/host_routes.sh build build/ulfius-image/lib
       - name: "host_ext (the extension host's routes on a host, against a compiled stand-in that is a live host: the upload sink, the install and a key without the button, the package routes and their 403s, a package's check run with the lease free and the setup record untouched, one session driving it and another following until it takes over)"
         run: sh tests/host_ext.sh build build/ulfius-image/lib
@@ -107,6 +109,12 @@ jobs:
         run: ./build/enclosure_wait_test
       - name: Controller-mode supervisor
         run: ./build/super_test
+      - name: "button_test (the ten-second hold and the press's wait on the clock; the wait thread joined by one caller alone)"
+        run: ./build/button_test
+      - name: "stopsig_test (the daemon's termination wait: a SIGTERM handled on another thread ends it)"
+        run: ./build/stopsig_test
+      - name: "fflog_test (the log emitter sends on the socket it holds, under the lock a reconnect closes it under)"
+        run: ./build/fflog_test
       - name: Capture frame-health ladder
         run: ./build/camhealth_test
       - name: A camera lamp write reports its failure
@@ -171,5 +179,5 @@ jobs:
         run: ./build/camkey_test
       - name: Published-release check (the tag from the first hop)
         run: ./build/relcheck_test
-      - name: "test_routes (every panel route registered, every route's capability, the page policy)"
+      - name: "test_routes (every panel route registered, every route's capability, the page policy, every fork the stop-signal helper's)"
         run: python3 -B -m unittest -v tests/test_routes.py

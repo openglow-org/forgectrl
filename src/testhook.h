@@ -13,7 +13,13 @@
  * GF_DATA_STATE the boot's data record (/run/forgefirm-data.state),
  * GF_LED_ROOT the LED class (/sys/class/leds), GF_IIO_ROOT the iio
  * devices the motion probe finds the head accelerometer among
- * (/sys/bus/iio/devices). Two stand in for a
+ * (/sys/bus/iio/devices), GF_PULSE_DEV the pulse device (/dev/glowforge),
+ * GF_SYSFS_DIR the lens hunt's sysfs tree (/sys/glowforge, without the
+ * trailing '/'), GF_GRBL_PORT the Grbl port the daemon's streamers dial
+ * (23), GF_PROC_STAT the CPU counters (/proc/stat). Two change what the
+ * daemon reads or how it moves: GF_SWITCH_WORD_FILE names a file holding
+ * the switch word in place of the switch device's, and GF_LENS_STEP_US
+ * shortens the lens hunt's step cadence. Two more stand in for a
  * program a host test must not run: GF_SLOT_LIST names a file that holds
  * the slot inventory in place of `ffboot -l`, and GF_REBOOT_FILE a file
  * a reboot the daemon schedules is written to in place of the reboot.

@@ -23,6 +23,11 @@ int diag_start(const char *tool, char *why, size_t len);
 /* Request an abort; the runner stands down and restarts the controller. */
 void diag_abort(void);
 
+/* The daemon's stop: a run in flight is aborted and waited for, up to
+ * 10 s, so its takeover is handed back and the cooling engine has the
+ * thermal hardware again before either stops. */
+void diag_shutdown(void);
+
 /* Live runner state as JSON (phase, temperatures, log, result). */
 int diag_status_json(char *buf, size_t len);
 

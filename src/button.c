@@ -50,7 +50,7 @@ static const char *switch_dev(void)
 static int read_button(void)
 {
     uint8_t sw[2] = { 0 };
-    int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK);
+    int fd = open(switch_dev(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
         return -1;
     int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
@@ -71,6 +71,15 @@ static void sleep_ms(int ms)
     nanosleep(&ts, NULL);
 }
 
+/* Milliseconds since t0, on the monotonic clock: a whole-second difference
+ * of the two tv_sec fields would pass up to a second short. */
+static long long elapsed_ms(const struct timespec *t0)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)(t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
 static void *wait_thread(void *arg)
 {
     int timeout_s = (int)(long)arg;
@@ -83,9 +92,7 @@ static void *wait_thread(void *arg)
             result = B_CANCELLED;
             break;
         }
-        struct timespec t;
-        clock_gettime(CLOCK_MONOTONIC, &t);
-        if (t.tv_sec - t0.tv_sec >= timeout_s)
+        if (elapsed_ms(&t0) >= (long long)timeout_s * 1000)
             break;
         int b = read_button();
         if (b == 0)
@@ -129,16 +136,21 @@ int button_wait_start(int timeout_s)
     return 0;
 }
 
+/* The waiting thread is joined by one caller alone: the cancel takes the
+ * handle under the lock, so a start that comes meanwhile finds nothing to
+ * join and refuses while the old wait still stands. */
 void button_wait_cancel(void)
 {
     pthread_mutex_lock(&mu);
-    int live = state == B_WAITING;
+    int live = state == B_WAITING && th_live;
+    pthread_t t = th;
+    if (live) {
+        cancel = 1;
+        th_live = 0;
+    }
     pthread_mutex_unlock(&mu);
-    if (!live)
-        return;
-    cancel = 1;
-    pthread_join(th, NULL);
-    th_live = 0;
+    if (live)
+        pthread_join(t, NULL);
 }
 
 const char *button_state(void)
@@ -172,9 +184,7 @@ int button_held_for(int hold_s)
     for (;;) {
         if (read_button() != 1)
             return 0;
-        struct timespec t;
-        clock_gettime(CLOCK_MONOTONIC, &t);
-        if (t.tv_sec - t0.tv_sec >= hold_s)
+        if (elapsed_ms(&t0) >= (long long)hold_s * 1000)
             return 1;
         sleep_ms(100);
     }

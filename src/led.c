@@ -32,7 +32,7 @@ static void wr(int ch, const char *attr, int val)
 {
     char path[160];
     snprintf(path, sizeof(path), "%s/button_led_%d/%s", led_root(), ch, attr);
-    FILE *f = fopen(path, "w");
+    FILE *f = fopen(path, "we");
     if (!f)
         return;
     fprintf(f, "%d\n", val);
@@ -80,7 +80,7 @@ static int rd_pulse(int ch)
 {
     char path[160], text[16];
     snprintf(path, sizeof(path), "%s/button_led_%d/pulse_on", led_root(), ch);
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     if (!f)
         return -1;
     int ok = fgets(text, sizeof(text), f) != NULL;
@@ -101,7 +101,7 @@ static int rd_target(int ch)
 {
     char path[160], text[16];
     snprintf(path, sizeof(path), "%s/button_led_%d/target", led_root(), ch);
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     if (!f)
         return -1;
     int ok = fgets(text, sizeof(text), f) != NULL;

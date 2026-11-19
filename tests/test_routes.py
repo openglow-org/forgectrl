@@ -13,10 +13,12 @@ files, because the frame-isolation harness renders the mock's page;
 main.c's two lists of environment variables, the overrides and the
 test hooks, the ones the daemon's start notice names, are held to
 every read in the sources (a test hook is read only through the gate,
-ff_test_hook in testhook.h, and no getenv reads one); and the 409
+ff_test_hook in testhook.h, and no getenv reads one); the 409
 body the panel sends a refused diagnostic start once more on is the
 body cb_diag_start sends for the cooling engine's refusal, in the mock
-the walk plays the panel against too.
+the walk plays the panel against too; and every child the daemon makes
+is forked by stopsig_fork (stopsig.c), which holds the stop signals
+across the fork: no other file in src/ calls fork.
 
 Run: python3 -B -m unittest -v tests/test_routes.py
 """
@@ -35,6 +37,10 @@ ENV_TABLE_ROW = re.compile(r'\{\s*' + ENV_NAME)
 ENV_INDIRECT = re.compile(r'\b(?:secure_)?getenv\s*\(\s*(?!")([^)]+)\)')
 HOOK_READ = re.compile(r'\bff_test_hook\s*\(\s*' + ENV_NAME)
 HOOK_INDIRECT = re.compile(r'\bff_test_hook\s*\(\s*(?!")([^)]+)\)')
+# a comment, or a string or character literal: what is not code
+NOT_CODE = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', re.S)
+# a call of fork or vfork, with or without a space before the parenthesis
+FORK_CALL = re.compile(r'(?<![A-Za-z0-9_])v?fork\s*\(')
 
 
 def read(rel):
@@ -131,6 +137,18 @@ def env_reads():
     return names, hooks, indirect, gate_indirect
 
 
+def fork_calls():
+    """How many times each file of src/ calls fork or vfork, its comments
+    and literals left out."""
+    calls = {}
+    for name in sorted(os.listdir(os.path.join(ROOT, 'src'))):
+        if name.endswith(('.c', '.h')):
+            n = len(FORK_CALL.findall(NOT_CODE.sub(' ', read(os.path.join('src', name)))))
+            if n:
+                calls[name] = n
+    return calls
+
+
 class RouteTest(unittest.TestCase):
     def test_every_panel_route_is_registered(self):
         registered = {p for _, p, _ in routes()[0]}
@@ -180,6 +198,9 @@ class RouteTest(unittest.TestCase):
                                     'cool.c:tunables[i].env', 'main.c:ENV_OVERRIDES[i]',
                                     'main.c:TEST_HOOKS[i]', 'testhook.h:hook'})
         self.assertEqual(gate_indirect, {'main.c:TEST_HOOKS[i]', 'testhook.h:const char *hook'})
+
+    def test_every_fork_is_the_stop_signal_helpers(self):
+        self.assertEqual(fork_calls(), {'stopsig.c': 1})
 
 
 if __name__ == '__main__':

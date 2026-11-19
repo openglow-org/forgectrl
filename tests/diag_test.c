@@ -9,12 +9,24 @@
  * the converter's 1023 rail and past it, a count under 0 C) is no reading
  * here as everywhere: the window takes no sample of it (an open sensor's
  * rail would read as a step), and takes a reading.
+ *
+ * And the daemon's stop: a run in flight is asked to end, and the stop
+ * returns once it has.
  */
 #define _GNU_SOURCE
 #include <time.h>
 #include <unistd.h>
 
-static int fake_usleep(useconds_t us) { (void)us; return 0; }
+static int real_pause;                  /* each sleep is 1 ms of real time (the stop's case) */
+static int fake_usleep(useconds_t us)
+{
+    (void)us;
+    if (real_pause) {
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+}
 static unsigned fake_sleep(unsigned s) { (void)s; return 0; }
 #define usleep fake_usleep
 #define sleep  fake_sleep
@@ -46,6 +58,24 @@ void super_takeover_end(void) { }
 int  wizdark_lease_owner(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int  machine_is_idle(void) { return 1; }
 void fflog(int prio, const char *fmt, ...) { (void)prio; (void)fmt; }
+
+/* A run's thread as runner_aa ends it: once the abort is asked for, it
+ * stands down and the run is over. */
+static void *stand_down(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&mu);
+        int asked = abort_req;
+        if (asked)
+            st_running = 0;
+        pthread_mutex_unlock(&mu);
+        if (asked)
+            return NULL;
+        struct timespec ts = { 0, 1000000 };
+        nanosleep(&ts, NULL);
+    }
+}
 
 /* status.c's conversion, which is coolant.h's. */
 double coolant_degc(long raw)
@@ -97,6 +127,27 @@ int main(void)
     coolant(700, 694);
     CHECK(aa_window(&w) == 0 && w.n == AA_N && w.m1 == 700.0 && w.m2 == 694.0,
           "both channels reading: every sample taken");
+
+    printf("the daemon's stop ends a run in flight and waits for it\n");
+    {
+        /* A run in flight, its thread standing down once asked to. */
+        pthread_mutex_lock(&mu);
+        st_running = 1;
+        abort_req = 0;
+        pthread_mutex_unlock(&mu);
+        pthread_t t;
+        pthread_create(&t, NULL, stand_down, NULL);
+        real_pause = 1;
+        diag_shutdown();
+        real_pause = 0;
+        int ended = !diag_running();
+        diag_abort();                   /* a thread that was never asked is let go */
+        pthread_mutex_lock(&mu);
+        abort_req = 1;
+        pthread_mutex_unlock(&mu);
+        pthread_join(t, NULL);
+        CHECK(ended, "the run was asked to end, and the stop returned once it had");
+    }
 
     unlink(ROOT "pic/water_temp_1");
     unlink(ROOT "pic/water_temp_2");

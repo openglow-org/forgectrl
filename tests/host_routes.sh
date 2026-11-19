@@ -20,6 +20,14 @@
 #     report with the secret ends the session, and a quiet hold may not
 #     take the pump while the engine cools down after it; the secret dies
 #     with its controller
+#   the daemon's stop: with a busy kernel and the stop lever's request held
+#     open on a controller whose own stop takes 1.5 s, the safing pair lands
+#     after the daemon's SIGTERM while that controller still runs (polled
+#     for 0.8 s), before the listeners' join
+#   a listener that cannot start (the HTTP port held by another listener),
+#     on a machine ready for a controller: the daemon leaves through its
+#     stop, non-zero, having opened no broker, written no cnc/enable and
+#     started no controller
 #   /events: the stream, the cap, the reads beside it, a freed place
 #   the motion routes: the token, the numbers, a line on the port each;
 #     GET /motion/state passing the port's state on, GET /motion/sender,
@@ -142,7 +150,7 @@ report() {
     fi
 }
 
-start_daemon() {
+launch_daemon() {
     env LD_LIBRARY_PATH="$ULIB" FORGECTRL_HOST_TEST=1 \
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$T/data/forgefirm.conf" \
         FFLOG_CONF="$T/data/forgefirm.conf" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
@@ -156,6 +164,9 @@ start_daemon() {
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
+}
+start_daemon() {
+    launch_daemon
     curl -s -o /dev/null --retry 30 --retry-connrefused --retry-delay 1 "$URL/status" \
         || fatal "the daemon did not answer"
 }
@@ -181,8 +192,10 @@ echo 8 > "$T/switches"
 : > "$T/port.log"
 echo "cool_intake_fans = 1" > "$T/data/forgefirm.conf"
 # The GRBL controller's stand-in: it records its pid, its arguments and
-# the secret it was handed, and stays up. The cloud client's must never
-# start. sshd's init script is a stand-in that records each action.
+# the secret it was handed, and stays up until its SIGTERM. While the file
+# slow-stop stands, its own stop takes 1.5 s, as a controller's ramp to a
+# stop does, and a second SIGTERM changes nothing. The cloud client's must
+# never start. sshd's init script is a stand-in that records each action.
 cat > "$T/bin/grbl" <<EOF
 #!/bin/sh
 echo \$\$ >> "$T/ctl.pids"
@@ -190,7 +203,10 @@ echo \$\$ > "$T/ctl.pid"
 echo "\$*" > "$T/ctl.args"
 printf '%s\n' "\$GF_REPORT_SECRET" > "$T/ctl.secret.new"
 mv "$T/ctl.secret.new" "$T/ctl.secret"
-exec sleep 600
+trap 'kill \$S 2>/dev/null; if [ -e "$T/slow-stop" ]; then trap "" TERM; echo \$\$ > "$T/ctl.term"; sleep 1.5; fi; exit 0' TERM
+sleep 600 &
+S=\$!
+wait \$S
 EOF
 printf '#!/bin/sh\necho "$0" >> "%s/cloud.started"\n' "$T" > "$T/bin/cloud"
 printf '#!/bin/sh\necho "$1" >> "%s/sshd.log"\n' "$T" > "$T/bin/sshd-init"
@@ -710,8 +726,103 @@ expect 403 "$(report run "$SEC")" "the exited controller's secret is refused"
 until_ok 50 eval '[ "$(grbl_block)" = none ]' && ok "/status no longer carries the grbl block" \
     || bad "the grbl block outlived its controller: $(grbl_block)"
 
+echo "== the daemon's stop lands the safing pair before it waits on a connection"
+# A busy kernel, a controller whose own stop takes 1.5 s, and a request held
+# open on it: the stop lever, whose handler waits for that controller to
+# exit, so the listeners' join waits for it too. The pair the lever and the
+# lifecycle thread wrote is put back to 0, and the daemon gets its SIGTERM:
+# both attributes read 1 again while the controller the handler waits for
+# still runs (polled for 0.8 s of its 1.5 s).
+pair() { echo "$(cat "$SYS/cnc/stop")$(cat "$SYS/cnc/laser_latch")"; }
+P=$(up)
+rm -f "$T/ctl.term"
+: > "$T/slow-stop"
+echo running > "$SYS/cnc/state"
+n_out=$(wc -l < "$T/out")
+post /controller/stop "$TOKEN" > /dev/null &
+LEVER=$!
+until_ok 50 test -s "$T/ctl.term" || bad "the lever did not reach the controller's stand-in"
+STOPPING=$(cat "$T/ctl.term")
+# The earlier writers of the pair are done: the lever (its pair came before
+# the stand-in's signal), and the lifecycle thread's own stop, which says so
+# in the log and then writes the pair. Then the pair goes back to 0, until
+# it stays there.
+n=0
+until { tail -n +$((n_out + 1)) "$T/out" | grep -q 'super: stopping grbl controller' && [ "$(pair)" = 11 ]; } \
+        || [ $n -ge 50 ]; do
+    n=$((n + 1))
+    sleep 0.01
+done
+[ $n -lt 50 ] || bad "the lifecycle thread's stop did not begin after the lever (pair $(pair))"
+n=0
+while :; do
+    echo 0 > "$SYS/cnc/stop"
+    echo 0 > "$SYS/cnc/laser_latch"
+    sleep 0.05
+    [ "$(pair)" = 00 ] && break
+    n=$((n + 1))
+    [ $n -lt 5 ] || break
+done
+rm -f "$T/stop.late"
+( sleep 0.8; : > "$T/stop.late" ) &
+LATE=$!
+kill $PID
+n=0
+until [ "$(pair)" = 11 ] || [ -e "$T/stop.late" ]; do
+    n=$((n + 1))
+    sleep 0.01
+done
+kill $LATE 2>/dev/null
+wait $LATE 2>/dev/null
+if [ "$(pair)" = 11 ] && alive "$STOPPING"; then
+    ok "the stop's safing pair lands at once, with the lever's handler still waiting (after $n polls of 10 ms)"
+else
+    bad "the stop's safing pair is not in after the SIGTERM while the lever's handler waits (pair $(pair), $n polls, the controller's stand-in $(alive "$STOPPING" && echo running || echo gone))"
+fi
+until_ok 75 eval '! alive $PID' || fatal "the daemon did not stop in 15 s"
+wait $PID
+PID=
+wait $LEVER
+rm -f "$T/slow-stop"
+echo idle > "$SYS/cnc/state"
+
+echo "== a listener that cannot start: the daemon leaves through its stop, having moved nothing"
+# The machine as every start above found it, ready for a controller (the
+# setup finished, the enclosure closed, the pulse device there), and the
+# HTTP port held by another listener. The supervisor waits for the
+# daemon's listener before it opens the broker, probes or starts a
+# controller, so this daemon does none of them.
+python3 -c 'import socket, sys, time
+s = socket.socket(socket.AF_INET6)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("::", int(sys.argv[1])))
+s.listen()
+time.sleep(60)' $HTTP_PORT &
+HOLDER=$!
+EVS="$EVS $HOLDER"
+until_ok 25 python3 -c 'import socket, sys
+socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1).close()' $HTTP_PORT 2>/dev/null     || bad "the port's holder did not listen"
+n_out=$(wc -l < "$T/out")
+n_ctl=$(wc -l < "$T/ctl.pids")
+: > "$SYS/cnc/enable"
+launch_daemon
+until_ok 150 eval '! alive $PID' || fatal "with its port held, the daemon did not exit in 30 s"
+wait $PID
+rc=$?
+PID=
+kill $HOLDER 2>/dev/null
+wait $HOLDER 2>/dev/null
+tail -n +$((n_out + 1)) "$T/out" > "$T/out.held"
+[ $rc -ne 0 ] && ok "with its port held, the daemon exits non-zero" || bad "with its port held, the daemon exited 0"
+sed -n "/cannot start HTTP on port $HTTP_PORT/,\$p" "$T/out.held" | grep -q 'shutting down' \
+    && ok "through its stop" || bad "with its port held, the daemon did not leave through its stop"
+! grep -q '(broker)' "$T/out.held" && ok "the broker was never opened" \
+    || bad "the broker was opened before the listener: $(grep '(broker)' "$T/out.held")"
+[ ! -s "$SYS/cnc/enable" ] && ok "cnc/enable was not written: no probe moved" \
+    || bad "cnc/enable was written before the listener: '$(cat "$SYS/cnc/enable")'"
+expect "$n_ctl" "$(wc -l < "$T/ctl.pids")" "and no controller was started"
+
 echo "== an sshd init override outside its form runs nothing"
-stop_daemon
 cp "$T/bin/sshd-init" "$T/bin/sshd init"     # a runnable file, at a path with a space
 n=$(wc -l < "$T/sshd.log")
 SSHD_INIT="$T/bin/sshd init" start_daemon

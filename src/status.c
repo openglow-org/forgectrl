@@ -516,8 +516,9 @@ long supply_temp_raw(void)
  * carries iowait, which the kernel may lower between reads, so an idle
  * step backward repeats the last percent too and an idle step past the
  * interval reads as no busy time. The daemon is thread-per-connection,
- * so the counters sit behind a mutex. GF_PROC_STAT overrides the file
- * for host tests. Returns -1 when unreadable or unprimed. */
+ * so the counters sit behind a mutex. The test hook GF_PROC_STAT moves
+ * the file in a host-test run (testhook.h). Returns -1 when unreadable or
+ * unprimed. */
 static double cpu_used_pct(void)
 {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -525,8 +526,8 @@ static double cpu_used_pct(void)
     static double last = -1;
     static int primed;
 
-    const char *path = getenv("GF_PROC_STAT");
-    FILE *f = fopen(path && *path ? path : "/proc/stat", "r");
+    const char *path = ff_test_hook("GF_PROC_STAT");
+    FILE *f = fopen(path ? path : "/proc/stat", "r");
     if (!f)
         return -1;
     unsigned long long v[8] = {0};

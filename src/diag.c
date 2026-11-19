@@ -366,7 +366,7 @@ static void *runner_aa(void *arg)
         controller_start();
         goto out_norestart;
     }
-    close(open(MARKER, O_CREAT | O_WRONLY, 0644));
+    close(open(MARKER, O_CREAT | O_WRONLY | O_CLOEXEC, 0644));
 
     double sd[AA_EDGES], su[AA_EDGES];
     int n = 0;
@@ -540,6 +540,15 @@ void diag_abort(void)
     if (st_running)
         abort_req = 1;
     pthread_mutex_unlock(&mu);
+}
+
+void diag_shutdown(void)
+{
+    diag_abort();
+    for (int i = 0; i < 100 && diag_running(); i++)
+        usleep(100 * 1000);
+    if (diag_running())
+        fflog(LOG_WARNING, "diag: the diagnostic did not end in 10 s - the daemon stops without it");
 }
 
 int diag_status_json(char *buf, size_t len)

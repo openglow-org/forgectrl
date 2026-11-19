@@ -14,8 +14,19 @@
  * controller process is already running (legacy init scripts), the
  * supervisor stands by instead of fighting it. */
 void super_init(void);
+/* The daemon's HTTP listener is up: nothing moves and no controller starts
+ * before this call. */
+void super_listening(void);
 
-/* Stop the supervised controller (SIGTERM, escalating) and the thread. */
+/* The daemon's stop, in two calls. super_shutdown_begin, as the stop
+ * begins: the safing pair (cnc/stop and the latch) lands at once, nothing
+ * starts from then on, a live controller is sent its SIGTERM, a probe or a
+ * sweep in flight ends between its steps, and the waits that hold a
+ * connection thread end. super_shutdown,
+ * at its end: the controller stopped the deliberate way, busy or idle
+ * (SIGTERM, escalating), then the lifecycle thread, then the broker. It
+ * begins the stop itself when nobody did. */
+void super_shutdown_begin(void);
 void super_shutdown(void);
 
 /* Whether the motion check failed: no controller runs until it is retried. */
@@ -29,11 +40,17 @@ int super_motion_fault(void);
  * inside its own hold), or NULL for anybody else. */
 int super_mode_switch(const char *mode, const char *as, char *err, size_t elen);
 
-/* The stop lever (POST /controller/stop): stop the active controller
- * without changing the selected mode and hold supervision suspended
- * (returns 0 once it is down); and the start that resumes supervision,
+/* The stop lever (POST /controller/stop): the safing pair at once, and the
+ * controller's SIGTERM from the caller's thread, then stop the active
+ * controller without changing the selected mode and hold supervision
+ * suspended. Returns 0 once it is down; 1 at once while the supervisor
+ * stands by beside a controller it did not start (the pair is in, the hold
+ * stands, and that controller is ended once the machine is idle); -1 when
+ * it has not exited in 15 s (the hold stands, and the supervisor ends it
+ * when it gets to it). The start resumes supervision,
  * clears a motion fault (the operator's retry) and lets the selected
- * mode's controller come back, whichever that is. */
+ * mode's controller come back, whichever that is; neither it nor a mode
+ * switch resumes anything once the daemon's stop has begun. */
 int super_controller_stop(void);
 void super_controller_start(void);
 /* A setup check's or a diagnostic's takeover: the controller stopped for

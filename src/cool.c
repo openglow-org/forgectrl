@@ -3260,8 +3260,8 @@ void cool_shutdown(void)
         crash_hw_armed = 0;
     }
     crash_hw_close();
-    /* On a machine still busy (a run the kernel's dead man's switch halts
-     * as the controller goes with the daemon, super_shutdown), idling the
+    /* On a machine still busy (the deceleration of the stop super_shutdown
+     * made, or a GRBL homing runner that homes on), idling the
      * fans here would drop the exhaust under it, and unlinking the verdict
      * would feed-hold it the moment a reader notices. Leave both alone: an
      * aging verdict file reads exactly like a stopped engine within the
