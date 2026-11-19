@@ -73,7 +73,8 @@
 #     that is not idle, and with a request that cannot be written or a
 #     reboot that cannot be scheduled, leaving no request; then it is
 #     taken, its request written and the reboot scheduled; GET /slots reads
-#     the inventory, and POST /system/reboot schedules its reboot 1 s on;
+#     the inventory, each slot's fields as ffboot -l prints them, and POST
+#     /system/reboot schedules its reboot 1 s on;
 #     with the controller stopped, a paused job's state file refuses nothing
 #   a dev image (GF_DEV_MARKER): a setup seed with no record becomes the
 #     record at start, with the account the users file holds; the login
@@ -953,6 +954,23 @@ rm -f "$T/data/reset-requested" "$T/data/upload.fw" "$T/reboot"
 # The inventory and the reboot route, through the same hooks.
 expect "200|True" "$(curl -s -o "$T/body" -w '%{http_code}' "$URL/slots")|$(jv 'd["slots"]["a"]["booted"] is True')" \
     "GET /slots reads the inventory: slot a booted"
+# The whole inventory as ffboot -l prints it on a machine booted from its
+# card (the bench's): each slot's presence, state, type, version and
+# kernel, which one is booted and which the next boot, the card shown since
+# it is present, and a version cut to its field's 63 characters.
+cp "$T/slots.list" "$T/slots.same"
+V64=v$(printf '%063d' 0)
+printf '%s\n' slot.sd.device=/dev/mmcblk1p1 slot.sd.present=yes slot.sd.state=ok slot.sd.type=forgefirm \
+    slot.sd.version=0.0.11 slot.sd.kernel=yes slot.sd.booted=yes slot.sd.next=yes \
+    slot.a.device=/dev/mmcblk2p1 slot.a.present=yes slot.a.state=ok slot.a.type=factory \
+    slot.a.version=v2.6.0-2228 slot.a.kernel=yes \
+    slot.b.device=/dev/mmcblk2p2 slot.b.present=yes slot.b.state=ok slot.b.type=forgefirm \
+    "slot.b.version=$V64" slot.b.kernel=yes > "$T/slots.list"
+code=$(curl -s -o "$T/body" -w '%{http_code}' "$URL/slots")
+got=$(jv '";".join("%s:%s,%s,%s,%s,%s,%s,%s" % (n, s["present"], s["state"], s["type"], s["version"], s["kernel"], s["booted"], s["next"]) for n, s in sorted(d["slots"].items()))')
+want="a:yes,ok,factory,v2.6.0-2228,yes,False,False;b:yes,ok,forgefirm,$(printf %.63s "$V64"),yes,False,False;sd:yes,ok,forgefirm,0.0.11,yes,True,True"
+expect "200|$want" "$code|$got" "GET /slots carries each slot's fields as ffboot -l prints them, the booted and the next boot marked"
+cp "$T/slots.same" "$T/slots.list"
 code=$(post /system/reboot "$TOKEN" -d confirm=1)
 expect "200|True|reboot in 1 s" "$code|$(jv 'd.get("rebooting")')|$(cat "$T/reboot" 2>/dev/null)" \
     "POST /system/reboot: 200, the reboot scheduled 1 s on"
