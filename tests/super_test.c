@@ -10,7 +10,8 @@
  * read. Every case is a rule the supervisor keeps:
  *
  *   A. a controller death is a signal: SIGCHLD ends the wait at once,
- *      and the pass that follows safes the machine and tells the engine
+ *      and the pass that follows safes the machine, takes the live-feed
+ *      declaration down behind the safing pair, and tells the engine
  *   B. a GRBL controller's homing runner is ended before the respawn,
  *      SIGTERM first, SIGKILL when it stays
  *   C. the respawn waits for the kernel to go idle, bounded: past the
@@ -30,7 +31,9 @@
  *      lens hunt ends the hunt with no marker
  *   G. a safing write is tried three times before it is named;
  *      the stop path lands the stop before the signal and repeats the
- *      pair after it
+ *      pair after it; a controller still there past its SIGTERM grace is
+ *      killed, and the live-feed declaration is down before its reap,
+ *      behind the kill's own safing pair
  *   H. a broker fd that cannot be locked refuses the spawn, and an
  *      open that fails keeps trying instead of a self-opening controller;
  *      GF_PULSE_DEV moves the device, and the refusal names the path
@@ -41,7 +44,9 @@
  *      the safing pair landed before the SIGTERM, and starts it again
  *      without a backoff
  *   J. a motor release is nobody's to end but the operator's: the probe
- *      is skipped with nothing written to the rail, the lens is still
+ *      is skipped with nothing written to the rail (a kernel left disabled
+ *      stays disabled, and one line at LOG_WARNING says so), the lens is
+ *      still
  *      swept before the controller and waits for an open lid, the
  *      controller still starts, and a switch to cloud mode is refused
  *   L. the report channel is the running controller's alone: each spawn
@@ -63,10 +68,14 @@
  *      motion faults in their own words, with no rail cycle
  *   Q. the kernel as the last holder left it: a stepper fault gets one
  *      enable (named, and a motion fault in its own words when refused,
- *      never retried by the passes), an underrun is acknowledged, a
+ *      written once and never retried by the passes), an underrun is
+ *      acknowledged, a
  *      kernel still playing is waited for, bounded, then halted; a
  *      respawn over a stepper fault is a motion fault, not a halt and a
- *      spawn; a shutdown and a standby treat a fault as playing nothing
+ *      spawn; a respawn over an underrun acknowledges it with a stop and
+ *      goes ahead in that pass, with no halt, and one whose stop is
+ *      refused (a fault landed) starts nothing and names the fault; a
+ *      shutdown and a standby treat a fault as playing nothing
  *   R. a check's hand-back ends its own takeover alone: an operator's
  *      stop and a motion fault outlive it; a check's probe that ends
  *      before a verdict leaves motion unverified, and one the lever ends
@@ -82,7 +91,11 @@
  *   T. a lever or a takeover that lands in the pass's enclosure read,
  *      with the lock down, is followed by no lens step and no spawn
  *   U. the lever reaches the wait for a busy kernel; an enable refused at
- *      a later rung is a motion fault; /mode names a stepper fault by what
+ *      a later rung is a motion fault; a stepper fault the probe's own move
+ *      raises, at the first rung or a later one, and a state that cannot be
+ *      read, end the ladder before its next rail-off rung as a motion fault
+ *      (the mask named), with no enable after the probe; /mode names a
+ *      stepper fault by what
  *      the kernel holds; a third move stopped under an opening with no
  *      whole move between is a motion fault, an opening before a move not
  *      ending the count; a check's probe under the lever's hold moves
@@ -274,6 +287,12 @@ static int crit_logs;                   /* the safing failures named (fflog at L
 static char crit_named[64];             /* ...the write each names, in order: S cnc/stop, L cnc/laser_latch, ? another */
 static int kill_crit[64];               /* ...as each signal found them */
 static int reap_crit = -1;              /* ...as waitpid reported the death (-1: not yet) */
+static long reap_streaming = -1;        /* cnc/streaming as waitpid reported the death (G) */
+static int ctl_term_ignored;            /* the controller stays past SIGTERM; SIGKILL ends it (G) */
+static int ctl_unlocks_late;            /* ...and before the SIGKILL lands it opens the latch again (G) */
+static double fork_at = -1.0;           /* the fake clock at the last controller fork (Q) */
+static double stop_at = -1.0;           /* ...and at the last cnc/stop write (Q) */
+static int stop_faults;                 /* a cnc/stop write finds a fault landed and is refused (Q) */
 static int runner_alive;                /* pgrep -x gfhome.py answers 0 */
 static int runner_term_ignored;         /* ...and SIGTERM does not end it */
 static int flock_fails;
@@ -309,6 +328,7 @@ pid_t fake_fork(void)
             return -1;
         }
         forks++;
+        fork_at = fake_now;
         note("fork-controller");
         if (real_fork_controller) {
             real_fork_controller = 0;
@@ -331,6 +351,16 @@ static int safe_writes;                                 /* head/safe's writes, e
 static int safe_forks = -1;                             /* controller forks at head/safe's last write */
 static int safe_probes = -1;                            /* motion probes at head/safe's last write */
 static int probes;                                      /* (the probe fake's count, below) */
+static long stream_seen_stop = -1, stream_seen_latch = -1;  /* the pair as cnc/streaming's first write found it (A) */
+static int enable_opens, disable_opens;                 /* writes of cnc/enable and cnc/disable tried (Q, U) */
+static int warn_logs, notice_logs;                      /* lines logged at LOG_WARNING and at LOG_NOTICE (J, Q) */
+
+/* The path names this attribute. */
+static int names(const char *path, const char *attr)
+{
+    size_t lp = strlen(path), la = strlen(attr);
+    return lp >= la && !strcmp(path + lp - la, attr);
+}
 
 int fake_open(const char *path, int flags, ...)
 {
@@ -341,8 +371,7 @@ int fake_open(const char *path, int flags, ...)
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    size_t lp = strlen(path), la = strlen("head/safe");
-    if ((flags & O_WRONLY) && lp >= la && !strcmp(path + lp - la, "head/safe")) {
+    if ((flags & O_WRONLY) && names(path, "head/safe")) {
         safe_writes++;
         safe_forks = forks;
         safe_probes = probes;
@@ -350,6 +379,24 @@ int fake_open(const char *path, int flags, ...)
             safe_seen_stop = get_long("cnc/stop");
             safe_seen_latch = get_long("cnc/laser_latch");
         }
+    }
+    if ((flags & O_WRONLY) && names(path, "cnc/streaming") && stream_seen_stop < 0) {
+        stream_seen_stop = get_long("cnc/stop");
+        stream_seen_latch = get_long("cnc/laser_latch");
+    }
+    if ((flags & O_WRONLY) && names(path, "cnc/enable"))
+        enable_opens++;
+    if ((flags & O_WRONLY) && names(path, "cnc/disable"))
+        disable_opens++;
+    if ((flags & O_WRONLY) && names(path, "cnc/stop")) {
+        if (stop_faults) {
+            /* A fault lands after the state was read: the kernel refuses
+             * the stop in it (EPERM). */
+            put("cnc/state", "fault\n");
+            errno = EPERM;
+            return -1;
+        }
+        stop_at = fake_now;
     }
     return openat(AT_FDCWD, path, flags, mode);
 }
@@ -372,6 +419,7 @@ pid_t fake_waitpid(pid_t pid, int *status, int flags)
         *status = death_status;
         death_pid = 0;
         reap_crit = crit_logs;          /* the notices named before the reap's own writes */
+        reap_streaming = get_long("cnc/streaming");     /* ...and what stood before them */
         return pid;
     }
     return 0;
@@ -389,6 +437,14 @@ int fake_kill(pid_t pid, int sig)
         kill_crit[nkills] = crit_logs;
         kill_thrun[nkills] = th_run;
     }
+    if (sig == SIGKILL && ctl_unlocks_late) {
+        /* The controller, still there past its grace, opened the latch
+         * again: the SIGKILL path's own pair is what locks it. */
+        ctl_unlocks_late = 0;
+        put("cnc/stop", "0\n");
+        put("cnc/laser_latch", "0\n");
+        stream_seen_stop = stream_seen_latch = -1;
+    }
     if (unlink_on_kill) {
         char path[160];
         snprintf(path, sizeof(path), GF_SYSFS "%s", unlink_on_kill);
@@ -396,8 +452,9 @@ int fake_kill(pid_t pid, int sig)
         unlink_on_kill = NULL;
     }
     nkills++;
-    /* SIGTERM to the child: it dies, the next waitpid finds it. */
-    if (sig == SIGTERM && pid > 0)
+    /* SIGTERM to the child: it dies, the next waitpid finds it. One that
+     * stays past SIGTERM dies at the SIGKILL. */
+    if (pid > 0 && (sig == SIGKILL || (sig == SIGTERM && !ctl_term_ignored)))
         death_pid = pid;
     return 0;
 }
@@ -478,6 +535,8 @@ static int probe_lever;                 /* the lever lands while the probe runs 
 static int probe_stop_seen;             /* ...and the probe's stop input answered it */
 static int open_after_probe;            /* the switches stop answering as the probe returns */
 static int enable_gone_after_probe;     /* cnc/enable refuses from the first probe on */
+static int fault_after_probe;           /* the move of the probe of this count (1: the first) latches a stepper fault (U) */
+static int state_gone_after_probe;      /* cnc/state cannot be read after the probe (U) */
 static int enclosure_open;              /* 1 open, -1 the switches cannot be read, 0 closed */
 static int enclosure_race;              /* the next enclosure read lands 1 the lever, 2 a takeover */
 static int race_rc = -9;                /* ...and what it answered */
@@ -501,6 +560,16 @@ int fake_liveness_probe(int fd, char *detail, size_t dlen, int (*stop)(void))
         enclosure_open = -1;
     if (enable_gone_after_probe)
         unlink(GF_SYSFS "cnc/enable");
+    if (fault_after_probe && probes >= fault_after_probe) {
+        /* The fault tasklet stopped the move: the state reads fault, its
+         * mask latched; the enable the rung began with is forgotten, so a
+         * second one shows. */
+        put("cnc/state", "fault\n");
+        put("cnc/faults", "1\n");
+        put("cnc/enable", "0\n");
+    }
+    if (state_gone_after_probe)
+        unlink(GF_SYSFS "cnc/state");
     return rc;
 }
 
@@ -546,6 +615,8 @@ void fflog(int prio, const char *fmt, ...)
                                   : strstr(last_log, " cnc/laser_latch ") ? 'L' : '?';
         crit_logs++;
     }
+    warn_logs += prio == LOG_WARNING;
+    notice_logs += prio == LOG_NOTICE;
     size_t n = strlen(logs);
     snprintf(logs + n, sizeof(logs) - n, "%s\n", last_log);
     printf("    log: %s\n", last_log);
@@ -714,6 +785,7 @@ static void make_tree(void)
     put("cnc/disable", "0\n");
     put("cnc/state", "idle\n");
     put("cnc/faults", "0\n");
+    put("cnc/streaming", "0\n");
     put("head/safe", "0\n");
     FILE *f = fopen(PULSE_DEV, "w");
     if (f)
@@ -724,13 +796,17 @@ static void make_tree(void)
     unlink(RELEASE_MARKER);
 }
 
+/* The attributes a reap writes, back to what a running controller leaves:
+ * its live feed declared. */
 static void clear_safing(void)
 {
     put("cnc/stop", "0\n");
     put("cnc/laser_latch", "0\n");
     put("cnc/halt", "0\n");
+    put("cnc/streaming", "1\n");
     put("head/safe", "0\n");
     safe_seen_stop = safe_seen_latch = -1;
+    stream_seen_stop = stream_seen_latch = -1;
 }
 
 /* The kernel at rest, its rail writes forgotten. */
@@ -821,6 +897,13 @@ static void reset_state(void)
     machine_idle = 1;
     runner_alive = 0;
     runner_term_ignored = 0;
+    ctl_term_ignored = 0;
+    ctl_unlocks_late = 0;
+    stop_faults = 0;
+    enable_opens = disable_opens = 0;
+    warn_logs = notice_logs = 0;
+    fork_at = stop_at = -1.0;
+    reap_streaming = -1;
     flock_fails = 0;
     engine_stops = 0;
     crit_reset();
@@ -831,6 +914,8 @@ static void reset_state(void)
     probe_lever = 0;
     open_after_probe = 0;
     enable_gone_after_probe = 0;
+    fault_after_probe = 0;
+    state_gone_after_probe = 0;
     enclosure_race = 0;
     race_rc = -9;
     abort_on_sleep = 0;
@@ -962,6 +1047,8 @@ int main(void)
     tick();
     CHECK(child_pid == 0, "the pass reaps the dead controller");
     CHECK(safed(), "and safes the machine: motion stopped, the latch locked");
+    CHECK(get_long("cnc/streaming") == 0 && stream_seen_stop == 1 && stream_seen_latch == 1,
+          "then takes the live-feed declaration down, behind the pair");
     CHECK(engine_stops == 1, "and tells the engine its reporter is gone");
     CHECK(strstr(last_log, "respawn in") != NULL, "the respawn is armed");
 
@@ -989,15 +1076,18 @@ int main(void)
     printf("C. the respawn waits for the kernel, bounded\n");
     bring_up();
     machine_idle = 0;
+    put("cnc/state", "running\n");
     die(0x0900);
     tick();
     fake_now += 2.0;
     CHECK(!run_until_spawned(5.0), "no respawn while the kernel runs (7 s)");
     machine_idle = 1;
+    put("cnc/state", "idle\n");
     CHECK(run_until_spawned(1.0), "the respawn follows the kernel's idle");
     CHECK(get_long("cnc/halt") == 0, "nothing was halted");
     bring_up();
     machine_idle = 0;
+    put("cnc/state", "running\n");
     die(0x0900);
     tick();
     fake_now += 2.0;
@@ -1148,6 +1238,19 @@ int main(void)
           "and once more at the reap: the stop and the latch");
     put("cnc/laser_latch", "0\n");
     put("cnc/stop", "0\n");
+    bring_up();                         /* its live feed declared (clear_safing) */
+    ctl_term_ignored = 1;
+    ctl_unlocks_late = 1;
+    pthread_mutex_lock(&mu);
+    suspended = 1;
+    stop_locked();
+    pthread_mutex_unlock(&mu);
+    ctl_term_ignored = 0;
+    CHECK(child_pid == 0 && nkills == 4 && kills[2] == SIGKILL && kills[3] == SIGKILL && reap_streaming == 0,
+          "a controller still there past its SIGTERM grace is killed, and the live-feed declaration is "
+          "down before its reap");
+    CHECK(stream_seen_stop == 1 && stream_seen_latch == 1,
+          "the kill's live-feed write comes behind its own safing pair");
 
     printf("H. the broker fails closed\n");
     reset_state();
@@ -1203,6 +1306,7 @@ int main(void)
 
     printf("J. a motor release is not ended from here\n");
     reset_state();
+    put("cnc/state", "idle\n");
     put("cnc/enable", "0\n");           /* the cases before this one probed */
     put("cnc/disable", "0\n");
     {
@@ -1232,6 +1336,17 @@ int main(void)
         CHECK(want == Ctl_Grbl, "the mode did not change");
     }
     cloud_enabled = 0;
+    /* A kernel left disabled (a module load, a drill's disable) under the
+     * release stays disabled: no rail power-up the probe does not follow. */
+    reset_state();
+    put("cnc/state", "disabled\n");
+    put("cnc/enable", "0\n");
+    put("cnc/disable", "0\n");
+    CHECK(run_until_spawned(5.0) && probes == 0 && probe_skipped && get_long("cnc/enable") == 0 &&
+          get_long("cnc/disable") == 0 && get_long("cnc/halt") == 0 && warn_logs == 1,
+          "a kernel left disabled under the release: no enable, no disable, no halt, no probe, and one "
+          "warning logged");
+    put("cnc/state", "idle\n");
     unlink(RELEASE_MARKER);
     reset_state();
     CHECK(run_until_spawned(5.0) && probes == 1 && !probe_skipped,
@@ -1440,6 +1555,7 @@ int main(void)
     tick();
     CHECK(probes == 0 && super_motion_fault() && forks == 0 && get_long("cnc/disable") == 0,
           "a stepper fault the enable cannot clear is a motion fault: no probe, no rail cycle");
+    CHECK(enable_opens == 1, "the refused enable was written once: a refusal is the answer, not retried");
     {
         char st[256];
         super_status_json(st, sizeof(st));
@@ -1451,6 +1567,12 @@ int main(void)
         fake_now += 2.0;
     }
     CHECK(crit_logs == crits && probes == 0, "and the enable is not tried again until a retry");
+    reset_state();
+    put("cnc/state", "disabled\n");
+    unlink(GF_SYSFS "cnc/enable");      /* refused with no fault to read: a rail that does not read on */
+    tick();
+    CHECK(probes == 0 && super_motion_fault() && forks == 0 && enable_opens == 1 && disable_opens == 0,
+          "an enable refused at the first rung with the state no fault ends the ladder too: no rail-off rung, no second enable");
     reset_state();
     put("cnc/state", "fault\n");
     put("cnc/faults", "1\n");           /* latched, its line cleared */
@@ -1492,6 +1614,39 @@ int main(void)
     int before_probes = probes;
     CHECK(run_until_spawned(3.0) && probes == before_probes + 1 && get_long("cnc/enable") == 1,
           "the retry probes, with its one enable, before the controller starts");
+    bring_up();
+    die(0x0900);
+    tick();                             /* the reap's own stop finds the kernel idle... */
+    put("cnc/state", "underrun\n");     /* ...and the ring the controller left runs dry after it */
+    machine_idle = 0;                   /* an underrun is not idle (status.c) */
+    clear_safing();
+    crit_reset();
+    CHECK(run_until_spawned(RESPAWN_IDLE_WAIT_S / 2.0) && get_long("cnc/stop") == 1 &&
+          get_long("cnc/halt") == 0 && crit_logs == 0 && fork_at == stop_at,
+          "a respawn over an underrun: acknowledged with a stop, no halt, and the controller starts in "
+          "the pass that acknowledged it");
+    machine_idle = 1;
+    /* The acknowledgment's stop refused: a fault landed after the state
+     * was read. No controller starts into it: the next pass reads the
+     * fault. */
+    bring_up();
+    die(0x0900);
+    tick();
+    put("cnc/state", "underrun\n");
+    machine_idle = 0;
+    stop_faults = 1;
+    crit_reset();
+    notice_logs = 0;
+    {
+        int before_forks = forks;
+        CHECK(!run_until_spawned(RESPAWN_IDLE_WAIT_S + 5.0) && forks == before_forks &&
+              super_motion_fault() && get_long("cnc/halt") == 0 && notice_logs == 0,
+              "a respawn whose underrun stop is refused: no controller, the fault named, no halt, "
+              "nothing logged as a notice (no acknowledgment)");
+    }
+    stop_faults = 0;
+    machine_idle = 1;
+    put("cnc/state", "idle\n");
     bring_up();
     put("cnc/state", "fault\n");
     machine_idle = 0;
@@ -1692,6 +1847,34 @@ int main(void)
     tick();
     CHECK(probes == 1 && super_motion_fault(),
           "an enable refused at a later rung (a fault latched with the rail off) is a motion fault, no second probe");
+    CHECK(enable_opens == 2 && disable_opens == 1,
+          "and that refusal ends the ladder: one enable written per rung reached, no rung after it");
+    reset_state();
+    probe_rc = 0;                       /* no motion at the first rung... */
+    fault_after_probe = 1;              /* ...and the probe's own move latched a stepper fault */
+    tick();
+    {
+        char st[256];
+        super_status_json(st, sizeof(st));
+        CHECK(probes == 1 && super_motion_fault() && forks == 0 && get_long("cnc/disable") == 0 &&
+              get_long("cnc/enable") == 0 && strstr(st, "faults 1") != NULL,
+              "a stepper fault the probe's move raised: a motion fault naming its mask, no rail-off rung, "
+              "no enable after it");
+    }
+    reset_state();
+    probe_rc = 0;                       /* no motion at the first rung or the second... */
+    fault_after_probe = 2;              /* ...and the second rung's move latched the fault */
+    tick();
+    CHECK(probes == 2 && super_motion_fault() && forks == 0 && disable_opens == 1 &&
+          get_long("cnc/enable") == 0,
+          "a stepper fault a later rung's move raised: the state is read before each rung, so the "
+          "next rung writes no disable and no enable");
+    reset_state();
+    probe_rc = 0;
+    state_gone_after_probe = 1;         /* the kernel's state cannot be read before the rung */
+    tick();
+    CHECK(probes == 1 && super_motion_fault() && forks == 0 && get_long("cnc/disable") == 0,
+          "a state that cannot be read before a rung: a motion fault, no rail-off rung");
     reset_state();
     probe_rc = 0;                       /* the ladder ends with no motion... */
     tick();

@@ -246,6 +246,7 @@ static int await_listener = 0;
 static int chld_efd = -1;          /* SIGCHLD lands here; the loop waits on it */
 
 static int wr_attr(const char *attr, const char *val);
+static int wr_enable_once(void);
 
 static double wall_s(void)
 {
@@ -523,8 +524,9 @@ static int sweep_stop(void)
  * recovery ladder takes a minute). The DRV8825 drivers can come out of
  * a rail power-up unserviceable; each recovery attempt gives them a
  * longer true power-off before re-probing. Returns 1 verified, 0 fault
- * (dead drivers after the ladder, a lens with no edge, a stepper enable
- * the kernel refuses, or a probe the machine fails, each with its own
+ * (dead drivers after the ladder, a stepper fault a dead verdict finds,
+ * which no rung cycles, a lens with no edge, a stepper enable the kernel
+ * refuses, or a probe the machine fails, each with its own
  * words), 2 when the probe could not run (no accelerometer): the machine
  * is not blocked, but motion stays UNVERIFIED and is reported so; 3 when
  * the probe must wait and run again - the enclosure opened between the
@@ -571,6 +573,15 @@ static int probe_sequence(int fd)
     char *detail = probe_detail;
 
     if (motors_released()) {
+        /* Nothing is written to the rail. A kernel left disabled (a module
+         * load, a drill's disable) stays disabled, and the controller's
+         * runs are refused in it until a probe powers the rail and verifies
+         * the gantry after it: the Motion check, once $ME ends the
+         * release. The log says so. */
+        char st[24];
+        if (rd_attr("cnc/state", st, sizeof(st)) == 0 && !strcmp(st, "disabled"))
+            fflog(LOG_WARNING, "super: the kernel reads disabled under the motor release - the "
+                               "controller's moves are refused until the Motion check, after $ME");
         snprintf(detail, sizeof(probe_detail), "the X and Y motors are released: nothing was moved");
         fflog(LOG_NOTICE, "super: liveness probe: SKIPPED - %s", detail);
         return 2;
@@ -610,6 +621,24 @@ static int probe_sequence(int fd)
 
     for (size_t i = 0; i < sizeof(ladder_s) / sizeof(ladder_s[0]); i++) {
         if (ladder_s[i] > 0) {
+            /* The ladder is for drivers that stopped with no fault
+             * flagged. A stepper fault (the probe's own move can raise
+             * one) is never cycled away: the kernel's disable leaves a
+             * fault as it is, and the probe ends here as a motion fault
+             * naming the mask, with no rail-off and no enable. A state
+             * that cannot be read ends it the same way. */
+            if (rd_attr("cnc/state", st, sizeof(st)) != 0 || !strcmp(st, "fault")) {
+                rd_attr("cnc/faults", faults, sizeof(faults));
+                if (st[0])
+                    snprintf(detail, sizeof(probe_detail), "no motion, and a stepper fault "
+                             "(faults %s): no rail cycle", faults[0] ? faults : "unreadable");
+                else
+                    snprintf(detail, sizeof(probe_detail), "no motion, and the kernel's state "
+                             "cannot be read: no rail cycle");
+                fflog(LOG_CRIT, "super: MOTION FAULT - %s. Controllers stay down (Retry, or the "
+                                "Motion check, once the drivers' fault lines clear).", detail);
+                return 0;
+            }
             fflog(LOG_WARNING, "super: motion dead - rail off %d s "
                                "and re-probing (%zu/3)", ladder_s[i], i);
             wr_attr("cnc/disable", "1");
@@ -618,11 +647,12 @@ static int probe_sequence(int fd)
         }
         if (probe_aborted())
             goto aborted;
-        if (wr_attr("cnc/enable", "1") != 0) {
-            /* One enable, never a loop: a kernel that refuses it (a
-             * stepper fault whose lines still read asserted, or a fault
-             * latched while the rail was off) keeps the controllers down,
-             * in its own words, until the operator retries. */
+        if (wr_enable_once() != 0) {
+            /* One enable, written once, never a loop: a kernel that
+             * refuses it (a stepper fault whose lines still read asserted,
+             * or a fault latched while the rail was off) keeps the
+             * controllers down, in its own words, until the operator
+             * retries. */
             rd_attr("cnc/state", st, sizeof(st));
             rd_attr("cnc/faults", faults, sizeof(faults));
             snprintf(detail, sizeof(probe_detail), "the kernel refused the stepper enable "
@@ -727,6 +757,21 @@ aborted:
     return 4;
 }
 
+/* One write of val to a kernel attribute: 0 when it landed, else its
+ * errno. */
+static int wr_attr_try(const char *attr, const char *val)
+{
+    char path[96];
+    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+        return errno;
+    ssize_t w = write(fd, val, strlen(val));
+    int err = w < 0 ? errno : 0;
+    close(fd);
+    return err;
+}
+
 /* The safing writes (cnc/stop, cnc/laser_latch) are the real safing
  * mechanism under the device broker: a write that fails is tried again
  * before it is named at the highest severity, and the callers on the
@@ -734,25 +779,31 @@ aborted:
  * landed. */
 static int wr_attr(const char *attr, const char *val)
 {
-    char path[96];
-    snprintf(path, sizeof(path), "%s%s", sysfs_root(), attr);
     int err = 0;
     for (int i = 0; i < WR_ATTR_TRIES; i++) {
         if (i)
             usleep(WR_ATTR_RETRY_US);
-        int fd = open(path, O_WRONLY | O_CLOEXEC);
-        if (fd < 0) {
-            err = errno;
-            continue;
-        }
-        ssize_t w = write(fd, val, strlen(val));
-        err = w < 0 ? errno : 0;
-        close(fd);
+        err = wr_attr_try(attr, val);
         if (!err)
             return 0;
     }
     fflog(LOG_CRIT, "super: writing %s to %s failed %d times: %s", val, attr,
           WR_ATTR_TRIES, strerror(err));
+    return -1;
+}
+
+/* The stepper enable is no safing write, and it is written once: its
+ * refusal is the answer. An enable the kernel refuses for a fault that
+ * lands in its own power-on has already taken the 40 V rail on and off
+ * again, and each further try would be another rail cycle over a faulting
+ * driver, which nothing here does to recover. Returns 0 when the kernel
+ * took it. */
+static int wr_enable_once(void)
+{
+    int err = wr_attr_try("cnc/enable", "1");
+    if (!err)
+        return 0;
+    fflog(LOG_CRIT, "super: writing 1 to cnc/enable failed: %s", strerror(err));
     return -1;
 }
 
@@ -1228,6 +1279,12 @@ static void reap_locked(int status)
      * already idle and latched. */
     wr_attr("cnc/stop", "1");
     wr_attr("cnc/laser_latch", "1");
+    /* Then the live-feed declaration, behind the pair and never ahead of
+     * it: the controller is gone and declares nothing again. One that died
+     * mid-stream leaves cnc/streaming at 1: the ring it left draining would
+     * end in an underrun instead of idle, and the next holder would start
+     * on a live feed it never declared. */
+    wr_attr("cnc/streaming", "0");
     /* Then the head, which no close of the device reaches here either: the
      * measuring laser and the UV LED off, the lens driver disabled at low
      * current (head/safe). An emitter the controller left on would
@@ -1339,9 +1396,13 @@ static void stop_locked(void)
             kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
             /* A SIGKILLed child can run no cleanup of its own - safe
-             * the machine now rather than waiting for the reap. */
+             * the machine now rather than waiting for the reap. Behind
+             * the pair, the live-feed declaration goes as it does at the
+             * reap: a killed child declares nothing again, and the reap
+             * writes it once more. */
             wr_attr("cnc/stop", "1");
             wr_attr("cnc/laser_latch", "1");
+            wr_attr("cnc/streaming", "0");
             deadline = wall_s() + STOP_TERM_WAIT_S;
         }
         pthread_mutex_unlock(&mu);
@@ -1509,7 +1570,13 @@ static void pass_locked(void)
                  * fault plays nothing and a halt cannot end it: no
                  * controller starts into it. It is a motion fault in its
                  * own words, and the probe a retry runs gives it its one
-                 * enable and verifies the gantry after it. */
+                 * enable and verifies the gantry after it. An underrun
+                 * plays nothing and nothing in it is waited for: it is
+                 * acknowledged at once with the stop, as the probe does,
+                 * and the respawn goes ahead once the stop is taken. A stop
+                 * the kernel refuses (a fault that landed after the read)
+                 * leaves the wait standing: the next pass reads the state
+                 * again, and a fault takes its branch. */
                 pthread_mutex_unlock(&mu);
                 int idle = machine_is_idle();
                 char st[24] = "", faults[16] = "";
@@ -1531,12 +1598,22 @@ static void pass_locked(void)
                     generation++;
                     fflog(LOG_CRIT, "super: MOTION FAULT - %s; no controller until then", probe_detail);
                 }
+                else if (!strcmp(st, "underrun")) {
+                    if (wr_attr("cnc/stop", "1") == 0) {
+                        fflog(LOG_NOTICE, "super: the kernel reads underrun after the controller left - "
+                                          "acknowledged before the respawn");
+                        respawn_wait_idle = 0;
+                    }
+                    else
+                        go = 0;
+                }
                 else if (wall_s() - died_at < RESPAWN_IDLE_WAIT_S)
                     go = 0;
                 else {
-                    fflog(LOG_CRIT, "super: the kernel is still running %d s "
+                    fflog(LOG_CRIT, "super: the kernel's state is still %s %d s "
                                     "after the controller left - halting it "
-                                    "before the respawn", RESPAWN_IDLE_WAIT_S);
+                                    "before the respawn", st[0] ? st : "unreadable",
+                          RESPAWN_IDLE_WAIT_S);
                     wr_attr("cnc/halt", "1");
                     respawn_wait_idle = 0;
                 }
