@@ -18,7 +18,8 @@
  * taken while the three are full and giving none of them up, and a
  * second host stream replacing the first. The button's own look: a
  * press that begins and ends between two of the 5 Hz gathers, with the
- * machine idle, reaches a stream as pressed and then released. The
+ * machine idle, reaches a stream as pressed and then released, and the
+ * extension host's stream carries neither. The
  * keep-alive's clock: a quiet stream's keep-alive comes 5 s after its
  * read began with the wall clock an hour behind.
  */
@@ -214,6 +215,9 @@ static void test_button(void)
     s = base_snap();
     s.button_wait = 1;
     press("a press this daemon waits for is its own", up, down, &s, "");
+    s = base_snap();
+    s.grbl_unknown = 1;
+    press("a press while the GRBL controller's state is not known may be a job's", up, down, &s, "");
 
     char t[256];
     s = base_snap();
@@ -399,6 +403,10 @@ static void test_short_press(void)
         return;
     }
     events_next(c, buf, sizeof(buf));               /* its greeting */
+    events_client_t *host = events_open_host(why, sizeof(why));
+    CHECK(host != NULL, "the extension host's stream was refused: %s", why);
+    if (host)
+        events_next(host, buf, sizeof(buf));        /* its greeting */
     usleep(500 * 1000);                             /* the baseline is taken */
 
     /* A 100 ms press, started on the gather it follows: the next one is
@@ -424,6 +432,14 @@ static void test_short_press(void)
         CHECK(n > 0 && strstr(buf, "event: button\ndata: {\"pressed\":true}"), "press %d: '%s'", i + 1, buf);
         n = events_next(c, buf, sizeof(buf));
         CHECK(n > 0 && strstr(buf, "event: button\ndata: {\"pressed\":false}"), "release %d: '%s'", i + 1, buf);
+    }
+    /* The extension host's stream carries none of them: the next thing it
+     * reads is the event published after the presses. */
+    if (host) {
+        events_publish("after", "{}");
+        long n = events_next(host, buf, sizeof(buf));
+        CHECK(n > 0 && strstr(buf, "event: after\n"), "the host's stream after the presses: '%s'", buf);
+        events_close(host);
     }
     events_close(c);
     events_shutdown();

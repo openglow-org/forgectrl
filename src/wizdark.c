@@ -56,7 +56,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROMPT_TIMEOUT_S 600     /* an eye at a sheet takes its time */
+#define PROMPT_TIMEOUT_S WIZ_PROMPT_TIMEOUT_S
 #define LOG_LINES 32
 #define LOG_LEN   112
 /* The jog witness: the head accelerometer over the crash watch's own
@@ -524,7 +524,36 @@ void wiz_led_attention(int on)
         led_release();
 }
 
+/* The Switches check asks for the machine's button, so it takes the
+ * machine first: a controller left listening would see the same press,
+ * and a job that reached its arm wait during the prompt would take it as
+ * its own. A busy machine is refused rather than stopped (a stop would
+ * cancel a running job): a job that waits for the press, runs or is
+ * paused, or a Grbl sender connected. The check reads the switches
+ * itself and needs no controller. */
+static void switches_check(void);
+
 static void run_switches(void)
+{
+    char why[128];
+    if (job_takes_button(why, sizeof(why))) {
+        finish_err("%s", why);
+        return;
+    }
+    if (super_grbl_running() && lease_sender_connected && lease_sender_connected()) {
+        finish_err("a Grbl sender is connected to the machine: close it first");
+        return;
+    }
+    phase("stopping the motion controller");
+    if (wiz_controller_stop() != 0) {
+        finish_err("could not stop the motion controller");
+        return;
+    }
+    switches_check();
+    wiz_controller_start();
+}
+
+static void switches_check(void)
 {
     /* EV_SW bits: 2 button, 3 doors (both lid switches, closed = 1),
      * 4 hv_enable readback, 5 interlock (active = the loop is open),
@@ -2121,7 +2150,7 @@ out:
 
 static const wiz_entry_t wizards[] = {
     { "cloud.header",        run_cloud_header,        1 },
-    { "switches",            run_switches,            0 },
+    { "switches",            run_switches,            1 },
     { "sensors",             run_sensors,             1 },
     { "airflow",             run_airflow,             1 },
     { "cooling.aa-offset",   run_cooling_aa,          1 },

@@ -535,6 +535,8 @@ static int grant_ok(const char *g, size_t n)
     return 1;
 }
 
+void (*extpkg_installed)(const char *id) = NULL;
+
 int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen)
 {
     static char held[EXTPKG_GRANTS_MAX][44];
@@ -557,6 +559,10 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     json_t *j = inspect(status, why, wlen);
     if (!j)
         return -1;
+    char pid[80] = "";
+    const char *inspected_id = json_string_value(json_object_get(json_object_get(j, "package"), "id"));
+    if (inspected_id)
+        snprintf(pid, sizeof(pid), "%s", inspected_id);
     const char *consent = consent_of(j);
     const char *flag = NULL;
     if (!strcmp(consent, "typed")) {
@@ -609,6 +615,8 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     }
     json_decref(j);
     extpkg_stage_discard();
+    if (extpkg_installed && pid[0])
+        extpkg_installed(pid);
     *status = 200;
     return 0;
 }

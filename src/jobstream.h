@@ -69,12 +69,26 @@ typedef struct {
     long tp_base, tp_max;               /* thermopile: the dark level, the peak */
 } jobstream_run_t;
 
+/* The GRBL controller's published state (<run>/grbl.state), whole and
+ * current: 0 with the document in body, or -1 when it is missing, torn
+ * (no closing brace, or more than the buffer holds), carries no ts_mono,
+ * or is older than JOBSTREAM_STATE_STALE_S on CLOCK_MONOTONIC. The
+ * controller rewrites it on every change and on a 5 s heartbeat, so a
+ * live controller's file is never that old: one that is has stopped being
+ * written, and what it last said is not known. A stamp up to a second
+ * ahead of the reader is the same moment. Every reader of the file that
+ * decides something reads it here. */
+#define JOBSTREAM_STATE_STALE_S 10.0
+#define JOBSTREAM_STATE_MAX     1024    /* the controller's document is under 700 bytes */
+int jobstream_grbl_state(char *body, size_t len);
+
 /* Is a sender on the Grbl socket (from the controller's published
- * state)? 1, 0, or -1 when the state is unreadable. */
+ * state)? 1, 0, or -1 when the state is unreadable or not current. */
 int jobstream_sender_connected(void);
 /* Whether a run of the daemon's own must be refused for a sender: a
- * connected one, and a state that cannot be read - an unreadable state
- * is no license to displace whoever holds the socket. */
+ * connected one, and a state that cannot be read or is not current - a
+ * state nobody can vouch for is no license to displace whoever holds the
+ * socket. */
 int jobstream_sender_blocks(void);
 
 /* Run a program. 0 when every line was acknowledged and the end

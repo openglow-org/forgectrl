@@ -8,11 +8,16 @@
 # Starts the built forgectrl the way host_setup.sh does for the whole
 # record (the same environment, sysfs tree with cnc/state idle, stand-ins,
 # port listener, and seeded setup record), so the gate is open and the
-# controller's stand-in runs. With an event stream open, the switches
+# controller's stand-in runs. The switches check refuses, and leaves the
+# controller running, while the controller's state file says a job waits
+# for the press, and while it says a Grbl sender is connected. With the
+# file current and idle with no sender, and an event stream open, the
 # check is started and left at its first wait: with no switch device the
 # lid reads open, so it waits on "Close the lid to begin." and moves
 # nothing. While it waits, one case each:
 #
+#   the controller is stopped: the check asks for the button, and no
+#     controller listens for the press meanwhile
 #   /status names the holder wizard:switches, of kind hardware, and
 #     observes sender and motors_released beside it
 #   POST /diag/aa-offset-calibrate, /curve/record, /logs/export, /mode with the
@@ -24,9 +29,10 @@
 # Once the event stream has named the hold (the sampler publishes a
 # lease change only from its next full snapshot, five a second), the
 # check is aborted (and a diagnostic and the recorder stopped, in case a
-# refusal failed): the lease is free, the check is not running, the same
-# settings write is 200, and the event stream said lease.changed for the
-# hold and then for its end. Nothing posts confirm=1, a reboot,
+# refusal failed): the lease is free, the check is not running, the
+# controller runs again, the same settings write is 200, and the event
+# stream said lease.changed for the hold and then for its end. Nothing
+# posts confirm=1, a reboot,
 # /system/ssh, or an update. The daemon runs on the image's ulfius
 # (tests/ulfius_image.sh). Runs unprivileged; build.yml runs it:
 #
@@ -186,6 +192,33 @@ free || fatal "the lease is held before the check: $(holder)"
 MODE=$(curl -s "$URL/mode" | python3 -c 'import json, sys; print(json.load(sys.stdin)["mode"])')
 UNITS=$(curl -s "$URL/settings" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("ui_units") or "metric")')
 
+echo "== the switches check refuses a busy machine"
+# grbl_state <arming 0|1> <connected 0|1>: the controller's own state file,
+# current and idle. The check refuses a controller whose state it cannot
+# know.
+grbl_state() {
+    python3 - "$T/run/grbl.state" "$1" "$2" <<'EOF'
+import json, os, sys, time
+tmp = sys.argv[1] + '.tmp'
+json.dump({'ts_mono': round(time.monotonic(), 3), 'state': 'Idle', 'alarm': 0, 'connected': sys.argv[3] == '1',
+           'laser': {'armed': False, 'arming': sys.argv[2] == '1', 'model': 'density'}}, open(tmp, 'w'),
+          separators=(',', ':'))
+os.replace(tmp, sys.argv[1])
+EOF
+}
+refused() { dark && [ "$(jget "$T/dark.json" '"%s|%s" % (d.get("running"), bool(d.get("error")))')" = "False|True" ]; }
+CTL0=$(cat "$T/ctl.pid")
+# A busy machine is refused, not stopped: a job waiting for the press, a
+# Grbl sender connected. The controller is left as it was.
+for busy in "1 0:a job waiting for the press" "0 1:a Grbl sender connected"; do
+    set -- ${busy%%:*}
+    grbl_state $1 $2
+    expect 200 "$(post /wiz/switches/start "$TOKEN")" "POST /wiz/switches/start beside ${busy#*:} is 200"
+    until_ok 100 refused && ok "the check refuses ${busy#*:}" || bad "the check did not refuse ${busy#*:}: $(cat "$T/dark.json")"
+    alive "$CTL0" && ok "and leaves the controller running" || bad "a refused check stopped the controller"
+done
+grbl_state 0 0
+
 echo "== the switches check holds the machine"
 curl -s -N -o "$T/events" "$URL/events" &
 EVS=$!
@@ -195,6 +228,8 @@ OFF=$(wc -c < "$T/events")
 expect 200 "$(post /wiz/switches/start "$TOKEN")" "POST /wiz/switches/start is 200"
 until_ok 100 waiting && ok "it waits: Close the lid to begin." || bad "the check is not at its first wait: $(cat "$T/dark.json")"
 until_ok 50 held || bad "the lease is not the check's: $(holder)"
+alive "$CTL0" && bad "the controller still runs while the check asks for the button" \
+    || ok "the controller is stopped while the check asks for the button"
 lease
 expect 'wizard:switches|hardware|motors_released,sender' \
     "$(jget "$T/status.json" '"%s|%s|%s" % (d["lease"]["holder"].get("owner"), d["lease"]["holder"].get("kind"), ",".join(sorted(d["lease"].get("observed") or {})))')" \
@@ -234,6 +269,8 @@ post /diag/abort "$TOKEN" > /dev/null
 post /curve/stop "$TOKEN" > /dev/null
 until_ok 150 free && ok "the lease has no holder" || bad "the lease is still held: $(holder)"
 until_ok 150 stopped && ok "the check is not running" || bad "the check still runs: $(cat "$T/dark.json")"
+until_ok 100 eval '[ "$(cat "$T/ctl.pid")" != "$CTL0" ] && ctl_up' && ok "the controller runs again" \
+    || bad "no controller runs after the check"
 expect 200 "$(post /settings "$TOKEN" -d "ui_units=$UNITS")" "the same settings write is then 200"
 sleep 1
 kill $EVS 2>/dev/null

@@ -818,6 +818,9 @@ class Mock:
         self.report_at = self.t0
         self.rep_armed = False
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
+        # The panel's reservation of the button (POST /button/reserve): when it
+        # was opened, and until when its last renewal holds it.
+        self.panel_res = {}             # a dialog's name -> [opened, held until]
         self.upload_unsigned = False    # the staged upload is not signed with the release key
         self.cool_demo = os.environ.get('GF_MOCK_COOL', '')
         self.notices_seen = 0           # the notices dismissed: every seq up to this one
@@ -1076,6 +1079,16 @@ class Mock:
         if g and g['state'] in ('Run', 'Hold'):
             return 'a job is running or paused: finish or cancel it first'
         return None
+
+    def press_unreserved(self):
+        """main.c's panel_press_reserved, as a refusal or None: the button
+        held counts only inside the panel's own reservation of it, standing
+        for 1 s (the daemon counts that from the verdict that carried it).
+        The reservations run on the monotonic clock, as the daemon's do."""
+        now = time.monotonic()
+        if any(until > now and now - since >= 1.0 for since, until in self.panel_res.values()):
+            return None
+        return 'the button was not reserved for this: start it again from the control panel'
 
     # The machine lease (src/lease.c): who has the machine, in the daemon's
     # order of nesting (a diagnostic under its wizard is the innermost), and
@@ -2783,6 +2796,8 @@ class Mock:
                 if not self.button:
                     return T(403, 'hold the machine button to reveal the '
                                   'fuse identity')
+                if self.press_unreserved():
+                    return T(409, self.press_unreserved())
                 return J(200, {'serial': '123456789', 'hostname': 'ABC-123',
                                'password': '0123456789abcdef' * 4})
             if path == '/wiz':
@@ -2908,6 +2923,32 @@ class Mock:
             n = (1 << 32) if upto is None else int(upto) if upto.isdigit() else 0
             self.notices_seen = max(self.notices_seen, n)
             return J(200, {'dismissed': True})
+
+        # The machine's button reserved for one hold dialog (main.c,
+        # cb_button_reserve) under the caller's own name (id), each renewal
+        # good for 10 s; ready once it has stood 1 s with no job taking the
+        # press. A package's page reserves nothing.
+        if path == '/button/reserve':
+            on, nonce = form.get('on'), form.get('id') or ''
+            if on not in ('0', '1'):
+                return T(400, 'on must be 0 or 1')
+            if form.get('pkg') is not None:
+                return T(409, "a package's page reserves nothing: reload the control panel")
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', nonce):
+                return T(400, "id names the prompt: 1 to 32 of letters, digits, '-' and '_'")
+            now = time.monotonic()
+            table = self.panel_res
+            if on == '1':
+                if nonce not in table or table[nonce][1] <= now:
+                    table[nonce] = [now, now + 10.0]
+                else:
+                    table[nonce][1] = now + 10.0
+            else:
+                table.pop(nonce, None)
+            reserved = nonce in table and table[nonce][1] > now
+            waits = self.job_takes_button() if reserved else None
+            ready = reserved and now - table[nonce][0] >= 1.0 and not waits
+            return J(200, {'reserved': reserved, 'ready': bool(ready), 'waits': waits or ''})
 
         if path == '/cool/quiet':
             on = form.get('on')
@@ -3162,6 +3203,8 @@ class Mock:
             if not self.button:
                 return J(403, {'error': 'hold the machine button to reset every setting',
                                'button': 'not held'})
+            if self.press_unreserved():
+                return J(409, {'error': self.press_unreserved()})
             self._log('system: every setting is reset at the next boot '
                       '(mock: down for %d s, nothing reset)' % MOCK_REBOOT_S)
             self.down_until = time.time() + 1.5 + MOCK_REBOOT_S
@@ -3200,6 +3243,8 @@ class Mock:
                 if not self.button:
                     return J(403, {'error': 'hold the machine button to install unsigned firmware',
                                    'button': 'not held'})
+                if self.press_unreserved():
+                    return J(409, {'error': self.press_unreserved()})
             slot, err = self._slot_target(form, J)
             if err:
                 return err

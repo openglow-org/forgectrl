@@ -30,6 +30,7 @@ var EXT_CAPS = {
   ui: 'Show a card of its own on the Extensions tab',
   'ui.background': 'Keep its page running while you are on another tab',
   'sender.keep_out': 'Disconnect the Grbl sender while it uses the machine (only when the machine is idle)',
+  button: "Ask for a press of the machine's button: no laser job starts while it asks",
   'net.outbound': 'Connect to',
   'net.outbound.operator': 'Connect to the places you name for it, below',
   'net.listen': 'Listen on port',
@@ -339,22 +340,24 @@ function renderExtKeys(keys) {
     );
   $('extkeys').innerHTML = g || "<p class='hint'>No key of yours is here: only a package signed by OpenGlow reads as official, and every other one as unverified.</p>";
 }
+/* Adding a key takes the machine's button held: the hold dialog reserves
+ * the button first (panel.js, holdConfirm), so no job takes the press. */
 function extKeyAdd() {
-  extSay('msg-extkey', '\u2026');
-  fx('/ext/key', {
-    method: 'POST',
-    body: new URLSearchParams({ name: $('extkeyname').value.trim(), key: $('extkeytext').value.trim() })
-  })
-    .then(extAnswer)
-    .then(function (j) {
-      extSay('msg-extkey', '');
+  var name = $('extkeyname').value.trim(),
+    key = $('extkeytext').value.trim();
+  extSay('msg-extkey', '');
+  holdConfirm({
+    title: 'Add the key ' + name + '?',
+    body: ['A package signed with it reads as Community from then on.'],
+    send: function () {
+      return fx('/ext/key', { method: 'POST', body: new URLSearchParams({ name: name, key: key }) });
+    },
+    done: function (j) {
       $('extkeyname').value = '';
       $('extkeytext').value = '';
       renderExt(j);
-    })
-    .catch(function (e) {
-      extSay('msg-extkey', String(e));
-    });
+    }
+  });
 }
 function extKeyRemove(name) {
   if (!window.confirm('Remove the key ' + name + '? A package signed with it then reads as unverified.')) return;
@@ -721,7 +724,14 @@ function extBridgeCall(id, call, args) {
   }
   if (call === 'motion.job.abort') return fx('/job/abort', { method: 'POST' }).then(extAnswer);
   if (call === 'motion.job.state') return fx('/job').then(extAnswer);
-  return fx(spec.path).then(extAnswer);
+  return fx(spec.path)
+    .then(extAnswer)
+    .then(function (j) {
+      /* The button's level is no package's to read: a package gets a
+       * press by asking for one (its service's POST /v0/button/ask). */
+      if (call === 'machine.status' && j && j.switches) delete j.switches.button;
+      return j;
+    });
 }
 
 window.addEventListener('message', function (ev) {
@@ -1055,19 +1065,32 @@ function extInstall() {
     boxes = document.querySelectorAll('.extgrant'),
     i;
   for (i = 0; i < boxes.length; i++) if (boxes[i].checked) grants.push(boxes[i].value);
+  var body = { grants: grants.join(','), phrase: $('extinstallphrase').value };
+  var installed = function (j) {
+    extSay('msg-extinstall', '');
+    extStaged = null;
+    $('extstaged').style.display = 'none';
+    $('extfile').value = '';
+    renderExt(j);
+  };
+  /* A package nobody the machine trusts signed takes the button held: the
+   * hold dialog reserves it first (panel.js, holdConfirm). */
+  if (extStaged && extStaged.consent === 'button') {
+    extSay('msg-extinstall', '');
+    holdConfirm({
+      title: 'Install this unverified package?',
+      body: ['Nobody this machine trusts signed it.'],
+      send: function () {
+        return fx('/ext/install', { method: 'POST', body: new URLSearchParams(body) });
+      },
+      done: installed
+    });
+    return;
+  }
   extSay('msg-extinstall', 'installing…');
-  fx('/ext/install', {
-    method: 'POST',
-    body: new URLSearchParams({ grants: grants.join(','), phrase: $('extinstallphrase').value })
-  })
+  fx('/ext/install', { method: 'POST', body: new URLSearchParams(body) })
     .then(extAnswer)
-    .then(function (j) {
-      extSay('msg-extinstall', '');
-      extStaged = null;
-      $('extstaged').style.display = 'none';
-      $('extfile').value = '';
-      renderExt(j);
-    })
+    .then(installed)
     .catch(function (e) {
       extSay('msg-extinstall', String(e));
     });

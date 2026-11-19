@@ -52,8 +52,29 @@ typedef struct {
 /* One step of the service's, held to its form: 0, or -1 with the words. */
 int wizpkg_parse(json_t *body, wizpkg_step_t *s, char *why, size_t wlen);
 
-/* The wizard runner's entry for pkg:<id>. */
+/* The wizard runner's entry for pkg:<id>. A prompt reserves the machine's
+ * button for the package (btnres.h) and is shown only once the
+ * reservation has stood on file for BTNRES_READY_S with no job that would
+ * take the press, naming the waiting job meanwhile, and ends the check
+ * past WIZPKG_READY_WAIT_S. The reservation outlasts the prompt by
+ * WIZPKG_LINGER_S: the Setup page goes on showing a question for up to
+ * 2.5 s and a frame after the request of the last poll that showed it
+ * (wizard.js, DARK_FRESH_MS), however the prompt ended (answered,
+ * aborted, its time out, here or in another browser), and a next
+ * prompt's wait that ends the check keeps it so. tools/check_ui_js.py
+ * holds it over the page's bound. A package's ask for a press keeps its
+ * reservation the same time after the press (btnres.h). */
 void wizpkg_run(void);
+#define WIZPKG_LINGER_S 5.0
+
+/* The two readings that wait asks (main.c points them at
+ * cool_button_on_file_s and job_takes_button); with no on-file reading
+ * the prompt waits for nothing. */
+#ifndef WIZPKG_READY_WAIT_S
+#define WIZPKG_READY_WAIT_S 60.0
+#endif
+extern double (*wizpkg_on_file_s)(void);
+extern int (*wizpkg_job_waits)(char *why, size_t len);
 
 /* 1 when id is pkg:<id> of an installed package that adds a check. */
 int wizpkg_known(const char *id);

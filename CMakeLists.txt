@@ -72,6 +72,7 @@ add_executable(forgectrl
   src/peer.c
   src/camhealth.c
   src/camlamp.c
+  src/btnres.c
   src/cool.c
   src/coolfmt.c
   src/flowcalc.c
@@ -536,18 +537,21 @@ target_link_libraries(mcode_test jansson pthread)
 
 # An extension that keeps the Grbl sender out: the claim, its refusals,
 # its ends (the package's, the operator's, a stale keeper's), and the
-# controller brought back in line, over a scripted port and the real lease.
+# controller brought back in line, and the job runner's keep for a run,
+# over a scripted port and the real lease.
 add_executable(senderout_test tests/senderout_test.c src/senderout.c src/lease.c src/fflog.c)
 target_compile_options(senderout_test PRIVATE -Wall -Wextra)
 target_compile_definitions(senderout_test PRIVATE SENDEROUT_NO_THREAD=1 SENDEROUT_GRACE_S=0.3
-                           SENDEROUT_FRESH_S=0.3 SENDEROUT_REPUSH_S=0.3)
+                           SENDEROUT_FRESH_S=0.3 SENDEROUT_REPUSH_S=0.3
+                           SENDEROUT_RUNNER_WAIT_S=0.3 SENDEROUT_RUNNER_STEP_S=0.05)
 target_link_libraries(senderout_test jansson pthread)
 
 # A package's check on the Setup page: each step held to its form, and a
 # check run end to end on stand-ins for the runner and the host.
 add_executable(wizpkg_test tests/wizpkg_test.c src/wizpkg.c src/extpkg.c src/sha256.c src/fflog.c
-               src/stopsig.c)
+               src/stopsig.c src/btnres.c)
 target_compile_options(wizpkg_test PRIVATE -Wall -Wextra)
+target_compile_definitions(wizpkg_test PRIVATE WIZPKG_READY_WAIT_S=1.0)
 target_link_libraries(wizpkg_test jansson pthread)
 target_compile_options(extpkg_test PRIVATE -Wall -Wextra)
 target_link_libraries(extpkg_test jansson)

@@ -14,6 +14,13 @@ page and fails on any error. It also reads what a page must carry
 defines loadExt before the call panel.js runs while the page parses, so
 a later ext.js is a broken tab.
 
+It holds one bound between the daemon and a page (linger_failure): a
+package check's reservation of the machine's button outlasts its prompt
+by WIZPKG_LINGER_S (src/wizpkg.h), which must exceed what the Setup page
+can go on showing the question (src/ui/wizard.js: DARK_FRESH_MS after the
+request of the last poll that showed it, checked on every frame, with
+50 ms for the frame) by a second at least.
+
 With --embed it also runs src/ui/embed.cmake, as the build runs it, on
 the login page with the dev-image mark taken out, and fails unless the
 script refuses it, saying the page lacks the mark: main.c puts a dev
@@ -56,6 +63,29 @@ def carry_failures(name, html):
         if a < 0 or b < 0 or a > b:
             out.append("%s has no %s before %s" % (name, first, then))
     return out
+
+
+LINGER = (os.path.join("src", "wizpkg.h"), re.compile(r"#define\s+WIZPKG_LINGER_S\s+([0-9]+(?:\.[0-9]+)?)\b"))
+DARK_FRESH = (os.path.join("src", "ui", "wizard.js"), re.compile(r"var\s+DARK_FRESH_MS\s*=\s*([0-9]+)\s*;"))
+DARK_FRAME_SLACK_MS = 50
+LINGER_MARGIN_MS = 1000
+
+
+def linger_failure():
+    """Why WIZPKG_LINGER_S does not outlast the Setup page's question by
+    LINGER_MARGIN_MS, or None when it does."""
+    got = []
+    for rel, pat in (LINGER, DARK_FRESH):
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            m = pat.findall(f.read())
+        if len(m) != 1:
+            return "%s: %d definitions of %s, not one" % (rel, len(m), pat.pattern)
+        got.append(float(m[0]))
+    linger_ms, fresh_ms = got[0] * 1000.0, got[1]
+    if linger_ms < fresh_ms + DARK_FRAME_SLACK_MS + LINGER_MARGIN_MS:
+        return ("WIZPKG_LINGER_S %.0f ms does not outlast the Setup page's question (DARK_FRESH_MS %.0f ms + %d ms) "
+                "by %d ms" % (linger_ms, fresh_ms, DARK_FRAME_SLACK_MS, LINGER_MARGIN_MS))
+    return None
 
 
 def embed_failure(tmp):
@@ -133,6 +163,12 @@ def main():
     for name in sorted(set(MUST_CARRY) - {os.path.basename(p) for p in pages}):
         lacking += 1
         print("FAIL %s is not in the bundle" % name)
+    why = linger_failure()
+    if why:
+        lacking += 1
+        print("FAIL %s" % why)
+    else:
+        print("WIZPKG_LINGER_S outlasts the Setup page's question")
     if not checked:
         print("check_ui_js: no scripts in the bundled pages")
         return 2

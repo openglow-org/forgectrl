@@ -121,6 +121,10 @@ char *extpkg_settings_json(const char *id, const char *patch, int *status, char 
  * that is not held, 502) and the words; the staged file stays for another
  * try. */
 int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen);
+/* Told the id of each package installed, as the host's inspect named it
+ * (main.c: a package installed anew may ask for a press again, btnres.h).
+ * NULL: nobody is told. */
+extern void (*extpkg_installed)(const char *id);
 
 /* The owner's keys, the trust anchor a community package is judged by.
  * Adding one is the operator's own act: forgectrl takes it only with the

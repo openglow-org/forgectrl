@@ -396,7 +396,7 @@ static int fr_verdict(const char *v)
 {
     static const char *const set[] = {
         "FIRE", "CRASH", "FLAME", "BUMP", "AIRFLOW", "CRITICAL", "SENSOR",
-        "OVERTEMP", "COLD",
+        "FANS", "OVERTEMP", "COLD",
     };
     for (size_t i = 0; i < sizeof(set) / sizeof(*set); i++)
         if (!strcmp(v, set[i]))

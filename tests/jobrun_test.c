@@ -20,6 +20,9 @@
  * not at its last ok nor while its state cannot be read, and at once on an
  * underrun; the abort sends the soft reset and frees the
  * lease; a connected Grbl sender refuses the start with nothing sent; a
+ * start keeps the Grbl socket to this host first, a controller that calls
+ * the machine busy refuses it with nothing sent, and a run gives the
+ * socket back once at its end; a
  * run on the caller's thread stands inside a wizard's hold and gives the
  * machine back to the wizard, and is not the abort route's to stop; the
  * ready and done hooks of a started run, with the lease given back from
@@ -30,7 +33,9 @@
  * an error stops the run at the line that drew it; a lit program ends
  * after its dark stretch with the witnesses read; the generator's pacing
  * return, and the abort that ends it with the soft reset; the witness
- * rate against the ticks; the sender check reads the state file.
+ * rate against the ticks; an ok that answers another session's line is
+ * not counted; the sender check reads the state file, and one past its
+ * age is no answer.
  */
 #include "../src/jobrun.h"
 #include "../src/lease.h"
@@ -78,6 +83,7 @@ static struct {
     volatile int lines, resets, holding, release;
     char seen[64][80];
     int lit_after;              /* set hv after this many lines */
+    volatile int stray_ok;      /* an ok after the banner that answers nothing of this session's */
 } mock;
 
 static void *mock_thread(void *arg)
@@ -89,6 +95,7 @@ static void *mock_thread(void *arg)
             break;
         const char *banner = "Grbl 1.1 ['$' for help]\r\n";
         if (write(c, banner, strlen(banner)) < 0) { }
+        if (mock.stray_ok && write(c, "ok\r\n", 4) < 0) { }
         char buf[1024];
         size_t n = 0;
         for (;;) {
@@ -158,7 +165,7 @@ static void mock_start(void)
 static void mock_clear(void)
 {
     msleep(200);                        /* a closed connection's last bytes land first */
-    mock.lines = mock.resets = mock.holding = mock.release = mock.lit_after = 0;
+    mock.lines = mock.resets = mock.holding = mock.release = mock.lit_after = mock.stray_ok = 0;
 }
 
 static int wait_for(volatile int *flag, int want, int ms)
@@ -205,6 +212,21 @@ static int client_on;
 static int client_connected(void)
 {
     return client_on;
+}
+
+/* The Grbl socket's keep, as the controller port would answer it: a
+ * machine that is not idle (a held job of a sender that left) refuses. */
+static int out_refuse, out_calls, in_calls;
+static int sender_out(char *err, size_t elen)
+{
+    out_calls++;
+    if (out_refuse)
+        snprintf(err, elen, "the machine is not idle: a program, a jog, a hold, an armed laser, or an alarm");
+    return out_refuse ? -1 : 0;
+}
+static void sender_in(void)
+{
+    in_calls++;
 }
 
 /* ---- the cases ---- */
@@ -400,6 +422,29 @@ static void test_client_refuses(void)
           "the record after a refusal: %s", status());
 }
 
+/* A start keeps the Grbl socket to this host before a line goes out; a
+ * machine the controller calls busy refuses it with nothing sent and
+ * nothing to give back, and a run gives the socket back once at its end. */
+static void test_sender_kept(void)
+{
+    char err[160] = "", who[64];
+    mock_clear();
+    out_refuse = 1;
+    out_calls = in_calls = 0;
+    STAGE("G21\n");
+    CHECK(jobrun_program_start(staged, "held", NULL, 0, 30, 0, err, sizeof(err)) == -1 &&
+          strstr(err, "not idle"), "a start the controller calls busy: \"%s\"", err);
+    out_refuse = 0;
+    msleep(200);
+    CHECK(mock.lines == 0, "%d lines went out past the refusal", mock.lines);
+    CHECK(!lease_holder(who, sizeof(who)), "the lease is \"%s\" after the refusal", who);
+    CHECK(out_calls == 1 && in_calls == 0, "the refused keep: %d asked, %d given back", out_calls, in_calls);
+    STAGE("G21\n");
+    CHECK(jobrun_program_start(staged, "kept", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("done", 5000), "the job did not end: %s", status());
+    CHECK(out_calls == 2 && in_calls == 1, "a run: %d asked, %d given back", out_calls, in_calls);
+}
+
 static void *sync_thread(void *arg)
 {
     int *rc = arg;
@@ -475,8 +520,10 @@ static void test_hooks(void)
     jobrun_cfg_t cfg = { .owner = "recorder", .ready = on_ready, .done = on_done,
                          .stream = { .gen = jobstream_lines_gen, .ctx = &lines, .run_timeout_s = 30 } };
     ready_fail = 1;
+    out_calls = in_calls = 0;
     CHECK(jobrun_start(&cfg, err, sizeof(err)) == -1 && strstr(err, "the keys are held"), "ready's refusal: \"%s\"", err);
     CHECK(!lease_holder(who, sizeof(who)), "the lease is \"%s\" after ready refused", who);
+    CHECK(out_calls == 1 && in_calls == 1, "the socket after ready refused: %d kept, %d given back", out_calls, in_calls);
     CHECK(!strstr(status(), "\"owner\":\"recorder\""), "ready's refusal rewrote the record: %s", status());
     msleep(200);
     CHECK(mock.lines == 0 && done_calls == 0, "%d lines, %d done calls past the refusal", mock.lines, done_calls);
@@ -695,6 +742,68 @@ static void test_witness_rate(void)
     rate_case(5, (PACED_TICKS + 4) / 5);
 }
 
+/* A sender that left while its line still ran: the controller answers
+ * that line's ok on the next session, ahead of anything the run sent.
+ * The run counts no ok it has no line out for, so it is still waiting
+ * for its program end (held by the mock) when the stray one has come
+ * and gone. */
+static int stray_calls;
+static int stray_gen(void *ctx, char *buf, size_t len)
+{
+    (void)ctx;
+    if (++stray_calls <= 5)
+        return 2;                       /* a few ticks: the stray ok lands before the first line */
+    if (stray_calls == 6) {
+        snprintf(buf, len, "G21");
+        return 1;
+    }
+    if (stray_calls == 7) {
+        snprintf(buf, len, "M2 P77");   /* the end, held */
+        return 1;
+    }
+    return 0;
+}
+static jobstream_run_t stray_run;
+static volatile int stray_rc = -2, stray_back;
+static void *stray_thread(void *arg)
+{
+    (void)arg;
+    char err[160] = "";
+    jobstream_cfg_t cfg = { .gen = stray_gen, .run_timeout_s = 10 };
+    stray_rc = jobstream_run(&cfg, &stray_run, err, sizeof(err));
+    stray_back = 1;
+    return NULL;
+}
+
+static void test_stray_ok(void)
+{
+    mock_clear();
+    mock.stray_ok = 1;
+    stray_calls = 0;
+    stray_back = 0;
+    pthread_t t;
+    pthread_create(&t, NULL, stray_thread, NULL);
+    CHECK(wait_for(&mock.holding, 1, 3000), "the held program end never arrived");
+    msleep(300);
+    CHECK(!stray_back, "the run ended before its program end was answered (sent %d, acked %d)",
+          stray_run.sent, stray_run.acked);
+    mock.release = 1;
+    pthread_join(t, NULL);
+    CHECK(stray_rc == 0 && stray_run.sent == 2 && stray_run.acked == 2,
+          "after the release: rc %d, sent %d, acked %d", stray_rc, stray_run.sent, stray_run.acked);
+}
+
+/* The controller's state file, stamped age seconds ago on this clock. */
+static void grbl_state(const char *path, double age, const char *sender)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    FILE *f = fopen(path, "w");
+    fprintf(f, "{\"ts_mono\":%.3f,\"state\":\"Idle\",\"sender\":%s}\n",
+            (double)ts.tv_sec + ts.tv_nsec / 1e9 - age, sender);
+    fclose(f);
+}
+
 static void test_sender_check(void)
 {
     char dir[160], path[256];
@@ -705,16 +814,17 @@ static void test_sender_check(void)
     unlink(path);
     CHECK(jobstream_sender_connected() == -1, "no file reads as known");
     CHECK(jobstream_sender_blocks(), "an unreadable state blocks a run (it is no license to displace a sender)");
-    FILE *f = fopen(path, "w");
-    fprintf(f, "{\"sender\":{\"connected\":true,\"generation\":3}}\n");
-    fclose(f);
+    grbl_state(path, 0.0, "{\"connected\":true,\"generation\":3}");
     CHECK(jobstream_sender_connected() == 1, "connected not read");
     CHECK(jobstream_sender_blocks(), "a connected sender blocks a run");
-    f = fopen(path, "w");
-    fprintf(f, "{\"sender\":{\"connected\":false}}\n");
-    fclose(f);
-    CHECK(jobstream_sender_connected() == 0, "disconnected not read");
+    grbl_state(path, -0.5, "{\"connected\":false}");
+    CHECK(jobstream_sender_connected() == 0, "disconnected not read (stamped half a second ahead: the same moment)");
     CHECK(!jobstream_sender_blocks(), "no sender: a run may go");
+    /* A controller that stopped writing its file: what it last said is
+     * not known, and a sender it called gone may be at work. */
+    grbl_state(path, JOBSTREAM_STATE_STALE_S + 1.0, "{\"connected\":false}");
+    CHECK(jobstream_sender_connected() == -1, "a state file past its age read as current");
+    CHECK(jobstream_sender_blocks(), "an old state file let a run go");
 }
 
 int main(void)
@@ -740,16 +850,18 @@ int main(void)
     kernel_state("idle");               /* an unreadable state is not idle */
     snprintf(staged, sizeof(staged), "%s/job.upload", root);
     lease_sender_connected = client_connected;
+    jobrun_sender_out = sender_out;
+    jobrun_sender_in = sender_in;
     mock_start();
 
     static const struct { const char *name; void (*run)(void); } cases[] = {
         { "check", test_check }, { "program-plays", test_program_plays }, { "own-m2", test_own_m2 }, { "unlock", test_unlock }, { "done-is-idle", test_done_is_idle },
-        { "abort", test_abort }, { "client-refuses", test_client_refuses },
+        { "abort", test_abort }, { "client-refuses", test_client_refuses }, { "sender-kept", test_sender_kept },
         { "sync-under-a-wizard", test_sync_under_a_wizard }, { "hooks", test_hooks },
         { "must-light", test_must_light }, { "lit-full-rate", test_lit_full_rate },
         { "dark-program", test_dark_program }, { "error-stops", test_error_stops },
         { "lit-program", test_lit_program }, { "abort-and-pacing", test_abort_and_pacing },
-        { "witness-rate", test_witness_rate },
+        { "witness-rate", test_witness_rate }, { "stray-ok", test_stray_ok },
         { "sender-check", test_sender_check },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);

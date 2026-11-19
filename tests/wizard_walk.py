@@ -33,7 +33,13 @@ step, which the button takes; the account; preferences; the machine;
 cloud mode left off; against the mock, the intake fans check run to its
 result (through a prompt whose options are text, one shaped like code,
 one with quotes, each shown as written and the code-shaped one answered
-as written), and against the daemon, which the harness gives its fan
+as written; the question gone at a failed poll and once no poll has
+answered for 2.5 s, kept gone on an answer that comes too late by either
+clock, gone at a poll 3 s old by the wall clock as the tab comes back
+into view, the window is focused or the page shown again, gone in the
+first frames after a wake that brings no event, and back each time the
+polls answer), and
+against the daemon, which the harness gives its fan
 count, the intake fans shown counted and passed by; the choice, where Start using the machine lands on the panel with the setup
 complete; one setting saved through the panel's save bar; and the login
 page, which (against the mock) reads a plain-text answer as "sign-in
@@ -53,20 +59,37 @@ once: the press cancels the first press's second start. A start refused
 once, where another client starts the diagnostic and the operator aborts
 it, never goes again: the Abort alone cancels the second start, and
 clears the press's "starting" text. Then the System tab's Reset all
-settings, with the mock's button not held: OK leaves the dialog open,
-saying the button is not held, and Cancel closes it with nothing reset;
-with a job that arms while the dialog is open, OK sends nothing and
-says a job is waiting for the button press; and with the job armed
-before it, the button opens no dialog and says so. The fuse view shows
-the mock's plain-text refusal as it came. An upload the release key did
+settings, with the mock's button not held: the dialog asks for the
+button only once its reservation is ready (OK off until then), OK leaves
+the dialog open, saying the button is not held, and Cancel closes it
+with nothing reset; with a job that arms while the dialog is open, OK
+goes off and the dialog names the waiting job, and asks again once the
+job is gone; and with the job armed before it, the button opens no
+dialog and says so. The fuse view asks through the hold dialog, which
+shows the mock's plain-text refusal as it came. An upload the release key did
 not sign (the walk's /__walk/mock stages one and holds the button) asks
 through the hold dialog once its install is refused, and OK installs it
 with confirm_unsigned=1. The cooling engine's banners, in the mock's
 demos: a live failure offers no Acknowledge, one that waits does, a 409
 says the failure still stands and a taken one clears the banner; two
-notices go with one Dismiss. The Coolant loop form saves the flow
+notices go with one Dismiss. Set home here asks whether the head is
+against the gantry stops, sends nothing on a no, and sends one home for
+a double click, its button off until the answer. The Coolant loop form saves the flow
 watch's four settings, and the Cooling card then shows the watch's hold
-from GET /cool/flow. Last, with the button held, a reset the mock takes
+from GET /cool/flow. A package's page shown on the Extensions tab is
+seen at once and reserves nothing (no request names a package to the
+button's reservation), and the machine's status it reads through the
+bridge carries no level of the button. The hold
+dialog's OK sends nothing on a ready 3 s old by either clock or on none;
+a tab back in view, a focused window and a page shown again check its
+ready at once, and the first frames after a wake that brings no event
+take OK off. A dialog asked for while the last one fades out is shown
+once that one is hidden, no reservation outlives its dialog, and a
+closed dialog's late answer asks for nothing in the dialog that replaced
+it; a ready that the machine has not confirmed lately asks for nothing:
+OK goes off at a failed renewal and 2.5 s after the request a late answer
+confirmed, and stays off on answers that come too late by either clock.
+Last, with the button held, a reset the mock takes
 closes the dialog, says the machine restarts, and opens "/" once the
 mock went down and came back (the page's timers run at a tenth of their
 length there, and the mock is down half a second).
@@ -175,13 +198,15 @@ function where() {
   }
   return 'the frame is at ' + path() + ', steps on ' + JSON.stringify(steps) + ', messages ' + JSON.stringify(msgs).slice(0, 400);
 }
+/* The walk's waits run on the monotonic clock: a wall-clock step does not
+ * shorten them. */
 function until(what, test, ms) {
-  var end = Date.now() + (ms || 15000);
+  var end = performance.now() + (ms || 15000);
   return (function again() {
     var ok = false;
     try { ok = test(); } catch (e) { ok = false; }
     if (ok) return Promise.resolve(ok);
-    if (Date.now() > end) return Promise.reject(new Error('timed out waiting for ' + what + '; ' + where()));
+    if (performance.now() > end) return Promise.reject(new Error('timed out waiting for ' + what + '; ' + where()));
     return sleep(50).then(again);
   })();
 }
@@ -194,11 +219,11 @@ function at(o, dotted) { return dotted.split('.').reduce(function (x, k) { retur
 function walkMock(qs) { return fetch('/__walk/mock?' + qs, { method: 'POST' }).then(function (r) { return r.json(); }); }
 /* until() over an asynchronous read. */
 function untilGot(what, get, test, ms) {
-  var end = Date.now() + (ms || 10000);
+  var end = performance.now() + (ms || 10000);
   return (function again() {
     return get().then(function (v) {
       if (test(v)) return v;
-      if (Date.now() > end) throw new Error('timed out waiting for ' + what + '; ' + where());
+      if (performance.now() > end) throw new Error('timed out waiting for ' + what + '; ' + where());
       return sleep(50).then(again);
     });
   })();
@@ -212,11 +237,97 @@ function reportCtl(mode, armed) {
     .then(function (r) { if (!r.ok) throw new Error('the mock refused the report: HTTP ' + r.status); });
 }
 /* The page's own timers at a tenth of their length, on the frame's window
- * until a navigation replaces it: the walk's clock, as a unit test fakes one. */
+ * until a navigation replaces it: the walk's clock, as a unit test fakes one.
+ * Returns what puts the window's own timers back for the timers set after
+ * it (a timer set meanwhile keeps its short period until it is cleared). */
 function fastTimers() {
   var W = w(), st = W.setTimeout, si = W.setInterval;
   W.setTimeout = function (f, ms) { return st.call(W, f, (ms || 0) / 10); };
   W.setInterval = function (f, ms) { return si.call(W, f, (ms || 0) / 10); };
+  return function () { W.setTimeout = st; W.setInterval = si; };
+}
+/* A check's question stands only while the Setup page's polls answer: it
+ * goes at a failed poll and once no poll has answered for 2.5 s, an answer
+ * that arrives older than that brings nothing back, and a sleep the
+ * monotonic clock did not count (the wall clock ran 3 s more) takes it as
+ * the tab comes back into view. Each time the answered polls bring it back. */
+function darkQuestionFollowsPolls() {
+  var ev = [], mo = null,
+    prompt = function () { return el('#k-prompt').style.display !== 'none' && q('#k-pbtns button'); },
+    gone = function () { return el('#k-prompt').style.display === 'none'; };
+  return walkMock('dark_drop=1')
+    /* The next poll, within 1 s, fails: the question goes then, not 2.5 s
+     * after the last answered one. */
+    .then(function () { return until('the question gone at a failed poll', gone, 1400); })
+    .then(function () { return walkMock('dark_drop=0'); })
+    .then(function () { return until('the question back', prompt, 6000); })
+    .then(function () { return walkMock('dark_hang=6'); })
+    .then(function () { return until('the question gone with no poll answered for 2.5 s', gone, 4500); })
+    .then(function () {
+      mo = new (w().MutationObserver)(function () { ev.push(el('#k-prompt').style.display); });
+      mo.observe(el('#k-prompt'), { attributes: true, attributeFilter: ['style'] });
+      return untilGot('a poll answered 6 s late', function () { return walkMock(''); },
+                      function (s) { return s.dark_late >= 1; }, 9000); })
+    .then(function () { return sleep(300); })
+    .then(function () {
+      mo.disconnect();
+      if (ev.some(function (d) { return d !== 'none'; }) || !gone())
+        throw new Error('a poll answered 6 s late brought the question back');
+      return walkMock('dark_hang=0'); })
+    .then(function () { return until('the question back', prompt, 9000); })
+    .then(function () {
+      var W = w();
+      W.K.polledWall = W.Date.now() - 3000;
+      W.document.dispatchEvent(new W.Event('visibilitychange'));
+      if (!gone()) throw new Error('a poll 3 s old by the wall clock left the question shown');
+      return until('the question back', prompt, 6000); })
+    .then(function () {
+      /* The window focused and the page shown again check it the same way. */
+      var W = w(), left = [];
+      ['focus', 'pageshow'].forEach(function (e) {
+        el('#k-prompt').style.display = '';
+        W.K.polledAt = W.performance.now() - 3000;
+        W.dispatchEvent(new W.Event(e));
+        if (!gone()) left.push(e);
+      });
+      if (left.length) throw new Error('a poll 3 s old left the question shown at ' + left.join(' and '));
+      return until('the question back', prompt, 6000); })
+    /* A poll answered 1 s late by the monotonic clock and 4 s by the wall
+     * clock (a sleep the monotonic clock did not count) brings nothing
+     * back. */
+    .then(function () { return walkMock('dark_hang=1'); })
+    .then(function () { return untilGot('a poll held', function () { return walkMock(''); },
+                                        function (s) { return s.dark_busy > 0; }, 4000); })
+    .then(function () {
+      var W = w(), wall = W.Date.now;
+      ev = [];
+      mo = new W.MutationObserver(function () { ev.push(el('#k-prompt').style.display); });
+      mo.observe(el('#k-prompt'), { attributes: true, attributeFilter: ['style'] });
+      W.Date.now = function () { return wall.call(W.Date) + 3000; };
+      return untilGot('its answer', function () { return walkMock(''); }, function (s) { return s.dark_late >= 1; }, 4000)
+        .then(function () { return sleep(150); })
+        .then(function () {
+          mo.disconnect();
+          W.Date.now = wall;
+          if (ev.some(function (d) { return d !== 'none'; }) || !gone())
+            throw new Error('a poll answered 4 s late by the wall clock brought the question back');
+          return walkMock('dark_hang=0'); }); })
+    .then(function () { return until('the question back', prompt, 6000); })
+    /* A sleep of the device whose wake brings no event: its timers and its
+     * monotonic clock stood, and its wall clock ran 12.5 s. The first
+     * frames after the wake take the question down, before the poll's
+     * timer runs again with the time it had left. */
+    .then(function () { return until('a poll waiting on its timer', function () { return w().K.timer; }, 3000); })
+    .then(function () {
+      var W = w(), t = performance.now();
+      W.clearTimeout(W.K.timer);
+      W.K.polledWall -= 12500;
+      W.K.timer = W.setTimeout(W.darkPoll, 1000);
+      return until('the question gone after a wake with no event', gone, 3000)
+        .then(function () {
+          var off = performance.now() - t;
+          if (off > 250) throw new Error('the question stayed shown ' + Math.round(off) + ' ms after a wake with no event'); }); })
+    .then(function () { return until('the question back', prompt, 6000); });
 }
 
 var STEPS = [
@@ -308,6 +419,7 @@ var STEPS = [
       .then(function () {
         if (!PROMPT) return;
         return until('its prompt', function () { return shown('#k-prompt') && q('#k-pbtns button'); }, 20000)
+          .then(darkQuestionFollowsPolls)
           .then(function () {
             var bs = [].slice.call(d().querySelectorAll('#k-pbtns button'));
             var got = bs.map(function (b) { return b.textContent; });
@@ -486,7 +598,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
   /* The mock's button is not held (the walk clears GF_MOCK_BUTTON). A
    * reset the mock took would take it down: /status answers after Cancel
    * only if nothing was reset. */
-  ['the reset dialog stays open on OK while the machine button is not held, and says so; Cancel closes it, nothing reset', function () {
+  ['the reset dialog asks for the button only once its reservation is ready, stays open on OK while the button is not held, and says so; Cancel closes it, nothing reset', function () {
     var open = function () { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); };
     /* Bootstrap ignores a hide while the dialog is still fading in. */
     var opened = false;
@@ -495,7 +607,12 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () {
         el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
         click('button[onclick="doReset()"]');
+        if (!el('#hold-ok').disabled || shown('#hold-press'))
+          throw new Error('the dialog asks for the press before its reservation is ready');
         return until('the reset dialog', function () { return opened && open(); }); })
+      .then(function () {
+        return until('the dialog asking for the press, its reservation ready', function () {
+          return !el('#hold-ok').disabled && shown('#hold-press') && !shown('#hold-wait'); }, 10000); })
       .then(function () {
         click('#hold-ok');
         return until('a refusal in the dialog', function () { return shown('#hold-err') && !el('#hold-ok').disabled; }, 10000); })
@@ -510,10 +627,10 @@ if (PLAN.diag) STEPS = STEPS.concat([
         return api('/status'); }); }],
   /* The dialog can stay open a long time: a job that starts waiting for
    * its press while it is open would take the hold OK asks for. The mock's
-   * controller reports its armed window; OK then says a job is waiting, in
-   * the page's own words (the mock's refusal has other words: the page
-   * sent nothing), and the dialog stays open. */
-  ['a job that arms while the reset dialog is open: OK sends nothing and says a job waits; the dialog stays open', function () {
+   * controller reports its armed window; the dialog then stops asking for
+   * the press (OK off) and names the waiting job in the daemon's words, and
+   * asks again once the window has closed. */
+  ['a job that arms while the reset dialog is open: OK goes off and the dialog names the waiting job; it asks again once the job is gone', function () {
     var open = function () { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); };
     var report = function (mode, armed) {
       return fetch('/cool/state?mode=' + mode + '&armed=' + armed, { method: 'POST', headers: { 'X-ForgeFIRM-Report': PLAN.report } })
@@ -527,17 +644,19 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () {
         click('button[onclick="doReset()"]');
         return until('the reset dialog', function () { return opened && open(); }); })
+      .then(function () {
+        return until('the dialog asking for the press', function () { return !el('#hold-ok').disabled && shown('#hold-press'); }, 10000); })
       .then(function () { return report('run', 1); })
-      .then(function () { return until('the panel reads the armed window', function () { return w().CL && w().CL.armed; }, 10000); })
+      .then(function () {
+        return until('OK off and the waiting job named', function () {
+          return el('#hold-ok').disabled && !shown('#hold-press') && shown('#hold-wait') &&
+            q('#hold-wait').textContent === 'a job waits for the button press: cancel it first'; }, 10000); })
       .then(function () {
         click('#hold-ok');
-        return until('a refusal in the dialog', function () { return shown('#hold-err') && !el('#hold-ok').disabled; }, 10000); })
-      .then(function () {
-        if (!open()) throw new Error('the dialog closed on the refusal');
-        if (q('#hold-err').textContent !== w().HOLD_JOB_WAITS)
-          throw new Error('the dialog says ' + JSON.stringify(q('#hold-err').textContent) + ', not that a job is waiting');
+        if (!open() || shown('#hold-err')) throw new Error('OK under a waiting job answered: ' + q('#hold-err').textContent);
         return report('idle', 0); })
-      .then(function () { return until('the panel reads the window closed', function () { return w().CL && !w().CL.armed; }, 10000); })
+      .then(function () {
+        return until('the dialog asking again', function () { return !el('#hold-ok').disabled && shown('#hold-press'); }, 10000); })
       .then(function () {
         click('#hold-cancel');
         return until('the dialog closed', function () { return !open() && q('#holdmodal').style.display === 'none'; }, 5000); })
@@ -557,20 +676,28 @@ if (PLAN.diag) STEPS = STEPS.concat([
           throw new Error('the card says ' + JSON.stringify(q('#msg-reset').textContent) + ', not that a job is waiting');
         return reportCtl('idle', 0); })
       .then(function () { w().loadCool(); return until('the panel reads the window closed', function () { return w().CL && !w().CL.armed; }, 5000); }); }],
-  /* The mock's button is up: the daemon refuses the fuse view in plain
-   * text, and the page shows that text as it came. */
-  ['the fuse view shows the daemon\'s plain-text refusal as it came', function () {
-    var said;
-    return w().fx('/fuse-identity')
+  /* The fuse view asks for the button in the hold dialog. The mock's
+   * button is up: the daemon refuses the view in plain text, and the
+   * dialog shows that text as it came. */
+  ['the fuse view asks through the hold dialog, which shows the daemon\'s plain-text refusal as it came', function () {
+    var said, opened = false;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () { return w().fx('/fuse-identity'); })
       .then(function (r) { return r.text(); })
       .then(function (t) {
         said = t;
-        q('#msg-i').textContent = '';
         click('button[onclick="showFuse()"]');
-        return until('the refusal', function () { return q('#msg-i').textContent; }, 5000); })
+        return until('the fuse dialog asking for the press', function () {
+          return opened && modalOpen() && !el('#hold-ok').disabled; }, 10000); })
       .then(function () {
-        if (!said || q('#msg-i').textContent !== said)
-          throw new Error('the fuse view shows ' + JSON.stringify(q('#msg-i').textContent) + ', the daemon said ' + JSON.stringify(said)); }); }],
+        click('#hold-ok');
+        return until('the refusal', function () { return shown('#hold-err') && q('#hold-err').textContent; }, 5000); })
+      .then(function () {
+        if (!said || q('#hold-err').textContent !== said)
+          throw new Error('the fuse dialog shows ' + JSON.stringify(q('#hold-err').textContent) + ', the daemon said ' + JSON.stringify(said));
+        click('#hold-cancel');
+        return until('the dialog closed', modalGone, 5000); }); }],
   /* An upload the release key did not sign: its install ends refused, the
    * page asks through the hold dialog, and OK (the button held) sends the
    * install again with confirm_unsigned=1. The walk ends each mock job at
@@ -587,6 +714,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { return walkMock('job_end=1'); })
       .then(function () {
         return until('the hold dialog for the unsigned archive', function () { if (!opened) w().jobPoll(); return opened && modalOpen(); }, 5000); })
+      .then(function () { return until('the dialog asking for the press', function () { return !el('#hold-ok').disabled; }, 10000); })
       .then(function () { click('#hold-ok'); return until('the dialog closed on the install', function () { return !modalOpen(); }, 5000); })
       .then(function () { return walkMock('job_end=1&button=0'); })
       .then(function (s) {
@@ -628,6 +756,27 @@ if (PLAN.diag) STEPS = STEPS.concat([
           throw new Error('the Retry went by ' + JSON.stringify(s.retried) + ', the controller ' + JSON.stringify(s.controller));
         w().loadMode();
         return until('the Retry gone', function () { return !shown('#ctl-retry'); }, 5000); }); }],
+  /* Set home here declares the head at the gantry stops: a declined
+   * question sends nothing, and a double click sends one home, the button
+   * off from the click until the answer (the walk holds the answer 1 s). */
+  ['Set home here asks whether the head is against the gantry stops, and a double click sends one home', function () {
+    var W = w(), asked = 0;
+    W.confirm = function () { asked++; return false; };
+    return fetch('/__walk/home?hold=1', { method: 'POST' })
+      .then(function () { w().loadMach(); return until('the home button on', function () { return !el('#mhome').disabled; }, 5000); })
+      .then(function () {
+        click('#mhome');
+        W.confirm = function () { asked++; return true; };
+        click('#mhome');
+        click('#mhome');
+        return sleep(300); })
+      .then(function () { return api('/__walk/home'); })
+      .then(function (s) {
+        if (asked !== 2 || s.homes !== 1)
+          throw new Error('asked ' + asked + ' times, ' + s.homes + ' homes sent: not twice and one');
+        return until('the home button on again after the answer', function () { return !el('#mhome').disabled; }, 5000); })
+      .then(function () { return fetch('/__walk/home?hold=0', { method: 'POST' }).then(function (r) { return r.json(); }); })
+      .then(function (s) { if (s.homes !== 1) throw new Error(s.homes + ' homes in all, not one'); }); }],
   /* Two notices, seq 1 and 3: one Dismiss takes both, so it sends the newest. */
   ['the notices banner lists each notice, and its Dismiss takes every one shown', function () {
     return walkMock('cool=notice')
@@ -663,6 +812,206 @@ if (PLAN.diag) STEPS = STEPS.concat([
    * takes. The dialog closes, the card says the machine restarts, and once
    * the mock went down and came back the page opens "/" again: a new
    * document in the frame. */
+  /* A package's page reserves nothing: it is seen as soon as it loads, no
+   * request of the panel names a package to the button's reservation, and
+   * the machine's status a page reads through the bridge carries no level
+   * of the button (a package gets a press by asking for one). */
+  ['a package\'s page on the Extensions tab is seen at once and reserves nothing, and the status it reads carries no button level', function () {
+    var frame = function () { return q('#extcards .extcard iframe'); };
+    return walkMock('ext=1&page_asks=0')
+      .then(function () {
+        click('#t-ext');
+        return until('the page loaded and seen', function () {
+          return frame() && frame().style.visibility !== 'hidden'; }, 10000); })
+      .then(function () { return sleep(2500); })
+      .then(function () { return walkMock(''); })
+      .then(function (s) {
+        if (s.page_asks !== 0 || s.panel_reserved !== 0)
+          throw new Error('a shown page reserved the button: ' + s.page_asks + ' requests named a package, ' +
+                          s.panel_reserved + ' reservations stand');
+        return api('/status'); })
+      .then(function (st) {
+        if (!st.switches || !('button' in st.switches)) throw new Error('the mock\'s status has no button level to keep back');
+        var W = w(), id = W.EXT_FRAMES.filter(function (x) { return x.el; })[0].id;
+        return W.extBridgeCall(id, 'machine.status'); })
+      .then(function (st) {
+        if (!st.switches || !('lid' in st.switches)) throw new Error('the page\'s status lost its switches: ' + JSON.stringify(st.switches));
+        if ('button' in st.switches) throw new Error('the page read the button\'s level from the machine\'s status');
+        click('#t-system');
+        return walkMock('ext=0'); }); }],
+  /* OK sends nothing on a ready that no answer has confirmed for 2.5 s, by
+   * either clock, nor on one the dialog does not hold, whatever reaches the
+   * button; and a tab that comes back into view checks its ready's age at
+   * once, before its held timers run. */
+  ['the hold dialog sends nothing on a stale ready or none, checks its ready when the tab comes back, the window is focused or the page shown again, and takes OK off in the first frames after a wake with no event', function () {
+    var opened = false, sends = 0, stale = -1;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    var ready = function () { return opened && !el('#hold-ok').disabled; };
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () { click('button[onclick="doReset()"]'); return until('the dialog asking for the press', ready, 10000); })
+      .then(function () {
+        var W = w();
+        W.holdReq.send = function () { sends++; return new W.Promise(function () {}); };
+        W.holdAt = W.performance.now() - 3000;      /* no answer for 3 s */
+        W.holdGo();
+        stale = sends;
+        W.holdAt = W.performance.now();
+        W.holdReady = false;                        /* fresh, but not ready */
+        W.holdGo();
+        if (stale !== 0 || sends !== 0)
+          throw new Error('OK sent ' + stale + ' on a stale ready and ' + (sends - stale) + ' on no ready');
+        return until('the dialog asking again', ready, 10000); })
+      .then(function () {
+        /* The tab back in view, the window focused, the page shown again:
+         * each checks the ready's age at once, by either clock. */
+        var W = w(), left = [];
+        [['visibilitychange', W.document, 'holdAt'], ['visibilitychange', W.document, 'holdWall'],
+         ['focus', W, 'holdAt'], ['pageshow', W, 'holdAt']].forEach(function (c) {
+          W.holdAt = W.performance.now();
+          W.holdWall = W.Date.now();
+          W.holdShowReady(true, '');
+          W[c[2]] -= 3000;
+          c[1].dispatchEvent(new W.Event(c[0]));
+          if (!el('#hold-ok').disabled) left.push(c[0] + ' with ' + c[2] + ' 3 s old');
+        });
+        if (left.length) throw new Error('OK stayed on at ' + left.join(', '));
+        return until('the dialog asking again', ready, 10000); })
+      /* A sleep of the device whose wake brings no event (no lock screen:
+       * the tab never left view): its timers and its monotonic clock stood,
+       * and its wall clock ran 12.5 s. The first frames after the wake take
+       * OK off, before the renewal's timer runs again with the period it
+       * had left. */
+      .then(function () { return until('no renewal in flight', function () { return !w().holdReq.pending; }, 3000); })
+      .then(function () {
+        var W = w(), t = performance.now();
+        W.clearInterval(W.holdTimer);
+        W.holdWall -= 12500;
+        W.holdTimer = W.setInterval(W.holdTick, 1000);
+        return until('OK off after a wake with no event', function () { return el('#hold-ok').disabled; }, 3000)
+          .then(function () {
+            var off = performance.now() - t;
+            if (off > 250) throw new Error('OK stayed on ' + Math.round(off) + ' ms after a wake with no event'); }); })
+      .then(function () { return until('the dialog asking again', ready, 10000); })
+      .then(function () {
+        /* A sleep of the device: the wall clock ran 3 s that the
+         * monotonic clock did not count. */
+        var W = w(), before = sends;
+        W.holdWall = W.Date.now() - 3000;
+        W.holdGo();
+        if (sends !== before || !el('#hold-ok').disabled)
+          throw new Error('OK sent ' + (sends - before) + ' on a ready 3 s old by the wall clock, and stayed ' +
+                          (el('#hold-ok').disabled ? 'off' : 'on'));
+        click('#hold-cancel');
+        return until('the dialog closed', modalGone, 10000); }); }],
+  /* A dialog asked for while the last one fades out is shown once that one
+   * is hidden, and each dialog's reservation ends with it: none is left
+   * renewing with nothing on screen. */
+  ['a dialog asked for while the last one fades out is shown once it is hidden, and each one\'s reservation ends with it, and a closed one\'s late answer asks for nothing in the next', function () {
+    var shownN = 0, on = [], mo = null;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { shownN++; });
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () {
+        click('button[onclick="doReset()"]');
+        return until('the first dialog', function () { return shownN === 1 && modalOpen(); }, 5000); })
+      .then(function () {
+        click('#hold-cancel');
+        click('button[onclick="doReset()"]');
+        return until('the second dialog, shown once the first was hidden', function () { return shownN === 2 && modalOpen(); }, 5000); })
+      .then(function () { return untilGot('the second dialog\'s reservation alone', function () { return walkMock(''); },
+                                          function (s) { return s.panel_reserved === 1; }, 5000); })
+      .then(function () { click('#hold-cancel'); return until('the dialog closed', modalGone, 5000); })
+      .then(function () { return untilGot('no reservation left', function () { return walkMock(''); },
+                                          function (s) { return s.panel_reserved === 0; }, 5000); })
+      /* A renewal of a dialog that has closed, answered once the dialog
+       * that replaced it is shown, asks for nothing there: that dialog
+       * waits for its own reservation (here a job waits, so it is never
+       * ready). */
+      .then(function () {
+        click('button[onclick="doReset()"]');
+        return until('a third dialog asking', function () { return shownN === 3 && modalOpen() && !el('#hold-ok').disabled; }, 10000); })
+      .then(function () { return walkMock('late_for=2&late_clear=1'); })
+      .then(function () { return untilGot('its renewal taken, its answer held', function () { return walkMock(''); },
+                                          function (s) { return s.late_left === 0 && s.late_busy > 0; }, 5000); })
+      .then(function () {
+        click('#hold-cancel');
+        click('button[onclick="doReset()"]');
+        return reportCtl('run', 1); })
+      .then(function () { return until('the fourth dialog, shown once the third was hidden', function () { return shownN === 4 && modalOpen(); }, 5000); })
+      .then(function () {
+        on = [];
+        mo = new (w().MutationObserver)(function () { if (!el('#hold-ok').disabled) on.push(1); });
+        mo.observe(el('#hold-ok'), { attributes: true, attributeFilter: ['disabled'] });
+        if (!el('#hold-ok').disabled) throw new Error('the fourth dialog asked for the press at once');
+        return untilGot('the third dialog\'s answer', function () { return walkMock(''); },
+                        function (s) { return s.late_rec.length >= 1; }, 5000); })
+      .then(function () { return sleep(300); })
+      .then(function () {
+        mo.disconnect();
+        if (on.length || !el('#hold-ok').disabled)
+          throw new Error('the closed dialog\'s answer asked for the press in the dialog that replaced it');
+        return reportCtl('idle', 0); })
+      .then(function () { return until('the panel reads the job gone', function () { return !(w().CL && w().CL.armed); }, 10000); })
+      .then(function () { click('#hold-cancel'); return until('the dialog closed', modalGone, 5000); })
+      .then(function () { return untilGot('no reservation left', function () { return walkMock(''); },
+                                          function (s) { return s.panel_reserved === 0; }, 5000); }); }],
+  /* A ready that no fresh answer confirms asks for nothing. A renewal
+   * that fails turns OK off at once. One the machine answers 2 s late
+   * confirms its ready for 2.5 s from that renewal's request, not from its
+   * answer. Answers that arrive older than 2.5 s (the machine slow to
+   * answer, 4 s each) ask for nothing, so OK stays off. */
+  ['a ready the machine has not confirmed lately asks for nothing: OK goes off at a failed renewal, 2.5 s after the request a late answer confirmed, and stays off on answers that come too late by either clock', function () {
+    var opened = false, ev = [], mo = null;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    var ready = function () { return opened && !el('#hold-ok').disabled; };
+    return until('the dialog before it wholly closed', modalGone, 5000)
+      .then(function () {
+        click('button[onclick="doReset()"]');
+        return until('the dialog asking for the press', ready, 10000); })
+      .then(function () { return walkMock('reserve_drop=1'); })
+      .then(function () { return until('OK off at the first failed renewal', function () { return el('#hold-ok').disabled; }, 1500); })
+      .then(function () { return walkMock('reserve_drop=0'); })
+      .then(function () { return until('the dialog asking again', ready, 10000); })
+      .then(function () { return walkMock('late_for=2&late_clear=1'); })
+      .then(function () { return untilGot('the late renewal taken', function () { return walkMock(''); },
+                                          function (s) { return s.late_left === 0 && s.late_busy > 0; }, 5000); })
+      .then(function () { return walkMock('reserve_hang=1'); })
+      .then(function () { return until('the late answer read', function () { return !w().holdReq.pending; }, 5000); })
+      .then(function () {
+        return until('OK off 2.5 s after the late answer\'s request', function () { return el('#hold-ok').disabled; }, 2000); })
+      .then(function () {
+        mo = new (w().MutationObserver)(function () { ev.push([performance.now(), el('#hold-ok').disabled]); });
+        mo.observe(el('#hold-ok'), { attributes: true, attributeFilter: ['disabled'] });
+        return until('the next renewal in flight', function () { return w().holdReq.pending; }, 3000); })
+      .then(function () { return until('its answer, 4 s late, read', function () { return !w().holdReq.pending; }, 6000); })
+      .then(function () { return sleep(300); })
+      .then(function () {
+        mo.disconnect();
+        if (ev.some(function (e) { return !e[1]; }) || !el('#hold-ok').disabled)
+          throw new Error('OK came back on an answer 4 s old');
+        return walkMock('reserve_hang=0'); })
+      .then(function (s) {
+        /* One renewal at a time: none piled on the one that stalled. */
+        if (s.reserve_held > 1)
+          throw new Error('the dialog piled ' + s.reserve_held + ' renewals on a stalled one'); })
+      /* An answer 1.5 s old by the monotonic clock and 4.5 s by the wall
+       * clock (a sleep the monotonic clock did not count) asks for
+       * nothing either. */
+      .then(function () { return until('the dialog asking again', ready, 10000); })
+      .then(function () { return walkMock('late_for=1.5&late_clear=1'); })
+      .then(function () { return untilGot('the late renewal taken', function () { return walkMock(''); },
+                                          function (s) { return s.late_left === 0 && s.late_busy > 0; }, 5000); })
+      .then(function () {
+        var W = w(), wall = W.Date.now, on = [];
+        mo = new W.MutationObserver(function () { if (!el('#hold-ok').disabled) on.push(1); });
+        mo.observe(el('#hold-ok'), { attributes: true, attributeFilter: ['disabled'] });
+        W.Date.now = function () { return wall.call(W.Date) + 3000; };
+        return until('the late answer read', function () { return !W.holdReq.pending; }, 5000)
+          .then(function () {
+            mo.disconnect();
+            W.Date.now = wall;
+            if (on.length || !el('#hold-ok').disabled)
+              throw new Error('OK came back on an answer 4.5 s old by the wall clock'); }); })
+      .then(function () { click('#hold-cancel'); return until('the dialog closed', modalGone, 10000); }); }],
   ['a taken reset closes the dialog, says the machine restarts, and opens "/" once the machine went down and came back', function () {
     var doc, m, opened = false;
     return until('the dialog before it wholly closed', modalGone, 5000)
@@ -673,7 +1022,8 @@ if (PLAN.diag) STEPS = STEPS.concat([
         m.addEventListener('shown.bs.modal', function () { opened = true; });
         fastTimers();
         click('button[onclick="doReset()"]');
-        return until('the reset dialog', function () { return opened && modalOpen(); }); })
+        return until('the reset dialog asking for the press', function () {
+          return opened && modalOpen() && !el('#hold-ok').disabled; }, 10000); })
       .then(function () {
         click('#hold-ok');
         return until('the dialog closed, the card saying the machine restarts', function () {
@@ -713,21 +1063,88 @@ class Walk(devserver.Handler):
     # The next POST /login answers 502 with a plain-text body, as a proxy
     # in front of the machine might.
     login_plain = False
+    # The page's POST /motion/home since the walk last held them, and
+    # whether each is answered a second late.
+    homes = 0
+    home_hold = False
+    # Each POST /button/reserve answered 4 s late.
+    reserve_hang = False
+    # The POST /button/reserve held by the hang since it began.
+    reserve_held = 0
+    # Each POST /button/reserve answered short: the page's request fails.
+    reserve_drop = False
+    # The next POST /button/reserve?on=1 requests, each taken at once (the
+    # reservation renewed) and its answer held the next of these seconds,
+    # as a link whose answers stall after the machine took the request. At
+    # each answer, the reservations then standing; the answers held now,
+    # and the renewals that came in while one was.
+    late_q = []
+    late_rec = []
+    # The POST /button/reserve requests that named a package (pkg=).
+    page_asks = 0
+    late_busy = 0
+    late_others = 0
+    # Each GET /wiz/dark held this long, or answered short; the answers
+    # sent after such a hold, and the polls held now.
+    dark_hang = 0.0
+    dark_drop = False
+    dark_late = 0
+    dark_busy = 0
 
     def _say(self, msg):
         Walk.said.append(msg)
 
     def _send(self, code, headers, body):
         p = urlsplit(self.path).path
+        if self.command == "POST" and p == "/button/reserve" and Walk.late_q and "on=1" in urlsplit(self.path).query:
+            hold = Walk.late_q.pop(0)
+            Walk.late_busy += 1
+            time.sleep(hold)                # taken, its answer held
+            now = time.monotonic()
+            Walk.late_rec.append({"panels": sum(1 for _s, u in Walk.mock.panel_res.values() if u > now)})
+            Walk.late_busy -= 1
         if self.command == "POST" and p.startswith("/diag/") and p != "/diag/abort":
             Walk.starts.append((code, time.monotonic()))
         devserver.Handler._send(self, code, headers, body)
+
+    def _short(self):
+        """An answer cut short: the head promises a body that never comes, and
+        the connection closes, so the page's read of it fails."""
+        self._read_body()
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "64")
+        self.end_headers()
+        self.wfile.write(b'{"reserv')
 
     def _mock(self, path, q):
         if self.command == "POST" and path == "/login" and Walk.login_plain:
             Walk.login_plain = False
             self._read_body()
             return self._send(502, {"Content-Type": "text/plain"}, b"bad gateway")
+        if self.command == "POST" and path == "/motion/home":
+            Walk.homes += 1
+            if Walk.home_hold:
+                time.sleep(1.0)
+        if self.command == "GET" and path == "/wiz/dark":
+            if Walk.dark_drop:
+                return self._short()
+            if Walk.dark_hang > 0:
+                Walk.dark_busy += 1
+                time.sleep(Walk.dark_hang)
+                Walk.dark_busy -= 1
+                Walk.dark_late += 1
+        if self.command == "POST" and path == "/button/reserve":
+            if "pkg=" in urlsplit(self.path).query:
+                Walk.page_asks += 1
+            if Walk.reserve_drop:
+                return self._short()
+            if Walk.late_busy and "on=1" in urlsplit(self.path).query:
+                Walk.late_others += 1
+        if self.command == "POST" and path == "/button/reserve" and Walk.reserve_hang:
+            Walk.reserve_held += 1
+            time.sleep(4.0)                 # the machine slow to answer a renewal
         devserver.Handler._mock(self, path, q)
         # A restart the mock took answers nothing for DOWN_S seconds.
         if self.command == "POST" and path == "/system/reset":
@@ -744,6 +1161,14 @@ class Walk(devserver.Handler):
         if u.path == "/__walk/result" and self.command == "POST":
             Walk.result = json.loads(self._read_body() or b"{}")
             return self._json(200, {"ok": True})
+        # The home requests: hold=1 counts afresh and answers each a second
+        # late, hold=0 answers at once again; either way the count since.
+        if u.path == "/__walk/home" and Walk.mock:
+            if self.command == "POST" and "hold" in q:
+                if q["hold"] == "1":
+                    Walk.homes = 0
+                Walk.home_hold = q["hold"] == "1"
+            return self._json(200, {"homes": Walk.homes})
         if u.path == "/__walk/diag" and Walk.mock:
             if self.command == "POST":
                 with Walk.mock.lock:
@@ -771,6 +1196,26 @@ class Walk(devserver.Handler):
                         Walk.mock.upload_unsigned = True
                     if q.get("job_end") == "1" and Walk.mock.update["running"]:
                         Walk.mock._job_end()
+                    if "ext" in q:
+                        Walk.mock.settings["ext_enabled"] = q["ext"]
+                    if "reserve_hang" in q:
+                        Walk.reserve_hang = q["reserve_hang"] == "1"
+                        if Walk.reserve_hang:
+                            Walk.reserve_held = 0
+                    if "reserve_drop" in q:
+                        Walk.reserve_drop = q["reserve_drop"] == "1"
+                    if "late_for" in q:
+                        Walk.late_q = [float(x) for x in q["late_for"].split(",")]
+                        Walk.late_others = 0
+                    if q.get("late_clear") == "1":
+                        Walk.late_rec = []
+                    if "dark_hang" in q:
+                        Walk.dark_hang = float(q["dark_hang"])
+                        Walk.dark_late = 0
+                    if "dark_drop" in q:
+                        Walk.dark_drop = q["dark_drop"] == "1"
+                    if "page_asks" in q:
+                        Walk.page_asks = 0
                     if q.get("stepper_fault") == "1":
                         Walk.mock.stepper_fault = True
                         Walk.mock.controller = "motion-fault"
@@ -779,7 +1224,14 @@ class Walk(devserver.Handler):
                         Walk.mock.retried = ""
                 Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
             return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"],
-                                    "retried": Walk.mock.retried, "controller": Walk.mock.controller})
+                                    "retried": Walk.mock.retried, "controller": Walk.mock.controller,
+                                    "page_asks": Walk.page_asks,
+                                    "panel_reserved": sum(1 for _s, u in Walk.mock.panel_res.values()
+                                                          if u > time.monotonic()),
+                                    "reserve_held": Walk.reserve_held, "late_rec": Walk.late_rec,
+                                    "late_left": len(Walk.late_q), "late_busy": Walk.late_busy,
+                                    "late_others": Walk.late_others, "dark_late": Walk.dark_late,
+                                    "dark_busy": Walk.dark_busy})
         if Walk.daemon:
             return self._proxy(u)
         if self.command in ("GET", "HEAD") and (u.path in ("/setup", "/login") or (u.path == "/" and "action" not in q)):
@@ -839,9 +1291,9 @@ def main():
                     help="walk the page a running daemon serves at its HTTPS listener, through the walk's own "
                          "relay, instead of the bundled pages against the mock")
     ap.add_argument("--port", type=int, default=8093)
-    ap.add_argument("--timeout", type=float, default=0, help="seconds for the whole walk (default 150; 600 with --daemon)")
+    ap.add_argument("--timeout", type=float, default=0, help="seconds for the whole walk (default 240; 600 with --daemon)")
     a = ap.parse_args()
-    timeout = a.timeout or (600 if a.daemon else 150)
+    timeout = a.timeout or (600 if a.daemon else 240)
     exe = find_browser(a.browser)
     if not exe:
         print("no %s found" % a.browser)

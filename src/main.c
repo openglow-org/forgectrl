@@ -47,6 +47,7 @@
 #include "cool.h"
 #include "flowrun.h"
 #include "curverec.h"
+#include "btnres.h"
 #include "diag.h"
 #include "events.h"
 #include "extpkg.h"
@@ -78,6 +79,7 @@
 #include "users.h"
 #include "wiz.h"
 #include "wizdark.h"
+#include "wizpkg.h"
 #include "testhook.h"
 
 #include <ctype.h>
@@ -1370,8 +1372,31 @@ static int cb_ext_package(const struct _u_request *req, struct _u_response *res,
     const char *id = setting_param(req, "id"), *action = setting_param(req, "action");
     char why[300];
     int status;
-    if (extpkg_action(id, action, &status, why, sizeof(why)) != 0)
-        return reply_error(res, (unsigned)status, why);
+    /* A package turned off or removed asks for no press from the
+     * operator's click on, whatever its service still calls before the
+     * host has stopped it: its ask ends and its next ones are refused,
+     * pending while the host is asked (which can take EXTPKG_TIMEOUT_S),
+     * and for good once the host has taken the action, until it is turned
+     * on again (btnres.h). A host that refuses the action or does not
+     * answer has left the package on, so the pending entry is lifted and
+     * the operator is told; a package already turned off stays so. An id
+     * of no package's form bars nothing. */
+    int off = id && action && extpkg_id_ok(id) &&
+              (!strcmp(action, "disable") || !strcmp(action, "remove") || !strcmp(action, "remove-keep-data"));
+    int pending = off && btnres_ask_bar_pending(id);
+    if (extpkg_action(id, action, &status, why, sizeof(why)) != 0) {
+        char said[400];
+        if (pending)
+            btnres_ask_unbar(id);
+        if (!off)
+            return reply_error(res, (unsigned)status, why);
+        snprintf(said, sizeof(said), "%s: the package %s", why, status == 502 ? "may still be on" : "is still on");
+        return reply_error(res, (unsigned)status, said);
+    }
+    if (off)
+        btnres_ask_bar(id);
+    if (!strcmp(action, "enable"))
+        btnres_ask_unbar(id);
     fflog(LOG_NOTICE, "ext: %s %s (by the operator, through the panel)", action, id);
     return cb_ext_status(req, res, NULL);
 }
@@ -1508,7 +1533,12 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
      * refuses the install before the button is read. */
     if (job_takes_button(why, sizeof(why)))
         return reply_error(res, 409, why);
-    if (extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), operator_present(), &status, why,
+    /* The consent is the button held inside the panel's own reservation:
+     * a hold outside one is no consent, and the install goes on without
+     * it (a package that needs none installs; one that does is refused in
+     * its own words). */
+    int present = operator_present() && panel_press_reserved(why, sizeof(why));
+    if (extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), present, &status, why,
                        sizeof(why)) != 0)
         return reply_error(res, (unsigned)status, why);
     fflog(LOG_NOTICE, "ext: a package was installed (by the operator, through the panel; grants: %s)",
@@ -1530,7 +1560,11 @@ static int cb_ext_key(const struct _u_request *req, struct _u_response *res, voi
     int status;
     if (job_takes_button(why, sizeof(why)))
         return reply_error(res, 409, why);
-    if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, operator_present(), &status, why,
+    /* The button counts only when the panel's dialog reserved it first. */
+    int present = operator_present();
+    if (present && !panel_press_reserved(why, sizeof(why)))
+        return reply_error(res, 409, why);
+    if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, present, &status, why,
                        sizeof(why)) != 0)
         return reply_error(res, (unsigned)status, why);
     fflog(LOG_NOTICE, "ext: the owner's key %s was added (by the operator, with the button held)",
@@ -2067,6 +2101,8 @@ static int cb_fuse_identity(const struct _u_request *req,
     if (!operator_present())
         return reply_error(res, 403,
             "hold the machine button to reveal the fuse identity");
+    if (!panel_press_reserved(taken, sizeof(taken)))
+        return reply_error(res, 409, taken);
     char body[192], mid[16], pw[65];
     unsigned long serial = fuse_serial();
     machine_id(mid, sizeof(mid));
@@ -2308,7 +2344,7 @@ static void snap_str(json_t *o, const char *key, char *dst, size_t len)
  * controller's: it opens with the wait for the press), and the GRBL
  * controller's own state file while the supervisor holds one, which
  * names the wait itself and a job that runs or is held with its window
- * closed. */
+ * closed, and which refuses when it is not current. */
 int job_takes_button(char *why, size_t len)
 {
     static const char waits[] = "a job waits for the button press: cancel it first";
@@ -2318,11 +2354,15 @@ int job_takes_button(char *why, size_t len)
     }
     if (!super_grbl_running())
         return 0;
-    char path[256], state[12] = "";
-    snprintf(path, sizeof(path), "%s/grbl.state", ff_run_dir());
-    json_t *o = json_load_file(path, 0, NULL);
-    if (!o)
-        return 0;
+    /* The live controller's own file, current or not known: one it has
+     * stopped writing could hide a job that waits, runs or is paused. */
+    char body[JOBSTREAM_STATE_MAX], state[12] = "";
+    json_t *o = jobstream_grbl_state(body, sizeof(body)) == 0 ? json_loads(body, 0, NULL) : NULL;
+    if (!o) {
+        snprintf(why, len, "the GRBL controller's state cannot be read, so a job could be waiting "
+                           "for the button press: try again, or restart the controller");
+        return 1;
+    }
     snap_str(o, "state", state, sizeof(state));
     int arming = json_is_true(json_object_get(json_object_get(o, "laser"), "arming"));
     json_decref(o);
@@ -2333,6 +2373,128 @@ int job_takes_button(char *why, size_t len)
     else
         return 0;
     return 1;
+}
+
+/* hooks.h. */
+int panel_press_reserved(char *why, size_t len)
+{
+    if (btnres_any("panel:") && cool_button_on_file_s() >= BTNRES_READY_S)
+        return 1;
+    snprintf(why, len, "the button was not reserved for this: start it again from the control panel");
+    return 0;
+}
+
+/* POST /button/reserve: the panel reserves the machine's button for one
+ * hold dialog that asks for it (btnres.h), named by the caller's own id
+ * (id=<nonce>), and renews it while the dialog stands (on=1); on=0 ends
+ * that one. The answer says whether the dialog may ask for the press now
+ * ("ready": the reservation on file long enough for both controllers to
+ * have read it, and no job that would take the press as its own), and
+ * which job waits ("waits"). A package's page reserves nothing: the
+ * route names no package. */
+static int cb_button_reserve(const struct _u_request *req,
+                             struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    const char *on = setting_param(req, "on");
+    const char *nonce = setting_param(req, "id");
+    if (!on || (strcmp(on, "0") && strcmp(on, "1")))
+        return reply_error(res, 400, "on must be 0 or 1");
+    if (setting_param(req, "pkg"))
+        return reply_error(res, 409, "a package's page reserves nothing: reload the control panel");
+    char who[BTNRES_WHO_MAX], why[160] = "";
+    snprintf(who, sizeof(who), "panel:%s", nonce ? nonce : "");
+    if (!btnres_name_ok(who))
+        return reply_error(res, 400, "id names the prompt: 1 to 32 of letters, digits, '-' and '_'");
+    if (!strcmp(on, "0")) {
+        btnres_close(who);
+    } else if (btnres_open(who, BTNRES_PANEL_TTL_S, why, sizeof(why)) != 0) {
+        return reply_error(res, 409, why);
+    }
+    int reserved = btnres_stands(who);
+    int waits = reserved && job_takes_button(why, sizeof(why));
+    int ready = reserved && !waits && cool_button_on_file_s() >= BTNRES_READY_S;
+    json_t *o = json_pack("{s:b, s:b, s:s}", "reserved", reserved, "ready", ready, "waits", waits ? why : "");
+    char *body = o ? json_dumps(o, JSON_COMPACT) : NULL;
+    json_decref(o);
+    if (!body)
+        return reply_error(res, 500, "out of memory");
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    free(body);
+    return U_CALLBACK_CONTINUE;
+}
+
+/* btnres.h: who else waits on the button, for a package's ask. A job
+ * first (the question every hold-gated route asks), then this daemon's
+ * own wait for a press (the Setup page's, button.h), then the machine's
+ * lease: a wizard, a diagnostic or a job runner holds the machine, and a
+ * press made under it is its own to judge (the Setup page's Switches
+ * check reads the button under the lease). The package's own hold of the
+ * machine (it keeps the Grbl sender out, senderout.h) refuses nothing.
+ * Asked under btnres.c's lock: it calls nothing of btnres. */
+static int ask_refused(const char *pkg, char *why, size_t len)
+{
+    char as[LEASE_OWNER_MAX];
+    if (job_takes_button(why, len))
+        return 1;
+    if (!strcmp(button_state(), "waiting")) {
+        snprintf(why, len, "the machine waits for a press of the button for its own setup");
+        return 1;
+    }
+    snprintf(as, sizeof(as), "ext:%s", pkg);
+    return lease_refusal_for(as, why, len);
+}
+
+/* btnres.h. */
+static int daemon_waits(void)
+{
+    return !strcmp(button_state(), "waiting");
+}
+
+/* btnres.h: the button's level, from the switch word. */
+static int ask_button(void)
+{
+    unsigned long bits;
+    if (machine_switch_read(&bits) != 0)
+        return -1;
+    return (bits >> 2) & 1;
+}
+
+/* POST /button/ask?id=<package>: a package asks for a press of the
+ * machine's button, or keeps asking (btnres.h, btnres_ask), the one way a
+ * package gets a press. The extension host's call alone, in the
+ * package's name: it holds the package to its `button` capability. The
+ * answer is the ask's state ("waiting", "ready", or "pressed", said
+ * once), or 409 with who holds the button. end=1 withdraws an ask that
+ * has had no press. */
+static int cb_button_ask(const struct _u_request *req,
+                         struct _u_response *res, void *user_data)
+{
+    (void)user_data;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    if (!auth_by_host())
+        return reply_error(res, 403, "only the extension host asks for a package");
+    const char *id = setting_param(req, "id"), *end = setting_param(req, "end");
+    const char *state = "ended";
+    char why[200] = "", body[48];
+    if (!id || !senderout_id_ok(id))
+        return reply_error(res, 400, "id is a package id");
+    if (end && !strcmp(end, "1")) {
+        btnres_ask_end(id);
+    } else {
+        int rc = btnres_ask(id, &state, why, sizeof(why));
+        if (rc != 0)
+            return reply_error(res, rc == -2 ? 400 : 409, why);
+    }
+    snprintf(body, sizeof(body), "{\"state\":\"%s\"}", state);
+    ulfius_set_string_body_response(res, 200, body);
+    ulfius_add_header_to_response(res, "Content-Type", "application/json");
+    ulfius_add_header_to_response(res, "Cache-Control", "no-store");
+    return U_CALLBACK_CONTINUE;
 }
 
 /* The event stream's view of the machine: state the daemon already
@@ -2362,18 +2524,23 @@ static void events_gather_state(events_snap_t *s)
         json_decref(o);
     }
 
-    /* The GRBL controller's own report, while one runs. */
-    s->gstate[0] = '\0';
-    s->alarm = s->arming = 0;
+    /* The GRBL controller's own report, while one runs. A file that is
+     * not current keeps what it last said (no edge comes of it), and the
+     * button is nobody's to report: a job could be waiting for it. */
+    s->grbl_unknown = 0;
     if (super_grbl_running()) {
-        char path[256];
-        snprintf(path, sizeof(path), "%s/grbl.state", ff_run_dir());
-        if ((o = json_load_file(path, 0, NULL))) {
+        char body[JOBSTREAM_STATE_MAX];
+        if (jobstream_grbl_state(body, sizeof(body)) == 0 && (o = json_loads(body, 0, NULL))) {
+            s->gstate[0] = '\0';
             snap_str(o, "state", s->gstate, sizeof(s->gstate));
             s->alarm = (int)json_integer_value(json_object_get(o, "alarm"));
             s->arming = json_is_true(json_object_get(json_object_get(o, "laser"), "arming"));
             json_decref(o);
-        }
+        } else
+            s->grbl_unknown = 1;
+    } else {
+        s->gstate[0] = '\0';
+        s->alarm = s->arming = 0;
     }
 
     machine_home_state(&s->homed_axes, s->home_source, sizeof(s->home_source));
@@ -3864,6 +4031,16 @@ int main(int argc, char **argv)
     cam_engine_init();
     wiz_init();             /* its machine check reads the sensor the camera engine resolved: after it */
     curverec_init();
+    cool_button_reserved = btnres_withheld;     /* read from the engine's first tick */
+    btnres_pkg_holds = senderout_keeps_machine;
+    btnres_ask_refused = ask_refused;
+    btnres_daemon_waits = daemon_waits;
+    btnres_session_reported = cool_armed;
+    btnres_on_file_s = cool_button_on_file_s;
+    btnres_button = ask_button;
+    extpkg_installed = btnres_ask_unbar;
+    wizpkg_on_file_s = cool_button_on_file_s;
+    wizpkg_job_waits = job_takes_button;
     cool_init();
     cool_fail_tier_stop = super_controller_restart;
     senslog_start();        /* samples the engine: after it */
@@ -3872,6 +4049,8 @@ int main(int argc, char **argv)
     wizdark_init();
     update_init();
     lease_sender_connected = jobstream_sender_blocks;
+    jobrun_sender_out = senderout_runner_out;
+    jobrun_sender_in = senderout_runner_in;
     lease_motors_released = motors_released_now;
     events_gather = events_gather_state;
     events_switches = machine_switch_bits;
@@ -3928,6 +4107,8 @@ int main(int argc, char **argv)
         { "POST", "/settings",             cb_settings_post,    NULL, 0, NULL },
         { "GET",  "/status",               cb_machine_status,   NULL, 1, "machine.read" },
         { "GET",  "/fuse-identity",        cb_fuse_identity,    NULL, 0, NULL },
+        { "POST", "/button/reserve",       cb_button_reserve,   NULL, 0, NULL },
+        { "POST", "/button/ask",           cb_button_ask,       NULL, 0, "motion.jog" },
         { "GET",  "/mode",                 cb_mode_get,         NULL, 1, "machine.read" },
         { "POST", "/mode",                 cb_mode_post,        NULL, 0, NULL },
         { "POST", "/controller/stop",      cb_controller_stop,  NULL, 0, NULL },

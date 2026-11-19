@@ -153,6 +153,7 @@
 #include "gates.h"
 #include "holds.h"
 #include "led.h"
+#include "paths.h"
 #include "senslog.h"
 #include "settings.h"
 #include "status.h"
@@ -182,11 +183,18 @@ static const char *sysfs_root(void)
     const char *r = ff_test_hook("GF_SYSFS_ROOT");
     return r ? r : GF_SYSFS;
 }
-#ifndef VERDICT_DIR
-#define VERDICT_DIR  "/run/forgefirm"
+/* The verdict's directory: the run directory (paths.h), which a host-test
+ * run moves with GF_RUN_DIR as it moves every runtime file; a unit test's
+ * build names its own. */
+#ifdef VERDICT_DIR
+static const char *verdict_dir(void) { return VERDICT_DIR; }
+#else
+static const char *verdict_dir(void) { return ff_run_dir(); }
 #endif
-#define VERDICT_FILE VERDICT_DIR "/cooling.state"
-#define VERDICT_TMP  VERDICT_DIR "/.cooling.state.tmp"
+static void verdict_path(char *buf, size_t len, const char *name)
+{
+    snprintf(buf, len, "%s/%s", verdict_dir(), name);
+}
 
 /* A controller reports at ~1 Hz; past this silence it is treated as
  * gone (fire blocked, stand-down through cooldown). */
@@ -402,6 +410,12 @@ static int silent_warned = 0;
 static int silent_safed = 0;        /* hang dead-man fired this episode */
 
 void (*cool_fail_tier_stop)(const char *why) = NULL;
+int (*cool_button_reserved)(char *why, size_t len) = NULL;
+
+/* The machine's button reserved for a prompt (cool.h): asked once a tick,
+ * and published as the verdict's button_reserved. */
+static int button_withheld = 0;
+static double button_on_file_at = -1.0; /* the first publish of this stretch; <0 = none */
 
 /* Physical-evidence witnesses. */
 static float fire_q1_alert = 275.0f;    /* the factory's header defaults */
@@ -480,10 +494,29 @@ static airflow_fan_t fan_gate[Fan_N];
 static double fan_reading[Fan_N];
 static double fan_floor[Fan_N];
 static double fan_grace_until = 0.0;
-/* Every gated fan at or above its floor, this tick: the armed window is
- * acknowledged only then, so the first fire waits for the airflow. */
+/* The airflow behind the armed window's acknowledgment. Up on a tick on
+ * which every judged fan reads at or above its floor, so the first fire
+ * waits for the airflow. It is the window's own: dropped at the session's
+ * opening, at the window's opening and at the warm-up's release, so it is
+ * never carried into a window the fans have not met. Withdrawn only once a
+ * judged fan has read under its floor for AIRFLOW_DEBOUNCE_TICKS ticks in
+ * a row, the count the airflow gate trips on, so one low tach reading
+ * does not take it. */
 static int fans_up = 0;
+static int fans_low_ticks = 0;       /* ticks in a row with a judged fan under, while up */
+static int fans_clean_ticks = 0;     /* ticks in a row with every judged fan at its floor (to the count) */
 static double fans_up_at = -1.0;     /* when they first were, this session */
+/* The armed window owes its fans: it has been acknowledged in this run, or
+ * it was already open when this engine first heard from the controller (a
+ * restart of the daemon under a busy job), so it may have fired. While it
+ * owes them, a judged fan that takes the acknowledgment away (FANS) blocks
+ * fire and holds the window, grace or not. A window this engine saw open
+ * waits for its acknowledgment unheld: its controller fires nothing before
+ * it. */
+static int window_owes_fans = 0;
+static int window_unarmed_seen = 0;  /* a fresh report with no window, this engine's life */
+static int fans_held = 0;            /* FANS, this tick */
+static char fans_low_name[24];       /* the judged fan last read under its floor */
 static int airflow_alarm = 0;        /* latched fan fault, this run session */
 static int fan_would_warned = 0;     /* off gate, would have tripped: once */
 static char pub_fan_gates[COOL_FAN_GATES_JSON_MAX] = "{}";
@@ -1568,10 +1601,10 @@ static int fan_margin_noted[Fan_N];
 /* The document must always fit its buffer. An oversized one is not
  * published at all, and no verdict reads to every controller as a
  * fault: fire blocked and the job held. Budget: the keys, quotes and
- * separators; the five booleans; the numbers (seq, ts_mono and the two
+ * separators; the six booleans; the numbers (seq, ts_mono and the two
  * temperatures); and the two bounded strings. */
-#define VERDICT_PUNCTUATION 116
-#define VERDICT_BOOLEANS     25
+#define VERDICT_PUNCTUATION 135
+#define VERDICT_BOOLEANS     30
 #define VERDICT_NUMBERS      64
 #define VERDICT_BODY_MAX    384
 _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
@@ -1593,7 +1626,16 @@ _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
  * carrying armed=true was computed with the run session open, and only
  * once every gated fan reads at or above its floor (fans_up): the
  * controller waits on this acknowledgment, so the first fire waits for
- * the airflow instead of the fans catching up under the beam.
+ * the airflow instead of the fans catching up under the beam. It is the
+ * precondition of a window's first fire (the arm, the re-arm, the cloud
+ * client before its run); inside an open window fire_ok alone gates.
+ *
+ * "button_reserved" says the machine's button is reserved for a prompt
+ * that is not this window's job (cool_button_reserved): fire_ok is false,
+ * the window is not acknowledged, and hold is true while a window is
+ * open, so a press made for that prompt arms, resumes and fires nothing.
+ * The name is BUTTON only where no other verdict stands; a controller that
+ * must not take a press as its own reads this instead.
  *
  * "ack_wait" says a failure waits for the operator's acknowledgment
  * (attention_tick), whatever the verdict's name: the name is ACK only
@@ -1609,10 +1651,16 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
 {
     char body[VERDICT_BODY_MAX];
     /* Never while a session's warm-up decision waits for a reading: an arm
-     * waits for it rather than read the undecided hold as a refusal. */
-    int armed_ack = eff_armed && fans_up && !warmup_pending;
+     * waits for it rather than read the undecided hold as a refusal. Never
+     * while the button is reserved for another prompt: a press made for
+     * that prompt must not complete an arm or a re-arm. */
+    int armed_ack = eff_armed && fans_up && !warmup_pending &&
+                    !button_withheld;
+    int reserved = button_withheld;
     pthread_mutex_lock(&mu);
     int ack_wait = attn_ack_waits();
+    if (!reserved)
+        button_on_file_at = -1.0;
     snprintf(pub_verdict, sizeof(pub_verdict), "%s", verdict);
     pub_fire_ok = fire_ok;
     pub_hold = hold;
@@ -1627,11 +1675,12 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     int n = snprintf(body, sizeof(body),
         "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
         "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
-        "\"ack_wait\":%s,"
+        "\"ack_wait\":%s,\"button_reserved\":%s,"
         "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
         ++verdict_seq, stamp, fire_ok ? "true" : "false",
         verdict, hold ? "true" : "false", hold ? "false" : "true",
         armed_ack ? "true" : "false", ack_wait ? "true" : "false",
+        reserved ? "true" : "false",
         pub_reason, pub_down, pub_up);
     pthread_mutex_unlock(&mu);
     /* snprintf reports the untruncated length; never publish more than
@@ -1645,13 +1694,32 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
         return;
     }
 
-    int fd = open(VERDICT_TMP, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    char file[256], tmp[256];
+    verdict_path(file, sizeof(file), "cooling.state");
+    verdict_path(tmp, sizeof(tmp), ".cooling.state.tmp");
+    int fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0)
         return;
     int ok = write(fd, body, (size_t)n) == n;
     close(fd);
-    if (ok)
-        rename(VERDICT_TMP, VERDICT_FILE);
+    int landed = ok && rename(tmp, file) == 0;
+    /* The reservation's time on file starts with the first document that
+     * carries it, never with the request: a reader can only have acted on
+     * what it could read (cool_button_on_file_s). */
+    if (reserved && landed) {
+        pthread_mutex_lock(&mu);
+        if (button_on_file_at < 0)
+            button_on_file_at = wall_s();
+        pthread_mutex_unlock(&mu);
+    }
+}
+
+double cool_button_on_file_s(void)
+{
+    pthread_mutex_lock(&mu);
+    double s = button_on_file_at < 0 ? -1.0 : wall_s() - button_on_file_at;
+    pthread_mutex_unlock(&mu);
+    return s;
 }
 
 /* ------------------------------------------------------------ engine */
@@ -1949,6 +2017,8 @@ static void flood_apply(int on, double now)
             airflow_reset(&fan_gate[i]);
         airflow_alarm = 0;
         fans_up = 0;
+        fans_low_ticks = 0;
+        fans_clean_ticks = 0;
         fans_up_at = -1.0;
         memset(fan_lost, 0, sizeof(fan_lost));
         fan_would_warned = 0;
@@ -2123,6 +2193,18 @@ static void engine_tick(void)
     memcpy(run_duty, duty, sizeof(run_duty));
     int armed_rose = armed && !eff_armed;
     eff_armed = armed;
+    if (fresh && !armed)
+        window_unarmed_seen = 1;
+    /* A window that opens is acknowledged on its own fans: a fan the
+     * session ran slower before it (unjudged then) is judged from here.
+     * One this engine never saw closed was open before it started, and
+     * owes its fans from the start. */
+    if (armed_rose) {
+        fans_up = 0;
+        fans_low_ticks = 0;
+        fans_clean_ticks = 0;
+        window_owes_fans = !window_unarmed_seen;
+    }
     /* A quiet hold (a listening with the fans off) never meets a run
      * session opening: the opening edge releases it (a session already
      * open when the hold was taken is the finder's own after a burn,
@@ -2509,8 +2591,10 @@ static void engine_tick(void)
             int judged = !fitted ? 0
                        : dx < 0 ? airflow_judged(run, armed, 1, 1)
                        : airflow_judged(run, armed, cmd_duty[dx], fan_local[dx]);
-            if (judged && fan_floor[i] > 0.0 && fan_reading[i] < fan_floor[i])
+            if (judged && fan_floor[i] > 0.0 && fan_reading[i] < fan_floor[i]) {
                 up_now = 0;
+                snprintf(fans_low_name, sizeof(fans_low_name), "%s", fan_name[i]);
+            }
             if (judged) {
                 st = airflow_tick(&fan_gate[i], fan_reading[i], fan_floor[i], in_grace);
                 if (!in_grace && !fan_margin_noted[i] && fan_floor[i] > 0.0
@@ -2560,14 +2644,38 @@ static void engine_tick(void)
                           : run ? "unjudged" : "idle";
         }
         /* The airflow is up once every gated fan reads its floor; in an
-         * armed session that is the moment the window is acknowledged
-         * and the beam may start. */
-        if (flood_on && up_now && !fans_up) {
-            fans_up_at = now;
-            if (armed)
-                info("fans at their floors: the armed window is acknowledged");
+         * armed run that is the moment the window is acknowledged and the
+         * beam may start. A warm-up judges no fan, so nothing is said
+         * there: its release drops the airflow, and the run's fans are
+         * judged before the acknowledgment the first fire waits for. Once
+         * up, it goes only with a fan that stays under its floor for the
+         * airflow gate's count of ticks, which runs in the spin-up grace
+         * too. An acknowledged window owes its fans from then on. */
+        if (!flood_on) {
+            fans_up = 0;
+            fans_low_ticks = 0;
+            fans_clean_ticks = 0;
+        } else if (up_now) {
+            if (!fans_up) {
+                fans_up_at = now;
+                if (armed && run)
+                    info("fans at their floors: the armed window is acknowledged");
+            }
+            fans_up = 1;
+            fans_low_ticks = 0;
+            if (fans_clean_ticks < AIRFLOW_DEBOUNCE_TICKS)
+                fans_clean_ticks++;
+            if (armed && run)
+                window_owes_fans = 1;
+        } else {
+            fans_clean_ticks = 0;
+            if (fans_up && ++fans_low_ticks >= AIRFLOW_DEBOUNCE_TICKS) {
+                fans_up = 0;
+                fans_low_ticks = 0;
+                if (armed)
+                    info("a fan under its floor: the armed window's acknowledgment is withdrawn");
+            }
         }
-        fans_up = flood_on && up_now;
         char fg[sizeof(pub_fan_gates)];
         if (coolfmt_fan_gates(fg, sizeof(fg), rows, Fan_N) < 0)
             fflog(LOG_ERR, "cool: the fan gate rows do not fit their status "
@@ -2787,6 +2895,12 @@ static void engine_tick(void)
             cool_state = Cool_Run;
             fans_run();
             fan_grace_until = now + (double)fan_grace_s;
+            /* The undecided hold judged no fan: as at the warm-up's
+             * release, the run's fans are judged from the next tick. */
+            fans_up = 0;
+            fans_low_ticks = 0;
+            fans_clean_ticks = 0;
+            fans_up_at = -1.0;
             char msg[96];
             snprintf(msg, sizeof(msg),
                      "warm-up not needed: coolant %.1f C at the %.0f C start gate - run",
@@ -2816,6 +2930,13 @@ static void engine_tick(void)
             cool_state = Cool_Run;
             fans_run();
             fan_grace_until = now + (double)fan_grace_s;
+            /* The warm-up judged no fan: the run's are judged from the
+             * next tick, and the window is acknowledged when they read
+             * their floors, never on this tick's release. */
+            fans_up = 0;
+            fans_low_ticks = 0;
+            fans_clean_ticks = 0;
+            fans_up_at = -1.0;
             char msg[96];
             snprintf(msg, sizeof(msg),
                      "warm-up complete: coolant %.1f C at the %.0f C start "
@@ -3035,6 +3156,36 @@ static void engine_tick(void)
     holds_t ext;
     ext_holds_read(now, &ext);
     ext_holds_log(&ext);
+    pthread_mutex_lock(&mu);
+    int quiet_now = quiet_held;
+    pthread_mutex_unlock(&mu);
+    /* The machine's button reserved for a prompt that is not this window's
+     * job: asked outside the lock, once a tick. */
+    char button_why[64] = "";
+    button_withheld = cool_button_reserved && cool_button_reserved(button_why, sizeof(button_why));
+    /* A window that owes its fans with the acknowledgment gone (a judged fan
+     * under its floor for the gate's count of ticks, grace or not): the pause
+     * tier, until every judged fan has read its floor for the same count of
+     * ticks in a row, so a fan that dips and comes back for a tick does not
+     * cycle the job lit and dark. AIRFLOW still trips once the grace is over
+     * and the fan has not come back. Its rise goes to the log alone: the
+     * reason is the verdict's, and a verdict over it (AIRFLOW, which rises
+     * in the same tick past the grace, CRITICAL, SENSOR) keeps its own
+     * words; the reason block below writes FANS's while FANS is the name. */
+    {
+        int was = fans_held;
+        fans_held = eff_armed && window_owes_fans && cool_state == Cool_Run &&
+                    (!fans_up || (was && fans_clean_ticks < AIRFLOW_DEBOUNCE_TICKS));
+        if (fans_held && !was) {
+            fflog(LOG_WARNING, "cool: FANS: %s under its floor in the armed window - fire blocked, hold",
+                  fans_low_name);
+        } else if (!fans_held && was)
+            info("FANS cleared: every judged fan at its floor, or the window closed");
+    }
+    /* The name is the highest verdict standing. Every name that ends the
+     * job or waits for the operator stands over FANS, the pause tier, so
+     * the controllers' fail tier, the red flash and its acknowledgment, the
+     * flight recorder and the cloud client's fault all see it. */
     const char *verdict = fire_alarm ? "FIRE"
                         : crash_w.alarm ? "CRASH"
                         : flame_alert ? "FLAME"
@@ -3042,10 +3193,13 @@ static void engine_tick(void)
                         : airflow_alarm ? "AIRFLOW"
                         : critical_alarm ? "CRITICAL"
                         : sensor_alarm || ir_blind_alarm ? "SENSOR"
+                        : fans_held ? "FANS"
                         : over_temp_gate ? "OVERTEMP"
                         : cold_gate ? "COLD"
                         : warming ? "WARMUP"
-                        : ext.standing ? "EXT" : "OK";
+                        : ext.standing ? "EXT"
+                        : quiet_now ? "QUIET"
+                        : button_withheld ? "BUTTON" : "OK";
     /* A failure that waits for the operator's acknowledgment (ACK): its
      * own verdict has gone, and it blocks fire, and holds an armed window,
      * until the panel's Acknowledge. Motion is free. */
@@ -3058,19 +3212,25 @@ static void engine_tick(void)
     pthread_mutex_unlock(&mu);
     if (ack_wait && !strcmp(verdict, "OK"))
         verdict = "ACK";
+    /* A quiet hold (every fan off for a listening) and a reserved button
+     * block fire like ACK does: always, and they hold only an open window,
+     * so motion stays free. */
     int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
-             || airflow_alarm || critical_alarm || sensor_alarm || ir_blind_alarm
+             || airflow_alarm || fans_held || critical_alarm || sensor_alarm || ir_blind_alarm
              || over_temp_gate || cold_gate || warming
-             || ext.standing || (ack_wait && eff_armed);
+             || ext.standing || (ack_wait && eff_armed)
+             || ((quiet_now || button_withheld) && eff_armed);
     int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
-                && !crash_w.alert && !airflow_alarm
+                && !crash_w.alert && !airflow_alarm && !fans_held
                 && !critical_alarm && !sensor_alarm && !ir_blind_alarm
                 && !over_temp_gate && !cold_gate && !warming
-                && !ext.standing && !ack_wait;
+                && !ext.standing && !ack_wait
+                && !quiet_now && !button_withheld;
     /* The reason is the hold's while the verdict is: it says which package
      * and why, and another event's words may have stood there since. The
      * lid IR channels' SENSOR keeps its own words the same way (a coolant
-     * sensor's SENSOR, when both stand, keeps the coolant's). */
+     * sensor's SENSOR, when both stand, keeps the coolant's), and so does
+     * the reservation, which says whose prompt it is. */
     if (!strcmp(verdict, "EXT")) {
         pthread_mutex_lock(&mu);
         snprintf(pub_reason, sizeof(pub_reason), "%s", ext.reason);
@@ -3079,6 +3239,26 @@ static void engine_tick(void)
         pthread_mutex_lock(&mu);
         snprintf(pub_reason, sizeof(pub_reason), "%s", ir_blind_reason);
         pthread_mutex_unlock(&mu);
+    } else {
+        int fans_words_gone = 0;
+        pthread_mutex_lock(&mu);
+        if (!strcmp(verdict, "QUIET"))
+            snprintf(pub_reason, sizeof(pub_reason), "QUIET: every fan is held off for a listening - fire blocked");
+        else if (!strcmp(verdict, "BUTTON"))
+            snprintf(pub_reason, sizeof(pub_reason), "BUTTON: %s - fire blocked until it is done", button_why);
+        else if (!strcmp(verdict, "FANS"))
+            snprintf(pub_reason, sizeof(pub_reason), "FANS: %s under its floor in the armed window - "
+                     "hold", fans_low_name);
+        else if (!strncmp(pub_reason, "QUIET: ", 7) || !strncmp(pub_reason, "BUTTON: ", 8) ||
+                 !strncmp(pub_reason, "FANS: ", 6)) {
+            fans_words_gone = !strncmp(pub_reason, "FANS: ", 6);
+            pub_reason[0] = '\0';           /* the words go with their verdict */
+        }
+        pthread_mutex_unlock(&mu);
+        /* The ceiling's hold stood under FANS: it names itself again, as it
+         * does when a SENSOR or a CRITICAL over it clears. */
+        if (fans_words_gone && !strcmp(verdict, "OVERTEMP"))
+            overtemp_warn(0);
     }
 
     pthread_mutex_lock(&mu);
@@ -3087,7 +3267,6 @@ static void engine_tick(void)
               : cool_state == Cool_Smoke ? "smoke"
               : cool_state == Cool_Thermal ? "thermal" : "idle";
     pub_cooling_forced = over_temp_gate || forced_cool;
-    int quiet_now = quiet_held;
     pthread_mutex_unlock(&mu);
 
     /* The flow watch's context: when it may have the heater, and the fans
@@ -3176,6 +3355,21 @@ static void *engine_main(void *arg)
 void cool_init(void)
 {
     const char *opt;
+    /* A starting engine has heard from no controller and knows no window
+     * or session: a window reported open from here on that it never saw
+     * closed was opened before it started. */
+    pthread_mutex_lock(&mu);
+    rep_at = -1.0;
+    rep_armed = 0;
+    pthread_mutex_unlock(&mu);
+    eff_armed = 0;
+    flood_on = 0;
+    cool_state = Cool_Idle;
+    fans_up = 0;
+    fans_low_ticks = 0;
+    fans_clean_ticks = 0;
+    window_owes_fans = 0;
+    window_unarmed_seen = 0;
     for (size_t i = 0; i < sizeof(tunables) / sizeof(tunables[0]); i++) {
         if ((opt = getenv(tunables[i].env))) {
             /* A limit that is not a finite number is no override: the
@@ -3195,7 +3389,7 @@ void cool_init(void)
     }
     conf_reload();
 
-    mkdir(VERDICT_DIR, 0755);
+    mkdir(verdict_dir(), 0755);
 
     /* Idle posture. Purge air belongs to the armed/run story the same
      * way air assist does, but the factory holds it on continuously;
@@ -3268,8 +3462,10 @@ void cool_shutdown(void)
      * 2 s staleness window, and the restarted daemon reasserts the right
      * posture. */
     if (machine_is_idle()) {
+        char file[256];
         fans_idle();
-        unlink(VERDICT_FILE);   /* missing file = fire blocked at readers */
+        verdict_path(file, sizeof(file), "cooling.state");
+        unlink(file);           /* missing file = fire blocked at readers */
     }
 }
 

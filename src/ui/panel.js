@@ -763,7 +763,22 @@ function portPost(url, msgId, done) {
     })
     .catch(function () {
       portSay(msgId, 'no response');
+      if (done) done(false);
     });
+}
+/* A port action whose button stays off from the click until the answer:
+ * a second click is no second request. lockApply leaves it off meanwhile
+ * (data-off). */
+function portOnce(btnId, url, msgId) {
+  var b = $(btnId);
+  if (b.getAttribute('data-off') === '1') return;
+  b.setAttribute('data-off', '1');
+  b.disabled = true;
+  portPost(url, msgId, function () {
+    b.removeAttribute('data-off');
+    b.disabled = locked;
+    loadMach();
+  });
 }
 /* While this panel's own jog runs the machine is busy, and that is no
  * reason to lock the page or to put the busy banner up: it would move
@@ -808,15 +823,18 @@ function jogCancel() {
   portPost('/motion/cancel', 'msg-jog', function () {});
 }
 function motorsToggle() {
-  portPost(M.motors_released ? '/motion/energize' : '/motion/release', 'msg-mrel');
+  portOnce('mrel', M.motors_released ? '/motion/energize' : '/motion/release', 'msg-mrel');
 }
+/* The manual home declares the head at the gantry stops (less the manual
+ * offset) wherever it stands: asked first, and sent once. */
 function manualHome() {
-  portPost('/motion/home', 'msg-mhome');
+  if (!confirm('Is the head against the gantry stops?')) return;
+  portOnce('mhome', '/motion/home', 'msg-mhome');
 }
 /* The crumb tray: Z from the tray, or from the floor with the tray out.
  * The controller switches the numbers; nothing moves. */
 function trayToggle() {
-  portPost('/motion/tray?tray=' + (M.lens && M.lens.tray === 'out' ? 'in' : 'out'), 'msg-tray');
+  portOnce('traybtn', '/motion/tray?tray=' + (M.lens && M.lens.tray === 'out' ? 'in' : 'out'), 'msg-tray');
 }
 function rpm(v) {
   return v > 0 ? v + ' rpm' : 'stopped';
@@ -1674,31 +1692,26 @@ function clearIdentity() {
 (function () {
   fillRegions($('wifi_country'));
 })();
+/* The fuse identity takes the machine's button held, so it is asked for
+ * in the hold dialog: the button is reserved before the press is asked
+ * for, and a job waiting for its press is named instead. */
 function showFuse() {
-  fx('/fuse-identity')
-    .then(function (r) {
-      /* The refusal is plain text (main.c's), not JSON. */
-      if (!r.ok)
-        return r.text().then(function (t) {
-          var why = t;
-          try {
-            why = JSON.parse(t).error;
-          } catch (e) {}
-          throw why || 'cannot read fuses';
-        });
-      return r.json();
-    })
-    .then(function (f) {
+  $('msg-i').textContent = '';
+  holdConfirm({
+    title: 'Show the fuse identity?',
+    body: ["The serial, hostname and password burned into this machine's fuses. They never change."],
+    send: function () {
+      return fx('/fuse-identity');
+    },
+    done: function (f) {
       var g = '';
       g += kv('Serial', "<span class='mono'>" + esc(f.serial || '?') + '</span>');
       g += kv('Hostname', "<span class='mono'>" + esc(f.hostname || '?') + '</span>');
       g += kv('Password', "<span class='mono brk'>" + esc(f.password || '?') + '</span>');
       $('fusekv').innerHTML = g;
       $('fusewrap').className = 'on';
-    })
-    .catch(function (e) {
-      $('msg-i').textContent = String(e || 'cannot read fuses');
-    });
+    }
+  });
 }
 function hideFuse() {
   $('fusewrap').className = '';
@@ -1981,28 +1994,149 @@ function doReboot() {
  * it, or on Cancel, and on nothing else: a refusal stays in the dialog,
  * and one for the button (the answer's "button": "not held") says the
  * button is not held, so OK can go again once it is. While a request is
- * out, neither button answers. A job waiting for the button press would
- * take the hold as its own, so each OK looks for one first and sends
- * nothing while one waits: the dialog can stay open a long time. */
+ * out, neither button answers.
+ *
+ * A job waiting for the button press would take the hold as its own, so
+ * the dialog reserves the button while it is on screen (POST
+ * /button/reserve, under a name of its own, renewed every second from the
+ * moment it is shown until it is hidden): the cooling engine then blocks
+ * fire and withholds every armed window's acknowledgment, and the
+ * controllers' arm and resume refuse. The dialog asks for the press only
+ * once the daemon says the reservation is ready (on file long enough for
+ * both controllers to have read it, and no job waiting for the press);
+ * until then OK is off, and a job that waits is named. A ready is as old
+ * as the request it answered, by the larger of its monotonic and its
+ * wall-clock age (a wall-clock step back leaves the monotonic age; the
+ * monotonic clock can stand still while the device sleeps, the wall clock
+ * does not): past HOLD_FRESH_MS it asks for nothing, and an answer that
+ * arrives older than that asks for nothing either. A dialog asked for
+ * while the last one fades out is shown once that one is hidden. */
 var HOLD_NOT_HELD = "The machine's button is not held. Hold it down, then press OK again.";
 var HOLD_JOB_WAITS = 'A job is waiting for the button press: cancel it first.';
+var HOLD_FRESH_MS = 2500;
 var holdModal = null,
-  holdReq = null;
+  holdReq = null,
+  holdPending = null,
+  holdClosing = false,
+  holdTimer = null,
+  holdReady = false,
+  holdAt = 0,
+  holdWall = 0;
+function holdShowReady(ready, waits) {
+  holdReady = ready;
+  $('hold-press').style.display = ready ? '' : 'none';
+  $('hold-wait').style.display = ready ? 'none' : '';
+  $('hold-wait').textContent = waits || 'Making sure no job can take the press…';
+  if (!$('hold-cancel').disabled) $('hold-ok').disabled = !ready;
+}
+/* A name for one prompt's reservation: no other tab's or dialog's. */
+function resNonce() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+/* An answer's document: JSON, or main.c's refusal in plain text as
+ * {error: <the text>}. */
+function holdAnswer(r) {
+  return r.text().then(function (t) {
+    try {
+      return JSON.parse(t) || {};
+    } catch (e) {
+      return { error: t };
+    }
+  });
+}
+function holdReserve(o, on) {
+  return fx('/button/reserve?on=' + (on ? '1' : '0') + '&id=' + encodeURIComponent(o.nonce), {
+    method: 'POST'
+  }).then(holdAnswer);
+}
+/* The age of the request a ready answered: the larger of its two clocks'. */
+function holdAge(sent, sentWall) {
+  return Math.max(performance.now() - sent, Date.now() - sentWall);
+}
+/* A ready no answer has confirmed for HOLD_FRESH_MS, counted from the
+ * request it answered, asks for nothing. Checked on every frame the
+ * browser paints while the dialog is shown, so no frame shows a ready
+ * older than that, the first frame after a sleep of the device included;
+ * and when the tab comes back into view, the window gains the focus, or
+ * the page is shown again, whose frames and timers the browser may have
+ * held. */
+var holdFrame = 0;
+function holdFresh() {
+  if (holdReady && holdAge(holdAt, holdWall) > HOLD_FRESH_MS) holdShowReady(false, '');
+}
+function holdWatch() {
+  holdFresh();
+  holdFrame = requestAnimationFrame(holdWatch);
+}
+document.addEventListener('visibilitychange', holdFresh);
+window.addEventListener('focus', holdFresh);
+window.addEventListener('pageshow', holdFresh);
+function holdTick() {
+  var o = holdReq;
+  if (!o) return;
+  if (o.pending) return;                /* one renewal at a time: a stalled one is not piled on */
+  o.pending = true;
+  var sent = performance.now(),
+    sentWall = Date.now();
+  holdReserve(o, true)
+    .then(function (j) {
+      if (holdReq !== o) return;
+      /* An answer older than the bound when it arrives asks for nothing:
+       * the reservation it confirmed may have lapsed since. */
+      if (holdAge(sent, sentWall) > HOLD_FRESH_MS) {
+        holdShowReady(false, '');
+        return;
+      }
+      holdAt = sent;
+      holdWall = sentWall;
+      holdShowReady(!!j.ready, j.waits || (j.error ? String(j.error) : ''));
+    })
+    .catch(function () {
+      if (holdReq === o) holdShowReady(false, 'no answer from the machine');
+    })
+    .then(function () {
+      o.pending = false;
+    });
+}
 function holdConfirm(o) {
   if (!holdModal) {
     holdModal = new bootstrap.Modal($('holdmodal'), { backdrop: 'static', keyboard: false });
     /* The request that goes with a closing dialog is the one it had when
-     * the close began: one asked for while it fades out is the next
-     * dialog's, and stays. */
+     * the close began. Its reservation is renewed only while it is shown,
+     * and ended once it is hidden; a dialog asked for meanwhile waits for
+     * that. */
     var closing = null;
+    $('holdmodal').addEventListener('shown.bs.modal', function () {
+      if (holdTimer) clearInterval(holdTimer);
+      holdTimer = setInterval(holdTick, 1000);
+      if (!holdFrame) holdFrame = requestAnimationFrame(holdWatch);
+      holdTick();
+    });
     $('holdmodal').addEventListener('hide.bs.modal', function () {
+      holdClosing = true;
       closing = holdReq;
     });
     $('holdmodal').addEventListener('hidden.bs.modal', function () {
+      holdClosing = false;
+      if (holdTimer) clearInterval(holdTimer);
+      holdTimer = null;
+      if (holdFrame) cancelAnimationFrame(holdFrame);
+      holdFrame = 0;
+      if (closing) holdReserve(closing, false).catch(function () {});
       if (holdReq === closing) holdReq = null;
       closing = null;
+      if (holdPending) {
+        var p = holdPending;
+        holdPending = null;
+        holdConfirm(p);
+      }
     });
   }
+  if (holdClosing) {
+    holdPending = o;
+    return;
+  }
+  o.nonce = resNonce();
   holdReq = o;
   $('hold-title').textContent = o.title;
   $('hold-body').innerHTML = o.body
@@ -2012,18 +2146,22 @@ function holdConfirm(o) {
     .join('');
   $('hold-err').style.display = 'none';
   $('hold-err').textContent = '';
-  $('hold-ok').disabled = false;
   $('hold-cancel').disabled = false;
+  holdShowReady(false, '');
   holdModal.show();
 }
 function holdGo() {
   var o = holdReq;
-  if (!o) return;
+  if (!o || !holdReady) return;
+  if (holdAge(holdAt, holdWall) > HOLD_FRESH_MS) {
+    holdShowReady(false, '');
+    return;
+  }
   var refuse = function (why) {
     $('hold-err').textContent = why;
     $('hold-err').style.display = '';
-    $('hold-ok').disabled = false;
     $('hold-cancel').disabled = false;
+    $('hold-ok').disabled = !holdReady;
   };
   if (CL && CL.armed) {
     refuse(HOLD_JOB_WAITS);
@@ -2034,19 +2172,14 @@ function holdGo() {
   $('hold-err').style.display = 'none';
   o.send()
     .then(function (r) {
-      return r
-        .json()
-        .catch(function () {
-          return {};
-        })
-        .then(function (j) {
-          if (holdReq !== o) return;
-          if (r.ok) {
-            holdModal.hide();
-            o.done(j);
-          } else if (j.button === 'not held') refuse(HOLD_NOT_HELD);
-          else refuse(j.error || 'the machine refused it (HTTP ' + r.status + ')');
-        });
+      return holdAnswer(r).then(function (j) {
+        if (holdReq !== o) return;
+        if (r.ok) {
+          holdModal.hide();
+          o.done(j);
+        } else if (j.button === 'not held') refuse(HOLD_NOT_HELD);
+        else refuse(j.error || 'the machine refused it (HTTP ' + r.status + ')');
+      });
     })
     .catch(function () {
       if (holdReq === o) refuse('no answer from the machine');

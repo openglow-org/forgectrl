@@ -960,11 +960,13 @@ function initDark(id) {
   $('k-abort').style.display = 'none';
   $('k-next').style.display = stepDone(id) ? '' : 'none';
   setMsg('k-msg', '');
-  /* A run of this check already in flight (a reload mid-check) resumes. */
+  /* A run of this check already in flight (a reload mid-check) resumes
+   * through the poll, which shows its question; a finished one shows its
+   * outcome. */
   fetch('/wiz/dark')
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      if (d && d.id === id && (d.running || d.result || d.error)) darkRender(d);
+      if (d && d.id === id && !d.running && (d.result || d.error)) darkRender(d);
       if (d && d.running && d.id === id) darkPoll();
     })
     .catch(function () {});
@@ -999,17 +1001,58 @@ function darkNext() {
     go(firstOpen());
   });
 }
+/* A check's question may ask for the machine's button, which the daemon
+ * reserves while its prompt stands and for 5 s after (wizpkg.c). So the
+ * question is shown only while a poll has answered lately: it goes at a
+ * failed poll, at an answer that arrives older than DARK_FRESH_MS, and
+ * once the request of the last poll that answered is older than that by
+ * either clock (the monotonic clock can stand still while the device
+ * sleeps). That is checked on every frame the browser paints while the
+ * question is shown, so no frame shows it past that age, the first frame
+ * after a sleep of the device included, and when the tab comes back into
+ * view, the window gains the focus, or the page is shown again. */
+var DARK_FRESH_MS = 2500;
+function darkPromptHide() {
+  K.promptSeq = 0;
+  $('k-prompt').style.display = 'none';
+}
+function darkAge(sent, sentWall) {
+  var age = Math.max(performance.now() - sent, Date.now() - sentWall);
+  return isNaN(age) ? Infinity : age;
+}
+function darkPromptCheck() {
+  if ($('k-prompt').style.display !== 'none' && darkAge(K.polledAt, K.polledWall) > DARK_FRESH_MS) darkPromptHide();
+}
+function darkWatch() {
+  darkPromptCheck();
+  K.frame = $('k-prompt').style.display !== 'none' ? requestAnimationFrame(darkWatch) : 0;
+}
+document.addEventListener('visibilitychange', darkPromptCheck);
+window.addEventListener('focus', darkPromptCheck);
+window.addEventListener('pageshow', darkPromptCheck);
 function darkPoll() {
   if (K.timer) clearTimeout(K.timer);
   K.timer = null;
+  var sent = performance.now(),
+    sentWall = Date.now();
   fetch('/wiz/dark')
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d || d.id !== K.id) return;
+      var age = darkAge(sent, sentWall);
+      if (age > DARK_FRESH_MS) {
+        darkPromptHide();
+        K.timer = setTimeout(darkPoll, 1000);
+        return;
+      }
+      K.polledAt = sent;
+      K.polledWall = sentWall;
       darkRender(d);
+      if (!K.frame && $('k-prompt').style.display !== 'none') K.frame = requestAnimationFrame(darkWatch);
       if (d.running) K.timer = setTimeout(darkPoll, 1000);
     })
     .catch(function () {
+      darkPromptHide();
       K.timer = setTimeout(darkPoll, 2000);
     });
 }

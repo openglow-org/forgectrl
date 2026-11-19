@@ -12,8 +12,15 @@
  * and the operator's, are "sender in" with the lease given up; a claim the
  * host stops keeping fresh ends by itself with a notice, and moves
  * nothing; the operator's end refuses the package until it says in; the
- * controller is brought back in line after a restart either way; and a
- * daemon that starts takes up a claim the host still keeps.
+ * controller is brought back in line after a restart either way; a claim
+ * is enforced only on the running controller's word (its "sender out"
+ * taken, or its state saying so), never on a controller started since; the
+ * job runner's keep for a run is the controller's "sender out", refused at
+ * once on a busy machine, asked again while the sender is in its quiet
+ * time and refused past the wait, asked under a claim too, and
+ * neither the keeper nor a claim's end lets a sender in until the run's
+ * end does; and a daemon that starts takes up a claim the host still
+ * keeps.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -34,12 +41,15 @@ static int fails;
 /* --- the controller, scripted ------------------------------------------ */
 static int running = 1;
 static char next_reply[64] = "ok";      /* the answer to "sender ..." */
+static int busy_sender_left;            /* that many answers busy:sender first */
 static int unreachable;
 static int kept_out;                    /* what the controller says in its state */
-static char sent[16][32];
+static char sent[64][32];
 static int nsent;
 
+static long ctl_pid = 100;              /* the running controller; a new one is a new pid */
 int super_grbl_running(void) { return running; }
+long super_grbl_pid(void) { return running ? ctl_pid : 0; }
 
 int grblport_request(grblport_set_t set, grblport_op_t op, const char *arg, char *reply, size_t len)
 {
@@ -51,8 +61,13 @@ int grblport_request(grblport_set_t set, grblport_op_t op, const char *arg, char
     }
     if (op != GRBLPORT_SENDER || set != GRBLPORT_SET_DAEMON)
         return GRBLPORT_FORBIDDEN;
-    if (nsent < 16)
+    if (nsent < 64)
         snprintf(sent[nsent++], sizeof(sent[0]), "sender %s", arg);
+    if (busy_sender_left > 0) {
+        busy_sender_left--;
+        snprintf(reply, len, "busy:sender");
+        return GRBLPORT_OK;
+    }
     snprintf(reply, len, "%s", next_reply);
     if (!strcmp(next_reply, "ok"))
         kept_out = !strcmp(arg, "out");
@@ -141,6 +156,23 @@ int main(void)
           "a second package is refused: %s", why);
     CHECK(senderout_end(B, why, sizeof(why)) == 0 && kept_out && holds("ext:org.openglow.alignment"),
           "and its end changes nothing");
+    printf("A claim is trusted on the controller's own word:\n");
+    CHECK(senderout_enforced(A) && !senderout_enforced(B), "its sender out taken: enforced, for the holder alone");
+    CHECK(senderout_keeps_machine(A) && !senderout_keeps_machine(B), "and the holder alone keeps the machine for its own jobs");
+    ctl_pid++;                          /* the controller starts again, and keeps nobody out */
+    kept_out = 0;
+    CHECK(!senderout_enforced(A), "a controller started since is not the one that said so");
+    CHECK(!senderout_keeps_machine(A), "nor does the holder keep the machine on that controller");
+    snprintf(next_reply, sizeof(next_reply), "busy:sender");
+    nap(SENDEROUT_REPUSH_S + 0.1);
+    keep(A, 0, 1);
+    senderout_tick();
+    CHECK(!senderout_enforced(A), "its state keeps nobody out and the push is refused: not enforced");
+    snprintf(next_reply, sizeof(next_reply), "ok");
+    nap(SENDEROUT_REPUSH_S + 0.1);
+    keep(A, 0, 1);
+    senderout_tick();
+    CHECK(kept_out && senderout_enforced(A), "the push taken: enforced again");
     CHECK(senderout_end(A, why, sizeof(why)) == 0, "the package's own end");
     CHECK(!strcmp(last_sent(), "sender in") && !kept_out && lease_holder(id, sizeof(id)) == 0,
           "lets the sender in and gives up the machine");
@@ -226,15 +258,55 @@ int main(void)
     senderout_tick();
     CHECK(!kept_out && !strcmp(last_sent(), "sender in"), "a controller that keeps the sender out for nobody lets it in");
 
+    printf("The job runner keeps the sender out for a run:\n");
+    nsent = 0;
+    CHECK(senderout_runner_out(why, sizeof(why)) == 0 && kept_out && !strcmp(last_sent(), "sender out"),
+          "with no claim it is the controller's sender out: %s", why);
+    nap(SENDEROUT_REPUSH_S + 0.1);
+    senderout_tick();
+    CHECK(kept_out && strcmp(last_sent(), "sender in"), "the keeper does not let senders in under the run");
+    senderout_runner_in();
+    CHECK(!kept_out && !strcmp(last_sent(), "sender in"), "the run's end lets them in");
+    snprintf(next_reply, sizeof(next_reply), "busy:state");
+    before = nsent;
+    CHECK(senderout_runner_out(why, sizeof(why)) == -1 && strstr(why, "not idle") && nsent == before + 1,
+          "a machine the controller calls busy (a job held, a line running) refuses at once: %s", why);
+    snprintf(next_reply, sizeof(next_reply), "ok");
+    busy_sender_left = 1;
+    before = nsent;
+    CHECK(senderout_runner_out(why, sizeof(why)) == 0 && nsent == before + 2 && kept_out,
+          "a sender still in its quiet time is asked again until it has passed");
+    senderout_runner_in();
+    busy_sender_left = 1000;
+    CHECK(senderout_runner_out(why, sizeof(why)) == -1 && strstr(why, "Grbl sender is using"),
+          "and one that stays busy past the wait refuses: %s", why);
+    busy_sender_left = 0;
+    CHECK(senderout_claim(A, why, sizeof(why)) == 0, "under a package's claim");
+    keep(A, 0, 1);
+    kept_out = 0;                       /* a controller started since keeps nobody out */
+    before = nsent;
+    CHECK(senderout_runner_out(why, sizeof(why)) == 0 && nsent == before + 1 && kept_out &&
+          !strcmp(last_sent(), "sender out"), "the run still asks the controller's sender out: %s", why);
+    before = nsent;
+    CHECK(senderout_end(A, why, sizeof(why)) == 0 && kept_out && nsent == before,
+          "the claim's end under the run leaves the sender out");
+    senderout_runner_in();
+    CHECK(!kept_out && !strcmp(last_sent(), "sender in"), "until the run ends");
+    unkeep(A);
+
     printf("A daemon that starts takes up a claim the host keeps:\n");
     keep(B, 0, 1);
     senderout_init();
     CHECK(senderout_holder(id, sizeof(id)) && !strcmp(id, B) && holds("ext:org.example.other"),
           "taken up, the machine with it");
+    /* Taken up from the host's file, it is this daemon's record only: no
+     * controller has said it keeps the sender out for it yet. */
+    CHECK(!senderout_enforced(B), "a claim taken up at the start is not trusted before the controller's word");
     nap(SENDEROUT_REPUSH_S + 0.1);
     keep(B, 0, 1);
     senderout_tick();
     CHECK(kept_out, "and the controller told");
+    CHECK(senderout_enforced(B), "trusted once the running controller has taken its push");
     senderout_end(B, why, sizeof(why));
     unkeep(B);
 

@@ -34,7 +34,8 @@ void cool_diag_purge(int on);       /* the head's purge fan */
  * pump back. The engine releases the hold itself when a run session opens
  * (a job never runs with the machine held quiet), when the coolant crosses
  * its ceiling (the cooling airflow and the TEC run at once), and after
- * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. */
+ * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. While it
+ * stands the verdict blocks fire (QUIET), and holds an open window. */
 #define COOL_QUIET_HOLD_MAX_S 600
 void cool_quiet_hold(int on);
 void cool_quiet_hold_ex(int on, int with_pump);
@@ -139,6 +140,20 @@ void cool_controller_stopped(void);
  * restart; a host test counts the calls. NULL means the kernel writes
  * stand alone. */
 extern void (*cool_fail_tier_stop)(const char *why);
+
+/* The machine's button reserved for a prompt (btnres.h): asked once a
+ * tick, it returns 1, with whose prompt it is in @why, while a reservation
+ * stands that the job of the armed window may not take. The engine then
+ * blocks fire, withholds the window's acknowledgment and holds an open
+ * window (verdict BUTTON, button_reserved in the document), so the press
+ * that prompt asks for completes no arm and resumes no job. main.c points
+ * it at btnres_withheld; NULL means no reservation. */
+extern int (*cool_button_reserved)(char *why, size_t len);
+
+/* Seconds the published verdict has carried button_reserved without a
+ * break, or -1 when the last one did not: a prompt asks for the press only
+ * once both controllers have had the time to read it. */
+double cool_button_on_file_s(void);
 
 /* The counts the air-assist fan's ground shift adds to a raw coolant
  * thermistor reading at the duty the engine last commanded (more counts

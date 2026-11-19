@@ -15,9 +15,63 @@
 #include <string.h>
 #include <time.h>
 
+#include "btnres.h"
 #include "extpkg.h"
 #include "fflog.h"
 #include "wizrun.h"
+
+double (*wizpkg_on_file_s)(void) = NULL;
+int (*wizpkg_job_waits)(char *why, size_t len) = NULL;
+
+/* A check's reservation outlives its prompt: the wait for it to come on
+ * file, then the prompt's own timeout. */
+_Static_assert((int)BTNRES_TTL_MAX_S > (int)WIZPKG_READY_WAIT_S + WIZ_PROMPT_TIMEOUT_S,
+               "a check's reservation of the button must outlive its prompt");
+
+/* The prompt is shown only once its reservation has stood on file for
+ * BTNRES_READY_S with no job that would take the press as its own: both
+ * controllers have read it by then, and no job waits that a press could
+ * reach. Meanwhile the Setup page names the job that waits. A package
+ * that keeps the machine waits for nothing: its reservation withholds
+ * nothing from its own job, whenever it comes to keep it. Past
+ * WIZPKG_READY_WAIT_S, or on an abort, the check ends: 0 to show the
+ * prompt, -1 when it has ended. */
+static int ready_wait(const char *id, const char *step_phase)
+{
+    if (!wizpkg_on_file_s)
+        return 0;
+    struct timespec step = { 0, 100 * 1000 * 1000 };
+    char said[160] = "", jw[160];
+    for (double waited = 0;; waited += 0.1) {
+        if (btnres_pkg_holds && btnres_pkg_holds(id)) {
+            if (said[0])
+                wiz_phase("%s", step_phase);
+            return 0;
+        }
+        int waits = wizpkg_job_waits && wizpkg_job_waits(jw, sizeof(jw));
+        if (!waits && wizpkg_on_file_s() >= BTNRES_READY_S) {
+            if (said[0])
+                wiz_phase("%s", step_phase);
+            return 0;
+        }
+        if (waits && strcmp(said, jw)) {
+            snprintf(said, sizeof(said), "%s", jw);
+            wiz_phase("%s", jw);
+        }
+        if (wiz_aborted()) {
+            wiz_finish_err("aborted");
+            return -1;
+        }
+        if (waited >= WIZPKG_READY_WAIT_S) {
+            if (waits)
+                wiz_finish_err("%s", jw);
+            else
+                wiz_finish_err("the machine's button could not be reserved for the check's question");
+            return -1;
+        }
+        nanosleep(&step, NULL);
+    }
+}
 
 static int fail(char *why, size_t wlen, const char *text)
 {
@@ -134,6 +188,7 @@ void wizpkg_run(void)
 {
     const char *wid = wiz_current_id(), *id = wid + strlen(WIZPKG_PREFIX);
     char why[300] = "", answer[64], *doc = extpkg_wizard_json(id, "start", NULL, why, sizeof(why));
+    int asked = 0;                      /* a prompt of this run has been shown */
     for (int n = 0; n < WIZPKG_STEPS_MAX; n++) {
         wizpkg_step_t s;
         if (!doc) {
@@ -166,7 +221,32 @@ void wizpkg_run(void)
         const char *opts[WIZPKG_OPTS_MAX];
         for (int i = 0; i < s.nopt; i++)
             opts[i] = s.opts[i];
+        /* A prompt's words are the package's: any of them may ask for the
+         * machine's button. It is reserved for the package while the prompt
+         * stands, so a press made for it reaches no other party's job
+         * (btnres.h), and the prompt waits until the controllers have read
+         * that. The package's own jobs still take it. */
+        char who[BTNRES_WHO_MAX], rwhy[96];
+        snprintf(who, sizeof(who), "check:%s", id);
+        if (btnres_open(who, BTNRES_TTL_MAX_S, rwhy, sizeof(rwhy)) != 0) {
+            free(extpkg_wizard_json(id, "abort", NULL, why, sizeof(why)));
+            wiz_finish_err("%s", rwhy);
+            return;
+        }
+        if (ready_wait(id, s.phase) != 0) {
+            /* An earlier prompt's question may still be on a Setup page:
+             * its reservation keeps WIZPKG_LINGER_S from here. */
+            if (!asked || btnres_open(who, WIZPKG_LINGER_S, rwhy, sizeof(rwhy)) != 0)
+                btnres_close(who);
+            free(extpkg_wizard_json(id, "abort", NULL, why, sizeof(why)));
+            return;
+        }
+        asked = 1;
         rc = wiz_ask(s.kind, s.pid, s.text, opts, s.nopt, answer, sizeof(answer));
+        /* Kept for WIZPKG_LINGER_S, longer than the page shows the
+         * question; a next prompt renews it. */
+        if (btnres_open(who, WIZPKG_LINGER_S, rwhy, sizeof(rwhy)) != 0)
+            btnres_close(who);
         if (rc != 0) {
             /* A prompt nobody answered already ends the step with its
              * reason (the runner names the timeout); an abort is named

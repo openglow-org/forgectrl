@@ -75,6 +75,7 @@ typedef struct {
     int fire_ok;
     int armed;                      /* the active controller's report */
     int arming;                     /* the GRBL controller waits for the button */
+    int grbl_unknown;               /* a GRBL controller runs, and its state file is not current */
     char gstate[12];                /* the GRBL controller's state name, "" with none */
     int alarm;
     unsigned homed_axes;
@@ -97,8 +98,10 @@ void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn 
 /* The button, from one switch word to the next: a "button" event for each
  * edge, but only when nothing else is waiting for the press - not while a
  * job arms or runs, not under the machine lease (a wizard, a diagnostic),
- * and not while this daemon waits for it itself. The state is the last
- * full snapshot's. */
+ * not while this daemon waits for it itself, and not while the GRBL
+ * controller's state cannot be known (a job could be arming). The state
+ * is the last full snapshot's. The extension host's stream carries none
+ * of them: a package gets a press by asking for one (btnres.h). */
 void events_button(unsigned long was, unsigned long now, const events_snap_t *state, events_emit_fn emit, void *ctx);
 
 /* telemetry.tick's data: what the daemon already holds, no sensor read. */

@@ -7,8 +7,11 @@
  * See jobrun.h. One mutex holds the runner's own state; it is never held
  * across a client's callback or across the run, and the lease is taken
  * and given back inside it, so "no run is active" and "the runner holds
- * no lease" are one fact to anybody who asks. A client's own mutex comes
- * before the runner's, never after.
+ * no lease" are one fact to anybody who asks. The Grbl socket's keep is
+ * asked for and given back with the mutex let go (the controller's port
+ * answers in its own time), always while the run is active, so no other
+ * run begins between. A client's own mutex comes before the runner's,
+ * never after.
  */
 #define _GNU_SOURCE
 #include "jobrun.h"
@@ -26,9 +29,13 @@
 
 enum { JR_IDLE, JR_RUNNING, JR_DONE, JR_FAILED };
 
+int (*jobrun_sender_out)(char *err, size_t elen);
+void (*jobrun_sender_in)(void);
+
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int active;                      /* a run plays, started or on a caller's thread */
 static int lease_held;                  /* and its lease is still the runner's */
+static int sender_kept;                 /* and the Grbl socket is kept to this host for it */
 static char holder[LEASE_OWNER_MAX];    /* the lease owner of the run that plays */
 static char owner[LEASE_OWNER_MAX];     /* the record's: the run that plays, or the last one */
 static int is_program;                  /* the run is a posted program's */
@@ -61,9 +68,47 @@ static void busy_words(char *err, size_t elen)
 
 /* ------------------------------------------------------------ the run */
 
-/* The way in: the lease as a sender. The record of the last job stands
- * until record_open_locked(), so a refused start changes nothing anybody
- * reads. Called with mu held. */
+/* The Grbl socket kept to this host for the run that begins. The port
+ * answers in its own time, so it is asked with the mutex let go; active
+ * is set already, so nothing else begins meanwhile. Called with mu held. */
+static int sender_take_locked(char *err, size_t elen)
+{
+    if (!jobrun_sender_out)
+        return 0;
+    pthread_mutex_unlock(&mu);
+    int rc = jobrun_sender_out(err, elen);
+    pthread_mutex_lock(&mu);
+    if (rc == 0)
+        sender_kept = 1;
+    return rc;
+}
+
+/* And given back, while active still says the run is the runner's: the
+ * next run's keep can never meet this run's give. Called with mu held. */
+static void sender_give_locked(void)
+{
+    if (!sender_kept)
+        return;
+    sender_kept = 0;
+    if (jobrun_sender_in) {
+        pthread_mutex_unlock(&mu);
+        jobrun_sender_in();
+        pthread_mutex_lock(&mu);
+    }
+}
+
+/* A start that did not come to a run: the socket and the lease back.
+ * Called with mu held. */
+static void unbegin_locked(void)
+{
+    sender_give_locked();
+    lease_release(holder);
+    lease_held = active = 0;
+}
+
+/* The way in: the lease as a sender, then the Grbl socket kept to this
+ * host. The record of the last job stands until record_open_locked(), so
+ * a refused start changes nothing anybody reads. Called with mu held. */
 static int begin_locked(const jobrun_cfg_t *cfg, char *err, size_t elen)
 {
     if (!cfg || !cfg->owner || !cfg->stream.gen) {
@@ -78,6 +123,10 @@ static int begin_locked(const jobrun_cfg_t *cfg, char *err, size_t elen)
         return -1;
     active = lease_held = 1;
     snprintf(holder, sizeof(holder), "%s", cfg->owner);
+    if (sender_take_locked(err, elen) != 0) {
+        unbegin_locked();
+        return -1;
+    }
     return 0;
 }
 
@@ -93,19 +142,13 @@ static void record_open_locked(jobstream_run_t *run, int program, int nlines)
     cur = run;
 }
 
-/* A start that did not come to a run: the lease back. Called with mu held. */
-static void unbegin_locked(void)
-{
-    lease_release(holder);
-    lease_held = active = 0;
-}
-
-/* The way out: the counters kept, the lease back if the client has not
- * taken it back already, the state published last. */
+/* The way out: the counters kept, the socket and the lease back if the
+ * client has not taken them back already, the state published last. */
 static void end(int rc, const jobstream_run_t *run, const char *err)
 {
     char who[LEASE_OWNER_MAX];
     pthread_mutex_lock(&mu);
+    sender_give_locked();
     last = *run;
     last_elapsed = mono_s() - t_started;
     cur = NULL;
@@ -135,6 +178,7 @@ void jobrun_lease_back(void)
 {
     pthread_mutex_lock(&mu);
     if (active && lease_held) {
+        sender_give_locked();
         lease_release(holder);
         lease_held = 0;
     }

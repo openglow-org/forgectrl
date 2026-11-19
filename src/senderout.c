@@ -29,6 +29,12 @@ static double since, claimed_at;
 static char released[SENDEROUT_ID_MAX + 1];    /* the claim the operator ended, until the package says in */
 static char notice_id[SENDEROUT_ID_MAX + 1];   /* one that stopped while it kept the sender out */
 static double pushed_at;
+static int runner;          /* the daemon's job runner keeps the sender out for a run */
+/* The GRBL controller (its pid) whose own word says it keeps every network
+ * sender out for the holder: its "sender out" taken, or its state read
+ * saying so. 0 when no controller has said so since the claim, or since
+ * one said otherwise. A new controller is not the one that said it. */
+static long enforced_pid;
 
 static double mono(void)
 {
@@ -54,9 +60,18 @@ static void owner_of(const char *id, char *buf, size_t len)
 }
 
 /* The controller's own word: 0 ok, else the HTTP status with why. */
+static int port_sender_said(const char *arg, char *why, size_t len, int *busy_sender);
 static int port_sender(const char *arg, char *why, size_t len)
 {
+    return port_sender_said(arg, why, len, NULL);
+}
+
+/* And whether the refusal was the sender's (busy:sender), not the machine's. */
+static int port_sender_said(const char *arg, char *why, size_t len, int *busy_sender)
+{
     char reply[160];
+    if (busy_sender)
+        *busy_sender = 0;
     if (!super_grbl_running()) {
         snprintf(why, len, "the GRBL controller is not running");
         return 409;
@@ -69,22 +84,78 @@ static int port_sender(const char *arg, char *why, size_t len)
         return 0;
     if (!strcmp(reply, "busy:state"))
         snprintf(why, len, "the machine is not idle: a program, a jog, a hold, an armed laser, or an alarm");
-    else if (!strcmp(reply, "busy:sender"))
+    else if (!strcmp(reply, "busy:sender")) {
         snprintf(why, len, "the Grbl sender is using the machine: wait until it is done");
-    else
+        if (busy_sender)
+            *busy_sender = 1;
+    } else
         snprintf(why, len, "the GRBL controller refused (%.32s)", reply);
     return 409;
 }
 
-/* Let every sender in, and give up the machine. Called outside mu. */
+/* Let every sender in, and give up the machine. A run of the job runner's
+ * under the claim keeps them out until it ends (senderout_runner_in).
+ * Called outside mu. */
 static void let_in(const char *id)
 {
     char why[160], owner[LEASE_OWNER_MAX];
-    if (port_sender("in", why, sizeof(why)) != 0)
+    pthread_mutex_lock(&mu);
+    int run = runner;
+    pthread_mutex_unlock(&mu);
+    if (!run && port_sender("in", why, sizeof(why)) != 0)
         fflog(LOG_WARNING, "senderout: the controller was not told to let senders in (%s); "
                            "the keeper tries again", why);
     owner_of(id, owner, sizeof(owner));
     lease_release(owner);
+}
+
+int senderout_enforced(const char *id)
+{
+    pthread_mutex_lock(&mu);
+    int named = id && holder[0] && !strcmp(holder, id) && enforced_pid > 0;
+    long pid = enforced_pid;
+    pthread_mutex_unlock(&mu);
+    return named && pid == super_grbl_pid();
+}
+
+int senderout_keeps_machine(const char *id)
+{
+    return super_grbl_running() && senderout_enforced(id);
+}
+
+int senderout_runner_out(char *why, size_t len)
+{
+    /* Asked of the controller every time, a package's claim or not: the
+     * claim is this daemon's record, and a controller that started since
+     * keeps nobody out until it is told. One that keeps senders out
+     * already answers at once, and a busy machine refuses either way. The
+     * sender's last line, the runner's own last run's among them, keeps
+     * the port's answer busy for its quiet time: asked again until that
+     * has passed. */
+    struct timespec step = { 0, (long)(SENDEROUT_RUNNER_STEP_S * 1e9) };
+    double give_up = mono() + SENDEROUT_RUNNER_WAIT_S;
+    int busy_sender;
+    while (port_sender_said("out", why, len, &busy_sender) != 0) {
+        if (!busy_sender || mono() >= give_up)
+            return -1;
+        nanosleep(&step, NULL);
+    }
+    pthread_mutex_lock(&mu);
+    runner = 1;
+    pthread_mutex_unlock(&mu);
+    return 0;
+}
+
+void senderout_runner_in(void)
+{
+    char why[160];
+    pthread_mutex_lock(&mu);
+    int was = runner, claim = holder[0] != '\0';
+    runner = 0;
+    pthread_mutex_unlock(&mu);
+    if (was && !claim && port_sender("in", why, sizeof(why)) != 0)
+        fflog(LOG_WARNING, "senderout: the controller was not told to let senders in after a run (%s); "
+                           "the keeper tries again", why);
 }
 
 int senderout_claim(const char *id, char *why, size_t len)
@@ -117,6 +188,7 @@ int senderout_claim(const char *id, char *why, size_t len)
         snprintf(why, len, "%s", lw);
         return 409;
     }
+    long pid = super_grbl_pid();
     int rc = port_sender("out", why, len);
     if (rc) {
         lease_release(owner);
@@ -126,6 +198,7 @@ int senderout_claim(const char *id, char *why, size_t len)
     snprintf(holder, sizeof(holder), "%s", id);
     since = claimed_at = pushed_at = mono();
     notice_id[0] = '\0';
+    enforced_pid = pid;
     pthread_mutex_unlock(&mu);
     fflog(LOG_NOTICE, "senderout: %s keeps the Grbl sender out", id);
     return 0;
@@ -141,8 +214,10 @@ int senderout_end(const char *id, char *why, size_t len)
     if (!strcmp(released, id))
         released[0] = '\0';
     int was = !strcmp(holder, id);
-    if (was)
+    if (was) {
         holder[0] = '\0';
+        enforced_pid = 0;
+    }
     pthread_mutex_unlock(&mu);
     if (was) {
         let_in(id);
@@ -161,6 +236,7 @@ int senderout_release(char *why, size_t len)
     if (id[0]) {
         snprintf(released, sizeof(released), "%s", id);
         holder[0] = '\0';
+        enforced_pid = 0;
     }
     pthread_mutex_unlock(&mu);
     if (id[0]) {
@@ -245,6 +321,7 @@ void senderout_tick(void)
     snprintf(id, sizeof(id), "%s", holder);
     snprintf(rel, sizeof(rel), "%s", released);
     double claimed = claimed_at;
+    int run = runner;
     int push_due = mono() - pushed_at >= SENDEROUT_REPUSH_S;
     if (push_due)
         pushed_at = mono();
@@ -256,6 +333,7 @@ void senderout_tick(void)
         int still = !strcmp(holder, id);
         if (still) {
             holder[0] = '\0';
+            enforced_pid = 0;
             snprintf(notice_id, sizeof(notice_id), "%s", id);
         }
         pthread_mutex_unlock(&mu);
@@ -274,21 +352,32 @@ void senderout_tick(void)
         pthread_mutex_unlock(&mu);
     }
     /* The controller agrees with the claim: a restarted one lets senders
-     * in, and one a restarted daemon left keeping them out is told. */
+     * in, and one a restarted daemon left keeping them out is told. A run
+     * of the job runner's keeps them out with no claim, until it ends. */
     if (!push_due || !super_grbl_running())
         return;
+    long pid = super_grbl_pid();
     if (grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_STATE, NULL, reply, sizeof(reply)) != GRBLPORT_OK)
         return;
     json_t *st = json_loads(reply, 0, NULL);
     int out = json_is_true(json_object_get(st, "sender_out"));
     json_decref(st);
-    if (id[0] && !out) {
-        if (port_sender("out", why, sizeof(why)) == 0)
-            fflog(LOG_NOTICE, "senderout: the GRBL controller keeps the sender out for %s again", id);
-    } else if (!id[0] && out) {
-        if (port_sender("in", why, sizeof(why)) == 0)
+    if (!id[0]) {
+        if (!run && out && port_sender("in", why, sizeof(why)) == 0)
             fflog(LOG_NOTICE, "senderout: the GRBL controller lets senders in again");
+        return;
     }
+    /* What the claim may be trusted for is the controller's own word: its
+     * state now, or the push it takes. */
+    int kept = out;
+    if (!out && port_sender("out", why, sizeof(why)) == 0) {
+        kept = 1;
+        fflog(LOG_NOTICE, "senderout: the GRBL controller keeps the sender out for %s again", id);
+    }
+    pthread_mutex_lock(&mu);
+    if (!strcmp(holder, id))
+        enforced_pid = kept ? pid : 0;
+    pthread_mutex_unlock(&mu);
 }
 
 #ifndef SENDEROUT_NO_THREAD

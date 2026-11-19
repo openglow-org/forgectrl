@@ -27,6 +27,21 @@
  *                           before the air-assist lift and the correction
  *   J. blind under the floor: COLD keeps its state through SENSOR
  *   K. blind in a warm-up:  the heater goes off and comes back
+ *   L. the acknowledgment:  it waits for the fans; one low tach reading
+ *                           keeps it and the airflow gate's count takes
+ *                           it, in the spin-up grace too, and then the
+ *                           window it was given holds (FANS) until the
+ *                           fan reads its floor; a window open before the
+ *                           engine started holds the same way until its
+ *                           fans read their floors; CRITICAL, SENSOR and
+ *                           AIRFLOW name themselves over FANS, with
+ *                           their own words; a window that
+ *                           opens is acknowledged on its own fans; a
+ *                           quiet hold and a reserved button block fire
+ *                           and hold an open window, the reservation's
+ *                           package's own window excepted while it keeps
+ *                           the machine; a renewal moves a reservation's
+ *                           end, and each prompt's is its own
  *   M. the hang dead-man:   a report under the timeout is still fresh and
  *                           acknowledged; silence while armed stops and
  *                           locks once; silence while the kernel runs
@@ -48,7 +63,9 @@
  *   fan writes B. dropped:  two writes dropped, the third takes; no fault
  *   fan writes C. lost:     a device loses its duty mid-session; the tick
  *                           puts it back and the fan gets its spin-up
- *                           grace, so a fan that then runs is not tripped
+ *                           grace, so a fan that then runs is not tripped,
+ *                           while the acknowledged window holds (FANS)
+ *                           until it reads its floor again
  *   fan writes D. refused:  a device takes nothing, or the bus refuses the
  *                           write; the fan is tripped at its tach and the
  *                           fault names the duty and the readback
@@ -81,7 +98,8 @@
  *              the fans idle, released on the minute's minimum, not on a
  *              slug; both low gates at 0 are off
  *   gates B2.  no upstream reading at the session's start: WARMUP
- *              undecided, no heat, no acknowledgment, until one decides
+ *              undecided, no heat, no acknowledgment, until one decides;
+ *              a run so decided is acknowledged on its own fans
  *   gates E.   a value the setting does not take (not finite, padded, too
  *              long, out of range): the default stands
  *   gates F.   an upstream reading over 70 C releases no cold-side gate,
@@ -149,6 +167,7 @@
  */
 #define GF_SYSFS    "cool-engine-test/sys/"
 #define VERDICT_DIR "cool-engine-test/run"
+#define VERDICT_FILE VERDICT_DIR "/cooling.state"
 #define clock_gettime fake_clock_gettime
 /* The head accelerometer's interrupt generators, faked: the engine's
    calls land here (the real ones open an i2c bus this host lacks). */
@@ -254,6 +273,8 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
 #define write fake_write
 
 #include "../src/cool.c"
+/* The button's reservations on the same fake clock as the engine. */
+#include "../src/btnres.c"
 
 #include <stdarg.h>
 #include <sys/stat.h>
@@ -630,6 +651,15 @@ static void run_tick(loop_t *L)
     engine_tick();
 }
 
+/* One tick of an open run session whose window has closed. */
+static void tick_unarmed_run(loop_t *L)
+{
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 0, -1, -1, -1, NULL);
+    engine_tick();
+}
+
 /* Settle idle and open a run session (the session's first tick runs). The
  * engine reads its settings at the run start, so a case that sets them
  * after close_session sees them take effect here. */
@@ -658,6 +688,11 @@ static int failures;
     if (cond) { printf("  ok: %s\n", msg); } \
     else { printf("  FAIL: %s\n", msg); failures++; } \
 } while (0)
+
+static int now_in_grace(void)
+{
+    return wall_s() < fan_grace_until;
+}
 
 /* The armed acknowledgment waits for the fans: with the exhaust under
  * its floor the verdict carries armed=false however long the window is
@@ -695,6 +730,302 @@ static void test_ack_waits_for_fans(loop_t *L)
     CHECK(pub_armed_ack && fans_up, "the acknowledgment goes out the tick the exhaust reads its floor");
     put_long("thermal/tach_exhaust", 300);
     close_session(L);
+
+    /* Once given, it goes only with a fan that stays under its floor for
+     * the airflow gate's count of ticks: one low reading does not take
+     * it. The fan's spin-up grace stops nothing here: the session below
+     * is inside it throughout, where the airflow gate judges nothing. The
+     * window owes its fans from its acknowledgment, so the withdrawal
+     * blocks fire and holds the window (FANS) inside the grace, where
+     * AIRFLOW cannot trip yet, until the fan reads its floor again. */
+    printf("L2. one low tach reading keeps the acknowledgment; the gate's count withdraws it and holds "
+           "the window, in the session's grace too\n");
+    settle_and_open(L);
+    CHECK(pub_armed_ack && now_in_grace(), "a fresh session, every fan fast: acknowledged, in the grace");
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 1; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(pub_armed_ack && pub_fire_ok, "under its floor for fewer ticks than the gate's count: still acknowledged");
+    run_tick(L);
+    CHECK(!pub_armed_ack && now_in_grace() && !airflow_alarm, "under its floor for the gate's count: withdrawn, inside the grace");
+    CHECK(!pub_fire_ok && pub_hold && !strcmp(pub_verdict, "FANS"),
+          "the acknowledged window with a fan gone: FANS, fire blocked, the window held");
+    /* FANS goes only once every judged fan has read its floor for the
+     * gate's count of ticks in a row: a fan that dips and comes back for a
+     * tick does not cycle the job lit and dark. */
+    put_long("thermal/tach_exhaust", 300);
+    for (int i = 1; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(pub_armed_ack && !pub_fire_ok && pub_hold && !strcmp(pub_verdict, "FANS"),
+          "back at its floor for fewer ticks than the count: acknowledged, FANS still holds");
+    put_long("thermal/tach_exhaust", 10000000);
+    run_tick(L);
+    put_long("thermal/tach_exhaust", 300);
+    for (int i = 1; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "FANS"), "a dip in between starts the count again");
+    run_tick(L);
+    CHECK(pub_armed_ack && pub_fire_ok && !pub_hold,
+          "at its floor for the count of ticks in a row: fire permitted, released");
+    /* A window that has closed holds nothing, whatever it owed. */
+    tick_unarmed_run(L);
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS + 1; i++)
+        tick_unarmed_run(L);
+    CHECK(strcmp(pub_verdict, "FANS") && !pub_hold, "the window closed, a fan under its floor: no FANS, nothing held");
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+
+    /* A restart of the daemon under a busy job: the new engine hears of a
+     * window it never saw closed, which may have fired, so the window owes
+     * its fans from the engine's first tick, and fire waits for them
+     * (FANS) instead of a permissive verdict with the acknowledgment
+     * withheld. */
+    printf("L2b. a window open before the engine started owes its fans: FANS until they read their floors\n");
+    settle_and_open(L);
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack, "an armed run, acknowledged");
+    put_long("thermal/tach_exhaust", 10000000);     /* the exhaust stops */
+    machine_idle = 0;
+    cool_init();                        /* the daemon starts again under the busy job */
+    /* The engine ticks at once, before its server takes the controller's
+     * first report: a tick with no report is not a window seen closed. */
+    loop_tick(L);
+    fake_now += 1.0;
+    engine_tick();
+    run_tick(L);                        /* the controller's first report to it: its window open */
+    CHECK(!pub_fire_ok && pub_hold && !strcmp(pub_verdict, "FANS") && !airflow_alarm && now_in_grace(),
+          "the window from before the start, the exhaust stopped: FANS in the new grace, fire blocked, held");
+    put_long("thermal/tach_exhaust", 300);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(pub_fire_ok && !pub_hold && pub_armed_ack,
+          "the exhaust at its floor for the count of ticks: fire permitted, released, acknowledged");
+    machine_idle = 1;
+    close_session(L);
+
+    /* The acknowledgment is the window's own. An unarmed run stretch whose
+     * job holds the exhaust under its run duty does not judge it, so the
+     * airflow reads up; the window opening raises the exhaust to its run
+     * duty and judges it, and a fan still under its floor then holds the
+     * acknowledgment back from the window's first tick. */
+    printf("L3. a window opening is acknowledged on its own fans, never on the stretch before it\n");
+    settle_and_open(L);
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < 3; i++) {
+        loop_tick(L);
+        fake_now += 1.0;
+        cool_state_report("run", 0, -1, 20000, -1, NULL);
+        engine_tick();
+    }
+    CHECK(fans_up && !pub_armed_ack, "unarmed, the slowed exhaust unjudged: the airflow reads up, nothing armed");
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, 20000, -1, NULL);
+    engine_tick();
+    CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN && !pub_armed_ack,
+          "the window opens: the exhaust raised to its run duty, the window not acknowledged");
+    put_long("thermal/tach_exhaust", 300);
+    run_tick(L);
+    CHECK(pub_armed_ack, "the exhaust at its floor: acknowledged");
+    close_session(L);
+}
+
+static int verdict_has(const char *needle);
+
+/* FANS is a pause tier. A verdict that ends the job or waits for the
+ * operator stands over it by name, since the controllers' fail tier, the
+ * red flash and its acknowledgment, the flight recorder and the cloud
+ * client's fault key on the name; and the words stay the verdict's: one
+ * that rises with FANS keeps its own, and the ceiling's hold under FANS
+ * names itself again once FANS goes. */
+static void fans_under_the_fail_tiers(loop_t *L)
+{
+    printf("L2c. CRITICAL, SENSOR and AIRFLOW name themselves over FANS, with their own words\n");
+    attn_keep = 1;
+    close_session(L);
+    (void)cool_attention_ack();
+    kv[0] = "cool_temp_max"; kv[1] = "60"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+    kv[4] = "cool_temp_critical_c"; kv[5] = "30"; kv[6] = NULL;
+    settle_and_open(L);
+    run_tick(L);
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "FANS") && now_in_grace() && !attn_latched,
+          "an acknowledged window, the exhaust under its floor in the grace: FANS, nothing for the operator");
+    L->bulk_c = 10.0;                   /* 32.3 C: over the 30 C critical line */
+    run_tick(L);
+    CHECK(critical_alarm && !strcmp(pub_verdict, "CRITICAL") && attn_latched && attn_sticky && led_red &&
+          strstr(pub_reason, "CRITICAL"),
+          "the critical line crossed under FANS: CRITICAL by name and words, red, its acknowledgment taken");
+    /* The job canceled: the session ends, and CRITICAL's acknowledgment waits. */
+    L->bulk_c = 0.0;
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "ACK") && !pub_fire_ok && verdict_has("\"ack_wait\":true"),
+          "the job canceled: CRITICAL's acknowledgment waits");
+    (void)cool_attention_ack();
+
+    settle_and_open(L);
+    run_tick(L);
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    L->dead_up = 1;
+    run_tick(L);
+    run_tick(L);
+    CHECK(!strcmp(pub_verdict, "SENSOR") && attn_latched && led_red && strstr(pub_reason, "SENSOR"),
+          "a coolant sensor gone under FANS: SENSOR by name and words, red");
+    L->dead_up = 0;
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+    (void)cool_attention_ack();
+    run_idle_tick(L);
+
+    /* Past the grace, a fan that stops trips AIRFLOW in the tick FANS rises. */
+    settle_and_open(L);
+    {
+        double t0 = fake_now;
+        while (fake_now < t0 + FAN_GRACE_S + 1)
+            run_tick(L);
+    }
+    CHECK(pub_armed_ack && pub_fire_ok, "an acknowledged window past the grace");
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(airflow_alarm && fans_held && !strcmp(pub_verdict, "AIRFLOW") && strstr(pub_reason, "AIRFLOW") &&
+          !strcmp(attn_reason, pub_reason),
+          "AIRFLOW and FANS in one tick: AIRFLOW by name, its words published and on its acknowledgment");
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+    (void)cool_attention_ack();
+    run_idle_tick(L);
+
+    /* The ceiling's hold under FANS names itself again once FANS goes. */
+    kv[1] = "18";
+    settle_and_open(L);
+    run_tick(L);
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(over_temp_gate && !strcmp(pub_verdict, "FANS"), "the ceiling's hold under FANS");
+    put_long("thermal/tach_exhaust", 300);
+    for (int i = 0; i < AIRFLOW_DEBOUNCE_TICKS; i++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && strstr(pub_reason, "limit"),
+          "FANS gone: OVERTEMP with its own words");
+    kv[0] = NULL;
+    attn_keep = 0;
+    close_session(L);
+}
+
+/* A quiet hold (every fan off for a listening) taken inside an armed
+ * window blocks fire at the next tick and holds the window, whatever let
+ * it in; outside a window it blocks fire and holds nothing. */
+static void quiet_blocks_fire(loop_t *L)
+{
+    printf("L4. a quiet hold blocks fire at the next tick, and holds only an open window\n");
+    open_session(L);
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack, "an armed run, acknowledged");
+    cool_quiet_hold_ex(1, 0);
+    run_tick(L);
+    CHECK(!pub_fire_ok && pub_hold && !strcmp(pub_verdict, "QUIET"),
+          "the quiet hold in the window: QUIET, fire blocked, the window held");
+    close_session(L);
+    run_idle_tick(L);
+    CHECK(!pub_fire_ok && !pub_hold, "the quiet hold at idle: fire blocked, nothing held");
+    cool_quiet_hold(0);
+    run_idle_tick(L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "released: OK");
+}
+
+/* The machine's button reserved for a prompt (btnres.c): fire blocked, the
+ * window not acknowledged and held, the reservation in the document, until
+ * it runs out. A package's own reservation does not withhold its own job
+ * while it keeps the machine, and withholds every job while it does not
+ * (a job sent in its name from elsewhere then waits like any other). */
+static int own_keeps;
+static int fake_pkg_holds(const char *pkg)
+{
+    return own_keeps && !strcmp(pkg, "org.example.own");
+}
+
+static void button_reserved_case(loop_t *L)
+{
+    char why[96];
+    printf("L5. the button reserved for a prompt withholds the window and blocks fire until it ends\n");
+    cool_button_reserved = btnres_withheld;
+    btnres_pkg_holds = fake_pkg_holds;
+    close_session(L);
+    CHECK(btnres_open("panel:a1", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "the panel reserves the button");
+    /* The time on file counts from a document a reader can have read: a
+     * publish that does not land (its rename refused: a directory stands
+     * where the file goes) puts nothing on file. */
+    unlink(VERDICT_FILE);
+    CHECK(mkdir(VERDICT_FILE, 0755) == 0, "the verdict file's place taken by a directory");
+    run_idle_tick(L);
+    fake_now += BTNRES_READY_S;
+    CHECK(!strcmp(pub_verdict, "BUTTON") && cool_button_on_file_s() < 0,
+          "BUTTON with no document landed: nothing on file");
+    CHECK(rmdir(VERDICT_FILE) == 0, "and given back");
+    run_idle_tick(L);
+    CHECK(!pub_fire_ok && !pub_hold && !strcmp(pub_verdict, "BUTTON") && verdict_has("\"button_reserved\":true"),
+          "idle: BUTTON in the document, fire blocked, nothing held");
+    fake_now += BTNRES_READY_S;
+    CHECK(cool_button_on_file_s() >= BTNRES_READY_S, "on file since that publish");
+    L->session = 1;
+    run_tick(L);
+    CHECK(!pub_fire_ok && pub_hold && !pub_armed_ack && fans_up,
+          "an armed window under it, its fans up: fire blocked, held, not acknowledged");
+    fake_now += BTNRES_PANEL_TTL_S;
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack && !verdict_has("\"button_reserved\":true") && cool_button_on_file_s() < 0,
+          "the reservation ran out: fire permitted, acknowledged, nothing reserved");
+    /* A renewal moves the reservation's end; each prompt's is its own, and
+     * one ended ends no other. */
+    CHECK(btnres_open("panel:a1", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0 &&
+          btnres_open("panel:b2", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "two dialogs reserve the button");
+    fake_now += BTNRES_PANEL_TTL_S - 2.0;
+    CHECK(btnres_open("panel:a1", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "one renews");
+    btnres_close("panel:b2");
+    fake_now += BTNRES_PANEL_TTL_S - 2.0;
+    run_tick(L);
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "BUTTON"),
+          "past the first end, the renewed one stands, the other's close ending only its own");
+    btnres_close("panel:a1");
+    run_tick(L);
+    CHECK(pub_fire_ok, "closed: nothing reserved");
+
+    CHECK(btnres_open("check:org.example.own", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "a package's check reserves it");
+    run_tick(L);
+    CHECK(!pub_fire_ok && !pub_armed_ack, "the package does not keep the machine: the window withheld");
+    own_keeps = 1;
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack, "the package keeps the machine: its own window acknowledged");
+    CHECK(btnres_open("check:org.example.other", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "another package's check beside it");
+    run_tick(L);
+    CHECK(!pub_fire_ok && !pub_armed_ack, "another package's check: the window withheld");
+    btnres_close("check:org.example.own");
+    btnres_close("check:org.example.other");
+    /* A package's ask for a press withholds every job, its own included,
+     * though it keeps the machine: the press it is handed arms nothing. */
+    const char *ask_state = "";
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack, "with the checks closed the window is acknowledged again");
+    CHECK(btnres_ask("org.example.own", &ask_state, why, sizeof(why)) == 0, "the package asks for a press");
+    run_tick(L);
+    CHECK(!pub_fire_ok && pub_hold && !pub_armed_ack && verdict_has("\"button_reserved\":true"),
+          "its ask, the package keeping the machine: its own window withheld and held");
+    btnres_ask_end("org.example.own");
+    run_tick(L);
+    CHECK(pub_fire_ok && pub_armed_ack, "the ask withdrawn: acknowledged again");
+    own_keeps = 0;
+    close_session(L);
+    cool_button_reserved = NULL;
+    btnres_pkg_holds = NULL;
 }
 
 /* --- the fan writes and the intakes fitted ------------------------------ */
@@ -796,10 +1127,16 @@ static void fw_lost(void)
     for (int i = 0; i < 5; i++)
         tick("run", 1);
     CHECK(!airflow_alarm, "no fault while the fan spins back up inside the grace");
+    /* The window was acknowledged before the loss and owes its fans: the
+     * restarted grace keeps AIRFLOW from tripping, and the fan under its
+     * floor holds the window (FANS) meanwhile. */
+    CHECK(!pub_fire_ok && pub_hold && !strcmp(pub_verdict, "FANS"),
+          "under its floor in the restarted grace: FANS, fire blocked, the window held");
     put_long("head/air_assist_tach", AA_FAST);
     for (int i = 0; i < 25; i++)
         tick("run", 1);
     CHECK(!airflow_alarm, "no fault once the fan is back at speed");
+    CHECK(pub_fire_ok && !pub_hold, "and fire permitted again, the window released");
 }
 
 static void fw_refused(void)
@@ -1573,6 +1910,7 @@ static void gate_warmup(loop_t *L)
     printf("gates B. the start gate over the loop holds a warm-up; the bulk, not a slug, releases it\n");
     close_session(L);
     kv[0] = "cool_temp_start"; kv[1] = "23.3"; kv[2] = NULL;     /* 1 C over the loop's 22.3 */
+    logbuf[0] = '\0';
     settle_and_open(L);
     CHECK(cool_state == Cool_Warmup && !strcmp(pub_verdict, "WARMUP") && pub_hold && !pub_fire_ok &&
           !strcmp(pub_phase, "warm-up"), "WARMUP, hold, fire blocked, phase warm-up");
@@ -1598,6 +1936,12 @@ static void gate_warmup(loop_t *L)
     for (int i = 0; i < WARMUP_WIN - 1; i++)
         run_tick(L);
     CHECK(cool_state == Cool_Warmup, "the minute's minimum still under the gate: held");
+    CHECK(!log_has("the armed window is acknowledged"),
+          "no fan is judged in a warm-up, and nothing says the window is acknowledged");
+    /* The exhaust has not spun up when the release writes its run duty:
+     * the release tick permits fire and must not acknowledge the window,
+     * which waits for the run's fans to read their floors. */
+    put_long("thermal/tach_exhaust", 10000000);     /* 3000 rpm: under the 6400 floor */
     logbuf[0] = '\0';
     run_tick(L);
     CHECK(cool_state == Cool_Run && get_long("thermal/heater_pwm") == 0,
@@ -1605,6 +1949,14 @@ static void gate_warmup(loop_t *L)
     CHECK(get_long("thermal/exhaust_pwm") == EXHAUST_RUN && get_long("thermal/intake_pwm") == INTAKE_RUN,
           "the run duties");
     CHECK(log_has("warm-up complete"), "the line says the warm-up is complete");
+    CHECK(pub_fire_ok && !pub_hold && !pub_armed_ack,
+          "the release tick: fire permitted, the window not acknowledged");
+    run_tick(L);
+    run_tick(L);
+    CHECK(!pub_armed_ack, "the exhaust still under its floor: no acknowledgment");
+    put_long("thermal/tach_exhaust", 300);
+    run_tick(L);
+    CHECK(pub_armed_ack, "the exhaust at its floor: acknowledged");
     close_session(L);
     L->bulk_c = 0.0;
     kv[0] = "cool_temp_min"; kv[1] = "0"; kv[2] = "cool_temp_start"; kv[3] = "0"; kv[4] = NULL;
@@ -3124,13 +3476,27 @@ static void warmup_undecided(loop_t *L)
               cold ? "a cold loop: WARMUP undecided, no heat, no acknowledgment"
                    : "a warm loop: WARMUP undecided, no heat, no acknowledgment");
         L->dead_up = 0;
+        /* The undecided hold judged no fan. The exhaust has not spun up when
+         * the deciding tick writes its run duty: that tick permits fire and
+         * must not acknowledge the window, which waits for the run's fans. */
+        if (!cold)
+            put_long("thermal/tach_exhaust", 10000000);     /* 3000 rpm: under the 6400 floor */
         run_tick(L);
-        if (cold)
+        if (cold) {
             CHECK(cool_state == Cool_Warmup && !warmup_pending && heater_pct > 0 &&
                   !strcmp(pub_verdict, "WARMUP"), "the reading under the gate: the warm-up proper, heater on");
-        else
+        } else {
             CHECK(cool_state == Cool_Run && !warmup_pending && get_long("thermal/exhaust_pwm") == EXHAUST_RUN,
                   "the reading over the gate: the run, its fans up");
+            CHECK(pub_fire_ok && !pub_armed_ack,
+                  "the deciding tick: fire permitted, the window not acknowledged");
+            run_tick(L);
+            run_tick(L);
+            CHECK(!pub_armed_ack, "the exhaust still under its floor: no acknowledgment");
+            put_long("thermal/tach_exhaust", 300);
+            run_tick(L);
+            CHECK(pub_armed_ack, "the exhaust at its floor: acknowledged");
+        }
         kv[0] = NULL;
     }
     /* Undecided past the fans' spin-up grace (here 20 s blind): the run it
@@ -3632,6 +3998,9 @@ int main(void)
     flow_yield_now(&L);
 
     test_ack_waits_for_fans(&L);
+    fans_under_the_fail_tiers(&L);
+    quiet_blocks_fire(&L);
+    button_reserved_case(&L);
 
     /* The safing attributes the engine writes: present in the tree as
        "0" so a write can be seen, and put back to "0" between ticks so
@@ -4036,6 +4405,7 @@ int main(void)
           json_is_boolean(json_object_get(doc, "fire_ok")) && json_is_string(json_object_get(doc, "verdict")) &&
           json_is_boolean(json_object_get(doc, "hold")) && json_is_boolean(json_object_get(doc, "resume_ok")) &&
           json_is_boolean(json_object_get(doc, "armed")) && json_is_boolean(json_object_get(doc, "ack_wait")) &&
+          json_is_boolean(json_object_get(doc, "button_reserved")) &&
           json_is_string(json_object_get(doc, "reason")) &&
           json_is_number(json_object_get(doc, "down_c")) && json_is_number(json_object_get(doc, "up_c")),
           "the documented keys with their documented types");

@@ -882,6 +882,8 @@ int cb_system_reset(const struct _u_request *req, struct _u_response *res,
     if (!operator_present())
         return reply_json(res, 403, "{\"error\":\"hold the machine button to reset every setting\","
                                     "\"button\":\"not held\"}");
+    if (!panel_press_reserved(held, sizeof(held)))
+        return reply_err(res, 409, held);
     char path[256], ts[32], line[64];
     snprintf(path, sizeof(path), "%s/reset-requested", ff_data_dir());
     time_t now = time(NULL);
@@ -1320,6 +1322,8 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
         if (!operator_present())
             return reply_json(res, 403, "{\"error\":\"hold the machine button to install unsigned firmware\","
                                         "\"button\":\"not held\"}");
+        if (!panel_press_reserved(taken, sizeof(taken)))
+            return reply_err(res, 409, taken);
     }
 
     if (is_booted_root(t->dev))

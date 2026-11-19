@@ -89,8 +89,8 @@ void events_button(unsigned long was, unsigned long now, const events_snap_t *st
 {
     if (!((was ^ now) & SW_BUTTON))
         return;
-    if (st->arming || st->armed || st->lease[0] || st->button_wait)
-        return;                                     /* somebody else's press */
+    if (st->arming || st->armed || st->lease[0] || st->button_wait || st->grbl_unknown)
+        return;                                     /* somebody else's press, or maybe a job's */
     emit(ctx, "button", (now & SW_BUTTON) ? "{\"pressed\":true}" : "{\"pressed\":false}");
 }
 
@@ -208,6 +208,7 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t news;                                 /* an event, or the stop */
 static pthread_cond_t wanted = PTHREAD_COND_INITIALIZER;   /* the first listener */
 static char ring[RING][EVENT_TEXT];
+static unsigned char ring_no_host[RING];                     /* not for the extension host's stream */
 static unsigned long head = 1;                              /* the next sequence number */
 static events_slots_t slots;
 /* One more than the cap: the last is the extension host's (events.h). */
@@ -219,6 +220,9 @@ static pthread_t sampler;
 static void publish_locked(const char *name, const char *data)
 {
     snprintf(ring[head % RING], EVENT_TEXT, "id: %lu\nevent: %s\ndata: %s\n\n", head, name, data);
+    /* The button's edges go to this machine's own clients and to no
+     * package: a package gets a press by asking for one (btnres.h). */
+    ring_no_host[head % RING] = !strcmp(name, "button");
     head++;
     pthread_cond_broadcast(&news);
 }
@@ -430,14 +434,16 @@ long events_next(events_client_t *c, char *buf, size_t max)
         }
         goto out;
     }
-    if (c->next == head) {
-        n = snprintf(buf, max, ": keep-alive\n\n");
-        goto out;
-    }
     if (head - c->next > RING) {
         unsigned long lost = head - RING - c->next;
         c->next = head - RING;
         n = snprintf(buf, max, ": %lu events were lost to a slow reader\n\n", lost);
+        goto out;
+    }
+    while (c->slot == EVENTS_HOST_SLOT && c->next != head && ring_no_host[c->next % RING])
+        c->next++;
+    if (c->next == head) {
+        n = snprintf(buf, max, ": keep-alive\n\n");
         goto out;
     }
     n = snprintf(buf, max, "%s", ring[c->next % RING]);

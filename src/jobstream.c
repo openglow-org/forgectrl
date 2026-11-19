@@ -45,17 +45,44 @@ static int grbl_port(void)
     return port > 0 && port < 65536 ? port : 23;
 }
 
-int jobstream_sender_connected(void)
+static double mono_s(void);
+
+int jobstream_grbl_state(char *body, size_t len)
 {
     const char *d = ff_test_hook("GF_RUN_DIR");
-    char path[192], body[512];
+    char path[192];
+    if (len < 2)
+        return -1;
     snprintf(path, sizeof(path), "%s/grbl.state", d ? d : "/run/forgefirm");
     FILE *f = fopen(path, "r");
     if (!f)
         return -1;
-    size_t n = fread(body, 1, sizeof(body) - 1, f);
+    size_t n = fread(body, 1, len - 1, f);
     fclose(f);
     body[n] = '\0';
+    /* Whole, or not at all: a body that fills the buffer, or has no
+     * closing brace, is no document. */
+    char *end = strrchr(body, '}');
+    if (n == len - 1 || body[0] != '{' || !end)
+        return -1;
+    const char *ts = strstr(body, "\"ts_mono\":");
+    if (!ts)
+        return -1;
+    char *after;
+    double stamp = strtod(ts + 10, &after);
+    if (after == ts + 10)
+        return -1;
+    /* The writer stamps %.3f and can round a hair past this clock: a
+     * stamp under a second ahead is the same moment, not the future. */
+    double age = mono_s() - stamp;
+    return age >= -1.0 && age <= JOBSTREAM_STATE_STALE_S ? 0 : -1;
+}
+
+int jobstream_sender_connected(void)
+{
+    char body[JOBSTREAM_STATE_MAX];
+    if (jobstream_grbl_state(body, sizeof(body)) != 0)
+        return -1;
     if (strstr(body, "\"connected\":true"))
         return 1;
     if (strstr(body, "\"connected\":false"))
@@ -194,8 +221,8 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
      * the planner is never starved on short segments and the ring can
      * never overrun. */
     char sent_text[JOBSTREAM_INFLIGHT_LINES][64];
-    size_t sent_len[JOBSTREAM_INFLIGHT_LINES], inflight = 0;
-    int barrier = 0, have_held = 0;
+    size_t sent_len[JOBSTREAM_INFLIGHT_LINES] = { 0 }, inflight = 0;
+    int barrier = 0, have_held = 0, stray_said = 0;
     memset(run, 0, sizeof(*run));
     run->tp_base = -1;
 
@@ -228,7 +255,14 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                     char *l = rx;
                     while (*l == '\r' || *l == ' ')
                         l++;
-                    if (!strncmp(l, "ok", 2)) {
+                    if (!strncmp(l, "ok", 2) && run->acked >= run->sent) {
+                        /* An ok with no line of this run's out answers
+                         * somebody else's: a sender that left while its
+                         * line still ran. It is no acknowledgment. */
+                        if (!stray_said++)
+                            fflog(LOG_WARNING, "jobstream: an ok with no line of the run's out "
+                                               "(another session's), not counted");
+                    } else if (!strncmp(l, "ok", 2)) {
                         run->acked++;
                         inflight -= sent_len[(run->acked - 1) % JOBSTREAM_INFLIGHT_LINES];
                         if (run->acked >= run->sent)

@@ -48,6 +48,14 @@
 #define SENDEROUT_REPUSH_S  2.0     /* the controller's state is compared this often */
 #endif
 #define SENDEROUT_ID_MAX    63      /* a package id (forgeext) */
+/* How long the job runner's keep waits out a sender that is still quiet
+ * for less than the port's 2 s, and how often it asks meanwhile. */
+#ifndef SENDEROUT_RUNNER_WAIT_S
+#define SENDEROUT_RUNNER_WAIT_S 3.0
+#endif
+#ifndef SENDEROUT_RUNNER_STEP_S
+#define SENDEROUT_RUNNER_STEP_S 0.25
+#endif
 
 /* A package id as the extension host writes them. */
 int senderout_id_ok(const char *id);
@@ -60,6 +68,35 @@ int senderout_id_ok(const char *id);
  * a success that changes nothing. */
 int senderout_claim(const char *id, char *why, size_t len);
 int senderout_end(const char *id, char *why, size_t len);
+
+/* The daemon's job runner, for each run (jobrun.h): the Grbl socket kept
+ * to this host while the run plays. It is the controller's "sender out",
+ * asked under a package's claim too (a controller that started since the
+ * claim keeps nobody out until told), which only an idle machine takes
+ * (no program, nothing planned, no jog, no M-code wait, no armed window or
+ * arming wait, no open envelope, the kernel idle) and a sender quiet for
+ * 2 s: a busy sender is asked again for up to SENDEROUT_RUNNER_WAIT_S, a
+ * busy machine refuses at once. 0, or -1 with the words in why. While the
+ * runner keeps them out, neither the keeper nor a claim's end lets them
+ * in; the runner's end does, unless a claim stands. */
+int senderout_runner_out(char *why, size_t len);
+void senderout_runner_in(void);
+
+/* Whether @id's claim is enforced: it is the holder, and the running GRBL
+ * controller itself has said it keeps every network sender out for it
+ * (the claim's "sender out" taken, or the keeper's state read), with no
+ * other controller started since. A claim the controller has not
+ * confirmed, or one a new controller has not taken up, is not. */
+int senderout_enforced(const char *id);
+
+/* btnres.h's question (btnres_pkg_holds): whether @id keeps the machine
+ * for its own jobs. It does while it keeps the Grbl sender out with the
+ * GRBL controller running, on the running controller's own word. Then
+ * nobody but its own job runner can stream to the controller, and the
+ * runner takes a job in its name only from the extension host
+ * (jobpost.c), so the job waiting for the press, if any, is that
+ * package's. */
+int senderout_keeps_machine(const char *id);
 
 /* The operator's, from the panel: let the sender back in, whoever keeps
  * it out; and clear the notice of one that stopped while it kept it out. */

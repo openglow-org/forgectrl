@@ -41,8 +41,9 @@ int wiz_wait_for(int (*cond)(void *), void *ctx, int timeout_s);
 /* Prompts: kind is "continue", "confirm", "number", "choice",
  * "multichoice" (the answer is the chosen options joined by commas), or
  * "jog"; up to WIZ_PROMPT_OPTS options. 0 with the answer, -1 aborted,
- * -2 timed out. */
+ * -2 timed out, WIZ_PROMPT_TIMEOUT_S unanswered. */
 #define WIZ_PROMPT_OPTS 16
+#define WIZ_PROMPT_TIMEOUT_S 600     /* an eye at a sheet takes its time */
 int wiz_ask(const char *kind, const char *pid, const char *text, const char *const *opts,
             int nopt, char *answer, size_t alen);
 /* The same with its own timeout (a look at the sheet after a burn gets

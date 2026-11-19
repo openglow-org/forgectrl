@@ -7,7 +7,12 @@
  * jobstream is the sender; this is everything around one of its runs
  * that is the same whoever asks for it. A run takes the machine lease as
  * a sender (so it is refused while a Grbl sender is on the socket, and
- * while anything else holds the machine, in the holder's words), plays
+ * while anything else holds the machine, in the holder's words), then
+ * keeps the Grbl socket to this host for as long as it plays
+ * (jobrun_sender_out: refused unless the controller is idle with nothing
+ * planned, no jog, no M-code wait, no armed laser, no open envelope and a
+ * quiet sender, so a sender that left with a line still running, or a
+ * job of its held, never meets the run), plays
  * on a thread of the runner's or on the caller's, is visible to
  * GET /job while it plays and after, and gives the lease back on every
  * way out. The dose-curve recorder starts its ladder through it, the
@@ -52,6 +57,16 @@ typedef int (*jobrun_ready_fn)(void *ctx, char *err, size_t elen);
 /* The end of a started run, on the run's thread, with the lease still
  * held: rc and err are jobstream_run()'s. */
 typedef void (*jobrun_done_fn)(void *ctx, int rc, const jobstream_run_t *run, const char *err);
+
+/* The Grbl socket kept to this host for a run, and given back after it.
+ * A run's start asks for it once the lease is the run's and before
+ * anything is sent: 0, or -1 with the refusal in err, and the start is
+ * refused. Given back on every way out of a run that had it, before the
+ * runner is free for the next. Set at start (main.c: senderout.h's, the
+ * controller port's "sender out", which only an idle machine with a quiet
+ * sender takes); NULL asks nothing (a host test of the runner alone). */
+extern int (*jobrun_sender_out)(char *err, size_t elen);
+extern void (*jobrun_sender_in)(void);
 
 typedef struct {
     const char *owner;          /* the lease owner: "job:<name>", "recorder" */

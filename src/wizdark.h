@@ -4,13 +4,18 @@
  * Written by Scott Wiederhold
  * SPDX-License-Identifier: MIT
  *
- * A dark wizard takes the machine (the controller stopped, or grblHAL
- * in loopback posture for the motion jogs), runs a bounded procedure on
- * a worker thread, asks the operator questions through a prompt the
- * page polls and answers, and ends with a result for the record and,
- * for the wizards that measure, one validated settings write. The
- * laser latch stays locked throughout. One dark wizard runs at a time,
- * and none runs beside a diagnostic or the dose recorder.
+ * A dark wizard runs a bounded procedure on a worker thread, asks the
+ * operator questions through a prompt the page polls and answers, and
+ * ends with a result for the record and, for the wizards that measure,
+ * one validated settings write. None fires the laser. The ones that ask
+ * for the button or drive the motion themselves take the controller
+ * first (stopped, or grblHAL in loopback posture for the motion jogs)
+ * and hand it back at every exit: switches, airflow, airflow.intakes,
+ * motion, lens.travel, cloud.header, and cooling.aa-offset through its
+ * diagnostic. The sensors, cameras and motion.envelope checks leave the
+ * controller in its normal posture (the last jogs through its port) and
+ * ask for no press. One dark wizard runs at a time, and none runs beside
+ * a diagnostic or the dose recorder.
  *
  * Ids: switches, sensors, airflow, cooling.aa-offset, motion, cameras,
  * lens.travel, airflow.intakes.

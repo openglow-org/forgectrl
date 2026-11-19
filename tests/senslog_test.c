@@ -741,6 +741,10 @@ static void verdict_arms(void)
     /* The dump still waits out its window: an arming would be named in it. */
     CHECK(ev_seq == ev + 1 && fr_pending && !strstr(fr_msg, "WARMUP") && !strstr(fr_msg, "EXT") &&
           !strstr(fr_msg, "ACK"), "the warm-up, an extension's hold and ACK arm nothing");
+    /* A window held for its fans is a gate's hold: named in the dump that waits. */
+    view_verdict = "FANS";
+    logger_seconds(1);
+    CHECK(strstr(fr_msg, "verdict FANS"), "FANS arrives: it arms the recorder, named in the dump");
     view_verdict = "OK";
     senslog_stop();
     in_force = "";

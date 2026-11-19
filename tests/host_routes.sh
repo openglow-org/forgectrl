@@ -76,13 +76,40 @@
 #     and the fuse view each answer 409 before the button is asked for, and
 #     so do the fuse view beside a paused or a running GRBL job, the fuse
 #     view and the reset while the GRBL controller's state file says it is
-#     arming, and the reset with the next boot on the other slot; with the
+#     arming, the fuse view beside a state file past its age, and the reset
+#     with the next boot on the other slot; with the
 #     button held the reset is still refused under the lease, on a machine
-#     that is not idle, and with a request that cannot be written or a
+#     that is not idle, and outside the panel's reservation of the button,
+#     as the fuse view, the unsigned install, /ext/key and /ext/install are
+#     (409), and inside one not yet on file or not yet on file for its
+#     second, but a package's install, which goes on without the consent
+#     (a staged package nobody signed: refused in its own words, nothing
+#     installed); a reservation with no name of its own is 400, one that
+#     names a package 409; renewed until ready (POST /button/reserve) the
+#     install is taken with the consent, and it
+#     says not ready, naming the job, while a job waits for the press, and
+#     the reset is refused with a request that cannot be written or a
 #     reboot that cannot be scheduled, leaving no request; then it is
-#     taken, its request written and the reboot scheduled; GET /slots reads
-#     the inventory, each slot's fields as ffboot -l prints them, and POST
-#     /system/reboot schedules its reboot 1 s on;
+#     taken, its request written and the reboot scheduled, and on=0 ends
+#     the reservation; a package's ask for a press (POST /button/ask):
+#     the extension host's call alone (403), refused while a job waits for
+#     its press or is inside its armed window (409, in the routes' words),
+#     else reserved (the verdict's button_reserved, fire blocked), ready
+#     once on file, another package's ask refused by name meanwhile, the
+#     press said once to the asker; a press that somebody else takes (a
+#     GRBL job running, an armed session, a stale GRBL state file, the
+#     Switches check) not said, the ask ended with them named; a package
+#     turned off or removed refused whatever its service calls, until it
+#     is turned on or installed again, refused already while the host is
+#     asked, and not once the host has refused the action or failed to
+#     answer (the operator told the package is still on); an enable or an
+#     install the host refuses lifting nothing; a call under a reported
+#     armed session told waiting; the reservation standing after a press that is
+#     not said; the switch device gone ending the ask in words; no button
+#     event on the extension host's stream; an ask that gets no answer in
+#     20 s ends the run; GET /slots
+#     reads the inventory, each slot's fields as ffboot -l prints them, and
+#     POST /system/reboot schedules its reboot 1 s on;
 #     with the controller stopped, a paused job's state file refuses nothing
 #   a dev image (GF_DEV_MARKER): a setup seed with no record becomes the
 #     record at start, with the account the users file holds; the login
@@ -121,6 +148,7 @@ cleanup() {
     rm -rf "$T"
 }
 trap 'rc=$?; cleanup; exit $rc' EXIT
+trap 'exit 1' TERM
 
 fails=0
 ok() { echo "  ok: $1"; }
@@ -158,6 +186,7 @@ launch_daemon() {
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_SSHD_INIT="${SSHD_INIT:-$T/bin/sshd-init}" FORGECTRL_EXT_HOST_TOKEN="$T/run/ext-host.token" \
+        FORGECTRL_FORGEEXT="$T/bin/forgeext" FORGECTRL_EXT_STAGE="$T/ext.staged" \
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
         GF_DATA_STATE="${DATA_STATE:-}" GF_SLOT_LIST="${SLOT_LIST:-}" GF_REBOOT_FILE="${REBOOT_FILE:-}" \
         LD_PRELOAD="${PRELOAD:-}" SWSHIM_NO_URANDOM="$T/no-urandom" \
@@ -244,15 +273,17 @@ json.dump(rec, open(sys.argv[2], 'w'), indent=2)
 EOF
 
 # The controller's port: every line is recorded.
-python3 - "$T/run/grbl.ctl" "$T/port.log" <<'EOF' &
-import socket, sys, threading
-path, log = sys.argv[1], sys.argv[2]
+python3 - "$T/run/grbl.ctl" "$T/port.log" "$T/ctl.forget" "$T/ctl.busy" <<'EOF' &
+import os, socket, sys, threading
+path, log, forget, busy = sys.argv[1:5]
 srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 srv.bind(path)
 srv.listen(4)
 # state is answered in the controller's form (ctlport.c), with the sender
 # kept out as the last sender line said (the sender keeper pushes it again
-# when the state disagrees); every other line ok
+# when the state disagrees); every other line ok. The file forget makes it
+# a controller started afresh (it keeps nobody out); while the file busy
+# stands, a sender streams, and "sender out" is busy:sender.
 STATE = (b'{"state":"Idle","sender":false,"port_jog":false,"released":false,"mpos":[0.000,0.000,0.000],'
          b'"homed":3,"envelope_open":false,"mcode":null,"sender_out":%s,"tray":"in"}\n')
 out = False
@@ -262,6 +293,12 @@ def serve(c):
         with open(log, 'ab') as o:
             o.write(line)
         word = line.strip()
+        if os.path.exists(forget):
+            os.unlink(forget)
+            out = False
+        if word == b'sender out' and os.path.exists(busy):
+            c.sendall(b'busy:sender\n')
+            continue
         if word == b'sender out':
             out = True
         elif word == b'sender in':
@@ -652,7 +689,7 @@ expect 600 "$(stat -c %a "$CRED_FILE")" "the daemon minted it into a 0600 file"
 CRED=$(cat "$CRED_FILE")
 PKG=org.example.hostroutes
 # host <path> [curl args]: a POST with the credential, as the host sends it
-host() { p=$1; shift; curl -s -o "$T/body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $CRED" "$@" "$URL$p"; }
+host() { p=$1; shift; curl -s -m 20 -o "$T/body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $CRED" "$@" "$URL$p"; }
 expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "with it, $PKG keeps the sender out"
 curl -s -o "$T/body" "$URL/status"
 expect "ext:$PKG" "$(jv '(d.get("lease") or {}).get("holder") and d["lease"]["holder"]["owner"]')" \
@@ -956,14 +993,20 @@ armed() {
     [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-ForgeFIRM-Report: $SEC" -d "mode=$1" -d "armed=$2" \
               "$URL/cool/state")" = 200 ] || bad "the controller's report (mode=$1 armed=$2) was refused"
 }
-# gstate <state> [arming]: the GRBL controller's own state file, the laser
-# arming (waiting for the press) when the second argument is given
+# gstate <state> [arming] [nosender]: the GRBL controller's own state file,
+# the laser arming (waiting for the press) when the second argument is
+# given, no Grbl sender connected when the third is
 gstate() {
-    python3 - "$T/run/grbl.state" "$1" "${2:-}" <<'EOF'
+    python3 - "$T/run/grbl.state" "$1" "${2:-}" "${3:-}" <<'EOF'
 import json, os, sys, time
 tmp = sys.argv[1] + '.tmp'
-json.dump({'ts_mono': round(time.monotonic(), 3), 'state': sys.argv[2], 'alarm': 0,
-           'laser': {'armed': False, 'arming': bool(sys.argv[3]), 'model': 'density'}}, open(tmp, 'w'))
+d = {'ts_mono': round(time.monotonic(), 3), 'state': sys.argv[2], 'alarm': 0,
+     'laser': {'armed': False, 'arming': bool(sys.argv[3]), 'model': 'density'}}
+if sys.argv[4]:
+    d['sender'] = {'connected': False}
+    json.dump(d, open(tmp, 'w'), separators=(',', ':'))
+else:
+    json.dump(d, open(tmp, 'w'))
 os.replace(tmp, sys.argv[1])
 EOF
 }
@@ -1015,6 +1058,19 @@ gstate Idle arming
 expect "409|$WAITS" "$(getfuse)|$(cat "$T/body")" "GET /fuse-identity while the GRBL state file says arming: 409, a job waits"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "409|$WAITS" "$code|$(jv 'd.get("error")')" "and the reset: 409, a job waits"
+# A live controller that stopped writing its state file: what it last
+# said (Idle) is not known, and a job could be waiting for the press.
+gstale() {
+    python3 - "$T/run/grbl.state" <<'EOF'
+import json, os, sys, time
+tmp = sys.argv[1] + '.tmp'
+json.dump({'ts_mono': round(time.monotonic() - 30, 3), 'state': 'Idle', 'alarm': 0,
+           'laser': {'armed': False, 'arming': False, 'model': 'density'}}, open(tmp, 'w'))
+os.replace(tmp, sys.argv[1])
+EOF
+}
+gstale
+expect 409 "$(getfuse)" "GET /fuse-identity beside a GRBL state file 30 s old: 409, not the button's 403"
 gstate Idle
 expect 403 "$(getfuse)" "and 403 again, the button's, with the controller idle"
 [ ! -e "$T/data/reset-requested" ] && [ ! -e "$T/reboot" ] && ok "no reset is requested, and nothing rebooted" \
@@ -1044,6 +1100,94 @@ code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "409|machine is not idle" "$code|$(jv 'd.get("error")')" "the reset on a machine that is not idle, the button held: 409"
 echo idle > "$SYS/cnc/state"
 none_left && ok "neither left a request or a reboot" || bad "a refused reset left data/reset-requested or a reboot"
+# The button held, but not inside the control panel's own reservation of
+# it: a press the dialog did not ask for once the reservation stood is no
+# proof of presence. Each route that reads the button refuses it, the
+# reset with nothing left.
+gstate Idle
+NR='the button was not reserved for this: start it again from the control panel'
+expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset with the button held and the button not reserved: 409"
+none_left && ok "and it left no request or reboot" || bad "an unreserved reset left data/reset-requested or a reboot"
+expect "409|$NR" "$(getfuse)|$(cat "$T/body")" "the fuse view with the button held outside the reservation: 409"
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1)
+expect "409|$NR" "$code|$(jv 'd.get("error")')" "an unsigned install with the button held outside the reservation: 409"
+expect "409|$NR" "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(cat "$T/body")" \
+    "POST /ext/key with the button held outside the reservation: 409"
+# A package's install takes the button held inside the reservation as its
+# consent, and goes on without it otherwise: a package nobody the machine
+# trusts signed (the host's stand-in says so) is refused in its own words,
+# and nothing is installed.
+cat > "$T/bin/forgeext" <<'EOF'
+#!/bin/sh
+echo "$*" >> "${0%/bin/forgeext}/forgeext.ran"
+tier=$(cat "${0%/bin/forgeext}/ext.tier" 2>/dev/null || echo unverified)
+case $1 in inspect) echo "{\"ok\": true, \"tier\": \"$tier\", \"package\": {\"id\": \"org.example.hostroutes\"}}" ;;
+    *) [ ! -e "${0%/bin/forgeext}/ext.slow" ] || sleep 3
+       [ ! -e "${0%/bin/forgeext}/ext.silent" ] || exit 0
+       if [ -e "${0%/bin/forgeext}/ext.refuse" ]; then echo '{"ok": false, "error": "the stand-in refuses"}'; exit 1; fi
+       echo '{"ok": true}' ;; esac
+EOF
+chmod +x "$T/bin/forgeext"
+: > "$T/ext.staged"
+NC="nobody the machine trusts signed this package: hold the machine's button while you install it"
+expect "409|$NC" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" \
+    "POST /ext/install with the button held outside the reservation: no consent, the package's own refusal"
+grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "a hold outside the reservation installed the package: $(cat "$T/forgeext.ran")" \
+    || ok "and nothing was installed"
+# The published verdict's button_reserved.
+vreserved() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("button_reserved"))' \
+                  "$T/run/cooling.state" 2>&1; }
+# In the verdict, but not yet for the second both controllers need to have
+# read it: still no proof. Caught inside that second (the reservation's own
+# answer says it is not ready yet), the fuse view refuses, and the install
+# takes the hold as no consent; a try that misses the second starts the
+# reservation again, three tries at most.
+early_fuse() {
+    for _ in 1 2 3; do
+        post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
+        until_ok 25 eval '[ "$(vreserved)" = False ]' || return 1
+        post '/button/reserve?on=1&id=d0' "$TOKEN" > /dev/null
+        until_ok 25 eval '[ "$(vreserved)" = True ]' || return 1
+        code=$(getfuse)
+        fbody=$(cat "$T/body")
+        icode=$(post /ext/install "$TOKEN")
+        ibody=$(cat "$T/body")
+        [ "$(post '/button/reserve?on=1&id=d0' "$TOKEN")|$(jv 'd.get("ready")')" = "200|False" ] || continue
+        post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
+        [ "$code|$fbody" = "409|$NR" ]
+        return
+    done
+    post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
+    return 1
+}
+early_fuse && ok "the fuse view inside the reservation's first second in the verdict: 409" \
+    || bad "the fuse view was taken inside the reservation's first second, or that second was never caught"
+expect "409|$NC" "$icode|$ibody" "POST /ext/install inside the reservation's first second: no consent yet, the package's own refusal"
+grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "a hold inside the reservation's first second installed the package" \
+    || ok "and nothing was installed"
+# A package's page reserves nothing: the route names no package.
+expect 409 "$(post "/button/reserve?on=1&pkg=$PKG&id=p0" "$TOKEN")" "a reservation that names a package: 409"
+# The dialog's reservation, under its own name. Not on file yet, it is no
+# proof either; renewed until it is ready (on file in the verdict long
+# enough for both controllers to have read it, no job waiting), it is.
+expect "200|True" "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("reserved")')" "the dialog reserves the button"
+expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset before the reservation is on file: 409"
+none_left && ok "and it left no request or reboot" || bad "an early reset left data/reset-requested or a reboot"
+reserved_ready() {
+    [ "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("reserved"), d.get("ready")')" = "200|(True, True)" ]
+}
+until_ok 50 reserved_ready && ok "POST /button/reserve?on=1: reserved, and ready once on file" \
+    || bad "the reservation did not come ready: $(cat "$T/body")"
+post /ext/install "$TOKEN" > /dev/null
+grep -q '^install .* --consent-unverified$' "$T/forgeext.ran" \
+    && ok "POST /ext/install with the button held inside the reservation: installed with the consent" \
+    || bad "the install inside the reservation: $(cat "$T/body") [$(cat "$T/forgeext.ran")]"
+# A job that waits for its press takes the dialog's readiness away, and is named.
+gstate Idle arming
+expect "200|False|$WAITS" "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("ready")')|$(jv 'd.get("waits")')" \
+    "a job waiting for the press: not ready, the job named"
+gstate Idle
+expect 400 "$(post '/button/reserve?on=1' "$TOKEN")" "a reservation with no name of its own: 400"
 ln -s /dev/full "$T/data/reset-requested"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "500|cannot write the reset request" "$code|$(jv 'd.get("error")')" "a reset request that cannot be written: 500"
@@ -1055,10 +1199,200 @@ expect "500|cannot schedule reboot" "$code|$(jv 'd.get("error")')" "a reset whos
 rmdir "$T/reboot"
 
 # The button held: the reset is taken, its request written, the reboot scheduled.
+post '/button/reserve?on=1&id=d1' "$TOKEN" > /dev/null
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "with the button held the reset is taken"
 [ -s "$T/data/reset-requested" ] && ok "the reset request is in the data directory" || bad "no data/reset-requested"
 [ -s "$T/reboot" ] && ok "and the reboot is scheduled (written to the stand-in's file)" || bad "no reboot was scheduled"
+expect "200|False" "$(post '/button/reserve?on=0&id=d1' "$TOKEN")|$(jv 'd.get("reserved")')" "on=0 ends the reservation"
+until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "with the dialog's reservation ended the verdict carries none" \
+    || bad "the verdict still carries a reservation: $(vreserved)"
+# A package's ask for a press (POST /button/ask), the one way a package
+# gets one: the extension host's call, refused while a job waits on the
+# button, a reservation against every job from then on, and the press said
+# once to the package that asked.
+echo 8 > "$T/switches"
+OTHER=org.example.other
+ask() {
+    c=$(host /button/ask -d id=$1)
+    [ "$c" != 000 ] || { echo "FAIL: the daemon did not answer an ask within 20 s" >&2; kill -TERM $$; }
+    echo "$c"
+}
+press() { echo 12 > "$T/switches"; sleep 0.3; echo 8 > "$T/switches"; }
+asked() { echo "$(ask $1)|$(jv 'd.get("state")' 2>/dev/null)"; }
+# The extension host's event stream carries no button event: a press that
+# an ordinary stream opened beside it shows is not on the stream opened
+# from loopback with the host's header.
+gstate Idle
+curl -s -N -m 8 --interface 127.0.0.6 -o "$T/ev.plain" "$URL/events" &
+EVS="$EVS $!"
+curl -s -N -m 8 -H "X-ForgeFIRM-Client: extension-host" -o "$T/ev.host" "$URL/events" &
+EVS="$EVS $!"
+until_ok 25 eval 'grep -qs "^event: hello" "$T/ev.plain" && grep -qs "^event: hello" "$T/ev.host"' \
+    || bad "the two event streams did not open: $(head -c 200 "$T/ev.plain") / $(head -c 200 "$T/ev.host")"
+press
+until_ok 25 grep -qs '^event: button' "$T/ev.plain" && ok "a press is on an ordinary event stream" \
+    || bad "the ordinary stream shows no button event: $(tail -c 300 "$T/ev.plain")"
+sleep 0.3
+grep -qs '^event: button' "$T/ev.host" && bad "the extension host's stream carries a button event" \
+    || ok "and not on the extension host's stream"
+expect 403 "$(post /button/ask "$TOKEN" -d id=$PKG)" "POST /button/ask from the panel: 403, the extension host's alone"
+expect 400 "$(ask Bad_Id)" "POST /button/ask for an id that is no package id: 400"
+gstate Idle arming
+expect "409|$WAITS" "$(ask $PKG)|$(cat "$T/body")" "an ask while a job waits for its press: 409, a job waits"
+gstate Idle
+armed 1
+expect "409|$WAITS" "$(ask $PKG)|$(cat "$T/body")" "an ask inside an armed window: 409, a job waits"
+armed 0
+expect False "$(vreserved)" "neither refused ask reserved anything"
+# The machine's lease in another holder's hands refuses it too; the
+# package's own hold of the machine (it keeps the Grbl sender out) does not.
+expect 200 "$(host /motion/sender -d id=$OTHER -d out=1)" "$OTHER keeps the sender out: it holds the machine"
+case "$(ask $PKG)|$(cat "$T/body")" in "409|"*"$OTHER"*) ok "an ask under another holder's lease: 409, the holder named" ;;
+    *) bad "an ask under another holder's lease: $(cat "$T/body")" ;; esac
+expect 200 "$(host /motion/sender -d id=$OTHER -d out=0)" "$OTHER lets the sender back in"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "$PKG keeps the sender out"
+expect "200|waiting" "$(asked $PKG)" "an ask with nobody else waiting, under the asker's own hold: taken, waiting until it is on file"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
+ask_ready() { [ "$(asked $PKG)" = "200|ready" ]; }
+until_ok 50 ask_ready && ok "ready once the reservation has stood on file" || bad "the ask did not come ready: $(cat "$T/body")"
+expect "True|False" "$(vreserved)|$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("fire_ok"))' "$T/run/cooling.state")" \
+    "the verdict carries button_reserved, fire blocked"
+expect "409|the package $PKG asks for the button" "$(ask $OTHER)|$(cat "$T/body")" "another package's ask meanwhile: 409, the asker named"
+expect "200|ready" "$(host /button/ask -d id=$PKG -d end=0)|$(jv 'd.get("state")')" "end=0 withdraws nothing"
+# The Setup page coming to wait for a press of its own ends the ask, and
+# refuses a new one while it waits.
+post /wiz/advisories/press "$TOKEN" > /dev/null
+sleep 0.2
+expect "409|the machine waits for a press of the button for its own setup" "$(ask $PKG)|$(cat "$T/body")" \
+    "the Setup page's wait for a press: the ask ended, a new one refused"
+post /wiz/advisories/press/cancel "$TOKEN" > /dev/null
+until_ok 50 ask_ready && ok "asked again, ready" || bad "the second ask did not come ready: $(cat "$T/body")"
+sleep 0.2                       # the button read released with the ask in force
+press
+expect "200|pressed" "$(asked $PKG)" "the press, made with the ask in force: said to the asker"
+expect "200|ready" "$(asked $PKG)" "and said once: the next call is a new ask"
+# Who else waits on the button is asked again at the press. Somebody who
+# came after the ask was in force takes the press as their own: the ask
+# ends there, the press is not said, and the next call names them. A GRBL
+# job that runs (the button pauses it), a GRBL controller whose state file
+# went stale, and the Setup page's Switches check, which reads the button
+# under the machine's lease.
+sleep 0.2
+gstate Run
+press
+expect "409|a job is running or paused: finish or cancel it first" "$(ask $PKG)|$(cat "$T/body")" \
+    "a GRBL job running at the press: the press is not said to the asker, the job named"
+gstate Idle
+until_ok 50 ask_ready || bad "the ask after the job did not come ready: $(cat "$T/body")"
+sleep 0.2
+# A controller that reports its armed session under the ask (a cloud print
+# that waits, unlit, for the reservation to end): a press ends the ask.
+armed 1
+press
+expect "409|$WAITS" "$(ask $PKG)|$(cat "$T/body")" "an armed session reported at the press: the press is not said to the asker"
+sleep 1.5                       # a tick of the engine after the press
+expect True "$(vreserved)" "and the reservation stands after that press, as after one that is said"
+armed 0
+until_ok 50 ask_ready || bad "the ask after the armed session did not come ready: $(cat "$T/body")"
+# With no press: while the session is reported the package's calls keep
+# the ask but extend it no further, so it ends 10 s after the last call
+# that did, and the job gets the button.
+armed 1
+expect "200|waiting" "$(asked $PKG)" "a call under a reported armed session: the ask stands, told waiting"
+for _ in 1 2 3 4 5 6 7 8 9 10 11; do sleep 1; armed 1; ask $PKG > /dev/null; done
+expect "409|$WAITS" "$(ask $PKG)|$(cat "$T/body")" "called every second for 11 s under the session: the ask ended, the job named"
+armed 0
+gstate Idle
+until_ok 50 ask_ready || bad "the ask after the session's end did not come ready: $(cat "$T/body")"
+sleep 0.2
+gstale
+press
+case "$(ask $PKG)|$(cat "$T/body")" in "409|the GRBL controller's state cannot be read"*) ok "a stale GRBL state file at the press: the press is not said to the asker" ;;
+    *) bad "a stale GRBL state file at the press: $(cat "$T/body")" ;; esac
+gstate Idle "" nosender
+until_ok 50 ask_ready || bad "the ask after the stale file did not come ready: $(cat "$T/body")"
+sleep 0.2
+wholds() { curl -s "$URL/status" | python3 -c 'import json, sys; h = (json.load(sys.stdin).get("lease") or {}).get("holder"); print(h and h["owner"])'; }
+expect 200 "$(post /wiz/switches/start "$TOKEN")" "the Switches check starts beside the ask"
+until_ok 50 eval '[ "$(wholds)" = wizard:switches ]' || bad "the Switches check did not take the machine: $(wholds) $(curl -s "$URL/wiz/dark")"
+press
+case "$(ask $PKG)|$(cat "$T/body")" in "409|"*"holds the machine"*) ok "the Switches check's press: not said to the asker, the check named" ;;
+    *) bad "the Switches check's press: $(cat "$T/body")" ;; esac
+post /wiz/switches/abort "$TOKEN" > /dev/null
+until_ok 100 eval '[ "$(wholds)" = None ]' || bad "the Switches check did not give the machine back: $(wholds)"
+gstate Idle
+until_ok 50 ask_ready || bad "the ask after the Switches check did not come ready: $(cat "$T/body")"
+# The button's device gone under an ask in force: the ask ends, and the
+# next call says so.
+rm "$T/switches"
+sleep 0.5
+expect "409|the machine's button cannot be read" "$(ask $PKG)|$(cat "$T/body")" "the switch device gone under the ask: 409, in those words"
+echo 8 > "$T/switches"
+until_ok 50 ask_ready || bad "the ask after the device came back did not come ready: $(cat "$T/body")"
+# A change to a package's hold leaves its ask alone: it is not turned off.
+expect 200 "$(post /ext/package "$TOKEN" -d id=$PKG -d action=hold-advisory)" "the package's hold made advisory"
+expect "200|ready" "$(asked $PKG)" "and its ask stands"
+# The package turned off: from the operator's click its ask is ended and
+# its service, still calling, is refused, while the host is asked and once
+# the host has taken the action, until the package is turned on again or
+# installed anew; another package's ask is taken meanwhile. A host that
+# refuses the action, or does not answer, has left the package on: the
+# refusal is lifted, and the operator is told so.
+OFF="the package $PKG was turned off on the control panel: turn it on there (off and on again, if it shows as on)"
+: > "$T/ext.refuse"
+: > "$T/ext.slow"
+post /ext/package "$TOKEN" -d id=$PKG -d action=disable > "$T/slow.code" &
+SLOW=$!
+sleep 1
+expect "409|the package $PKG is being turned off on the control panel" "$(ask $PKG)|$(cat "$T/body")" \
+    "a disable the host has not answered yet: the package's ask is refused meanwhile"
+wait $SLOW
+rm "$T/ext.slow"
+expect "409|the stand-in refuses: the package is still on" "$(cat "$T/slow.code")|$(cat "$T/body")" \
+    "the host refuses that disable: 409, and the operator is told the package is still on"
+case $(asked $PKG) in "200|waiting"|"200|ready") ok "and the package's next ask is taken: it is still on" ;;
+    *) bad "the ask after a refused disable: $(cat "$T/body")" ;; esac
+rm "$T/ext.refuse"
+: > "$T/ext.silent"
+code=$(post /ext/package "$TOKEN" -d id=$PKG -d action=disable)
+rm "$T/ext.silent"
+case "$code|$(cat "$T/body")" in "502|"*"may still be on"*) ok "a disable the host does not answer: 502, the package may still be on" ;;
+    *) bad "a disable the host does not answer: $code $(cat "$T/body")" ;; esac
+case $(asked $PKG) in "200|waiting"|"200|ready") ok "and the package's next ask is taken" ;;
+    *) bad "the ask after an unanswered disable: $(cat "$T/body")" ;; esac
+post /ext/package "$TOKEN" -d id=$PKG -d action=disable > /dev/null
+expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "the asker turned off, its service calling again: 409"
+: > "$T/ext.refuse"
+post /ext/package "$TOKEN" -d id=$PKG -d action=disable > /dev/null
+rm "$T/ext.refuse"
+expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "a second disable the host refuses: the package already off stays refused"
+sleep 1.2
+expect "409|False" "$(ask $PKG)|$(vreserved)" "and a tick later: still 409, nothing reserved"
+case $(asked $OTHER) in "200|waiting"|"200|ready") ok "another package's ask meanwhile: taken" ;;
+    *) bad "another package's ask after the asker was turned off: $(cat "$T/body")" ;; esac
+expect "200|ended" "$(host /button/ask -d id=$OTHER -d end=1)|$(jv 'd.get("state")')" "end=1 withdraws an ask"
+: > "$T/ext.refuse"
+post /ext/package "$TOKEN" -d id=$PKG -d action=enable > /dev/null
+expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "an enable the host refuses: still 409"
+rm "$T/ext.refuse"
+rm -f "$T/ext.tier"
+: > "$T/ext.staged"
+gstate Idle
+expect "409|$NC" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" "an install refused for its consent"
+expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "lifts nothing: still 409"
+post /ext/package "$TOKEN" -d id=$PKG -d action=enable > /dev/null
+expect "200|waiting" "$(asked $PKG)" "turned on again: its ask is taken"
+post /ext/package "$TOKEN" -d id=$PKG -d action=remove > /dev/null
+expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "removed, its service calling again: 409"
+echo official > "$T/ext.tier"
+: > "$T/ext.staged"
+gstate Idle
+expect 200 "$(post /ext/install "$TOKEN")" "the package installed anew"
+expect "200|waiting" "$(asked $PKG)" "and its ask is taken"
+expect "200|ended" "$(host /button/ask -d id=$PKG -d end=1)|$(jv 'd.get("state")')" "withdrawn"
+until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "and the verdict carries no reservation" \
+    || bad "the verdict still carries a reservation: $(vreserved)"
 echo 8 > "$T/switches"
 rm -f "$T/data/reset-requested" "$T/data/upload.fw" "$T/reboot"
 
