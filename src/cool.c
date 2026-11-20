@@ -160,10 +160,13 @@
 #include "super.h"
 #include "testhook.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jansson.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -321,12 +324,22 @@ static int rep_armed = 0;
 static long rep_duty[3] = {-1, -1, -1}; /* air_assist, exhaust, intake */
 static cool_limits_t rep_lim = {-1, -1, -1, -1, -1}; /* <= 0 = absent */
 static double rep_at = -1.0;           /* CLOCK_MONOTONIC; <0 = never */
+/* The armed window's identity: the time its opening was reported, in ms on
+ * CLOCK_MONOTONIC, greater than every one before it in this boot (a report
+ * that opens a window after a closed or a stale one is an opening). 0 =
+ * none yet. GET /cool/status shows it with armed, and the extension host
+ * names in its status file the window it has paused its packages for. */
+static unsigned long long rep_window = 0;
 
 /* Published snapshot for cool_status_json. */
 static char pub_verdict[COOL_VERDICT_MAX] = "OK";
 static char pub_reason[COOL_REASON_MAX];
 static int pub_fire_ok, pub_hold;
 static int pub_armed_ack;           /* the acknowledgment as published */
+static int pub_ack_wait, pub_reserved;  /* the document's ack_wait and button_reserved, as published */
+/* One writer of the verdict file at a time: the engine's publish, and the
+ * report route's withdrawal of the acknowledgment. Taken before mu. */
+static pthread_mutex_t pub_mu = PTHREAD_MUTEX_INITIALIZER;
 static double pub_down = -273.15, pub_up = -273.15;
 static const char *pub_phase = "idle";
 static char pub_inforce[1024];          /* every tunable as resolved at the last reload */
@@ -453,6 +466,8 @@ static const char *pub_accel_watch = "watch";
 static long run_duty[3] = {-1, -1, -1};
 static long cmd_duty[3] = {-1, -1, -1};   /* what fans_run last wrote */
 static int eff_armed = 0;                 /* the armed window, as reported */
+static unsigned long long eff_window = 0; /* its identity (rep_window), as the tick last took it */
+static unsigned long long tick_window = 0; /* rep_window at this tick's snapshot of the report */
 static int session_armed = 0;             /* this run session has been armed */
 static unsigned long verdict_seq = 0;
 
@@ -1011,6 +1026,184 @@ static void ext_holds_log(const holds_t *h)
     ext_held = h->standing;
     ext_dropped = h->stale_advisory > 0;
     snprintf(ext_reason, sizeof(ext_reason), "%s", h->standing ? h->reason : "");
+}
+
+/* ------------------------------------ the packages, for the armed window */
+
+/* The extension host freezes every package's service for an armed window,
+ * or holds one the operator lets run through a job to EXT_JOB_CPU_PCT of
+ * the core, each in a group of its own under EXT_CG_DIR. It learns of the
+ * window at its next turn, which can come after a window's first fire
+ * could, and a turn that read the window closed can still start or thaw a
+ * service after the window is reported. So the window's acknowledgment
+ * also waits for two words, read once a tick while a window is reported:
+ * the host's, that it has paused every service for this window (or runs
+ * none and will start none before it says otherwise), and the kernel's,
+ * that every group is still. A group is still when it holds no process,
+ * when the kernel reads it frozen, or when its cpu.max is at most the
+ * job's share. No directory of groups is no package. Anything else that
+ * does not read is not still: the acknowledgment waits, and the first fire
+ * with it. */
+#ifndef EXT_CG_DIR                      /* the unit test points it at a fake tree */
+#define EXT_CG_DIR      "/sys/fs/cgroup/ffx"
+#endif
+#define EXT_JOB_CPU_PCT 3               /* forgeext's RUN_JOB_CPU_PCT */
+#define EXT_WAIT_WORDS  "PACKAGES: "    /* the reason's mark while the packages keep the window waiting */
+
+static const char *ext_cg_dir = EXT_CG_DIR;
+
+/* The host's status file: extpkg.h's EXTPKG_STATUS_FILE, in the run
+ * directory a host-test run moves; the unit test names its own. */
+#ifdef EXT_HOST_STATUS
+static const char *ext_host_status(void) { return EXT_HOST_STATUS; }
+#else
+static const char *ext_host_status(void)
+{
+    static char p[256];
+    snprintf(p, sizeof(p), "%s/ext/status.json", ff_run_dir());
+    return p;
+}
+#endif
+
+static int ext_unfrozen;                /* the packages kept the window waiting at the last tick with a window reported */
+static char ext_wait_words[COOL_REASON_MAX];    /* why, as the verdict's reason says it */
+
+/* The host's word on the window: 1 when no turn of the host can still
+ * start or thaw a service for want of having seen this window (win, its
+ * identity); 0 with the reason's words in why. The status file is written
+ * whole at the end of a turn, and only by a running host.
+ * - No file: no host has written one since the machine started, and a host
+ *   writes its word before it starts a service.
+ * - Its writer gone: the respawn wrapper kills every group with it, and a
+ *   host that starts writes its word before it starts a service.
+ * - "quiet" true: no service runs, and the host starts none before its
+ *   file says otherwise.
+ * - "window" equal to win: it has frozen or held every service for this
+ *   window, and no turn since has started or thawed one.
+ * Anything else, a file that does not read included, keeps the window
+ * waiting. A file with no "quiet" was written by a host older than this
+ * engine, which gives no word on a window: it waits, with words of its own. */
+static int ext_host_word(unsigned long long win, char *why, size_t wlen)
+{
+    int fd = open(ext_host_status(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT)
+            return 1;
+        snprintf(why, wlen, EXT_WAIT_WORDS "the extension host's status does not read (%s)", strerror(errno));
+        return 0;
+    }
+    json_error_t jerr;
+    json_t *j = json_loadfd(fd, 0, &jerr);
+    close(fd);
+    json_t *pid = json_object_get(j, "pid"), *w = json_object_get(j, "window"), *q = json_object_get(j, "quiet");
+    json_int_t p = json_is_integer(pid) ? json_integer_value(pid) : 0;
+    int ok = 0;
+    if (!json_is_object(j) || p <= 1 || p > INT32_MAX)
+        snprintf(why, wlen, EXT_WAIT_WORDS "the extension host's status does not read");
+    else if (!json_is_boolean(q))
+        snprintf(why, wlen, EXT_WAIT_WORDS "the extension host is older than this firmware");
+    else if (kill((pid_t)p, 0) != 0 && errno == ESRCH)
+        ok = 1;
+    else if (json_is_true(q))
+        ok = 1;
+    else if (win > 0 && json_is_integer(w) && json_integer_value(w) > 0 &&
+             (unsigned long long)json_integer_value(w) == win)
+        ok = 1;
+    else
+        snprintf(why, wlen, EXT_WAIT_WORDS "waiting for the extension host to pause them for this window");
+    json_decref(j);
+    return ok;
+}
+
+/* A group's file, whole: 0, or -1 with errno. */
+static int ext_cg_read(const char *dir, const char *grp, const char *file, char *buf, size_t len)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s/%s/%s", dir, grp, file);
+    int fd = open(p, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, buf, len - 1);
+    int e = errno;
+    close(fd);
+    if (n < 0) {
+        errno = e;
+        return -1;
+    }
+    buf[n] = '\0';
+    return 0;
+}
+
+/* The value of key in a flat-keyed text ("populated 1\nfrozen 0\n"), or -1. */
+static long long ext_cg_key(const char *text, const char *key)
+{
+    size_t klen = strlen(key);
+    for (const char *l = text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL)
+        if (!strncmp(l, key, klen) && l[klen] == ' ')
+            return atoll(l + klen + 1);
+    return -1;
+}
+
+/* One group: 1 still, 0 not, -1 gone. */
+static int ext_group_still(const char *dir, const char *grp)
+{
+    char text[256];
+    if (ext_cg_read(dir, grp, "cgroup.events", text, sizeof(text)) != 0)
+        return errno == ENOENT ? -1 : 0;
+    long long populated = ext_cg_key(text, "populated");
+    if (populated == 0)
+        return 1;
+    if (populated != 1)
+        return 0;
+    if (ext_cg_key(text, "frozen") == 1)
+        return 1;
+    long long quota, period;
+    if (ext_cg_read(dir, grp, "cpu.max", text, sizeof(text)) != 0)
+        return 0;
+    if (sscanf(text, "%lld %lld", &quota, &period) != 2 || quota < 0 || period <= 0)
+        return 0;                       /* "max": no limit */
+    return quota * 100 <= (long long)EXT_JOB_CPU_PCT * period;
+}
+
+/* 1 when every package's group is still; 0 with the reason's words in
+ * who, naming the first group that is not. */
+static int ext_packages_still(const char *dir, char *who, size_t wlen)
+{
+    who[0] = '\0';
+    DIR *d = opendir(dir);
+    if (!d) {
+        if (errno == ENOENT)
+            return 1;
+        snprintf(who, wlen, EXT_WAIT_WORDS "their groups do not read (%s)", strerror(errno));
+        return 0;
+    }
+    int still = 1;
+    struct dirent *e;
+    for (errno = 0; still && (e = readdir(d)); errno = 0) {
+        struct stat sb;
+        char p[512];
+        int g;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        if (stat(p, &sb) != 0)
+            g = errno == ENOENT ? -1 : 0;   /* gone, or not readable */
+        else if (!S_ISDIR(sb.st_mode))
+            continue;                   /* one of the parent's own files */
+        else
+            g = ext_group_still(dir, e->d_name);
+        if (g == 0) {
+            /* a package's id is at most 63 */
+            snprintf(who, wlen, EXT_WAIT_WORDS "waiting for %.63s to pause for the job", e->d_name);
+            still = 0;
+        }
+    }
+    if (still && errno != 0) {
+        snprintf(who, wlen, EXT_WAIT_WORDS "their groups do not read (%s)", strerror(errno));
+        still = 0;
+    }
+    closedir(d);
+    return still;
 }
 
 /* ---------------------------------------------------------- tunables */
@@ -1626,9 +1819,16 @@ _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
  * carrying armed=true was computed with the run session open, and only
  * once every gated fan reads at or above its floor (fans_up): the
  * controller waits on this acknowledgment, so the first fire waits for
- * the airflow instead of the fans catching up under the beam. It is the
- * precondition of a window's first fire (the arm, the re-arm, the cloud
- * client before its run); inside an open window fire_ok alone gates.
+ * the airflow instead of the fans catching up under the beam, and for
+ * every extension package to be still for the window (frozen, held to the
+ * job's share, or empty) with the host's word that it has paused them for
+ * this window. It is the precondition of a window's first fire (the arm,
+ * the re-arm, the cloud client before its run); inside an open window
+ * fire_ok alone gates. It is the window's own: a document carries it only
+ * when the window this tick judged is still the one reported, and a report
+ * that closes the window or opens a new one, or a GET /cool/status that
+ * shows it closed, takes it off the file at once (ack_withdraw), whatever
+ * the tick.
  *
  * "button_reserved" says the machine's button is reserved for a prompt
  * that is not this window's job (cool_button_reserved): fire_ok is false,
@@ -1645,6 +1845,67 @@ _Static_assert(VERDICT_PUNCTUATION + VERDICT_BOOLEANS + VERDICT_NUMBERS +
  * false whenever it is true. */
 static int attn_ack_waits(void);
 
+/* The document from the published fields, under mu: its length, as
+ * snprintf gives it. */
+static int verdict_body_locked(char *body, size_t len)
+{
+    /* To the millisecond, rounded down: a reader on this clock never
+     * sees a stamp from its future. Both readers refuse one, and the
+     * cloud client reads with no cache, so a refused read is a lost
+     * verdict there. */
+    double stamp = floor(wall_s() * 1000.0) / 1000.0;
+    return snprintf(body, len,
+        "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
+        "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
+        "\"ack_wait\":%s,\"button_reserved\":%s,"
+        "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
+        ++verdict_seq, stamp, pub_fire_ok ? "true" : "false",
+        pub_verdict, pub_hold ? "true" : "false", pub_hold ? "false" : "true",
+        pub_armed_ack ? "true" : "false", pub_ack_wait ? "true" : "false",
+        pub_reserved ? "true" : "false",
+        pub_reason, pub_down, pub_up);
+}
+
+/* The document into place, under pub_mu: 1 when it landed. snprintf
+ * reports the untruncated length; never publish more than the buffer
+ * holds, and never a document whose closing brace was cut off (the client
+ * refuses an incomplete verdict). */
+static int verdict_write(const char *body, int n, size_t cap)
+{
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= cap) {
+        fflog(LOG_ERR, "cool: verdict too long (%d bytes), "
+                       "not published", n);
+        return 0;
+    }
+    char file[256], tmp[256];
+    verdict_path(file, sizeof(file), "cooling.state");
+    verdict_path(tmp, sizeof(tmp), ".cooling.state.tmp");
+    int fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return 0;
+    int ok = write(fd, body, (size_t)n) == n;
+    close(fd);
+    return ok && rename(tmp, file) == 0;
+}
+
+/* The acknowledgment off the file now, under pub_mu (mu not held): the
+ * last document again with armed=false, if it carried armed=true. */
+static void ack_withdraw(void)
+{
+    char body[VERDICT_BODY_MAX];
+    int n = -1;
+    pthread_mutex_lock(&mu);
+    if (pub_armed_ack) {
+        pub_armed_ack = 0;
+        n = verdict_body_locked(body, sizeof(body));
+    }
+    pthread_mutex_unlock(&mu);
+    if (n >= 0)
+        verdict_write(body, n, sizeof(body));
+}
+
 static void verdict_publish(int fire_ok, const char *verdict, int hold,
                             int have_down, float down,
                             int have_up, float up)
@@ -1653,11 +1914,19 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     /* Never while a session's warm-up decision waits for a reading: an arm
      * waits for it rather than read the undecided hold as a refusal. Never
      * while the button is reserved for another prompt: a press made for
-     * that prompt must not complete an arm or a re-arm. */
+     * that prompt must not complete an arm or a re-arm. Never while the
+     * extension packages keep the window waiting (ext_unfrozen). */
     int armed_ack = eff_armed && fans_up && !warmup_pending &&
-                    !button_withheld;
+                    !button_withheld && !ext_unfrozen;
     int reserved = button_withheld;
+    pthread_mutex_lock(&pub_mu);
     pthread_mutex_lock(&mu);
+    /* The window this tick judged must still be the one reported, and open:
+     * a close or a new window reported since the tick's snapshot has taken
+     * the acknowledgment off the file, and this document must not put it
+     * back. */
+    double age = rep_at < 0 ? -1 : wall_s() - rep_at;
+    armed_ack = armed_ack && rep_window == tick_window && coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S);
     int ack_wait = attn_ack_waits();
     if (!reserved)
         button_on_file_at = -1.0;
@@ -1665,44 +1934,14 @@ static void verdict_publish(int fire_ok, const char *verdict, int hold,
     pub_fire_ok = fire_ok;
     pub_hold = hold;
     pub_armed_ack = armed_ack;
+    pub_ack_wait = ack_wait;
+    pub_reserved = reserved;
     pub_down = have_down ? down : -273.15;
     pub_up = have_up ? up : -273.15;
-    /* To the millisecond, rounded down: a reader on this clock never
-     * sees a stamp from its future. Both readers refuse one, and the
-     * cloud client reads with no cache, so a refused read is a lost
-     * verdict there. */
-    double stamp = floor(wall_s() * 1000.0) / 1000.0;
-    int n = snprintf(body, sizeof(body),
-        "{\"seq\":%lu,\"ts_mono\":%.3f,\"fire_ok\":%s,"
-        "\"verdict\":\"%s\",\"hold\":%s,\"resume_ok\":%s,\"armed\":%s,"
-        "\"ack_wait\":%s,\"button_reserved\":%s,"
-        "\"reason\":\"%s\",\"down_c\":%.2f,\"up_c\":%.2f}\n",
-        ++verdict_seq, stamp, fire_ok ? "true" : "false",
-        verdict, hold ? "true" : "false", hold ? "false" : "true",
-        armed_ack ? "true" : "false", ack_wait ? "true" : "false",
-        reserved ? "true" : "false",
-        pub_reason, pub_down, pub_up);
+    int n = verdict_body_locked(body, sizeof(body));
     pthread_mutex_unlock(&mu);
-    /* snprintf reports the untruncated length; never publish more than
-     * the buffer holds, and never a document whose closing brace was
-     * cut off (the client refuses an incomplete verdict). */
-    if (n < 0)
-        return;
-    if ((size_t)n >= sizeof(body)) {
-        fflog(LOG_ERR, "cool: verdict too long (%d bytes), "
-                       "not published", n);
-        return;
-    }
-
-    char file[256], tmp[256];
-    verdict_path(file, sizeof(file), "cooling.state");
-    verdict_path(tmp, sizeof(tmp), ".cooling.state.tmp");
-    int fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
-    if (fd < 0)
-        return;
-    int ok = write(fd, body, (size_t)n) == n;
-    close(fd);
-    int landed = ok && rename(tmp, file) == 0;
+    int landed = verdict_write(body, n, sizeof(body));
+    pthread_mutex_unlock(&pub_mu);
     /* The reservation's time on file starts with the first document that
      * carries it, never with the request: a reader can only have acted on
      * what it could read (cool_button_on_file_s). */
@@ -2147,6 +2386,7 @@ static void engine_tick(void)
     /* Snapshot the report. */
     pthread_mutex_lock(&mu);
     int mode = rep_mode, armed = rep_armed;
+    unsigned long long win = rep_window;
     double at = rep_at;
     long duty[3] = {rep_duty[0], rep_duty[1], rep_duty[2]};
     cool_limits_t hdr = rep_lim;
@@ -2191,8 +2431,12 @@ static void engine_tick(void)
     int flood = fresh && (mode == 1 || armed);
     int duty_changed = memcmp(run_duty, duty, sizeof(run_duty)) != 0;
     memcpy(run_duty, duty, sizeof(run_duty));
-    int armed_rose = armed && !eff_armed;
+    /* A window that closed and a next that opened between two ticks is a
+     * new window all the same: its identity tells it from the last. */
+    int armed_rose = armed && (!eff_armed || win != eff_window);
     eff_armed = armed;
+    eff_window = armed ? win : 0;
+    tick_window = win;
     if (fresh && !armed)
         window_unarmed_seen = 1;
     /* A window that opens is acknowledged on its own fans: a fan the
@@ -2644,8 +2888,9 @@ static void engine_tick(void)
                           : run ? "unjudged" : "idle";
         }
         /* The airflow is up once every gated fan reads its floor; in an
-         * armed run that is the moment the window is acknowledged and the
-         * beam may start. A warm-up judges no fan, so nothing is said
+         * armed run the window's acknowledgment waits for it (and for the
+         * rest of verdict_publish's conditions, which say when it goes
+         * out). A warm-up judges no fan, so nothing is said
          * there: its release drops the airflow, and the run's fans are
          * judged before the acknowledgment the first fire waits for. Once
          * up, it goes only with a fan that stays under its floor for the
@@ -2659,7 +2904,7 @@ static void engine_tick(void)
             if (!fans_up) {
                 fans_up_at = now;
                 if (armed && run)
-                    info("fans at their floors: the armed window is acknowledged");
+                    info("fans at their floors in the armed window");
             }
             fans_up = 1;
             fans_low_ticks = 0;
@@ -2931,8 +3176,8 @@ static void engine_tick(void)
             fans_run();
             fan_grace_until = now + (double)fan_grace_s;
             /* The warm-up judged no fan: the run's are judged from the
-             * next tick, and the window is acknowledged when they read
-             * their floors, never on this tick's release. */
+             * next tick, and the window is acknowledged no earlier than
+             * when they read their floors, never on this tick's release. */
             fans_up = 0;
             fans_low_ticks = 0;
             fans_clean_ticks = 0;
@@ -3163,6 +3408,20 @@ static void engine_tick(void)
      * job: asked outside the lock, once a tick. */
     char button_why[64] = "";
     button_withheld = cool_button_reserved && cool_button_reserved(button_why, sizeof(button_why));
+    /* The packages, while a window is reported, once a tick: the host's
+     * word for this window first, then the kernel's on every group. Each
+     * change of what keeps the acknowledgment waiting is said once. */
+    {
+        char why[sizeof(ext_wait_words)] = "";
+        int was = ext_unfrozen;
+        ext_unfrozen = eff_armed && (!ext_host_word(eff_window, why, sizeof(why)) ||
+                                     !ext_packages_still(ext_cg_dir, why, sizeof(why)));
+        if (ext_unfrozen && (!was || strcmp(why, ext_wait_words)))
+            fflog(LOG_NOTICE, "cool: the armed window is not acknowledged yet: %s", why);
+        else if (!ext_unfrozen && was && eff_armed)
+            info("the extension packages are paused for the armed window");
+        snprintf(ext_wait_words, sizeof(ext_wait_words), "%s", ext_unfrozen ? why : "");
+    }
     /* A window that owes its fans with the acknowledgment gone (a judged fan
      * under its floor for the gate's count of ticks, grace or not): the pause
      * tier, until every judged fan has read its floor for the same count of
@@ -3249,8 +3508,13 @@ static void engine_tick(void)
         else if (!strcmp(verdict, "FANS"))
             snprintf(pub_reason, sizeof(pub_reason), "FANS: %s under its floor in the armed window - "
                      "hold", fans_low_name);
+        /* Nothing else standing, and the packages keep the window waiting:
+         * the reason says so while the job waits, dark: the GRBL controller
+         * relays it to the sender, and the panel shows it. */
+        else if (!strcmp(verdict, "OK") && ext_unfrozen)
+            snprintf(pub_reason, sizeof(pub_reason), "%s", ext_wait_words);
         else if (!strncmp(pub_reason, "QUIET: ", 7) || !strncmp(pub_reason, "BUTTON: ", 8) ||
-                 !strncmp(pub_reason, "FANS: ", 6)) {
+                 !strncmp(pub_reason, "FANS: ", 6) || !strncmp(pub_reason, EXT_WAIT_WORDS, strlen(EXT_WAIT_WORDS))) {
             fans_words_gone = !strncmp(pub_reason, "FANS: ", 6);
             pub_reason[0] = '\0';           /* the words go with their verdict */
         }
@@ -3363,6 +3627,7 @@ void cool_init(void)
     rep_armed = 0;
     pthread_mutex_unlock(&mu);
     eff_armed = 0;
+    eff_window = 0;
     flood_on = 0;
     cool_state = Cool_Idle;
     fans_up = 0;
@@ -3483,7 +3748,19 @@ int cool_state_report(const char *mode, int armed,
     else
         return -1;
 
+    /* A report that closes the window, or opens a new one, takes the
+     * acknowledgment off the file before it is answered: an acknowledgment
+     * computed for one window is never on file once its close is reported.
+     * pub_mu keeps the engine's publish from landing between the two. */
+    pthread_mutex_lock(&pub_mu);
     pthread_mutex_lock(&mu);
+    double now = wall_s();
+    int was_open = coolfmt_armed(rep_armed, rep_at < 0 ? -1 : now - rep_at, REPORT_TIMEOUT_S);
+    int opens = armed && !was_open;
+    if (opens) {
+        unsigned long long id = (unsigned long long)(now * 1000.0);
+        rep_window = id > rep_window ? id : rep_window + 1;
+    }
     rep_mode = m;
     rep_armed = !!armed;
     rep_duty[0] = air_assist >= 0 && air_assist <= 1023 ? air_assist : -1;
@@ -3495,8 +3772,11 @@ int cool_state_report(const char *mode, int armed,
         cool_limits_t none = {-1, -1, -1, -1, -1};
         rep_lim = none;
     }
-    rep_at = wall_s();
+    rep_at = now;
     pthread_mutex_unlock(&mu);
+    if (!armed || opens)
+        ack_withdraw();
+    pthread_mutex_unlock(&pub_mu);
     return 0;
 }
 
@@ -3510,23 +3790,38 @@ double cool_report_age(void)
 
 void cool_controller_stopped(void)
 {
+    pthread_mutex_lock(&pub_mu);
     pthread_mutex_lock(&mu);
     rep_at = -1.0;
     rep_mode = 0;
     rep_armed = 0;
     pthread_mutex_unlock(&mu);
+    ack_withdraw();
+    pthread_mutex_unlock(&pub_mu);
 }
 
 int cool_status_json(char *buf, size_t len)
 {
+    /* The extension host reads the window here, and a window it reads
+     * closed it may thaw for: a window this document shows closed (a report
+     * gone stale) has its acknowledgment off the file first. The report's
+     * age is read once, for the withdrawal and the document both; pub_mu
+     * keeps every report out meanwhile. */
+    pthread_mutex_lock(&pub_mu);
     pthread_mutex_lock(&mu);
     double age = rep_at < 0 ? -1 : wall_s() - rep_at;
+    int open_now = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S);
+    pthread_mutex_unlock(&mu);
+    if (!open_now)
+        ack_withdraw();
+    pthread_mutex_lock(&mu);
     coolfmt_status_t st = {
         .phase = pub_phase, .verdict = pub_verdict, .reason = pub_reason,
         .fire_watch = pub_fire_watch, .accel_watch = pub_accel_watch,
         .quiet_hold = quiet_held,
         .fire_ok = pub_fire_ok, .hold = pub_hold,
-        .armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S),
+        .armed = open_now,
+        .window = rep_window,
         .down_c = pub_down, .up_c = pub_up,
         .report_age_s = age,
         .gates_off = pub_gates_off, .limits = pub_limits,
@@ -3537,6 +3832,7 @@ int cool_status_json(char *buf, size_t len)
     };
     int rc = coolfmt_status(buf, len, &st);
     pthread_mutex_unlock(&mu);
+    pthread_mutex_unlock(&pub_mu);
     return rc;
 }
 

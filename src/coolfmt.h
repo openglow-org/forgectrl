@@ -59,6 +59,9 @@ int coolfmt_fan_gates(char *buf, size_t len, const coolfmt_fan_t *fans, size_t n
 typedef struct {
     const char *phase, *verdict, *reason, *fire_watch, *accel_watch;
     int fire_ok, hold, armed;
+    /* The armed window's identity (cool.c, rep_window), shown only while
+     * armed is: 0 otherwise. */
+    unsigned long long window;
     int quiet_hold;                     /* every fan held off for a listening */
     double down_c, up_c, report_age_s;
     const char *gates_off, *limits, *fan_gates;

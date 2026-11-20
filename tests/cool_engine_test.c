@@ -41,7 +41,17 @@
  *                           and hold an open window, the reservation's
  *                           package's own window excepted while it keeps
  *                           the machine; a renewal moves a reservation's
- *                           end, and each prompt's is its own
+ *                           end, and each prompt's is its own; the window
+ *                           is acknowledged only once every extension
+ *                           package's group is still (frozen, at the job's
+ *                           share of the core, or empty), never while
+ *                           the groups do not read, and only on the
+ *                           extension host's word for this window; the
+ *                           acknowledgment is the window's own: off the
+ *                           file at its close, never put back by a tick
+ *                           that judged the window before, and a window
+ *                           that closes and opens between ticks, or after
+ *                           a stale report, is a new one
  *   M. the hang dead-man:   a report under the timeout is still fresh and
  *                           acknowledged; silence while armed stops and
  *                           locks once; silence while the kernel runs
@@ -168,6 +178,8 @@
 #define GF_SYSFS    "cool-engine-test/sys/"
 #define VERDICT_DIR "cool-engine-test/run"
 #define VERDICT_FILE VERDICT_DIR "/cooling.state"
+#define EXT_CG_DIR  "cool-engine-test/ffx"
+#define EXT_HOST_STATUS "cool-engine-test/ext/status.json"
 #define clock_gettime fake_clock_gettime
 /* The head accelerometer's interrupt generators, faked: the engine's
    calls land here (the real ones open an i2c bus this host lacks). */
@@ -209,10 +221,21 @@ static long heater_written_max = 0;
 /* Heater writes above zero that landed while the pump read off. */
 static int heat_with_pump_off = 0;
 static long get_long(const char *attr);
+/* Something done once, at the engine's next open of a path ending so: a
+   report landing inside a tick, between its snapshot and its publish. */
+static const char *on_open_suffix;
+static void (*on_open_do)(void);
 
 static int fake_open(const char *path, int flags, ...)
 {
     int drop = 0;
+    if (on_open_suffix) {
+        size_t lp = strlen(path), ls = strlen(on_open_suffix);
+        if (lp >= ls && !strcmp(path + lp - ls, on_open_suffix)) {
+            on_open_suffix = NULL;
+            on_open_do();
+        }
+    }
     if ((flags & O_WRONLY) && drop_attr && drop_left != 0) {
         size_t lp = strlen(path), la = strlen(drop_attr);
         drop = lp >= la && !strcmp(path + lp - la, drop_attr);
@@ -283,6 +306,7 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
 /* --- fakes ------------------------------------------------------------ */
 
 static double fake_now = 1000.0;
+static double fake_step;            /* added to the clock after each read: time passing between two reads */
 
 /* The engine's clock is CLOCK_MONOTONIC. Any other clock reads far from
  * it, so a stamp or a timeout taken from another clock shows. */
@@ -295,6 +319,7 @@ int fake_clock_gettime(clockid_t id, struct timespec *ts)
     }
     ts->tv_sec = (time_t)fake_now;
     ts->tv_nsec = (long)((fake_now - (double)(time_t)fake_now) * 1e9);
+    fake_now += fake_step;
     return 0;
 }
 
@@ -1026,6 +1051,310 @@ static void button_reserved_case(loop_t *L)
     close_session(L);
     cool_button_reserved = NULL;
     btnres_pkg_holds = NULL;
+}
+
+/* A package's group under the extension host's directory, as the kernel
+ * shows it: its events and its cpu.max. */
+static void ext_group(const char *grp, const char *events, const char *cpu_max)
+{
+    char p[160];
+    snprintf(p, sizeof(p), EXT_CG_DIR "/%s", grp);
+    mkdir(p, 0755);
+    snprintf(p, sizeof(p), EXT_CG_DIR "/%s/cgroup.events", grp);
+    FILE *f = fopen(p, "w");
+    if (f) {
+        fputs(events, f);
+        fclose(f);
+    }
+    snprintf(p, sizeof(p), EXT_CG_DIR "/%s/cpu.max", grp);
+    if ((f = fopen(p, "w"))) {
+        fputs(cpu_max, f);
+        fclose(f);
+    }
+}
+
+/* The window's acknowledgment waits for the packages (forgeext freezes
+ * them at its next turn, which can come after the first fire could): not
+ * while a package's group holds a process that is neither frozen nor held
+ * to the job's share of the core, nor while a group does not read; once
+ * each is still, and with no packages at all. */
+static void packages_case(loop_t *L)
+{
+    printf("L6. the window's acknowledgment waits for every package to be still\n");
+    close_session(L);
+    settle_and_open(L);
+    run_tick(L);
+    CHECK(pub_armed_ack, "no packages' directory: acknowledged");
+    close_session(L);
+    mkdir(EXT_CG_DIR, 0755);
+    FILE *f = fopen(EXT_CG_DIR "/cgroup.procs", "w");     /* one of the parent's own files */
+    if (f)
+        fclose(f);
+    ext_group("org.example.a", "populated 1\nfrozen 0\n", "25000 100000\n");
+    settle_and_open(L);
+    CHECK(!pub_armed_ack && fans_up && strstr(pub_reason, "org.example.a"),
+          "the window's first tick, a package not still: not acknowledged, its fans up, the reason names it");
+    for (int i = 0; i < 5; i++)
+        run_tick(L);
+    CHECK(!pub_armed_ack && fans_up && pub_fire_ok,
+          "a package running at its own share, not frozen: the window not acknowledged, its fans up");
+    close_session(L);
+    kv[0] = "cool_temp_max"; kv[1] = "18"; kv[2] = "cool_temp_resume"; kv[3] = "16"; kv[4] = NULL;
+    settle_and_open(L);
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    CHECK(!strcmp(pub_verdict, "OVERTEMP") && !pub_armed_ack && !strstr(pub_reason, EXT_WAIT_WORDS),
+          "another verdict standing, a package not still: the reason is that verdict's own");
+    kv[0] = NULL;
+    close_session(L);
+    settle_and_open(L);
+    for (int i = 0; i < 5; i++)
+        run_tick(L);
+    ext_group("org.example.a", "populated 1\nfrozen 1\n", "25000 100000\n");
+    ext_group("org.example.granted", "populated 1\nfrozen 0\n", "3000 100000\n");
+    ext_group("org.example.gone", "populated 0\nfrozen 0\n", "max 100000\n");
+    run_tick(L);
+    CHECK(pub_armed_ack, "frozen, held to the job's share, or empty: acknowledged");
+    ext_group("org.example.gone", "populated 1\nfrozen 0\n", "max 100000\n");
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group with no limit, not frozen: not acknowledged");
+    ext_group("org.example.gone", "populated 0\nfrozen 0\n", "max 100000\n");
+    unlink(EXT_CG_DIR "/org.example.a/cgroup.events");
+    mkdir(EXT_CG_DIR "/org.example.a/cgroup.events", 0755);  /* there, and not readable */
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group's events that do not read: not acknowledged");
+    rmdir(EXT_CG_DIR "/org.example.a/cgroup.events");
+    ext_group("org.example.a", "populated 1\nfrozen 1\n", "25000 100000\n");
+    run_tick(L);
+    CHECK(pub_armed_ack && !strstr(pub_reason, "PACKAGES"), "readable again, frozen: acknowledged, the reason gone");
+    /* Whatever does not read as still keeps the window waiting, each with
+     * every other group still. (A readdir error cannot be made in a tree of
+     * plain files.) */
+    ext_group("org.example.b", "frozen 0\n", "25000 100000\n");
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group's events with no populated key: not acknowledged");
+    ext_group("org.example.b", "populated 1\n", "25000 100000\n");
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group's events with no frozen key, at its own share: not acknowledged");
+    ext_group("org.example.b", "populated 1\nfrozen 0\n", "3001 100000\n");
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group held to just over the job's share: not acknowledged");
+    ext_group("org.example.b", "populated 1\nfrozen 0\n", "max 100000\n");
+    unlink(EXT_CG_DIR "/org.example.b/cpu.max");
+    mkdir(EXT_CG_DIR "/org.example.b/cpu.max", 0755);      /* there, and not readable */
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a group whose cpu.max does not read: not acknowledged");
+    rmdir(EXT_CG_DIR "/org.example.b/cpu.max");
+    ext_group("org.example.b", "populated 0\nfrozen 0\n", "max 100000\n");
+    run_tick(L);
+    CHECK(pub_armed_ack, "that group empty: acknowledged");
+    CHECK(symlink("org.example.loop", EXT_CG_DIR "/org.example.loop") == 0, "an entry that does not stat (a loop)");
+    run_tick(L);
+    CHECK(!pub_armed_ack, "an entry whose stat fails: not acknowledged");
+    unlink(EXT_CG_DIR "/org.example.loop");
+    close_session(L);
+    const char *grps[] = { "org.example.a", "org.example.b", "org.example.granted", "org.example.gone" };
+    char p[160];
+    for (size_t i = 0; i < sizeof(grps) / sizeof(grps[0]); i++) {
+        snprintf(p, sizeof(p), EXT_CG_DIR "/%s/cgroup.events", grps[i]);
+        unlink(p);
+        snprintf(p, sizeof(p), EXT_CG_DIR "/%s/cpu.max", grps[i]);
+        unlink(p);
+        snprintf(p, sizeof(p), EXT_CG_DIR "/%s", grps[i]);
+        rmdir(p);
+    }
+    unlink(EXT_CG_DIR "/cgroup.procs");
+    rmdir(EXT_CG_DIR);
+    if ((f = fopen(EXT_CG_DIR, "w")))                       /* the directory of groups that does not open */
+        fclose(f);
+    settle_and_open(L);
+    run_tick(L);
+    CHECK(!pub_armed_ack && fans_up, "a directory of groups that does not open: not acknowledged");
+    close_session(L);
+    unlink(EXT_CG_DIR);
+}
+
+/* The extension host's status file, as it writes it: its pid, whether it
+ * runs nothing (quiet), the window it has paused its packages for. */
+static void host_word(long long pid, int quiet, unsigned long long window)
+{
+    FILE *f = fopen(EXT_HOST_STATUS, "w");
+    if (f) {
+        fprintf(f, "{\"pid\": %lld, \"quiet\": %s, \"window\": %llu, \"services\": []}\n", pid,
+                quiet ? "true" : "false", window);
+        fclose(f);
+    }
+}
+
+/* A status file of another shape, whole. */
+static void host_status_text(const char *text)
+{
+    FILE *f = fopen(EXT_HOST_STATUS, "w");
+    if (f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+
+/* The host's word for this window is part of the acknowledgment: a turn
+ * that read the window closed can start or thaw a service after the window
+ * is reported, which the kernel cannot see coming. No package's group
+ * exists in these ticks, so the kernel reads every one still. */
+static void host_word_case(loop_t *L)
+{
+    printf("L7. the window's acknowledgment waits for the extension host's word for this window\n");
+    close_session(L);
+    mkdir("cool-engine-test/ext", 0755);
+    settle_and_open(L);
+    host_word(getpid(), 0, 0);
+    run_tick(L);
+    CHECK(!pub_armed_ack && fans_up && strstr(pub_reason, "extension host"),
+          "a running host that has not named this window: not acknowledged, the reason says why");
+    host_word(getpid(), 0, rep_window - 1);
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a running host that names another window: not acknowledged");
+    host_word(getpid(), 0, rep_window);
+    run_tick(L);
+    CHECK(pub_armed_ack, "a running host that names this window: acknowledged");
+    host_word(getpid(), 1, 0);
+    run_tick(L);
+    CHECK(pub_armed_ack, "a running host that runs nothing and starts nothing (quiet): acknowledged");
+    char text[160];
+    snprintf(text, sizeof(text), "{\"pid\": %lld, \"services\": []}\n", (long long)getpid());
+    host_status_text(text);                                 /* as a host older than this engine writes it */
+    run_tick(L);
+    CHECK(!pub_armed_ack && strstr(pub_reason, "older"),
+          "a running host whose status has no quiet (an older host): not acknowledged, the reason says so");
+    snprintf(text, sizeof(text), "{\"pid\": %lld, \"quiet\": false, \"services\": []}\n", (long long)getpid());
+    host_status_text(text);
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a running host whose status names no window at all: not acknowledged");
+    snprintf(text, sizeof(text), "{\"quiet\": true, \"window\": %llu, \"services\": []}\n", rep_window);
+    host_status_text(text);
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a status with no pid, quiet and naming this window: not acknowledged");
+    pid_t gone = fork();
+    if (gone == 0)
+        _exit(0);
+    waitpid(gone, NULL, 0);
+    host_word(gone, 0, 0);
+    run_tick(L);
+    CHECK(pub_armed_ack, "a status whose writer is gone: acknowledged");
+    snprintf(text, sizeof(text), "{\"pid\": %lld, \"services\": []}\n", (long long)gone);
+    host_status_text(text);                                 /* an older host's, its writer gone */
+    run_tick(L);
+    CHECK(!pub_armed_ack && strstr(pub_reason, "older"),
+          "a status with no quiet whose writer is gone (an older host): not acknowledged, the reason says so");
+    unlink(EXT_HOST_STATUS);
+    mkdir(EXT_HOST_STATUS, 0755);                           /* there, and not readable */
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a status that does not read: not acknowledged");
+    rmdir(EXT_HOST_STATUS);
+    run_tick(L);
+    CHECK(pub_armed_ack, "no status file (no host has run): acknowledged");
+    rmdir("cool-engine-test/ext");
+    FILE *f = fopen("cool-engine-test/ext", "w");           /* the file's directory a file: its open fails */
+    if (f)
+        fclose(f);
+    run_tick(L);
+    CHECK(!pub_armed_ack, "a status whose open fails for another reason than its absence: not acknowledged");
+    unlink("cool-engine-test/ext");
+    mkdir("cool-engine-test/ext", 0755);
+    close_session(L);
+}
+
+/* A report landing inside a tick: the window closes, and a new one opens,
+ * between the tick's snapshot and its publish. */
+static void close_and_reopen(void)
+{
+    cool_state_report("run", 0, -1, -1, -1, NULL);
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+}
+
+static void close_only(void)
+{
+    cool_state_report("run", 0, -1, -1, -1, NULL);
+}
+
+/* The acknowledgment is the window's own: off the file the moment its
+ * window's close is reported (or it is shown closed), never put back by a
+ * tick that judged the window before, and a close and an opening between
+ * two ticks make a new window, judged afresh. */
+static void window_own_ack_case(loop_t *L)
+{
+    char doc[COOL_STATUS_JSON_MAX], want[48];
+    printf("L8. the acknowledgment is the window's own\n");
+    close_session(L);
+    settle_and_open(L);
+    run_tick(L);
+    cool_status_json(doc, sizeof(doc));
+    snprintf(want, sizeof(want), "\"window\":%llu,", rep_window);
+    CHECK(pub_armed_ack && rep_window > 0 && strstr(doc, want), "acknowledged, /cool/status names the window");
+    cool_state_report("run", 0, -1, -1, -1, NULL);
+    CHECK(verdict_has("\"armed\":false"), "the window's close reported: the acknowledgment off the file before any tick");
+    run_tick(L);
+    run_tick(L);
+    CHECK(pub_armed_ack, "a new window, acknowledged");
+    put_long("thermal/tach_exhaust", 10000000);             /* one low reading: an open window keeps its fans up */
+    loop_tick(L);
+    fake_now += 1.0;
+    close_and_reopen();
+    engine_tick();
+    CHECK(!pub_armed_ack && !fans_up, "a close and an opening between two ticks: a new window, its fans judged afresh");
+    put_long("thermal/tach_exhaust", 300);
+    run_tick(L);
+    CHECK(pub_armed_ack, "its fans at their floors: acknowledged");
+    on_open_suffix = EXT_HOST_STATUS;                       /* opened after the tick's snapshot, before its publish */
+    on_open_do = close_and_reopen;
+    run_tick(L);
+    CHECK(!pub_armed_ack && verdict_has("\"armed\":false"),
+          "a close and an opening reported inside a tick: that tick's document does not carry the acknowledgment");
+    run_tick(L);
+    CHECK(pub_armed_ack, "the next tick judges the new window: acknowledged");
+    on_open_suffix = EXT_HOST_STATUS;
+    on_open_do = close_only;
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    engine_tick();
+    CHECK(!pub_armed_ack && verdict_has("\"armed\":false"),
+          "a close reported inside a tick: that tick's document does not carry the acknowledgment");
+    run_tick(L);
+    run_tick(L);
+    CHECK(pub_armed_ack, "opened again: acknowledged");
+    unsigned long long before = rep_window;
+    host_word(getpid(), 0, before);
+    run_tick(L);
+    CHECK(pub_armed_ack, "the host names it: acknowledged");
+    fake_now = rep_at + REPORT_TIMEOUT_S - 0.0005;          /* the report half a ms from stale, */
+    fake_step = 0.001;                                      /* and a ms passing at every read of the clock */
+    cool_status_json(doc, sizeof(doc));
+    fake_step = 0.0;
+    CHECK(!(strstr(doc, "\"armed\":false") && verdict_has("\"armed\":true")),
+          "a window /cool/status shows closed at the stale boundary: the acknowledgment off the file too");
+    fake_now += REPORT_TIMEOUT_S + 1.0;                     /* the controller silent: its report goes stale */
+    cool_status_json(doc, sizeof(doc));
+    CHECK(strstr(doc, "\"armed\":false") && verdict_has("\"armed\":false"),
+          "a window /cool/status shows closed (a stale report): the acknowledgment off the file first");
+    run_tick(L);
+    run_tick(L);
+    CHECK(!pub_armed_ack && rep_window != before,
+          "reported again after the stale stretch: a new window, the host's word for the last one does not count");
+    host_word(getpid(), 0, rep_window);
+    run_tick(L);
+    CHECK(pub_armed_ack, "the host names the new one: acknowledged");
+    fake_now += REPORT_TIMEOUT_S + 1.0;                     /* silent again, and nobody reads /cool/status */
+    cool_state_report("run", 1, -1, -1, -1, NULL);
+    CHECK(verdict_has("\"armed\":false"),
+          "a report that opens a window after a stale stretch: the acknowledgment off the file before any tick");
+    host_word(getpid(), 0, rep_window);
+    run_tick(L);
+    run_tick(L);
+    CHECK(pub_armed_ack, "the host names that one: acknowledged");
+    unlink(EXT_HOST_STATUS);
+    cool_controller_stopped();
+    CHECK(verdict_has("\"armed\":false"), "the controller stopped: the acknowledgment off the file");
+    close_session(L);
 }
 
 /* --- the fan writes and the intakes fitted ------------------------------ */
@@ -1936,8 +2265,8 @@ static void gate_warmup(loop_t *L)
     for (int i = 0; i < WARMUP_WIN - 1; i++)
         run_tick(L);
     CHECK(cool_state == Cool_Warmup, "the minute's minimum still under the gate: held");
-    CHECK(!log_has("the armed window is acknowledged"),
-          "no fan is judged in a warm-up, and nothing says the window is acknowledged");
+    CHECK(!log_has("fans at their floors in the armed window"),
+          "no fan is judged in a warm-up, and nothing says they are up");
     /* The exhaust has not spun up when the release writes its run duty:
      * the release tick permits fire and must not acknowledge the window,
      * which waits for the run's fans to read their floors. */
@@ -4001,6 +4330,9 @@ int main(void)
     fans_under_the_fail_tiers(&L);
     quiet_blocks_fire(&L);
     button_reserved_case(&L);
+    packages_case(&L);
+    host_word_case(&L);
+    window_own_ack_case(&L);
 
     /* The safing attributes the engine writes: present in the tree as
        "0" so a write can be seen, and put back to "0" between ticks so

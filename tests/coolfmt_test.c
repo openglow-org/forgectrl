@@ -126,7 +126,7 @@ int main(void)
     coolfmt_status_t st = {
         .phase = "cooldown", .verdict = "OVERTEMP", .reason = reason,
         .fire_watch = "armed", .accel_watch = "armed",
-        .fire_ok = 0, .hold = 0, .armed = 0,
+        .fire_ok = 0, .hold = 0, .armed = 1, .window = 9223372036854775807ULL,
         .down_c = -273.15, .up_c = -273.15, .report_age_s = 99999999.9,
         .gates_off = gates_off, .limits = lim, .fan_gates = fg,
         .attn_standing = 1, .attn_live = 1, .attn_verdict = "OVERTEMP", .attn_reason = reason,
@@ -140,6 +140,11 @@ int main(void)
            widest_limits, widest_fans, scalars, strlen(doc), COOL_STATUS_JSON_MAX);
     CHECK(scalars < COOL_STATUS_JSON_SCALARS, "the scalar allowance covers the widest scalars");
     CHECK(coolfmt_status(doc, 512, &st) < 0, "a 512-byte buffer is refused, not served cut off");
+    /* The window's identity goes with armed: none while it is false. */
+    st.armed = 0;
+    coolfmt_status(doc, sizeof(doc), &st);
+    CHECK(strstr(doc, "\"armed\":false,\"window\":0,") != NULL, "not armed: the window shows 0");
+    st.armed = 1;
 
     /* ack_wait: a failure standing whose cause has gone, and nothing else. */
     coolfmt_status(doc, sizeof(doc), &st);
