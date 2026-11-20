@@ -2159,7 +2159,7 @@ static int cb_mode_post(const struct _u_request *req,
 static int motion_port(struct _u_response *res, grblport_set_t set,
                        grblport_op_t op, const char *arg, const char *as)
 {
-    char reply[256], why[160];
+    char reply[512], why[160];
     if (!super_grbl_running())
         return reply_error(res, 409, "the GRBL controller is not running");
     /* Whoever holds the machine moves it alone: a job of the daemon's own
@@ -4051,6 +4051,7 @@ int main(int argc, char **argv)
     lease_sender_connected = jobstream_sender_blocks;
     jobrun_sender_out = senderout_runner_out;
     jobrun_sender_in = senderout_runner_in;
+    jobrun_wire(super_grbl_pid, &grblport_alarm_touched);
     lease_motors_released = motors_released_now;
     events_gather = events_gather_state;
     events_switches = machine_switch_bits;

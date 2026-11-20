@@ -614,6 +614,40 @@ static void grbl_block(void)
     machine_home_state(&axes, source, sizeof(source));
     CHECK(strstr(doc, "\"home_source\":\"manual\"") && strstr(doc, "\"homed_axes\":3,") &&
           axes == 3 && !strcmp(source, "manual"), "a manual home: home_source manual, homed_axes 3 (X and Y)");
+
+    /* An anchor that references X alone: Y and Z count from where
+     * counting started, as the controller's own position does; and X is
+     * in the controller's published steps per millimeter. */
+    {
+        char path[600];
+        int32_t steps[3] = { 1000, 400, 0 };
+        snprintf(path, sizeof(path), "%scnc", root);
+        mkdir(path, 0755);
+        snprintf(path, sizeof(path), "%scnc/position", root);
+        FILE *p = fopen(path, "wb");
+        fwrite(steps, sizeof(steps), 1, p);
+        fclose(p);
+        snprintf(path, sizeof(path), "%s/grbl.settings", dir);
+        p = fopen(path, "w");
+        fputs("$100=100.000\r\n$101=80.000\r\n", p);
+        fclose(p);
+        a = fopen(anchor, "w");
+        fputs("10.000 20.000 3.000 1 manual\n", a);
+        fclose(a);
+        machine_status_json(doc, sizeof(doc), "\"x\":1");
+        CHECK(strstr(doc, "\"pos\":{\"x\":20.00,\"y\":5.00,\"z\":0.00}"),
+              "X anchored and in $100, Y and Z from the counters alone, Y in $101");
+        /* And Y alone: X counts from where counting started. */
+        a = fopen(anchor, "w");
+        fputs("10.000 20.000 3.000 2 manual\n", a);
+        fclose(a);
+        machine_status_json(doc, sizeof(doc), "\"x\":1");
+        CHECK(strstr(doc, "\"pos\":{\"x\":10.00,\"y\":25.00,\"z\":0.00}"),
+              "Y anchored, X and Z from the counters alone");
+        unlink(path);
+        snprintf(path, sizeof(path), "%scnc/position", root);
+        unlink(path);
+    }
     unlink(anchor);
     anchor[0] = '\0';
     grbl_up = 0;

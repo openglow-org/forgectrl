@@ -15,8 +15,21 @@
  * job:<name> with the machine lease held as a sender, refuses a second
  * program and a wizard in the holder's words, gets the runner's M2, and
  * leaves the lease free and its staging file gone; a program that ends
- * in M2 gets no second one; the runner's $X goes out first when asked
- * for, and never otherwise; a program is done when the kernel is idle,
+ * in M2 gets no second one; a line is at most 250 characters once
+ * trimmed; the runner's $X goes out first when asked for after the
+ * runner's own abort or a lost connection's reset while the controller
+ * still reads that stop's alarm 3 with the same sender generation, from
+ * the same controller, the stop shown late in the read among them, and
+ * never otherwise (not with the runner unwired, not after a clean run, the
+ * controller's alarm lock, alarm or reset, nor after a run the controller
+ * answered no line of (an alarm 3 standing from before it), nor after a
+ * stop the controller did not show as alarm 3 with no connection (a stop
+ * at rest, another alarm at the stop, a document still connected, a
+ * controller restarting inside the read, an alarm shown only once the
+ * socket was given back), nor once
+ * another alarm, a home, release or energize of this daemon's, another
+ * session or another controller came since, nor with no state to read); a
+ * program is done when the kernel is idle,
  * not at its last ok nor while its state cannot be read, and at once on an
  * underrun; the abort sends the soft reset and frees the
  * lease; a connected Grbl sender refuses the start with nothing sent; a
@@ -35,13 +48,25 @@
  * return, and the abort that ends it with the soft reset; the witness
  * rate against the ticks; an ok that answers another session's line is
  * not counted; the sender check reads the state file, and one past its
- * age is no answer.
+ * age is no answer. A reset the controller reports (its banner again, as
+ * the driver writes it and as a Grbl-compatible build does) fails the run
+ * at once with no soft reset of the runner's, in the controller's warning
+ * just before it; a connection the controller closes mid-run fails it,
+ * with the soft reset on a connection of its own, and so does a write
+ * the closed connection refuses (the link wraps write()); one it turns away at
+ * the accept fails it with no reset; the window out is half the
+ * controller's ring and 32 lines; the controller's alarm stops the run at
+ * its line, and one in the end's dark wait fails it; a generator line too
+ * long for the buffer fails the run, never split.
  */
+#define _GNU_SOURCE
 #include "../src/jobrun.h"
 #include "../src/lease.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -54,6 +79,21 @@
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
+
+/* The link wraps write(): a write that carries fail_write_text fails as a
+ * write to a connection the controller closed does, whoever makes it. */
+static const char *volatile fail_write_text;
+ssize_t __real_write(int fd, const void *buf, size_t n);
+ssize_t __wrap_write(int fd, const void *buf, size_t n)
+{
+    const char *t = fail_write_text;
+    if (t && n >= strlen(t) && memmem(buf, n, t, strlen(t))) {
+        fail_write_text = NULL;
+        errno = EPIPE;
+        return -1;
+    }
+    return __real_write(fd, buf, n);
+}
 
 static char root[128], staged[192];
 
@@ -84,7 +124,24 @@ static struct {
     char seen[64][80];
     int lit_after;              /* set hv after this many lines */
     volatile int stray_ok;      /* an ok after the banner that answers nothing of this session's */
+    volatile int reset_after;   /* after this many lines' ok, the banner again (a reset), then silence */
+    volatile int close_after;   /* close the connection on taking this many lines */
+    volatile int ahead_bytes, ahead_lines;  /* the most seen waiting behind a held line */
+    volatile int alarm_after;   /* ALARM:1 after this many lines' ok, with nothing in flight */
+    volatile int refuse;        /* turn this many connections away at the accept, as a busy controller does */
+    volatile int grbl_banner;   /* the banner of a controller built for Grbl compatibility */
+    const char *early_msg;      /* a warning after the banner, before any line */
+    const char *reset_msg;      /* the controller's warning just before its reset banner */
+    volatile int reset_alarm;   /* and ALARM:3 between the warning and the banner */
+    volatile int accepts;       /* connections taken */
+    volatile int reset_on;      /* the connection (by accepts) the last soft reset came on */
 } mock;
+
+/* The controller's banner, as the driver's core writes it (report.c,
+ * COMPATIBILITY_LEVEL 0), and as a Grbl-compatible build writes it. */
+#define BANNER_GRBLHAL "\r\nGrblHAL 1.1f ['$' or '$HELP' for help]\r\n"
+#define BANNER_GRBL    "\r\nGrbl 1.1f ['$' for help]\r\n"
+#define BUSY_WORDS     "[MSG:The machine is busy with another sender's job: connect again once it is idle]\r\n"
 
 static void *mock_thread(void *arg)
 {
@@ -93,11 +150,26 @@ static void *mock_thread(void *arg)
         int c = accept(mock.listen_fd, NULL, NULL);
         if (c < 0)
             break;
-        const char *banner = "Grbl 1.1 ['$' for help]\r\n";
+        int conn = ++mock.accepts;
+        if (mock.refuse) {
+            /* The driver's refusal: its words, then the close, nothing read. */
+            mock.refuse--;
+            if (write(c, BUSY_WORDS, strlen(BUSY_WORDS)) < 0) { }
+            msleep(50);
+            char tmp[256];
+            ssize_t k = recv(c, tmp, sizeof(tmp), MSG_DONTWAIT);
+            if (k > 0 && memchr(tmp, 0x18, (size_t)k))
+                mock.resets++;
+            close(c);
+            continue;
+        }
+        const char *banner = mock.grbl_banner ? BANNER_GRBL : BANNER_GRBLHAL;
         if (write(c, banner, strlen(banner)) < 0) { }
+        if (mock.early_msg && write(c, mock.early_msg, strlen(mock.early_msg)) < 0) { }
         if (mock.stray_ok && write(c, "ok\r\n", 4) < 0) { }
         char buf[1024];
         size_t n = 0;
+        int silent = 0, closing = 0;
         for (;;) {
             ssize_t r = read(c, buf + n, sizeof(buf) - 1 - n);
             if (r <= 0)
@@ -107,6 +179,7 @@ static void *mock_thread(void *arg)
             while (i < n) {
                 if (buf[i] == 0x18) {
                     mock.resets++;
+                    mock.reset_on = conn;
                     i++;
                     continue;
                 }
@@ -117,25 +190,69 @@ static void *mock_thread(void *arg)
                 if (mock.lines < 64)
                     snprintf(mock.seen[mock.lines], 80, "%s", buf + i);
                 mock.lines++;
+                if (mock.close_after && mock.lines >= mock.close_after) {
+                    /* The close once the run has gone quiet: it has
+                     * written every line the window takes and waits for
+                     * their answers, and has read the welcome and the
+                     * answers before this line. A close inside its burst
+                     * of writes races the read of the welcome. */
+                    mock.close_after = 0;
+                    closing = 1;
+                    struct pollfd pq = { .fd = c, .events = POLLIN };
+                    char drop[512];
+                    while (poll(&pq, 1, 100) > 0 && read(c, drop, sizeof(drop)) > 0) { }
+                    break;
+                }
                 if (strstr(buf + i, "P77")) {
                     mock.holding = 1;
                     /* Let go by the test, or by an abort: its soft reset
-                     * behind whatever lines were in flight, or the close. */
+                     * behind whatever lines were in flight, or the close.
+                     * What waits behind the held line is the runner's
+                     * window. */
                     while (!mock.release) {
-                        char ahead[512];
+                        char ahead[2048];
                         ssize_t k = recv(c, ahead, sizeof(ahead), MSG_DONTWAIT | MSG_PEEK);
                         if (k == 0 || (k > 0 && memchr(ahead, 0x18, (size_t)k)))
                             break;
+                        size_t have = n - (size_t)(nl + 1 - buf);
+                        int nls = 0;
+                        for (size_t j = 0; j < have; j++)
+                            nls += nl[1 + j] == '\n';
+                        for (ssize_t j = 0; j < k; j++)
+                            nls += ahead[j] == '\n';
+                        if (k < 0)
+                            k = 0;
+                        if ((int)(have + (size_t)k) > mock.ahead_bytes)
+                            mock.ahead_bytes = (int)(have + (size_t)k);
+                        if (nls > mock.ahead_lines)
+                            mock.ahead_lines = nls;
                         msleep(10);
                     }
                     mock.holding = 0;
                 }
-                const char *ans = strstr(buf + i, "BAD") ? "error:9\r\n" : "ok\r\n";
+                const char *ans = strstr(buf + i, "BAD") ? "error:9\r\n"
+                                : strstr(buf + i, "ALM") ? "ALARM:1\r\n" : "ok\r\n";
                 if (mock.lit_after && mock.lines == mock.lit_after)
                     sysfs_write("pic/hv_current", 250);
-                if (write(c, ans, strlen(ans)) < 0) { }
+                if (!silent && write(c, ans, strlen(ans)) < 0) { }
+                if (!silent && mock.alarm_after && mock.lines == mock.alarm_after) {
+                    msleep(300);        /* the ok read alone first */
+                    if (write(c, "ALARM:1\r\n", 9) < 0) { }
+                }
+                if (!silent && mock.reset_after && mock.lines == mock.reset_after) {
+                    /* A reset with no alarm, as the lid's cancel is: its
+                     * warning if it has one, the banner again, and no
+                     * status for anything in flight. */
+                    if (mock.reset_msg && write(c, mock.reset_msg, strlen(mock.reset_msg)) < 0) { }
+                    /* An arm the controller ends: the alarm, then the reset. */
+                    if (mock.reset_alarm && write(c, "ALARM:3\r\n", 9) < 0) { }
+                    if (write(c, banner, strlen(banner)) < 0) { }
+                    silent = 1;
+                }
                 i = (size_t)(nl + 1 - buf);
             }
+            if (closing)
+                break;
             memmove(buf, buf + i, n - i);
             n -= i;
         }
@@ -164,8 +281,11 @@ static void mock_start(void)
 
 static void mock_clear(void)
 {
-    msleep(200);                        /* a closed connection's last bytes land first */
+    msleep(50);                         /* a closed connection's last bytes land first */
     mock.lines = mock.resets = mock.holding = mock.release = mock.lit_after = mock.stray_ok = 0;
+    mock.reset_after = mock.close_after = mock.ahead_bytes = mock.ahead_lines = 0;
+    mock.alarm_after = mock.refuse = mock.grbl_banner = mock.reset_alarm = 0;
+    mock.early_msg = mock.reset_msg = NULL;
 }
 
 static int wait_for(volatile int *flag, int want, int ms)
@@ -217,6 +337,8 @@ static int client_connected(void)
 /* The Grbl socket's keep, as the controller port would answer it: a
  * machine that is not idle (a held job of a sender that left) refuses. */
 static int out_refuse, out_calls, in_calls;
+static int give_publishes;              /* the next give publishes a sender's alarm 3 (below) */
+static void ctl_state(const char *state, int alarm, long gen);
 static int sender_out(char *err, size_t elen)
 {
     out_calls++;
@@ -227,6 +349,72 @@ static int sender_out(char *err, size_t elen)
 static void sender_in(void)
 {
     in_calls++;
+    /* A sender that connects the moment the socket is given back, stops
+     * its own motion with ^X and leaves: alarm 3, no sender, a newer
+     * generation. */
+    if (give_publishes) {
+        give_publishes = 0;
+        ctl_state("Alarm", 3, 9);
+    }
+}
+
+/* The running controller, as the supervisor names it (its pid). */
+static volatile long ctl_pid = 4001;
+static long test_controller(void)
+{
+    return ctl_pid;
+}
+
+/* The controller's state file as the driver publishes it: its state, its
+ * alarm code, whether a sender is on the socket, the sender generation. */
+static void ctl_doc(const char *state, int alarm, long gen, int connected)
+{
+    char path[256], tmp[272];
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(path, sizeof(path), "%s/run/grbl.state", root);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f)
+        return;
+    char g[48] = "";
+    if (gen >= 0)                       /* a document with no generation: gen below 0 */
+        snprintf(g, sizeof(g), ",\"generation\":%ld", gen);
+    fprintf(f, "{\"ts_mono\":%.3f,\"state\":\"%s\",\"alarm\":%d,"
+               "\"sender\":{\"connected\":%s%s,\"for_s\":0,\"peer\":\"\"},"
+               "\"laser\":{\"armed\":false,\"arming\":false}}\n",
+            (double)ts.tv_sec + ts.tv_nsec / 1e9, state, alarm, connected ? "true" : "false", g);
+    fclose(f);
+    rename(tmp, path);
+}
+
+/* The same with no sender on the socket. */
+static void ctl_state(const char *state, int alarm, long gen)
+{
+    ctl_doc(state, alarm, gen, 0);
+}
+
+/* The document that shows the stop comes late, while the runner reads the
+ * state after its soft reset (a restart: a new pid first). */
+static void *stop_shown_late(void *restart)
+{
+    wait_for(&mock.holding, 1, 3000);   /* the run plays */
+    wait_for(&mock.resets, 1, 3000);    /* its soft reset: the state's read comes next */
+    msleep(100);
+    if (restart)
+        ctl_pid++;
+    ctl_state("Alarm", 3, 7);
+    return NULL;
+}
+
+/* The controller port's hook, as main.c wires it. */
+static void (*port_touched)(void);
+
+static void ctl_state_gone(void)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/run/grbl.state", root);
+    unlink(path);
 }
 
 /* ---- the cases ---- */
@@ -258,6 +446,19 @@ static void test_check(void)
     OFFENSE("G21\nG1\0X1\n", "line 2", "printable");
     OFFENSE("G21\nG1 X1\rG1 X2\n", "line 2", "carriage return");
     OFFENSE("(only a comment)\n\n%\n", "the program", "no lines");
+
+    /* The limit is 250 characters of what goes out: trailing spaces are
+     * trimmed first, and a 251st character is refused. */
+    char edge[300];
+    memset(edge, '1', sizeof(edge));
+    memcpy(edge, "G1 X", 4);
+    edge[251] = '\n';
+    offense(edge, 252, "line 1", "longer");
+    memset(edge + 250, ' ', 5);
+    edge[255] = '\n';
+    stage(edge, 256);
+    CHECK(jobrun_program_check(staged, &n, err, sizeof(err)) == 0 && n == 1,
+          "250 characters and trailing spaces: n %d \"%s\"", n, err);
 
     char longline[400];
     memset(longline, 'X', sizeof(longline));
@@ -326,17 +527,323 @@ static void test_own_m2(void)
     CHECK(mock.lines == 3 && !strcmp(mock.seen[2], "M2"), "%d lines, the last \"%s\"", mock.lines, mock.seen[2]);
 }
 
-static void test_unlock(void)
+/* The $X clears the alarm the runner's own soft reset left: after a
+ * clean run it does not go out, nor after a run the controller stopped
+ * with its alarm lock (error:9); after an abort it goes out first. */
+static void unlock_run(const char *name, int want_x)
 {
     char err[160] = "";
     mock_clear();
     STAGE("G21\n");
-    CHECK(jobrun_program_start(staged, "unlock", NULL, 0, 30, 1, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(jobrun_program_start(staged, name, NULL, 0, 30, 1, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_state("done", 5000), "the job did not end: %s", status());
-    msleep(200);
-    CHECK(mock.lines == 3 && !strcmp(mock.seen[0], "$X") && !strcmp(mock.seen[1], "G21") &&
-          !strcmp(mock.seen[2], "M2"), "%d lines: \"%s\" \"%s\" \"%s\"", mock.lines, mock.seen[0],
-          mock.seen[1], mock.seen[2]);
+    if (want_x)
+        CHECK(mock.lines == 3 && !strcmp(mock.seen[0], "$X") && !strcmp(mock.seen[1], "G21") &&
+              !strcmp(mock.seen[2], "M2"), "%s: %d lines: \"%s\" \"%s\" \"%s\"", name, mock.lines, mock.seen[0],
+              mock.seen[1], mock.seen[2]);
+    else
+        CHECK(mock.lines == 2 && !strcmp(mock.seen[0], "G21") && !strcmp(mock.seen[1], "M2"),
+              "%s: the $X went out: %d lines, the first \"%s\"", name, mock.lines, mock.seen[0]);
+}
+
+/* A run that ends failed, from a mock set up by the caller. */
+static void failed_run(const char *name, const char *text)
+{
+    char err[160] = "";
+    stage(text, strlen(text));
+    CHECK(jobrun_program_start(staged, name, NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("failed", 5000), "%s did not fail: %s", name, status());
+}
+
+/* The runner's own stop: a run aborted mid-move (the controller took its
+ * first line), or one aborted at its first line, which the controller
+ * has not answered. */
+static void aborted_run_of(const char *text, int acked)
+{
+    char err[160] = "", key[24];
+    mock_clear();
+    stage(text, strlen(text));
+    CHECK(jobrun_program_start(staged, "stopped", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
+    snprintf(key, sizeof(key), "\"acked\":%d,", acked);
+    for (int t = 0; t < 3000 && !strstr(status(), key); t += 10)
+        msleep(10);                     /* the runner has read the answers before the held line */
+    CHECK(jobrun_program_abort(err, sizeof(err)) == 0, "abort: \"%s\"", err);
+}
+
+static void aborted_run(void)
+{
+    aborted_run_of("G21\nG4 P77\n", 1);
+}
+
+/* The $X goes out only where the runner's own stop stands: the last run
+ * ended with the runner's soft reset, and the controller still reads the
+ * alarm 3 that stop left, with the sender generation it showed after it,
+ * from the same controller. */
+static void test_unlock(void)
+{
+    /* What the controller shows after a soft reset in motion. */
+    ctl_state("Alarm", 3, 7);
+    /* Unwired, the runner knows no controller: no stop is its own. Wired
+     * as main.c wires it: the controller's identity, and the port's hook
+     * that forgets the stop. */
+    aborted_run();
+    unlock_run("not-wired", 0);
+    jobrun_wire(test_controller, &port_touched);
+    CHECK(port_touched == jobrun_forget_stop, "the port's hook is not the runner's forget");
+    unlock_run("after-a-clean-run", 0);
+    /* No stop of the runner's, and a document that names no generation:
+     * nothing to match. */
+    ctl_state("Alarm", 3, -1);
+    unlock_run("no-stop-no-generation", 0);
+    ctl_state("Alarm", 3, 7);
+
+    /* The stop is not the runner's: the controller's alarm lock, its
+     * alarm, its own reset. */
+    mock_clear();
+    failed_run("locked", "G21\nBAD\n");
+    unlock_run("after-the-alarm-lock", 0);
+    mock_clear();
+    failed_run("alarmed", "G21\nALM\n");
+    unlock_run("after-the-controller-alarm", 0);
+    mock_clear();
+    mock.reset_after = 1;
+    failed_run("reset", "G21\nG1 X5 F600\nG1 X10 F600\n");
+    unlock_run("after-the-controller-reset", 0);
+
+    /* The runner's own: an abort, and a lost connection's reset. */
+    aborted_run();
+    unlock_run("after-an-abort", 1);
+    mock_clear();
+    mock.close_after = 2;
+    failed_run("dropped", "G21\nG1 X5 F600\nG1 X10 F600\nG1 X15 F600\n");
+    CHECK(wait_for(&mock.resets, 1, 2000), "the lost connection's soft reset never came (%d)", mock.resets);
+    unlock_run("after-a-lost-connection", 1);
+
+    /* The stop shown late in the read: the document still shows the
+     * connection when the read begins. */
+    ctl_doc("Alarm", 3, 7, 1);
+    {
+        pthread_t t;
+        pthread_create(&t, NULL, stop_shown_late, NULL);
+        aborted_run();
+        pthread_join(t, NULL);
+    }
+    unlock_run("stop-shown-late", 1);
+
+    /* An alarm 3 that stood before the run (another sender's stop, the
+     * driver's own): a run aborted at its first line, which the
+     * controller has not answered, and its reset at rest keeps that
+     * alarm. Not the runner's. */
+    ctl_state("Alarm", 3, 7);
+    aborted_run_of("G4 P77\n", 0);
+    wait_state("failed", 3000);
+    unlock_run("alarm-before-the-run", 0);
+
+    /* The stop leaves no mark the controller did not show: a stop at rest
+     * (the state reads Idle at the end) and then the driver's own alarm 3;
+     * another alarm at the stop (a soft limit's) and then alarm 3; a
+     * document that still shows a connection through the whole read; the
+     * controller restarting inside the read. */
+    ctl_state("Idle", 0, 7);
+    aborted_run();
+    wait_state("failed", 3000);
+    ctl_state("Alarm", 3, 7);
+    unlock_run("stop-at-rest-then-alarm3", 0);
+    ctl_state("Alarm", 2, 7);
+    aborted_run();
+    wait_state("failed", 3000);
+    ctl_state("Alarm", 3, 7);
+    unlock_run("another-alarm-at-the-stop", 0);
+    ctl_state("Idle", 0, 7);            /* a stop never seen leaves no mark, not one of no generation */
+    aborted_run();
+    wait_state("failed", 3000);
+    ctl_state("Alarm", 3, -1);
+    unlock_run("unseen-stop-then-no-generation", 0);
+    ctl_doc("Alarm", 3, 7, 1);
+    aborted_run();
+    wait_state("failed", 3000);
+    ctl_state("Alarm", 3, 7);
+    unlock_run("still-connected-at-the-stop", 0);
+    /* The stop is read while the run still keeps the socket: a sender's
+     * alarm 3 shown only once the socket is given back is not the
+     * runner's. */
+    ctl_doc("Alarm", 3, 7, 1);
+    give_publishes = 1;
+    aborted_run();
+    wait_state("failed", 3000);
+    unlock_run("a-sender-after-the-give", 0);
+    ctl_doc("Alarm", 3, 7, 1);
+    {
+        pthread_t t;
+        static int restart = 1;
+        pthread_create(&t, NULL, stop_shown_late, &restart);
+        aborted_run();
+        pthread_join(t, NULL);
+        wait_state("failed", 3000);
+    }
+    unlock_run("controller-restart-in-the-read", 0);
+
+    /* The runner's stop, and since then something else: an alarm of its
+     * own (a soft limit), the state cleared or not Alarm, a home, release
+     * or energize from this daemon and then a fresh alarm 3, another
+     * sender's session, a controller started since, a state nobody can
+     * read. */
+    aborted_run();
+    ctl_state("Alarm", 2, 7);
+    unlock_run("a-limit-alarm-since", 0);
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    ctl_state("Idle", 0, 7);
+    unlock_run("cleared-since", 0);
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    ctl_state("Idle", 3, 7);
+    unlock_run("alarm-code-not-in-alarm", 0);
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    if (port_touched)
+        port_touched();                 /* the port's home: the hook as wired */
+    unlock_run("a-home-then-alarm3", 0);
+    aborted_run();
+    ctl_state("Alarm", 3, 9);
+    unlock_run("a-session-since", 0);
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    ctl_pid++;
+    unlock_run("a-controller-since", 0);
+    aborted_run();
+    ctl_state_gone();
+    unlock_run("no-state", 0);
+}
+
+/* A reset the controller reports (its banner a second time, as the lid's
+ * cancel sends it) ends the run at once, failed, and the runner sends no
+ * soft reset of its own: it would cut short the cancel's return move.
+ * The banner in either form; the record gives the controller's warning
+ * just before it (not its information or debug lines after the warning),
+ * and a warning answered by an ok since is not why. An arm the controller
+ * ends reports its alarm before the reset: the run fails at the alarm,
+ * with the warning in the record. */
+static void test_reset_banner(void)
+{
+    char err[160] = "", who[64];
+    for (int form = 0; form < 2; form++) {
+        mock_clear();
+        mock.reset_after = 1;
+        mock.grbl_banner = form;
+        mock.reset_msg = form ? NULL : "[MSG:Warning: lid opened - job canceled, returning to the job start]\r\n"
+                                       "[MSG:Info: laser disarmed - latch locked]\r\n[MSG:Debug: reset]\r\n";
+        mock.early_msg = form ? "[MSG:Warning: laser floor is 0]\r\n" : NULL;
+        STAGE("G21\nG1 X5 F600\nG1 X10 F600\nG1 X15 F600\n");
+        CHECK(jobrun_program_start(staged, "lid", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+        CHECK(wait_state("failed", 3000), "the run went on after the controller was reset (%s banner): %s",
+              form ? "Grbl" : "GrblHAL", status());
+        if (form)
+            CHECK(strstr(status(), "reset") && !strstr(status(), "floor"), "record: %s", status());
+        else
+            CHECK(strstr(status(), "lid opened - job canceled"), "record: %s", status());
+        CHECK(!lease_holder(who, sizeof(who)), "the lease is still \"%s\"", who);
+        msleep(200);
+        CHECK(mock.resets == 0, "%d soft resets after the controller's own", mock.resets);
+    }
+    mock_clear();
+    mock.reset_after = 1;
+    mock.reset_alarm = 1;
+    mock.reset_msg = "[MSG:Warning: laser arm timed out waiting for the button]\r\n";
+    STAGE("G21\nM3 S400\nG1 X5 F600\n");
+    CHECK(jobrun_program_start(staged, "arm", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("failed", 3000), "the run went on after the arm ended: %s", status());
+    CHECK(strstr(status(), "ALARM:3") && strstr(status(), "laser arm timed out"), "record: %s", status());
+}
+
+/* The controller turns the run's connection away at the accept: the run
+ * fails in those words, and no soft reset goes out (the run never had the
+ * machine), nor is the stop the runner's. */
+static void test_refused_connect(void)
+{
+    mock_clear();
+    ctl_state("Alarm", 3, 7);
+    mock.refuse = 2;
+    failed_run("refused", "G21\nG1 X5 F600\n");
+    CHECK(strstr(status(), "refused") && strstr(status(), "busy with another sender"), "record: %s", status());
+    msleep(300);
+    CHECK(mock.resets == 0, "%d soft resets for a connection the run never had", mock.resets);
+    unlock_run("after-a-refused-connection", 0);
+    ctl_state_gone();
+}
+
+/* The controller closes the run's connection with lines out: the run
+ * fails, and its soft reset goes on a connection of its own, so what is
+ * planned stops all the same. */
+static void test_midrun_close(void)
+{
+    char err[160] = "";
+    mock_clear();
+    mock.close_after = 2;
+    STAGE("G21\nG1 X5 F600\nG1 X10 F600\nG1 X15 F600\nG1 X20 F600\n");
+    CHECK(jobrun_program_start(staged, "dropped", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("failed", 3000), "the run did not fail on the close: %s", status());
+    CHECK(wait_for(&mock.resets, 1, 2000), "the soft reset never reached the controller (%d)", mock.resets);
+
+    /* A write the closed connection refuses: the same, the soft reset on
+     * a connection of its own, not on the one that refused the write. */
+    mock_clear();
+    int conn = mock.accepts;
+    fail_write_text = "M2";             /* the runner's own end, written once the welcome is read */
+    STAGE("G21\nG1 X5 F600\n");
+    CHECK(jobrun_program_start(staged, "unwritten", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("failed", 3000), "the run did not fail on the refused write: %s", status());
+    CHECK(wait_for(&mock.resets, 1, 2000) && mock.reset_on == conn + 2,
+          "after a refused write the soft reset came on connection %d, not on a new one (2), %d resets",
+          mock.reset_on - conn, mock.resets);
+    fail_write_text = NULL;
+}
+
+/* The window the runner keeps: lines out and not acknowledged are held
+ * to half the controller's 1024-byte ring and to 32 lines. */
+static void inflight_case(const char *line, int nlines)
+{
+    char err[160] = "", prog[4096];
+    size_t o = (size_t)snprintf(prog, sizeof(prog), "G4 P77\n");
+    for (int i = 0; i < nlines; i++)
+        o += (size_t)snprintf(prog + o, sizeof(prog) - o, "%s\n", line);
+    mock_clear();
+    stage(prog, o);
+    CHECK(jobrun_program_start(staged, "window", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
+    msleep(300);
+    mock.release = 1;
+    CHECK(wait_state("done", 5000), "the job did not end: %s", status());
+    printf("    %s: %d bytes in %d lines behind the held one\n", line, mock.ahead_bytes, mock.ahead_lines);
+    CHECK(mock.ahead_bytes + 7 <= 512, "%d bytes out past half the ring", mock.ahead_bytes + 7);
+    CHECK(mock.ahead_lines + 1 <= 32, "%d lines out past the bound", mock.ahead_lines + 1);
+}
+
+static void test_inflight_bound(void)
+{
+    inflight_case("G1 X1.000 Y1.000 F600 ; long", 60);     /* the bytes bind */
+    inflight_case("G0 X1", 60);                              /* the lines bind */
+}
+
+/* The controller's alarm stops the run at the line that drew it. */
+static void test_alarm_stops(void)
+{
+    mock_clear();
+    jobstream_lines_t lines = { "G21\nALM\nG90\n", 0 };
+    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .ctx = &lines, .run_timeout_s = 10 };
+    jobstream_run_t run;
+    char err[160] = "";
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    CHECK(rc == -1 && strstr(err, "ALARM:1") && strstr(err, "line 2"), "the alarm: rc %d, %s", rc, err);
+}
+
+/* A generator line longer than the buffer fails the run: never split. */
+static void test_lines_gen_long(void)
+{
+    char buf[8];
+    jobstream_lines_t l = { "G1 X123456789\nG0\n", 0 };
+    CHECK(jobstream_lines_gen(&l, buf, sizeof(buf)) == -1, "an over-long line was split, not refused");
 }
 
 static void kernel_state(const char *word)
@@ -676,6 +1183,28 @@ static void test_lit_program(void)
     CHECK(mock.resets == 0, "a soft reset on a clean lit run");
 }
 
+/* The controller alarms after the last line's ok, while the run waits for
+ * its dark stretch: the run is not clean. */
+static void test_enddark_alarm(void)
+{
+    mock_clear();
+    sysfs_write("pic/hv_current", 0);
+    sysfs_write("head/beam_detect_analog", 100);
+    sysfs_write("cnc/laser_on_sampled", 0);
+    mock.lit_after = 2;
+    mock.alarm_after = 4;               /* after the M2's ok: nothing in flight */
+    jobstream_lines_t lines = { "M3 S400\nG1 X10 F600\nM5\nM2\n", 0 };
+    jobstream_cfg_t cfg = { .gen = jobstream_lines_gen, .ctx = &lines,
+                            .wait_timeout_s = 10, .run_timeout_s = 20, .end_dark_s = 0.5 };
+    jobstream_run_t run;
+    char err[160] = "";
+    pthread_t t;
+    pthread_create(&t, NULL, flip, NULL);
+    int rc = jobstream_run(&cfg, &run, err, sizeof(err));
+    pthread_join(t, NULL);
+    CHECK(rc == -1 && strstr(err, "ALARM:1"), "an alarm in the dark wait: rc %d, \"%s\"", rc, err);
+}
+
 static volatile int abort_flag;
 static int slow_gen(void *ctx, char *buf, size_t len)
 {
@@ -833,12 +1362,14 @@ int main(void)
     setenv("FORGECTRL_HOST_TEST", "1", 1);     /* the test hooks' gate (testhook.h) */
     mkdir(root, 0755);
     char sub[192];
-    const char *dirs[] = { "pic", "head", "cnc" };
-    for (int i = 0; i < 3; i++) {
+    const char *dirs[] = { "pic", "head", "cnc", "run" };
+    for (int i = 0; i < 4; i++) {
         snprintf(sub, sizeof(sub), "%s/%s", root, dirs[i]);
         mkdir(sub, 0755);
     }
     setenv("GF_SYSFS_ROOT", root, 1);
+    snprintf(sub, sizeof(sub), "%s/run", root);
+    setenv("GF_RUN_DIR", sub, 1);       /* the controller's state file: none until a case writes it */
     sysfs_write("pic/hv_current", 0);
     sysfs_write("head/beam_detect_analog", 100);
     sysfs_write("cnc/laser_on_sampled", 0);
@@ -857,10 +1388,14 @@ int main(void)
     static const struct { const char *name; void (*run)(void); } cases[] = {
         { "check", test_check }, { "program-plays", test_program_plays }, { "own-m2", test_own_m2 }, { "unlock", test_unlock }, { "done-is-idle", test_done_is_idle },
         { "abort", test_abort }, { "client-refuses", test_client_refuses }, { "sender-kept", test_sender_kept },
+        { "reset-banner", test_reset_banner }, { "midrun-close", test_midrun_close },
+        { "inflight-bound", test_inflight_bound }, { "alarm-stops", test_alarm_stops },
+        { "lines-gen-long", test_lines_gen_long },
         { "sync-under-a-wizard", test_sync_under_a_wizard }, { "hooks", test_hooks },
         { "must-light", test_must_light }, { "lit-full-rate", test_lit_full_rate },
         { "dark-program", test_dark_program }, { "error-stops", test_error_stops },
-        { "lit-program", test_lit_program }, { "abort-and-pacing", test_abort_and_pacing },
+        { "lit-program", test_lit_program }, { "enddark-alarm", test_enddark_alarm },
+        { "refused-connect", test_refused_connect }, { "abort-and-pacing", test_abort_and_pacing },
         { "witness-rate", test_witness_rate }, { "stray-ok", test_stray_ok },
         { "sender-check", test_sender_check },
     };

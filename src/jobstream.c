@@ -6,11 +6,9 @@
  *
  * See jobstream.h. The loop ticks at 25 Hz: it harvests the
  * controller's answers, feeds the next line when the last one is
- * acknowledged, samples the witnesses, and judges the end. Because a
- * new connection displaces the sender (last connection wins), a run
- * should be refused by its caller while jobstream_sender_connected()
- * says a sender is on the socket; in the wizard's loopback posture no
- * sender can be.
+ * acknowledged, samples the witnesses, and judges the end. A run is
+ * refused by its caller while jobstream_sender_connected() says a sender
+ * is on the socket; in the wizard's loopback posture no sender can be.
  */
 #define _GNU_SOURCE
 #include "jobstream.h"
@@ -152,8 +150,11 @@ int jobstream_lines_gen(void *ctx, char *buf, size_t len)
         return 0;
     const char *nl = strchr(p, '\n');
     size_t n = nl ? (size_t)(nl - p) : strlen(p);
-    if (n >= len)
-        n = len - 1;
+    if (n >= len) {
+        /* Never split: the rest would go out as a line of its own. */
+        snprintf(buf, len, "a line of the program is longer than the sender takes");
+        return -1;
+    }
     memcpy(buf, p, n);
     buf[n] = '\0';
     l->off = (size_t)(p - l->text) + n;
@@ -171,6 +172,37 @@ static int line_is_barrier(const char *l)
 {
     return l[0] == '$' || !strncmp(l, "M102", 4) ||
            (l[0] == 'M' && l[1] == '2' && (l[2] == '\0' || l[2] == ' '));
+}
+
+/* The controller's banner: its welcome to a connection, and its word
+ * after every reset. */
+static int line_is_banner(const char *l)
+{
+    return !strncmp(l, "GrblHAL ", 8) || !strncmp(l, "Grbl ", 5);
+}
+
+/* What the controller says of itself ([MSG:...]), into said: its warnings
+ * and its plain words, not its information or debug lines. */
+static void line_said(const char *l, char *said, size_t len)
+{
+    if (strncmp(l, "[MSG:", 5) || !strncmp(l + 5, "Info: ", 6) || !strncmp(l + 5, "Debug: ", 7))
+        return;
+    const char *s = l + 5;
+    if (!strncmp(s, "Warning: ", 9))
+        s += 9;
+    snprintf(said, len, "%.*s", (int)strcspn(s, "]\r"), s);
+}
+
+/* The soft reset on a connection of its own, for a run whose connection
+ * the controller closed: whatever of the run is still planned stops. */
+static int reset_on_new_connection(void)
+{
+    int fd = connect_loopback();
+    if (fd < 0)
+        return -1;
+    int rc = write(fd, "\x18", 1) == 1 ? 0 : -1;
+    close(fd);
+    return rc;
 }
 
 /* One sample of the witnesses, into the run's record and to the caller. */
@@ -222,7 +254,8 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
      * never overrun. */
     char sent_text[JOBSTREAM_INFLIGHT_LINES][64];
     size_t sent_len[JOBSTREAM_INFLIGHT_LINES] = { 0 }, inflight = 0;
-    int barrier = 0, have_held = 0, stray_said = 0;
+    int barrier = 0, have_held = 0, stray_said = 0, banners = 0, foreign = 0;
+    char said[96] = "";                 /* the controller's last word since the last ok */
     memset(run, 0, sizeof(*run));
     run->tp_base = -1;
 
@@ -243,8 +276,9 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
         if (tickn % div == 0)
             witness(cfg, run, t, &dark_run);
 
-        /* The controller's answers. */
-        if (!done_sending || run->acked < run->sent) {
+        /* The controller's answers, read to the run's end: an alarm or a
+         * reset in the end's dark wait is the run's too. */
+        {
             ssize_t r;
             while ((r = read(fd, rx + rxn, sizeof(rx) - 1 - rxn)) > 0) {
                 rxn += (size_t)r;
@@ -255,6 +289,24 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                     char *l = rx;
                     while (*l == '\r' || *l == ' ')
                         l++;
+                    /* The first banner is the welcome; a second is a
+                     * reset (a lid cancel's, an arm the controller ended,
+                     * a sender's ^X), which flushed the lines out with no
+                     * status for any of them. The run is over, and the
+                     * controller has stopped it itself: a soft reset now
+                     * would only cut short what it does next (the
+                     * cancel's return move). Its warning just before is
+                     * why. */
+                    if (line_is_banner(l) && ++banners >= 2) {
+                        if (said[0])
+                            snprintf(err, elen, "the controller reset the job: %s", said);
+                        else
+                            snprintf(err, elen, "the controller was reset");
+                        goto failed_reset;
+                    }
+                    line_said(l, said, sizeof(said));
+                    if (!strncmp(l, "ok", 2))
+                        said[0] = '\0';
                     if (!strncmp(l, "ok", 2) && run->acked >= run->sent) {
                         /* An ok with no line of this run's out answers
                          * somebody else's: a sender that left while its
@@ -270,9 +322,16 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                         t_last_ack = now;
                     } else if (!strncmp(l, "error", 5) || !strncmp(l, "ALARM", 5)) {
                         l[strcspn(l, "\r")] = '\0';     /* the reason is read by people, and served as JSON */
-                        snprintf(err, elen, "the controller answered %.24s on line %d (%s)",
+                        /* With the controller's warning just before it, when
+                         * it gave one (an arm it ended: timed out, refused). */
+                        snprintf(err, elen, "the controller answered %.24s on line %d (%s)%s%s",
                                  l, run->acked + 1,
-                                 run->acked < run->sent ? sent_text[run->acked % JOBSTREAM_INFLIGHT_LINES] : "");
+                                 run->acked < run->sent ? sent_text[run->acked % JOBSTREAM_INFLIGHT_LINES] : "",
+                                 said[0] ? ": " : "", said);
+                        /* An alarm, or the lock of one that stood: the
+                         * controller stopped first, and what it is in is
+                         * not the run's own doing. */
+                        foreign = !strncmp(l, "ALARM", 5) || !strcmp(l, "error:9");
                         goto fail;
                     }
                     size_t rest = rxn - (size_t)(nl + 1 - rx);
@@ -283,8 +342,8 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
                     rxn = 0;            /* a status frame overran: drop it */
             }
             if (r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
-                snprintf(err, elen, "the controller closed the connection (a sender took the socket?)");
-                goto fail;
+                snprintf(err, elen, "the controller closed the connection");
+                goto failed_closed;
             }
         }
 
@@ -320,7 +379,7 @@ int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, s
             line[n++] = '\n';
             if (write(fd, line, n) != (ssize_t)n) {
                 snprintf(err, elen, "cannot write to the controller");
-                goto fail;
+                goto failed_closed;
             }
             inflight += n;
             run->sent++;
@@ -371,6 +430,36 @@ fail:
     /* A controlled stop and the latch relocked, whatever the state. */
     if (write(fd, "\x18", 1) != 1)
         fflog(LOG_WARNING, "jobstream: could not send the soft reset");
+    else
+        run->own_stop = !foreign;
+    close(fd);
+    fflog(LOG_WARNING, "jobstream: %s", err);
+    return -1;
+
+failed_closed:
+    close(fd);
+    if (!banners) {
+        /* No welcome: the controller turned the connection away at the
+         * accept (another sender's job, senders kept out), and the run
+         * never had the machine. A reset now would reach whoever has it. */
+        if (said[0])
+            snprintf(err, elen, "the controller refused the connection: %s", said);
+        else
+            snprintf(err, elen, "the controller refused the connection");
+        fflog(LOG_WARNING, "jobstream: %s", err);
+        return -1;
+    }
+    /* The run's connection is gone, and with it the way to the soft
+     * reset: it goes on a connection of its own, so the run's planned
+     * lines stop all the same. */
+    if (reset_on_new_connection() != 0)
+        fflog(LOG_WARNING, "jobstream: could not send the soft reset");
+    else
+        run->own_stop = 1;
+    fflog(LOG_WARNING, "jobstream: %s", err);
+    return -1;
+
+failed_reset:
     close(fd);
     fflog(LOG_WARNING, "jobstream: %s", err);
     return -1;

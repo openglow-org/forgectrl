@@ -55,6 +55,12 @@ typedef enum {
 int grblport_request(grblport_set_t set, grblport_op_t op, const char *arg,
                      char *reply, size_t len);
 
+/* Called before a home, a release or an energize goes out (each clears
+ * or changes an alarm with no sender session), whatever the answer; set
+ * at start (main.c: jobrun_wire, the job runner's jobrun_forget_stop),
+ * NULL calls nothing. */
+extern void (*grblport_alarm_touched)(void);
+
 /* The most one jog request may ask for, which is the jog's dead-man: a
  * client that vanishes leaves at most this much motion behind it. */
 #define GRBLPORT_JOG_MAX_XY_MM 100.0

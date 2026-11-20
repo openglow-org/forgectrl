@@ -255,8 +255,13 @@ int sheet_text_line(sheet_text_t *t, const char *fmt, ...)
     va_start(ap, fmt);
     int n = vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
-    if (n < 0 || n >= (int)sizeof(line) - 1)
+    if (n < 0 || n >= (int)sizeof(line) - 1) {
+        /* A line dropped from a program is a program that does something
+         * else (a lost G0 makes the next polyline's start a lit G1): the
+         * text is bad, as on a failed allocation, and nobody sends it. */
+        t->oom = 1;
         return -1;
+    }
     line[n++] = '\n';
     if (text_append(t, line, (size_t)n) != 0)
         return -1;

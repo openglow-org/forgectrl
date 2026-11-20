@@ -169,6 +169,23 @@ static long fan_rpm(long period_ns)
     return period_ns > 0 ? (long)(60e9 / ((double)period_ns * 2.0)) : 0;
 }
 
+static int read_state_file(const char *name, char *buf, size_t len);
+
+/* $100 and $101 from the controller's published settings, while it runs;
+ * each left as it was when absent. */
+static void xy_steps_per_mm(double *sx, double *sy)
+{
+    char buf[8192];
+    if (!super_grbl_running() || read_state_file("grbl.settings", buf, sizeof(buf)) != 0)
+        return;
+    for (char *save = NULL, *l = strtok_r(buf, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
+        if (!strncmp(l, "$100=", 5))
+            *sx = atof(l + 5);
+        else if (!strncmp(l, "$101=", 5))
+            *sy = atof(l + 5);
+    }
+}
+
 /* Machine position: home anchor + kernel step counters. Without an
  * anchor the machine is unreferenced but still movable - position is
  * then counters-only, i.e. relative to wherever the head was when
@@ -205,8 +222,14 @@ static int read_position(double *x, double *y, double *z, int *homed,
             got = 4;
         if (got >= 3)
             *axes = got == 4 ? (m & 7u) : 7u;
-        if (!*axes)
-            hx = hy = hz = 0;
+        /* An axis the anchor does not reference counts from wherever
+         * counting started, as the controller's own position does. */
+        if (!(*axes & 1u))
+            hx = 0;
+        if (!(*axes & 2u))
+            hy = 0;
+        if (!(*axes & 4u))
+            hz = 0;
         *homed = *axes == 7u;
     }
 
@@ -224,13 +247,23 @@ static int read_position(double *x, double *y, double *z, int *homed,
     memcpy(&sy, raw + 4, 4);
     memcpy(&sz, raw + 8, 4);
 
+    /* X and Y in the controller's own steps per millimeter ($100, $101),
+     * so the position agrees with its MPos whatever a sender set; the
+     * factory constants at the live microstep mode when it has not
+     * published them. */
+    double spm_x = 0, spm_y = 0;
+    xy_steps_per_mm(&spm_x, &spm_y);
     long xm = rd_attr_long("cnc/x_mode", 8);
     long ym = rd_attr_long("cnc/y_mode", 8);
     if (xm <= 0) xm = 8;
     if (ym <= 0) ym = 8;
+    if (spm_x <= 0)
+        spm_x = (double)xm / XY_MM_PER_FULL_STEP;
+    if (spm_y <= 0)
+        spm_y = (double)ym / XY_MM_PER_FULL_STEP;
 
-    *x = hx + (double)sx / (double)xm * XY_MM_PER_FULL_STEP;
-    *y = hy + (double)sy / (double)ym * XY_MM_PER_FULL_STEP;
+    *x = hx + (double)sx / spm_x;
+    *y = hy + (double)sy / spm_y;
     *z = hz + (double)sz / 2.0 * Z_MM_PER_FULL_STEP;
     return 0;
 }

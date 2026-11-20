@@ -46,6 +46,17 @@ static int lines;                       /* a posted program's line count; 0 for 
 static jobstream_run_t *cur;            /* the live counters, while active */
 static jobstream_run_t last;            /* and as they ended */
 static double last_elapsed;
+/* The last run, one the controller took a line of, ended with the
+ * runner's own soft reset, and the controller showed it after the run:
+ * the sender generation it published once the run's connection was gone,
+ * and which controller it was. */
+static struct {
+    int set;
+    long gen;
+    long ctl;
+} stop_mark;
+
+static long (*jobrun_controller)(void);
 
 static pthread_t thread;
 static int thread_live, joining;
@@ -64,6 +75,82 @@ static void busy_words(char *err, size_t elen)
 {
     if (!lease_refusal(err, elen))
         snprintf(err, elen, "a job is finishing");
+}
+
+static long controller_id(void)
+{
+    return jobrun_controller ? jobrun_controller() : 0;
+}
+
+/* A whole number after key in the controller's state document, or -1. */
+static long state_number(const char *body, const char *key)
+{
+    const char *p = strstr(body, key);
+    if (!p)
+        return -1;
+    p += strlen(key);
+    char *end;
+    long v = strtol(p, &end, 10);
+    return end == p || v < 0 ? -1 : v;
+}
+
+/* The state document reads the alarm a soft reset in motion leaves. */
+static int reads_alarm3(const char *body)
+{
+    return strstr(body, "\"state\":\"Alarm\"") && state_number(body, "\"alarm\":") == 3;
+}
+
+/* After a run's own soft reset: the sender generation of the first
+ * document that shows that stop, alarm 3 with no connection on the
+ * socket, within JOBRUN_STOP_SEEN_S. 0, or -1 when the state cannot be
+ * read or never shows it (a stop at rest raises no alarm of its own; an
+ * alarm 3 the driver raises inside the read is taken for it). Asked while
+ * the run still keeps the Grbl socket to this host, so no sender from the
+ * network can come between. After a lost connection the alarm is raised
+ * only once the controller has read the ^X of the reset connection, so
+ * the document that shows it with no connection comes after that
+ * connection's drop. */
+static int stop_seen(long *gen)
+{
+    char body[JOBSTREAM_STATE_MAX];
+    struct timespec tick = { 0, 20 * 1000000L };
+    for (double t0 = mono_s(); mono_s() - t0 < JOBRUN_STOP_SEEN_S; nanosleep(&tick, NULL)) {
+        if (jobstream_grbl_state(body, sizeof(body)) != 0)
+            return -1;
+        if (strstr(body, "\"connected\":false") && reads_alarm3(body))
+            return (*gen = state_number(body, "\"generation\":")) < 0 ? -1 : 0;
+    }
+    return -1;
+}
+
+/* The runner's own stop still stands: the controller that showed it reads
+ * the alarm a soft reset in motion leaves (alarm 3), no session has had
+ * the Grbl socket since (the same sender generation), and nothing of this
+ * daemon's has cleared or changed the alarm since (jobrun_forget_stop:
+ * the port's home, release and energize). Anything else (another alarm,
+ * another sender's session, a controller started since, a state that
+ * cannot be read) is not the runner's to clear. Called with mu held. */
+static int stop_stands_locked(void)
+{
+    char body[JOBSTREAM_STATE_MAX];
+    if (!stop_mark.set || jobstream_grbl_state(body, sizeof(body)) != 0)
+        return 0;
+    return controller_id() == stop_mark.ctl && reads_alarm3(body) &&
+           state_number(body, "\"generation\":") == stop_mark.gen;
+}
+
+void jobrun_forget_stop(void)
+{
+    pthread_mutex_lock(&mu);
+    stop_mark.set = 0;
+    pthread_mutex_unlock(&mu);
+}
+
+void jobrun_wire(long (*controller)(void), void (**alarm_touched)(void))
+{
+    jobrun_controller = controller;
+    if (alarm_touched)
+        *alarm_touched = jobrun_forget_stop;
 }
 
 /* ------------------------------------------------------------ the run */
@@ -147,10 +234,24 @@ static void record_open_locked(jobstream_run_t *run, int program, int nlines)
 static void end(int rc, const jobstream_run_t *run, const char *err)
 {
     char who[LEASE_OWNER_MAX];
+    /* Seen before the socket goes back: the stop's mark is the
+     * controller's own word, with no other session yet possible. Only a
+     * run the controller took a line of (an ok to it): a controller that
+     * answers nothing, or only its alarm lock, may be in an alarm that
+     * stood before the run, which a soft reset at rest keeps. The
+     * controller's identity is read before the state, and the next
+     * program's check compares it: a controller started inside the read
+     * is not the one marked. No identity (nothing wired), no mark. */
+    long gen = -1;
+    long ctl = controller_id();
+    int stopped = rc != 0 && run->own_stop && run->acked > 0 && ctl > 0 && stop_seen(&gen) == 0;
     pthread_mutex_lock(&mu);
     sender_give_locked();
     last = *run;
     last_elapsed = mono_s() - t_started;
+    stop_mark.set = stopped;
+    stop_mark.gen = gen;
+    stop_mark.ctl = ctl;
     cur = NULL;
     snprintf(reason, sizeof(reason), "%s", rc == 0 ? "" : err);
     snprintf(who, sizeof(who), "%s", holder);
@@ -333,6 +434,11 @@ static int line_clean(const char *in, char *out, size_t len, const char **why)
     while (n > 0 && out[n - 1] == ' ')
         n--;
     out[n] = '\0';
+    /* The limit is on what goes out: comments gone, the ends trimmed. */
+    if (n > JOBRUN_LINE_MAX) {
+        *why = "is longer than the sender takes";
+        return -1;
+    }
     if (out[0] == '$') {
         *why = "is a $ command: the controller's system commands are not a job's to send";
         return -1;
@@ -358,7 +464,7 @@ int jobrun_program_check(const char *path, int *nlines, char *err, size_t elen)
         snprintf(err, elen, "no program was received");
         return -1;
     }
-    char *raw = NULL, out[JOBRUN_LINE_MAX + 2];
+    char *raw = NULL, out[RAW_MAX];
     size_t cap = 0;
     ssize_t got;
     int row = 0, kept = 0, rc = 0;
@@ -400,7 +506,7 @@ static program_t prog;                  /* written under mu, and only while no r
 static int program_gen(void *ctx, char *buf, size_t len)
 {
     program_t *p = ctx;
-    char raw[RAW_MAX];
+    char raw[RAW_MAX], clean[RAW_MAX];
     if (p->unlock) {
         p->unlock = 0;
         snprintf(buf, len, "$X");
@@ -408,13 +514,14 @@ static int program_gen(void *ctx, char *buf, size_t len)
     }
     while (p->f && fgets(raw, sizeof(raw), p->f)) {
         const char *why = NULL;
-        int n = line_clean(raw, buf, len < JOBRUN_LINE_MAX + 2 ? len : JOBRUN_LINE_MAX + 2, &why);
+        int n = line_clean(raw, clean, sizeof(clean), &why);
         if (n < 0) {
             snprintf(buf, len, "a line of the program %s", why);
             return -1;
         }
         if (n == 0)
             continue;
+        snprintf(buf, len, "%s", clean);
         p->ended = is_end(buf);
         return 1;
     }
@@ -461,6 +568,22 @@ static void kernel_idle_wait(double limit_s)
         fflog(LOG_WARNING, "jobrun: the kernel was still playing %.0f s after the program's end", limit_s);
 }
 
+/* Once the run keeps the Grbl socket (no session can come between this
+ * and the $X): the unlock asked for goes out only where the runner's own
+ * stop still stands. Called with mu held. */
+static int program_ready(void *ctx, char *err, size_t elen)
+{
+    program_t *p = ctx;
+    (void)err;
+    (void)elen;
+    if (p->unlock && !stop_stands_locked()) {
+        p->unlock = 0;
+        fflog(LOG_INFO, "jobrun: %s asked for the unlock, and the controller is not in the alarm "
+                        "the runner's own stop left: no $X", holder);
+    }
+    return 0;
+}
+
 static void program_done(void *ctx, int rc, const jobstream_run_t *run, const char *err)
 {
     program_t *p = ctx;
@@ -499,6 +622,7 @@ int jobrun_program_start(const char *path, const char *name, const char *under, 
          * its witnesses is ever read. */
         .stream = { .gen = program_gen, .ctx = &prog, .wait_timeout_s = lit_timeout_s,
                     .run_timeout_s = run_timeout_s, .sample_div = lit_timeout_s > 0 ? 1 : 5 },
+        .ready = program_ready,
         .done = program_done,
     };
     pthread_mutex_lock(&mu);
@@ -508,6 +632,9 @@ int jobrun_program_start(const char *path, const char *name, const char *under, 
     else {
         memset(&prog, 0, sizeof(prog));
         prog.f = f;
+        /* The $X clears the alarm the runner's own soft reset left, and
+         * no other: an alarm of anything else's stands, and the program's
+         * first line meets it (program_ready decides). */
         prog.unlock = unlock;
         rc = start_locked(&cfg, 1, n, err, elen);
         if (rc != 0)

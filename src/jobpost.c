@@ -7,7 +7,15 @@
  * See jobpost.h. One upload at a time: the sink stages the program as it
  * arrives, the route hands the staged file to the runner, and the runner
  * opens it and takes its name away, so the next upload never writes
- * under a job that plays.
+ * under a job that plays. The slot stays the upload's until the runner
+ * has it: from the route's first look through the runner's start, a new
+ * upload is refused.
+ *
+ * An upload is its request's, and the request's own thread's: the
+ * server runs a thread per connection, the sink and the route of one
+ * request run on it, and a connection that drops ends its thread. A
+ * later request whose structure happens to sit at a dropped request's
+ * address runs on another thread, and adopts nothing.
  */
 #define _GNU_SOURCE
 #include "jobpost.h"
@@ -33,6 +41,8 @@ static double up_last;
 static size_t up_bytes;
 static int up_error;                    /* the HTTP status of the refusal, or 0 */
 static char up_refusal[160];
+static int up_starting;                 /* the route has the upload, until the runner does */
+static __thread int tl_staged;          /* this thread's request staged the upload */
 
 static double mono_s(void)
 {
@@ -98,7 +108,7 @@ int jobpost_sink(const struct _u_request *req, const char *key, const char *data
         /* A second upload while the first still streams is refused, not
          * adopted; one whose client went away mid-stream is abandoned
          * after a minute of silence. */
-        if (up_owner && up_owner != req && mono_s() - up_last < 60) {
+        if (up_owner && up_owner != req && (up_starting || mono_s() - up_last < 60)) {
             pthread_mutex_unlock(&mu);
             return 1;                   /* the route reports the refusal */
         }
@@ -106,6 +116,7 @@ int jobpost_sink(const struct _u_request *req, const char *key, const char *data
             fclose(up_fp);
         up_fp = NULL;
         up_owner = req;
+        tl_staged = 1;
         up_bytes = 0;
         up_error = 0;
         up_refusal[0] = '\0';
@@ -145,6 +156,9 @@ static double field_s(const struct _u_request *req, const char *key, double max,
     return d;
 }
 
+static int job_start(const struct _u_request *req, struct _u_response *res, const char *path,
+                     int status, size_t bytes, char *why, size_t wlen);
+
 int cb_job_post(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -155,9 +169,11 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
 
     char path[192], why[160];
     staging_path(path, sizeof(path));
+    int mine = tl_staged;
+    tl_staged = 0;
     pthread_mutex_lock(&mu);
-    if (up_owner != req) {
-        int streaming = up_owner != NULL;
+    if (up_owner != req || !mine || up_starting) {
+        int streaming = up_owner != NULL && up_owner != req;
         pthread_mutex_unlock(&mu);
         return streaming ? reply_text(res, 409, "another program is being uploaded")
                          : reply_text(res, 400, "no program was received (the file part is `program`)");
@@ -165,12 +181,25 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
     if (up_fp)
         fclose(up_fp);
     up_fp = NULL;
-    up_owner = NULL;
+    up_starting = 1;
     int status = up_error;
     size_t bytes = up_bytes;
     snprintf(why, sizeof(why), "%s", up_refusal);
     pthread_mutex_unlock(&mu);
 
+    int rc = job_start(req, res, path, status, bytes, why, sizeof(why));
+    pthread_mutex_lock(&mu);
+    up_owner = NULL;
+    up_starting = 0;
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
+/* The staged upload to the runner, or its refusal; the slot is the
+ * upload's throughout. */
+static int job_start(const struct _u_request *req, struct _u_response *res, const char *path,
+                     int status, size_t bytes, char *why, size_t wlen)
+{
     if (status)
         return reply_text(res, (unsigned)status, why);
     if (bytes == 0) {
@@ -185,13 +214,17 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
         unlink(path);
         return reply_text(res, 400, "lit_within_s is 0 to 3600 and timeout_s 0 to 86400, in seconds");
     }
+    /* Every posted program has a bound: one that names none gets the
+     * longest a client may name. */
+    if (run_s == 0)
+        run_s = TIMEOUT_MAX_S;
     if (!name || !*name || jobrun_name_ok(name) != 0) {
         unlink(path);
         return reply_text(res, 400, "name says who sends the job: 1 to 63 of letters, digits, "
                                     "'.', '_' and '-'");
     }
     int lines = 0;
-    if (jobrun_program_check(path, &lines, why, sizeof(why)) != 0) {
+    if (jobrun_program_check(path, &lines, why, wlen) != 0) {
         unlink(path);
         return reply_text(res, 400, why);
     }
@@ -205,7 +238,7 @@ int cb_job_post(const struct _u_request *req, struct _u_response *res, void *use
         under = ext_owner;
     const char *unlock = u_map_get(req->map_post_body, "unlock");
     if (jobrun_program_start(path, name, under, lit_s, run_s, unlock && !strcmp(unlock, "1"),
-                             why, sizeof(why)) != 0)
+                             why, wlen) != 0)
         return reply_text(res, 409, why);
     return reply_record(res);
 }

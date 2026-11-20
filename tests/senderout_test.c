@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "../src/grblport.h"
+#include "../src/holds.h"
 #include "../src/lease.h"
 #include "../src/senderout.h"
 
@@ -220,6 +221,46 @@ int main(void)
     keep(A, 0, 0);
     senderout_tick();
     CHECK(!kept_out && !senderout_holder(id, sizeof(id)), "a fresh file that says in ends it too");
+    /* The holds' rules: a stamp further ahead of the clock than a fresh
+     * one is behind it is no claim, and a claim file is never read
+     * through a link. */
+    CHECK(senderout_claim(A, why, sizeof(why)) == 0, "a new claim");
+    nap(SENDEROUT_GRACE_S + 0.1);
+    keep(A, -(SENDEROUT_FRESH_S + 5), 1);
+    senderout_tick();
+    CHECK(!kept_out && !senderout_holder(id, sizeof(id)), "a claim stamped in the future stood");
+    {
+        char real[256], link[256];
+        snprintf(real, sizeof(real), "%s/sender-out/real.json", dir);
+        snprintf(link, sizeof(link), "%s/sender-out/%s.json", dir, A);
+        CHECK(senderout_claim(A, why, sizeof(why)) == 0, "a new claim");
+        nap(SENDEROUT_GRACE_S + 0.1);
+        keep(A, 0, 1);
+        unlink(real);
+        CHECK(rename(link, real) == 0 && symlink(real, link) == 0, "the link could not be made");
+        senderout_tick();
+        CHECK(!kept_out && !senderout_holder(id, sizeof(id)), "a claim read through a link stood");
+        unlink(real);
+    }
+    {
+        /* A fresh claim that says out, one byte longer than a hold file
+         * may be: no claim. */
+        char path[256], text[HOLDS_FILE_MAX + 2];
+        CHECK(senderout_claim(A, why, sizeof(why)) == 0, "a new claim");
+        nap(SENDEROUT_GRACE_S + 0.1);
+        /* Stamped now: fresh at the tick, so its size alone decides. */
+        int n = snprintf(text, sizeof(text), "{\"id\":\"%s\",\"required\":false,\"raised\":true,"
+                         "\"reason\":\"keeps the Grbl sender out\",\"ts_mono\":%.3f}", A, mono());
+        memset(text + n, ' ', sizeof(text) - 1 - (size_t)n);
+        text[HOLDS_FILE_MAX + 1] = '\0';
+        snprintf(path, sizeof(path), "%s/sender-out/%s.json", dir, A);
+        unlink(path);                   /* the link the case above left */
+        FILE *f = fopen(path, "w");
+        fputs(text, f);
+        fclose(f);
+        senderout_tick();
+        CHECK(!kept_out && !senderout_holder(id, sizeof(id)), "a claim file longer than a hold file stood");
+    }
     unkeep(A);
 
     printf("The operator lets the sender back in:\n");

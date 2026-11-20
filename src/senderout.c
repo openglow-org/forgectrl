@@ -11,14 +11,17 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <jansson.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "fflog.h"
 #include "grblport.h"
+#include "holds.h"
 #include "lease.h"
 #include "paths.h"
 #include "super.h"
@@ -291,11 +294,21 @@ int senderout_holder(char *id, size_t len)
  * claim. */
 static double claim_written(const char *id, int *out)
 {
-    char path[256];
+    char path[256], text[HOLDS_FILE_MAX + 2];  /* one byte past a hold file, and its end */
     snprintf(path, sizeof(path), "%s/sender-out/%s.json", ff_run_dir(), id);
-    json_t *j = json_load_file(path, 0, NULL);
     double ts = 0;
     *out = 0;
+    /* Read as the holds are: never through a link, and no more than a
+     * hold file is. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0 || n > HOLDS_FILE_MAX)
+        return 0;
+    text[n] = '\0';
+    json_t *j = json_loads(text, JSON_REJECT_DUPLICATES, NULL);
     if (j) {
         const char *jid = json_string_value(json_object_get(j, "id"));
         if (jid && !strcmp(jid, id)) {
@@ -311,7 +324,10 @@ static int claim_fresh(const char *id)
 {
     int out;
     double ts = claim_written(id, &out);
-    return out && ts > 0 && mono() - ts <= SENDEROUT_FRESH_S;
+    double age = mono() - ts;
+    /* The holds' window, both ways: a stamp further ahead of this clock
+     * than a fresh one is behind it is no claim. */
+    return out && ts > 0 && age <= SENDEROUT_FRESH_S && age >= -SENDEROUT_FRESH_S;
 }
 
 void senderout_tick(void)

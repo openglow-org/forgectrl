@@ -20,7 +20,11 @@
  * line is acknowledged and, if asked, the tube has been dark for a
  * while after; a NULL line from the generator ends the program. A run
  * that fails or is aborted sends the controller a soft reset (^X: a
- * controlled stop, the latch relocked) before it closes.
+ * controlled stop, the latch relocked) before it closes; on a connection
+ * of its own when the controller closed the run's. A reset the
+ * controller reports (its banner a second time on the run's connection:
+ * a lid cancel, a sender's ^X) ends the run at once, failed, with no
+ * reset of the run's own: the controller has stopped the run itself.
  */
 #ifndef FORGECTRL_JOBSTREAM_H
 #define FORGECTRL_JOBSTREAM_H
@@ -67,6 +71,9 @@ typedef struct {
     double t_first_lit, t_last_lit;
     long hv_max, lon_max;
     long tp_base, tp_max;               /* thermopile: the dark level, the peak */
+    int own_stop;                       /* the run ended with a soft reset of its own: not after
+                                         * the controller's alarm, nor its alarm lock (error:9),
+                                         * nor its own reset */
 } jobstream_run_t;
 
 /* The GRBL controller's published state (<run>/grbl.state), whole and
@@ -97,7 +104,8 @@ int jobstream_sender_blocks(void);
  * abort, the generator's failure). */
 int jobstream_run(const jobstream_cfg_t *cfg, jobstream_run_t *run, char *err, size_t elen);
 
-/* A generator over an array of lines (a program in memory). */
+/* A generator over an array of lines (a program in memory). A line that
+ * does not fit the buffer fails the run: it is never split. */
 typedef struct {
     const char *text;       /* newline-separated lines */
     size_t off;

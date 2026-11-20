@@ -64,8 +64,28 @@ int mcode_memory_for(mcode_memory_t *m, long ctl)
     if (m->ctl == ctl)
         return 0;
     m->ctl = ctl;
-    m->done = 0;
+    m->done = m->asked = m->tries = 0;
+    m->line[0] = '\0';
     return 1;
+}
+
+int mcode_memory_ask(mcode_memory_t *m, unsigned seq)
+{
+    if (m->asked == seq)
+        return 0;
+    m->asked = seq;
+    m->tries = 0;
+    m->line[0] = '\0';
+    return 1;
+}
+
+unsigned mcode_memory_answered(mcode_memory_t *m, unsigned seq, int rc, const char *reply)
+{
+    if (rc == GRBLPORT_OK && (!strcmp(reply, "ok") || !strncmp(reply, "error:", 6))) {
+        m->done = seq;
+        return 0;
+    }
+    return ++m->tries;
 }
 
 #ifndef MCODE_NO_THREAD
@@ -86,9 +106,9 @@ static void nap(double s)
 
 static void *relay(void *arg)
 {
-    char want[128], pushed[128] = "", reply[512], line[200], why[300];
+    char want[128], pushed[128] = "", reply[512], why[300];
     double pushed_at = 0;
-    mcode_memory_t mem = { 0, 0 };
+    mcode_memory_t mem = { 0 };
     (void)arg;
     for (;;) {
         double wait = MCODE_IDLE_S;
@@ -122,18 +142,29 @@ static void *relay(void *arg)
                 int code = (int)json_integer_value(json_object_get(m, "code"));
                 char *words = json_dumps(json_object_get(m, "words"), JSON_COMPACT);
                 if (seq && seq != mem.done && words) {
-                    fflog(LOG_INFO, "mcode: M%d (seq %u) goes to its extension", code, seq);
-                    why[0] = '\0';
-                    char *doc = extpkg_mcode_json(code, words, why, sizeof(why));
-                    mcode_answer_line(seq, doc, why, line, sizeof(line));
-                    free(doc);
-                    int rc = grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_MCODE_RESULT, line, reply, sizeof(reply));
-                    fflog(rc == GRBLPORT_OK && strcmp(reply, "ok") == 0 ? LOG_INFO : LOG_WARNING,
-                          "mcode: M%d: told the GRBL controller %s (%s)", code, line, reply);
-                    mem.done = seq;
-                }
+                    if (mcode_memory_ask(&mem, seq)) {
+                        fflog(LOG_INFO, "mcode: M%d (seq %u) goes to its extension", code, seq);
+                        why[0] = '\0';
+                        char *doc = extpkg_mcode_json(code, words, why, sizeof(why));
+                        mcode_answer_line(seq, doc, why, mem.line, sizeof(mem.line));
+                        free(doc);
+                    }
+                    unsigned before = mem.tries;
+                    int rc = grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_MCODE_RESULT, mem.line, reply, sizeof(reply));
+                    unsigned tries = mcode_memory_answered(&mem, seq, rc, reply);
+                    /* The first try that did not take, and the outcome: not
+                     * every try between. */
+                    if (tries == 1)
+                        fflog(LOG_WARNING, "mcode: M%d: the GRBL controller did not take %s (%s); "
+                                           "tried again every %.2f s", code, mem.line, reply, MCODE_RETRY_S);
+                    else if (!tries)
+                        fflog(strcmp(reply, "ok") == 0 ? LOG_INFO : LOG_WARNING,
+                              "mcode: M%d: told the GRBL controller %s (%s)%s", code, mem.line, reply,
+                              before ? " after tries that did not take" : "");
+                    wait = tries ? MCODE_RETRY_S : 0.02;
+                } else
+                    wait = 0.02;
                 free(words);
-                wait = 0.02;
             }
             json_decref(st);
         }

@@ -17,6 +17,14 @@
  * where it was started), and a posted job is refused in its name; its
  * stop ends the run failed, stopped before the ladder fired, with the
  * lease free; and the dose keys read back as they were before the start.
+ * Its elapsed time does not move with the wall clock, and the reason is
+ * served as JSON text whatever the controller said.
+ *
+ * The override: a restore write that fails keeps the marker and the
+ * override, refuses the next override while it is owed, and the next
+ * override's begin restores once the writes take; a marker that cannot be
+ * written whole changes no key; an override whose own key write fails puts
+ * back the keys it wrote and does not stand.
  */
 #define _GNU_SOURCE
 #include "../src/curverec.h"
@@ -65,8 +73,17 @@ int settings_get(const char *key, char *val, size_t len)
     return -1;
 }
 
+static const char *fail_key;            /* a write of this key fails, as on a full /data */
+static const char *fail_once_key;       /* the next write of this key fails, the ones after take */
+
 int settings_set(const char *key, const char *val)
 {
+    if (fail_key && !strcmp(key, fail_key))
+        return -1;
+    if (fail_once_key && !strcmp(key, fail_once_key)) {
+        fail_once_key = NULL;
+        return -1;
+    }
     int i = 0;
     while (i < nstore && strcmp(store[i].key, key))
         i++;
@@ -102,8 +119,12 @@ static const char *redirect(const char *path)
     return !strcmp(path, "/data/forgefirm/curverec.saved") ? marker : path;
 }
 
+static int full_marker;                 /* the marker is written to a device that is always full */
+
 FILE *__wrap_fopen(const char *path, const char *mode)
 {
+    if (full_marker && mode[0] == 'w' && !strcmp(path, "/data/forgefirm/curverec.saved"))
+        return __real_fopen("/dev/full", mode);
     return __real_fopen(redirect(path), mode);
 }
 
@@ -117,7 +138,20 @@ int __wrap_unlink(const char *path)
 static struct {
     int listen_fd;
     volatile int holding;
+    volatile int quote;         /* answer every line with an error that carries a quote and a control byte */
 } mock;
+
+/* The wall clock, set years ahead at will: the recorder's elapsed time
+ * must not move with it. */
+time_t __real_time(time_t *t);
+static time_t time_jump;
+time_t __wrap_time(time_t *t)
+{
+    time_t v = __real_time(NULL) + time_jump;
+    if (t)
+        *t = v;
+    return v;
+}
 
 static void *mock_thread(void *arg)
 {
@@ -158,7 +192,8 @@ static void *mock_thread(void *arg)
                     }
                     mock.holding = 0;
                 }
-                if (write(c, "ok\r\n", 4) < 0) { }
+                const char *ans = mock.quote ? "error:\"q\x01\r\n" : "ok\r\n";
+                if (write(c, ans, strlen(ans)) < 0) { }
                 i = (size_t)(nl + 1 - buf);
             }
             memmove(buf, buf + i, n - i);
@@ -227,6 +262,10 @@ static void test_start(void)
     CHECK(curverec_start(err, sizeof(err)) == 0, "start: %s", err);
     CHECK(strstr(recorder(), "\"state\":\"waiting\""), "the recorder after its start: %s", recorder());
     CHECK(wait_for(&mock.holding, 1, 3000), "the ladder's M3 never arrived");
+    time_jump = 10L * 365 * 86400;      /* the clock set ten years ahead mid-recording */
+    const char *e = strstr(recorder(), "\"elapsed_s\":");
+    CHECK(e && atol(e + 12) < 60, "the elapsed time moved with the wall clock: %s", recorder());
+    time_jump = 0;
 
     CHECK(lease_holder(who, sizeof(who)) && !strcmp(who, "recorder"), "the holder is \"%s\"", who);
     lease_json(lease, sizeof(lease));
@@ -282,6 +321,66 @@ static void test_keys_restored(void)
           key("laser_dose_curve"));
 }
 
+/* A restore write that fails keeps the marker and the override: the next
+ * override is refused while it is owed, and its begin retries the
+ * restore once the writes take again. */
+static void test_restore_fails(void)
+{
+    struct stat sb;
+    settings_set("laser_floor_density", FLOOR_BEFORE);
+    CHECK(curverec_override_begin("0", "off", NULL) == 0, "the override did not begin");
+    fail_key = "laser_floor_density";
+    curverec_override_end();
+    CHECK(stat(marker, &sb) == 0, "the marker went with a restore write that failed");
+    CHECK(curverec_override_active(), "the override ended with its keys not written back");
+    CHECK(curverec_override_begin("0", "off", NULL) == -1, "an override began over a restore still owed");
+    fail_key = NULL;
+    CHECK(curverec_override_begin("5", "off", NULL) == 0 && !strcmp(key("laser_floor_density"), "5"),
+          "the next override after the writes took again: floor %s", key("laser_floor_density"));
+    curverec_override_end();
+    CHECK(!strcmp(key("laser_floor_density"), FLOOR_BEFORE) && !strcmp(key("laser_dose_curve"), CURVE_BEFORE),
+          "the keys after the owed restore: floor %s, curve %s", key("laser_floor_density"),
+          key("laser_dose_curve"));
+    CHECK(stat(marker, &sb) != 0 && !curverec_override_active(), "the marker or the override outlived the restore");
+}
+
+/* A marker that cannot be written whole changes no key. */
+static void test_marker_fails(void)
+{
+    full_marker = 1;
+    CHECK(curverec_override_begin("0", "off", NULL) == -1, "an override began with no whole marker");
+    full_marker = 0;
+    CHECK(!curverec_override_active() && !strcmp(key("laser_floor_density"), FLOOR_BEFORE),
+          "a failed marker left the override %d and the floor %s", curverec_override_active(),
+          key("laser_floor_density"));
+}
+
+/* The controller's own words in the reason are served as JSON text. */
+static void test_reason_escaped(void)
+{
+    char err[160] = "";
+    mock.quote = 1;
+    CHECK(curverec_start(err, sizeof(err)) == 0, "start: %s", err);
+    for (int t = 0; t < 3000 && !strstr(recorder(), "\"state\":\"failed\""); t += 20)
+        msleep(20);
+    CHECK(strstr(recorder(), "error:\\\"q\\u0001"), "the reason's quote or control byte is not escaped: %s",
+          recorder());
+    mock.quote = 0;
+}
+
+/* An override whose own key write fails changes nothing: the keys it did
+ * write are put back, and no override stands. */
+static void test_override_fails(void)
+{
+    struct stat sb;
+    settings_set("laser_floor_density", FLOOR_BEFORE);
+    fail_once_key = "laser_dose_curve";
+    CHECK(curverec_override_begin("0", "off", NULL) == -1, "an override began with a key it could not write");
+    CHECK(!curverec_override_active() && !strcmp(key("laser_floor_density"), FLOOR_BEFORE) &&
+          stat(marker, &sb) != 0, "a failed override left the override %d, the floor %s",
+          curverec_override_active(), key("laser_floor_density"));
+}
+
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/curverec_test.%d", (int)getpid());
@@ -295,6 +394,8 @@ int main(void)
     static const struct { const char *name; void (*run)(void); } cases[] = {
         { "start", test_start }, { "override", test_override }, { "abort-route", test_abort_route },
         { "posted-job", test_posted_job }, { "stop", test_stop }, { "keys-restored", test_keys_restored },
+        { "restore-fails", test_restore_fails }, { "marker-fails", test_marker_fails },
+        { "reason-escaped", test_reason_escaped }, { "override-fails", test_override_fails },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGPIPE, SIG_IGN);           /* the mock answers a connection the stop has closed */

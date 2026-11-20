@@ -120,15 +120,12 @@ static int release_send(const char *cmd, int want_released)
  * the lid closed; a step aborted while they are free leaves them free, and
  * the next step finds them so and asks for the push again. 0 home, or
  * -1 (aborted, or the error set). */
-static int head_home(void)
+int wizlive_head_home(const char *question)
 {
     static const char *const opts[] = { "The head is home", "Release the motors" };
     char a[32];
     while (!motors_released()) {
-        if (wiz_ask("choice", "home",
-                    "Every card is drawn from the head's home: the back-left corner, against the "
-                    "gantry stops. Is the head there?",
-                    opts, 2, a, sizeof(a)) != 0)
+        if (wiz_ask("choice", "home", question, opts, 2, a, sizeof(a)) != 0)
             return -1;
         if (!strcmp(a, opts[0])) {
             wiz_log("the head is home, the operator says");
@@ -289,7 +286,8 @@ static int live_begin(live_t *L, json_t *r)
     }
     if (L->spmz > 0)
         z_spm = L->spmz;
-    if (head_home() != 0)
+    if (wizlive_head_home("Every card is drawn from the head's home: the back-left corner, against the "
+                          "gantry stops. Is the head there?") != 0)
         return -1;
     rc = wait_named("the cooling engine takes the controller's report", engine_ready, NULL, 20);
     if (rc == -1)

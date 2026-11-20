@@ -9,6 +9,20 @@
  * fails is dropped and tried again once: a controller that restarted
  * left a dead socket behind, and the first request after it should not
  * be the one that pays.
+ *
+ * The controller answers one request at a time, in order, and the
+ * answer to a line it injected (a jog, a release, a home) goes to
+ * whichever client holds the port when the line ends, so a request this
+ * client gave up on can answer on its next connection. Such an answer is
+ * never the state's JSON (the state is answered at once, never
+ * injected), so every new connection begins with a fence: a state
+ * request, and every line before its JSON read and dropped. Only then
+ * does the request go out, and its answer is its own.
+ *
+ * A jog's cancel does not wait behind another request: when the lock is
+ * taken it cuts the connection instead, which the controller takes as
+ * the cancel of the port's jog (its client is the jog's dead-man), and
+ * the request it cut is not sent again.
  */
 #define _GNU_SOURCE
 #include "grblport.h"
@@ -53,14 +67,18 @@ static const struct {
 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t fd_mu = PTHREAD_MUTEX_INITIALIZER;   /* port_fd and cut, for the cancel */
 static int port_fd = -1;
+static int cut;                         /* a cancel cut the connection under the request */
 
 static void drop(void)
 {
+    pthread_mutex_lock(&fd_mu);
     if (port_fd >= 0) {
         close(port_fd);
         port_fd = -1;
     }
+    pthread_mutex_unlock(&fd_mu);
 }
 
 static int port_connect(void)
@@ -76,25 +94,25 @@ static int port_connect(void)
         close(fd);
         return -1;
     }
+    pthread_mutex_lock(&fd_mu);
     port_fd = fd;
+    pthread_mutex_unlock(&fd_mu);
     return 0;
 }
 
-/* One line out, one line back. -1: the connection is no good (it may
- * have died with a controller that has since restarted). -2: the port
- * took the request and did not answer in time. */
-static int exchange(const char *line, size_t n, char *reply, size_t len)
+/* One line back, within the reply timeout counted from t0. 0, or -1:
+ * the connection is no good (it may have died with a controller that
+ * has since restarted), -2: no whole line in time, -3: a whole line that
+ * does not fit len (read to its end, so the next line is still a line). */
+static int read_line(const struct timespec *t0, char *reply, size_t len)
 {
-    if (send(port_fd, line, n, MSG_NOSIGNAL) != (ssize_t)n)
-        return -1;
-
-    struct timespec t0, now;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    struct timespec now;
     size_t got = 0;
+    int over = 0;
     for (;;) {
         clock_gettime(CLOCK_MONOTONIC, &now);
         long left = GRBLPORT_REPLY_TIMEOUT_MS -
-                    ((now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000);
+                    ((now.tv_sec - t0->tv_sec) * 1000 + (now.tv_nsec - t0->tv_nsec) / 1000000);
         if (left <= 0)
             return -2;
         struct pollfd p = { .fd = port_fd, .events = POLLIN };
@@ -108,14 +126,49 @@ static int exchange(const char *line, size_t n, char *reply, size_t len)
         if (k == 1) {
             if (c == '\n') {
                 reply[got] = '\0';
-                return 0;
+                return over ? -3 : 0;
             }
-            if (c != '\r' && got < len - 1)
+            if (c == '\r')
+                continue;
+            if (got < len - 1)
                 reply[got++] = c;
+            else
+                over = 1;
         } else if (k == 0 || (errno != EINTR && errno != EAGAIN))
-            return got ? -2 : -1;   /* hung up: before any answer, or in the middle of one */
+            return got || over ? -2 : -1;   /* hung up: before any answer, or in the middle of one */
     }
 }
+
+/* One line out, one line back: read_line()'s codes. */
+static int exchange(const char *line, size_t n, char *reply, size_t len)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (send(port_fd, line, n, MSG_NOSIGNAL) != (ssize_t)n)
+        return -1;
+    return read_line(&t0, reply, len);
+}
+
+/* A new connection's fence: a state request, and every line before its
+ * JSON dropped (an answer owed to a request given up on). read_line()'s
+ * codes, but for -3, which drops the line as any other. */
+static int fence(void)
+{
+    char line[512];
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (send(port_fd, "state\n", 6, MSG_NOSIGNAL) != 6)
+        return -1;
+    for (;;) {
+        int x = read_line(&t0, line, sizeof(line));
+        if (x == 0 && line[0] == '{')
+            return 0;
+        if (x == -1 || x == -2)
+            return x;
+    }
+}
+
+void (*grblport_alarm_touched)(void);
 
 int grblport_request(grblport_set_t set, grblport_op_t op, const char *arg,
                      char *reply, size_t len)
@@ -138,29 +191,69 @@ int grblport_request(grblport_set_t set, grblport_op_t op, const char *arg,
         return GRBLPORT_FORBIDDEN;
     }
 
+    /* A home, a release or an energize clears or changes an alarm with no
+     * sender session: told before it goes out, whatever the answer. */
+    if ((op == GRBLPORT_HOME || op == GRBLPORT_RELEASE || op == GRBLPORT_ENERGIZE) && grblport_alarm_touched)
+        grblport_alarm_touched();
+
     int rc = GRBLPORT_UNREACHABLE;
-    pthread_mutex_lock(&lock);
+    if (op == GRBLPORT_CANCEL && pthread_mutex_trylock(&lock) != 0) {
+        /* Another request has the port: the cancel cuts the connection
+         * under it rather than wait (the port's client is its jog's
+         * dead-man), and that request is not sent again. */
+        pthread_mutex_lock(&fd_mu);
+        if (port_fd >= 0) {
+            shutdown(port_fd, SHUT_RDWR);
+            cut = 1;
+        }
+        pthread_mutex_unlock(&fd_mu);
+        snprintf(reply, len, "ok");
+        return GRBLPORT_OK;
+    } else if (op != GRBLPORT_CANCEL)
+        pthread_mutex_lock(&lock);
     /* Two tries, and only a kept connection that turns out dead earns the
      * second: a request the port answered late, or not at all, is never
-     * sent again. */
+     * sent again, nor one a cancel cut. */
     for (int attempt = 0; attempt < 2; attempt++) {
         int fresh = port_fd < 0;
         if (fresh && port_connect() != 0) {
             snprintf(reply, len, "the GRBL controller is not on its port");
             break;
         }
-        int x = exchange(line, (size_t)n, reply, len);
+        int x = fresh ? fence() : 0;
+        if (x == 0)
+            x = exchange(line, (size_t)n, reply, len);
+        if (x == 0 && op == GRBLPORT_STATE && (reply[0] != '{' || reply[strlen(reply) - 1] != '}')) {
+            /* The state is one JSON object on one line, or it is no state. */
+            snprintf(reply, len, "the GRBL controller's state was not understood");
+            break;
+        }
         if (x == 0) {
             rc = GRBLPORT_OK;
             break;
         }
+        if (x == -3) {
+            snprintf(reply, len, "the GRBL controller's answer does not fit");
+            break;
+        }
         drop();
+        pthread_mutex_lock(&fd_mu);
+        int was_cut = cut;
+        cut = 0;
+        pthread_mutex_unlock(&fd_mu);
+        if (was_cut) {
+            snprintf(reply, len, "a jog's cancel cut the request short");
+            break;
+        }
         if (x == -2 || fresh) {
             snprintf(reply, len, x == -2 ? "the GRBL controller did not answer"
                                          : "the GRBL controller closed its port");
             break;
         }
     }
+    pthread_mutex_lock(&fd_mu);
+    cut = 0;
+    pthread_mutex_unlock(&fd_mu);
     pthread_mutex_unlock(&lock);
     return rc;
 }

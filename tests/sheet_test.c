@@ -42,6 +42,15 @@ static void test_text(void)
     CHECK(fabsf(sheet_text_width(5.0f, "Hello") - 2 * w) < 0.01f, "width does not scale with cap");
     sheet_paths_free(&s);
     sheet_paths_free(&c);
+    /* A line too long for a program is never dropped from it quietly:
+     * the text is bad, and nobody sends it. */
+    sheet_text_t t;
+    sheet_text_init(&t);
+    char lng[300];
+    memset(lng, '1', sizeof(lng) - 1);
+    lng[sizeof(lng) - 1] = '\0';
+    CHECK(sheet_text_line(&t, "G1 X%s", lng) == -1 && t.oom, "an over-long line was dropped with the text still good");
+    sheet_text_free(&t);
 }
 
 static void test_layout(void)

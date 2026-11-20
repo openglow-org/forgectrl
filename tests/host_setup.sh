@@ -1215,11 +1215,15 @@ expect 'True|True' "$(run '"%s|%s" % (bool(d.get("aborted_at")), "lens reference
 up && ok "the controller comes back" || bad "no controller after the check"
 expect $((SWEPT + 1)) "$(grep -c 'lens reference before the controller: ON EDGE' "$T/out")" \
     "the lens was swept onto its edge again before it"
-# Run whole, the check reaches the crash watch's part, which it borrows
-# for the jogs; a host has no i2c bus, so the borrow is refused, and the
-# check hands the machine back from its loopback posture.
+# Run whole, the check asks for the head at its home before anything of
+# the jogs (the controller is unhomed and checks no travel limit), then
+# reaches the crash watch's part, which it borrows for the jogs; a host
+# has no i2c bus, so the borrow is refused, and the check hands the
+# machine back from its loopback posture.
 OLD=$(ctl_pid)
-check motion
+check motion "answer:home=The head is home"
+expect 'home|choice' "$(run '"|".join([d["prompts"][0]["id"], d["prompts"][0]["kind"]]) if d["prompts"] else ""')" \
+    "the check asks for the head at its home first"
 expect true "$(run '"i2c bus" in (d["dark"]["error"] or "")')" \
     "the probe, the lens passes and the loopback controller, then the borrow refused ($(run 'd["dark"]["error"]'))"
 up && ok "the controller comes back in its normal posture" || bad "no controller after the check"

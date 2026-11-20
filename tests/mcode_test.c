@@ -10,9 +10,10 @@
  * code and the words, its refusal passed on in its words; and the answer
  * line, ok for a 2xx with the body's message and fail for everything else,
  * held to the port's form (printable, no brackets, bounded); the relay's
- * memory of what it answered, kept per controller pid. The daemon
- * set: neither operation is open to a package or a panel caller, and
- * nothing is written when one tries.
+ * memory of what it answered, kept per controller pid; the relay's thread
+ * against a controller that never takes the answer tries again
+ * MCODE_RETRY_S apart. The daemon set: neither operation is open to a
+ * package or a panel caller, and nothing is written when one tries.
  */
 #include "../src/extpkg.h"
 #include "../src/grblport.h"
@@ -23,12 +24,53 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
 
 static char dir[] = "/tmp/mcode-test-XXXXXX";
+
+/* The relay's thread runs against a scripted world (the link wraps the
+ * port, the host's table and its answer; the supervisor is stubbed): a
+ * controller that waits at M160 and never takes the answer. Off, every
+ * wrapped call is the real one. */
+static volatile int relay_world;
+static volatile int relay_tries;
+long super_grbl_pid(void)
+{
+    return relay_world ? 4242 : 0;
+}
+int __real_grblport_request(grblport_set_t set, grblport_op_t op, const char *arg, char *reply, size_t len);
+int __wrap_grblport_request(grblport_set_t set, grblport_op_t op, const char *arg, char *reply, size_t len)
+{
+    if (!relay_world)
+        return __real_grblport_request(set, op, arg, reply, len);
+    if (op == GRBLPORT_MCODE_RESULT) {
+        relay_tries++;
+        snprintf(reply, len, "the GRBL controller did not answer");
+        return GRBLPORT_UNREACHABLE;
+    }
+    snprintf(reply, len, "%s", op == GRBLPORT_STATE
+             ? "{\"sender\":false,\"mcode\":{\"seq\":5,\"code\":160,\"words\":{}}}" : "ok");
+    return GRBLPORT_OK;
+}
+void __real_extpkg_mcode_table(char *buf, size_t len);
+void __wrap_extpkg_mcode_table(char *buf, size_t len)
+{
+    if (!relay_world)
+        __real_extpkg_mcode_table(buf, len);
+    else
+        snprintf(buf, len, "160");
+}
+char *__real_extpkg_mcode_json(int code, const char *words, char *why, size_t wlen);
+char *__wrap_extpkg_mcode_json(int code, const char *words, char *why, size_t wlen)
+{
+    if (!relay_world)
+        return __real_extpkg_mcode_json(code, words, why, wlen);
+    return strdup("{\"status\":200,\"body\":{\"message\":\"done\"}}");
+}
 
 static void write_file(const char *path, const char *text, mode_t mode)
 {
@@ -79,11 +121,32 @@ int main(void)
     /* The relay's memory is one controller's: each numbers its M-codes from
      * 1, so a respawned controller (a new pid, even between two polls)
      * starts it empty, and its first M-code is answered. */
-    mcode_memory_t mem = { 0, 0 };
+    mcode_memory_t mem = { 0 };
     CHECK(mcode_memory_for(&mem, 4001) == 1 && mem.done == 0, "a first controller starts the memory empty");
     mem.done = 1;
     CHECK(mcode_memory_for(&mem, 4001) == 0 && mem.done == 1, "the same controller keeps what was answered");
     CHECK(mcode_memory_for(&mem, 4002) == 1 && mem.done == 0, "a new controller's sequence 1 is not taken for answered");
+    /* A sequence is answered once the controller says so, or refuses the
+     * answer in its own words; an answer that did not arrive is asked
+     * again. */
+    unsigned t1 = mcode_memory_answered(&mem, 3, GRBLPORT_UNREACHABLE, "the GRBL controller did not answer");
+    CHECK(mem.done == 0, "an answer the controller never took marked its sequence answered");
+    /* The tries that did not take are counted, so only the first is
+     * logged; the one that takes ends the count. */
+    unsigned t2 = mcode_memory_answered(&mem, 3, GRBLPORT_OK, "busy:sender");
+    CHECK(t1 == 1 && t2 == 2, "the tries that did not take counted %u, %u", t1, t2);
+    CHECK(mcode_memory_answered(&mem, 3, GRBLPORT_OK, "ok") == 0, "a taken answer still counted as a try");
+    CHECK(mem.done == 3, "an answer the controller took left its sequence unanswered");
+    mcode_memory_answered(&mem, 4, GRBLPORT_OK, "error:stale");
+    CHECK(mem.done == 4, "a stale refusal left its sequence to be asked again");
+    /* The extension hears an M-code once: an answer that did not reach the
+     * controller goes again, and the extension is not asked again. */
+    CHECK(mcode_memory_ask(&mem, 5) == 1, "a new sequence did not go to its extension");
+    CHECK(mcode_memory_ask(&mem, 5) == 0, "a sequence went to its extension twice");
+    CHECK(mcode_memory_answered(&mem, 5, GRBLPORT_UNREACHABLE, "") == 1,
+          "a new sequence's first try that did not take is not its first");
+    CHECK(mcode_memory_for(&mem, 4003) == 1 && mcode_memory_ask(&mem, 5) == 1,
+          "a new controller's sequence was taken for one its extension heard");
 
     /* The table, from the host's own status, only while that host is alive. */
     ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
@@ -143,6 +206,19 @@ int main(void)
           "the package set answered an M-code");
     CHECK(grblport_request(GRBLPORT_SET_DAEMON, GRBLPORT_MCODE_RESULT, "1 ok\nrelease", reply, sizeof(reply)) == GRBLPORT_FORBIDDEN,
           "an answer that carries a second line went out");
+
+    /* The relay's thread: an answer the controller does not take goes
+     * again MCODE_RETRY_S apart, not at the poll's pace. Over 1.5 s that
+     * is at most 1.5 / MCODE_RETRY_S + 1 tries (the extension asked once). */
+    relay_world = 1;
+    mcode_init();
+    struct timespec run = { 1, 500 * 1000000L };
+    nanosleep(&run, NULL);
+    int tries = relay_tries;
+    relay_world = 0;                    /* the relay idles: no controller */
+    printf("the relay tried %d times in 1.5 s\n", tries);
+    CHECK(tries >= 2 && tries <= (int)(1.5 / MCODE_RETRY_S) + 1,
+          "an answer the controller did not take went %d times in 1.5 s", tries);
 
     char cmd[340];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);

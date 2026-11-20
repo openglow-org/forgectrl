@@ -36,6 +36,7 @@
 #include "super.h"
 #include "tray.h"
 #include "wizcalc.h"
+#include "wizlive.h"
 #include "grblport.h"
 #include "wizpkg.h"
 #include "wizrun.h"
@@ -1493,6 +1494,15 @@ static void run_motion(void)
         finish_err("the controller did not come up for the jogs");
         goto out;
     }
+    /* The jogs start from the head's home, as the burns do: the
+     * controller is unhomed here and checks no travel limit, so a head
+     * left near the right or the front end would be jogged into it. From
+     * the back-left the first jog of each axis moves away from the stops,
+     * and the second comes back to where it began. */
+    phase("the head at its home");
+    if (wizlive_head_home("The jogs start from the head's home: the back-left corner, against the "
+                          "gantry stops. Is the head there?") != 0)
+        goto out;
     fd = grbl_connect();
     if (fd < 0) {
         finish_err("cannot reach the controller on the Grbl socket");
@@ -1520,8 +1530,8 @@ static void run_motion(void)
         goto out;
     }
     watch = 1;
-    if (ask_continue("jogs", "The head moves 50 mm each way on X, then on Y, at 3000 mm/min. "
-                             "Keep the bed clear and the lid closed.") != 0)
+    if (ask_continue("jogs", "From its home the head moves 50 mm right and back, then 50 mm forward "
+                             "and back, at 3000 mm/min. Keep the bed clear and the lid closed.") != 0)
         goto out;
     phase("the head at rest");
     accstat_t rest;

@@ -34,9 +34,29 @@
  * from any sender does (the soft reset of a machine in motion), and a
  * program may not carry the $X that clears it. The caller of POST /job
  * asks for it instead: with `unlock`, the runner sends $X itself ahead
- * of the program's first line, the way the sheet wizards head theirs.
- * While the X and Y motors are released the controller refuses it, and
- * the job ends there.
+ * of the program's first line, the way the sheet wizards head theirs,
+ * only while the runner's own stop still stands: its last run ended with
+ * the runner's own soft reset (an abort, a timeout, a failed witness, a
+ * lost connection), not with the controller's alarm, its alarm lock
+ * (error:9) or its own reset; the controller took at least one of that
+ * run's lines (an ok to it: no alarm stood when the run began, since a
+ * soft reset at rest keeps one that stands); the controller showed that
+ * stop at the run's end (its published state read alarm 3 with no
+ * connection, within JOBRUN_STOP_SEEN_S: a stop at rest raises no alarm
+ * of its own, though an alarm 3 the driver raises inside that read is
+ * taken for it), and which controller process it was is read
+ * before that state; nothing of this
+ * daemon's has cleared or changed the alarm since (the port's home,
+ * release, energize: jobrun_wire); and, once the new run keeps the
+ * Grbl socket, the state still reads alarm 3, with the sender generation
+ * it showed after that stop and from the same controller process.
+ * Another alarm, another sender's session since, a controller started
+ * since, or a state that cannot be read: no $X, and the program's first
+ * line meets whatever stands. The driver's own alarm 3 raised while the
+ * runner's stands reads the same and is cleared with it. Outside a
+ * package's claim the run's keep is refused on an alarmed machine, so the
+ * $X goes out only under a claim. While the X and Y motors are released
+ * the controller refuses the $X, and the job ends there.
  */
 #ifndef FORGECTRL_JOBRUN_H
 #define FORGECTRL_JOBRUN_H
@@ -67,6 +87,28 @@ typedef void (*jobrun_done_fn)(void *ctx, int rc, const jobstream_run_t *run, co
  * sender takes); NULL asks nothing (a host test of the runner alone). */
 extern int (*jobrun_sender_out)(char *err, size_t elen);
 extern void (*jobrun_sender_in)(void);
+
+/* How long a run's end waits for the controller to publish the state
+ * that shows the runner's own soft reset (alarm 3, no connection; it
+ * publishes within a poll of its loop): a stop not seen in that time, a
+ * stop at rest among them, leaves no mark, and no $X. */
+#ifndef JOBRUN_STOP_SEEN_S
+#define JOBRUN_STOP_SEEN_S 1.0
+#endif
+
+/* Forget the runner's stop: something of this daemon's has cleared or
+ * changed the controller's alarm with no sender session. */
+void jobrun_forget_stop(void);
+
+/* The unlock's two links to the rest of the daemon, set at start
+ * (main.c): controller, the running GRBL controller's identity (the
+ * supervisor's pid of it, 0 for none), so the unlock above never clears
+ * an alarm of a controller started since the runner's stop; and
+ * *alarm_touched (the controller port's grblport_alarm_touched, called
+ * before a home, a release or an energize goes out) set to
+ * jobrun_forget_stop. Until it is called no stop is marked, and no $X
+ * goes out. */
+void jobrun_wire(long (*controller)(void), void (**alarm_touched)(void));
 
 typedef struct {
     const char *owner;          /* the lease owner: "job:<name>", "recorder" */
@@ -100,7 +142,8 @@ int jobrun_program_check(const char *path, int *lines, char *err, size_t elen);
 /* Check it and start it as job:<name>. The file is the runner's from
  * here: it is opened and its name removed, started or refused. lit_timeout_s
  * above 0 says the program must show a discharge within that long (the
- * press included) or fail; unlock sends the runner's $X first. */
+ * press included) or fail; unlock sends the runner's $X first, after the
+ * runner's own stop only (above). */
 int jobrun_program_start(const char *path, const char *name, const char *under, double lit_timeout_s,
                          double run_timeout_s, int unlock, char *err, size_t elen);
 /* Abort a posted program: 0, or -1 with why not in err (nothing runs,

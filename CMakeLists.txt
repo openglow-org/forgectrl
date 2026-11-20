@@ -171,12 +171,15 @@ target_link_libraries(curverec_fit_test m pthread)
 # local port and the test's own settings store: the lease and the job
 # record while it waits, the floor and the curve overridden, the abort
 # route and a posted job refused in its name, the stop before the ladder
-# fired, and the keys restored. fopen and unlink are wrapped so the
-# override's marker lands in the test's tree, not under /data.
+# fired, and the keys restored; a restore write that fails, a marker that
+# cannot be written, the elapsed time against a clock set ahead, and the
+# reason served escaped. fopen and unlink are wrapped so the override's
+# marker lands in the test's tree, not under /data; time is wrapped so
+# the wall clock can jump.
 add_executable(curverec_test tests/curverec_test.c src/curverec.c src/jobrun.c src/jobstream.c
                src/lease.c src/fflog.c)
 target_compile_options(curverec_test PRIVATE -Wall -Wextra)
-target_link_libraries(curverec_test -Wl,--wrap=fopen -Wl,--wrap=unlink m pthread)
+target_link_libraries(curverec_test -Wl,--wrap=fopen -Wl,--wrap=unlink -Wl,--wrap=time m pthread)
 
 # Host unit test for the log-export sanitizer: every identifying class
 # redacted, ordinary log text untouched, stable placeholders, idempotent.
@@ -475,9 +478,12 @@ target_link_libraries(grblport_test pthread m)
 # controller on a local port: the lease as a sender on every way in and
 # out, a posted program's check, its M2, and its abort; the sender's
 # errors, witnesses, pacing and abort, and its check of the state file.
+# The read of the runner's stop is held to 0.3 s (the product's 1.0 s):
+# the cases that publish the stop late publish it 0.1 s after the reset.
 add_executable(jobrun_test tests/jobrun_test.c src/jobrun.c src/jobstream.c src/lease.c src/fflog.c)
 target_compile_options(jobrun_test PRIVATE -Wall -Wextra)
-target_link_libraries(jobrun_test pthread)
+target_compile_definitions(jobrun_test PRIVATE JOBRUN_STOP_SEEN_S=0.3)
+target_link_libraries(jobrun_test -Wl,--wrap=write pthread)
 
 # POST /job's multipart reader on a ulfius instance of its own, fed raw
 # bodies: the form parts reach the runner's start byte for byte, and a
@@ -486,7 +492,7 @@ target_link_libraries(jobrun_test pthread)
 add_executable(jobpost_test tests/jobpost_test.c src/jobpost.c src/jobrun.c src/jobstream.c
                src/lease.c src/fflog.c)
 target_compile_options(jobpost_test PRIVATE -Wall -Wextra)
-target_link_libraries(jobpost_test -Wl,--wrap=jobrun_program_start ulfius pthread)
+target_link_libraries(jobpost_test -Wl,--wrap=jobrun_program_start -Wl,--wrap=clock_gettime ulfius pthread)
 
 # The scoped-token store: the closed capability list, the judgment, the
 # hash-only file, the deferred last-used write, revoke, and a damaged store.
@@ -532,8 +538,8 @@ add_executable(extpkg_test tests/extpkg_test.c src/extpkg.c src/sha256.c src/sto
 add_executable(mcode_test tests/mcode_test.c src/mcode.c src/extpkg.c src/grblport.c src/sha256.c src/fflog.c
                src/stopsig.c)
 target_compile_options(mcode_test PRIVATE -Wall -Wextra)
-target_compile_definitions(mcode_test PRIVATE MCODE_NO_THREAD=1)
-target_link_libraries(mcode_test jansson pthread)
+target_link_libraries(mcode_test -Wl,--wrap=grblport_request -Wl,--wrap=extpkg_mcode_table
+                      -Wl,--wrap=extpkg_mcode_json jansson pthread)
 
 # An extension that keeps the Grbl sender out: the claim, its refusals,
 # its ends (the package's, the operator's, a stale keeper's), and the

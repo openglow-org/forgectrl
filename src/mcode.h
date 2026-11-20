@@ -31,6 +31,7 @@
 #define MCODE_IDLE_S    1.0     /* otherwise */
 #define MCODE_REPUSH_S  2.0     /* the table again, for a controller that restarted */
 #define MCODE_TEXT_MAX  96      /* what the controller takes as an answer's words */
+#define MCODE_RETRY_S   0.25    /* between tries of an answer the controller did not take */
 
 /* Start the relay. */
 void mcode_init(void);
@@ -49,6 +50,9 @@ void mcode_answer_line(unsigned seq, const char *doc, const char *why, char *out
 typedef struct {
     long ctl;           /* the controller's pid this memory is for (0: none yet) */
     unsigned done;      /* the last sequence answered for it */
+    unsigned asked;     /* the last sequence its extension was asked about */
+    char line[200];     /* and the answer it gave, as the port takes it */
+    unsigned tries;     /* the tries of that answer the controller did not take */
 } mcode_memory_t;
 
 /* The memory for controller ctl: 1 when ctl is not the controller it
@@ -56,5 +60,22 @@ typedef struct {
  * again). A respawn between two polls is a new pid, so it is never
  * mistaken for the controller before it. */
 int mcode_memory_for(mcode_memory_t *m, long ctl);
+
+/* The port's answer to mcode_result for seq (rc and reply,
+ * grblport_request()'s): the sequence is answered once the controller has
+ * said so, "ok", or refused it in words of its own (error:stale, an answer
+ * it already holds or no longer waits for; error:invalid). An answer that
+ * did not arrive, or that is not one of these, is tried again
+ * MCODE_RETRY_S later: the controller takes a sequence's answer once.
+ * Returns the tries of the asked sequence's answer the controller has not
+ * taken so far (0 once it is answered), so the relay logs the first and
+ * the outcome, not every try. */
+unsigned mcode_memory_answered(mcode_memory_t *m, unsigned seq, int rc, const char *reply);
+
+/* Whether the extension is to be asked about seq: 1 the first time
+ * (seq is then the one asked, and line is the caller's to fill), 0 when
+ * it was asked already and its answer, in line, only has to reach the
+ * controller again. An extension hears each M-code once. */
+int mcode_memory_ask(mcode_memory_t *m, unsigned seq);
 
 #endif

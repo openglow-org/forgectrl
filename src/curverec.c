@@ -72,10 +72,37 @@ enum { CR_IDLE, CR_WAITING, CR_RECORDING, CR_DONE, CR_FAILED };
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int cr_state = CR_IDLE;
 static char cr_reason[128];
-static time_t cr_started;
+static double cr_started;               /* CLOCK_MONOTONIC */
 static int cr_samples;
 static long *buf_hv, *buf_tp;
 static volatile int stop_requested;
+
+/* The elapsed time is the monotonic clock's: a clock set mid-recording
+ * moves nothing. */
+static double mono_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* s as the inside of a JSON string: the reason can carry the
+ * controller's own words. */
+static void json_text(char *buf, size_t len, const char *s)
+{
+    size_t n = 0;
+    for (; *s && n + 7 < len; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            buf[n++] = '\\';
+            buf[n++] = (char)c;
+        } else if (c < 0x20)
+            n += (size_t)snprintf(buf + n, len - n, "\\u%04x", c);
+        else
+            buf[n++] = (char)c;
+    }
+    buf[n] = '\0';
+}
 
 /* ------------------------------------------------ the laser override */
 
@@ -87,6 +114,7 @@ static volatile int stop_requested;
 
 static pthread_mutex_t ov_mu = PTHREAD_MUTEX_INITIALIZER;
 static int ov_active;
+static int ov_owed;                     /* the job ended, and a restore write failed */
 static char saved_floor[32], saved_curve[192], saved_gamma[32];
 
 /* One line of the marker; a missing line reads as untouched. */
@@ -99,22 +127,35 @@ static void saved_line(FILE *f, char *buf, size_t len)
         snprintf(buf, len, "%s", UNTOUCHED);
 }
 
-static void saved_restore_locked(void)
+/* The saved keys back. Only once every write took does the override end
+ * and its marker go: a write that failed leaves both, the override still
+ * holding the laser keys (so the next recording or floor burn is refused
+ * and says why), and the restore is tried again at the daemon's next
+ * start and at the next override's begin. 0, or -1 with it owed. */
+static int saved_restore_locked(void)
 {
-    if (strcmp(saved_floor, UNTOUCHED))
-        settings_set("laser_floor_density", saved_floor);
-    if (strcmp(saved_curve, UNTOUCHED))
-        settings_set("laser_dose_curve", saved_curve);
-    if (strcmp(saved_gamma, UNTOUCHED))
-        settings_set("laser_corner_gamma", saved_gamma);
+    int bad = 0;
+    if (strcmp(saved_floor, UNTOUCHED) && settings_set("laser_floor_density", saved_floor) != 0)
+        bad = 1;
+    if (strcmp(saved_curve, UNTOUCHED) && settings_set("laser_dose_curve", saved_curve) != 0)
+        bad = 1;
+    if (strcmp(saved_gamma, UNTOUCHED) && settings_set("laser_corner_gamma", saved_gamma) != 0)
+        bad = 1;
+    if (bad) {
+        ov_owed = 1;
+        fflog(LOG_ERR, "curverec: the laser keys a job overrode could not be written back; "
+              "they are tried again at the next start and the next recording");
+        return -1;
+    }
     unlink(SAVED_MARKER);
-    ov_active = 0;
+    ov_active = ov_owed = 0;
+    return 0;
 }
 
 int curverec_override_begin(const char *floor, const char *curve, const char *gamma)
 {
     pthread_mutex_lock(&ov_mu);
-    if (ov_active) {
+    if (ov_active && (!ov_owed || saved_restore_locked() != 0)) {
         pthread_mutex_unlock(&ov_mu);
         return -1;
     }
@@ -136,15 +177,24 @@ int curverec_override_begin(const char *floor, const char *curve, const char *ga
         pthread_mutex_unlock(&ov_mu);
         return -1;
     }
-    fprintf(f, "%s\n%s\n%s\n", saved_floor, saved_curve, saved_gamma);
-    fclose(f);
-    if (floor)
-        settings_set("laser_floor_density", floor);
-    if (curve)
-        settings_set("laser_dose_curve", curve);
-    if (gamma)
-        settings_set("laser_corner_gamma", gamma);
+    /* A marker that is not whole restores nothing at the next start (a
+     * missing line reads as untouched): no key changes without one. */
+    int wrote = fprintf(f, "%s\n%s\n%s\n", saved_floor, saved_curve, saved_gamma) > 0;
+    if (fclose(f) != 0 || !wrote) {
+        fflog(LOG_ERR, "curverec: cannot write %s: %s", SAVED_MARKER, strerror(errno));
+        unlink(SAVED_MARKER);
+        pthread_mutex_unlock(&ov_mu);
+        return -1;
+    }
     ov_active = 1;
+    if ((floor && settings_set("laser_floor_density", floor) != 0) ||
+        (curve && settings_set("laser_dose_curve", curve) != 0) ||
+        (gamma && settings_set("laser_corner_gamma", gamma) != 0)) {
+        fflog(LOG_ERR, "curverec: the laser keys could not be overridden");
+        saved_restore_locked();
+        pthread_mutex_unlock(&ov_mu);
+        return -1;
+    }
     pthread_mutex_unlock(&ov_mu);
     return 0;
 }
@@ -186,16 +236,15 @@ void curverec_init(void)
     saved_line(f, saved_gamma, sizeof(saved_gamma));
     fclose(f);
     ov_active = 1;
-    saved_restore_locked();
+    int rc = saved_restore_locked();
     pthread_mutex_unlock(&ov_mu);
-    fflog(LOG_WARNING, "curverec: a job was cut short by a daemon exit; the laser keys "
-          "it overrode are restored");
+    if (rc == 0)
+        fflog(LOG_WARNING, "curverec: a job was cut short by a daemon exit; the laser keys "
+              "it overrode are restored");
 }
 
 /* ------------------------------------------------------- the ladder */
 
-static char ladder_lines[LADDER_MAX_LINES][40];
-static int ladder_n;
 static char result_curve[256];
 static curverec_pt result_pts[LADDER_N];
 static int result_n;
@@ -301,7 +350,7 @@ int curverec_curve_text(const curverec_pt *pts, int n, char *buf, size_t len)
     return off < len ? 0 : -1;
 }
 
-static void ladder_build(void);
+static int ladder_build(char lines[LADDER_MAX_LINES][40]);
 
 /* -------------------------------------------------- lifecycle */
 
@@ -379,10 +428,13 @@ static int record_ready(void *ctx, char *err, size_t elen)
         snprintf(err, elen, "the laser keys are held by another job");
         return -1;
     }
+    /* The run's own copy of the ladder: GET /curve/ladder.gcode builds
+     * one of its own, and the two share nothing. */
+    char lines[LADDER_MAX_LINES][40];
+    int n = ladder_build(lines);
     size_t off = 0;
-    ladder_build();
-    for (int i = 0; i < ladder_n; i++)
-        off += (size_t)snprintf(program + off, sizeof(program) - off, "%s\n", ladder_lines[i]);
+    for (int i = 0; i < n; i++)
+        off += (size_t)snprintf(program + off, sizeof(program) - off, "%s\n", lines[i]);
     program_lines = (jobstream_lines_t){ program, 0 };
     cr_state = CR_WAITING;
     cr_reason[0] = '\0';
@@ -390,7 +442,7 @@ static int record_ready(void *ctx, char *err, size_t elen)
     result_n = 0;
     result_curve[0] = '\0';
     stop_requested = 0;
-    cr_started = time(NULL);
+    cr_started = mono_s();
     return 0;
 }
 
@@ -450,14 +502,16 @@ void curverec_stop(void)
 int curverec_status_json(char *buf, size_t len)
 {
     static const char *names[] = { "idle", "waiting", "recording", "done", "failed" };
+    char why[6 * sizeof(cr_reason)];
     pthread_mutex_lock(&mu);
+    json_text(why, sizeof(why), cr_reason);
     size_t off = 0;
     off += (size_t)snprintf(buf + off, len - off,
         "{\"state\":\"%s\",\"reason\":\"%s\",\"elapsed_s\":%ld,"
         "\"samples\":%d,\"curve\":\"%s\",\"points\":[",
-        names[cr_state], cr_reason,
+        names[cr_state], why,
         cr_state == CR_WAITING || cr_state == CR_RECORDING
-            ? (long)difftime(time(NULL), cr_started) : 0,
+            ? (long)(mono_s() - cr_started) : 0,
         cr_samples, result_curve);
     for (int i = 0; i < result_n && off < len - 48; i++)
         off += (size_t)snprintf(buf + off, len - off,
@@ -470,9 +524,9 @@ int curverec_status_json(char *buf, size_t len)
 
 /* The ladder job, absolute from the origin: rung i cuts X0..X100 at
  * Y = i mm. The same lines the recorder streams. */
-static void ladder_build(void)
+static int ladder_build(char ladder_lines[LADDER_MAX_LINES][40])
 {
-    ladder_n = 0;
+    int ladder_n = 0;
     snprintf(ladder_lines[ladder_n++], 40, "G21");
     snprintf(ladder_lines[ladder_n++], 40, "G90");
     snprintf(ladder_lines[ladder_n++], 40, "G0 X0 Y0");
@@ -488,17 +542,19 @@ static void ladder_build(void)
     }
     snprintf(ladder_lines[ladder_n++], 40, "M5");
     snprintf(ladder_lines[ladder_n++], 40, "M2");
+    return ladder_n;
 }
 
 int curverec_ladder_gcode(char *buf, size_t len)
 {
-    ladder_build();
+    char lines[LADDER_MAX_LINES][40];
+    int n = ladder_build(lines);
     size_t off = 0;
     off += (size_t)snprintf(buf + off, len - off,
         "; ForgeFIRM dose-curve ladder - the job the panel's recorder streams.\n"
         "; Absolute from X0 Y0: 100 mm of +X travel, %d mm of +Y, scrap under\n"
         "; the whole area. One line per rung, low to full power.\n", LADDER_N);
-    for (int i = 0; i < ladder_n; i++)
-        off += (size_t)snprintf(buf + off, len - off, "%s\n", ladder_lines[i]);
+    for (int i = 0; i < n; i++)
+        off += (size_t)snprintf(buf + off, len - off, "%s\n", lines[i]);
     return off < len ? 0 : -1;
 }

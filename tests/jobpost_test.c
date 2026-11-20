@@ -15,10 +15,17 @@
  *   the form parts: a program of several kilobytes (many chunks of the
  *     sink) reaches the start byte for byte, with the name and unlock=1;
  *     without the unlock field the start is told 0
+ *   a program that names no timeout_s gets the longest a client may
+ *     name (86400 s); one that names a bound keeps it
+ *   a second upload begun while the first is handed to the runner is
+ *     refused, however long since the first's last chunk: the first runs
+ *     its own lines
  *   a missing name: 400, nothing started, nothing staged
  *   a $ line: 400 naming its line number, nothing started, nothing staged
  *   a malformed boundary (the body's delimiter is not the one declared):
  *     400, nothing started, nothing staged
+ *   an abandoned upload is adopted by no request on another thread, even
+ *     one whose structure sits at the abandoned request's address: 400
  */
 #include "../src/auth.h"
 #include "../src/jobpost.h"
@@ -26,11 +33,13 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <ulfius.h>
 #include <unistd.h>
 
@@ -74,16 +83,42 @@ static struct {
     char name[64];
     int unlock;
     int under;
+    double run_timeout_s;
     char *program;
     size_t len;
 } started;
+
+/* Between the route's look at the upload and the runner's start, a second
+ * upload begins (another client's first chunk). */
+static int second_upload;
+static struct _u_request second_req;
+
+/* The monotonic clock, moved on by the test (the link wraps clock_gettime). */
+static double clock_skew_s;
+int __real_clock_gettime(clockid_t id, struct timespec *ts);
+int __wrap_clock_gettime(clockid_t id, struct timespec *ts)
+{
+    int rc = __real_clock_gettime(id, ts);
+    if (rc == 0 && id == CLOCK_MONOTONIC && clock_skew_s > 0) {
+        ts->tv_sec += (time_t)clock_skew_s;
+    }
+    return rc;
+}
 
 int __wrap_jobrun_program_start(const char *path, const char *name, const char *under,
                                 double lit_timeout_s, double run_timeout_s, int unlock,
                                 char *err, size_t elen)
 {
-    (void)lit_timeout_s; (void)run_timeout_s; (void)err; (void)elen;
+    (void)lit_timeout_s; (void)err; (void)elen;
+    if (second_upload) {
+        /* Past the minute an abandoned upload is kept: the start alone
+         * holds the slot. */
+        second_upload = 0;
+        clock_skew_s += 61;
+        jobpost_sink(&second_req, "program", "G1 X150 Y30 F1200 ; B's\n", 0, 24);
+    }
     started.calls++;
+    started.run_timeout_s = run_timeout_s;
     snprintf(started.name, sizeof(started.name), "%s", name ? name : "");
     started.unlock = unlock;
     started.under = under != NULL;
@@ -113,6 +148,21 @@ static int sink(const struct _u_request *req, const char *key, const char *filen
     (void)filename; (void)content_type; (void)transfer_encoding; (void)cls;
     jobpost_sink(req, key, data, off, size);
     return U_OK;
+}
+
+/* A POST /job with no file part, on a thread of its own, made with the
+ * request structure it is handed. */
+static int stranger_status;
+static void *stranger_post(void *arg)
+{
+    struct _u_request *r = arg;
+    struct _u_response res;
+    ulfius_init_response(&res);
+    u_map_put(r->map_post_body, "name", "stranger");
+    cb_job_post(r, &res, NULL);
+    stranger_status = (int)res.status;
+    ulfius_clean_response(&res);
+    return NULL;
 }
 
 /* ---- the client ---- */
@@ -209,6 +259,8 @@ int main(void)
         return 2;
     }
     inst.max_post_body_size = 64 * 1024;
+    ulfius_init_request(&second_req);
+    second_req.http_url = strdup("/job");       /* ulfius_init_request leaves it NULL */
     ulfius_add_endpoint_by_val(&inst, "POST", NULL, "/job", 0, cb_job_post, NULL);
     ulfius_set_upload_file_callback_function(&inst, &sink, NULL);
     if (ulfius_start_framework(&inst) != U_OK) {
@@ -237,6 +289,21 @@ int main(void)
         st = send_form(without_unlock, program, out, sizeof(out));
         CHECK(st == 200 && started.calls == 2 && started.unlock == 0,
               "the form without unlock -> %d, %d starts, unlock=%d", st, started.calls, started.unlock);
+        /* A program that names no bound gets the longest a client may
+         * name; one that names a bound keeps it. */
+        CHECK(started.run_timeout_s == 86400.0, "a program with no timeout_s was given %.0f s",
+              started.run_timeout_s);
+        const char *bounded[] = { "name", "ftest", "timeout_s", "120", NULL };
+        st = send_form(bounded, program, out, sizeof(out));
+        CHECK(st == 200 && started.run_timeout_s == 120.0, "timeout_s=120 -> %d, %.0f s", st, started.run_timeout_s);
+
+        /* A second upload that begins while the first is handed to the
+         * runner is refused: the first runs its own lines. */
+        second_upload = 1;
+        st = send_form(without_unlock, program, out, sizeof(out));
+        CHECK(st == 200 && started.len == o && started.program && !memcmp(started.program, program, o),
+              "the first program, with a second upload begun at its start: %d, %zu bytes of %zu", st,
+              started.len, o);
         free(program);
         printf("the form parts: %zu bytes, the name and unlock reach the start\n", o);
     }
@@ -275,6 +342,22 @@ int main(void)
         CHECK(started.calls == calls, "a program behind a malformed boundary was started");
         CHECK(!is_staged(), "a program behind a malformed boundary was staged");
         printf("a malformed boundary: %d\n", st);
+    }
+
+    /* An upload is its request's own thread's: a request on another thread
+     * whose structure sits at an abandoned upload's address adopts none of
+     * its bytes. */
+    {
+        int calls = started.calls;
+        struct _u_request *r = &second_req;
+        jobpost_sink(r, "program", "G21\nG1 X12", 0, 10);          /* staged here, then abandoned */
+        pthread_t t;
+        pthread_create(&t, NULL, stranger_post, r);
+        pthread_join(t, NULL);
+        CHECK(stranger_status == 400 && started.calls == calls,
+              "a request on another thread adopted an abandoned upload: %d, %d starts", stranger_status,
+              started.calls - calls);
+        printf("an abandoned upload: %d\n", stranger_status);
     }
 
     ulfius_stop_framework(&inst);
