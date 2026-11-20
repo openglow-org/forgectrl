@@ -99,7 +99,7 @@ jobs:
         run: sh tests/host_lease.sh build build/ulfius-image/lib
       - name: "host_guard (the start's machine check on a record made on another machine, the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export, the log tree and its tail, and what the export carries and takes out)"
         run: sh tests/host_guard.sh build build/ulfius-image/lib
-      - name: "host_lan (writes from a LAN peer go to HTTPS, and the camera key reads from the LAN with the reads closed: a network namespace, one veth, the daemon as the CI user)"
+      - name: "host_lan (writes from a LAN peer go to HTTPS, a scoped token there refused and named; the camera key reads from the LAN with the reads closed; before the account the token writes the setup routes alone, form bodies over their bounds end unanswered, the press bound to one browser of two, the account step revoking tokens, rotating the camera key and ending sessions; LAN connections held to 48 slots, the idle timeout, an account record in fault: a network namespace, one veth, four client addresses, the daemon as the CI user)"
         run: sudo sh tests/host_lan.sh build build/ulfius-image/lib
       - name: "host_update (the release check against a local release server, and an update job's lease: a probe download refuses the settings and a job)"
         run: sh tests/host_update.sh build build/ulfius-image/lib

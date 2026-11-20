@@ -29,7 +29,13 @@ the wizard to the panel. The steps are in STEPS below: GET /wiz carries
 the first-run fields the page reads, each with its type, and the page's
 required steps are the setup's; the welcome; each document read to its
 end and accepted (the typed phrase where it asks for one); the press
-step, which the button takes; the account; preferences; the machine;
+step, which the button takes (against the mock: a start refused for a job
+shows its words and Ask again, the step says not to press until the
+machine says ready, and a step left mid-wait withdraws it, even one left
+before its start was answered, and a request that ended says not to
+press); the account
+(against the mock: a failed revoke warns, each half of the warning named
+alone); preferences; the machine;
 cloud mode left off; against the mock, the intake fans check run to its
 result (through a prompt whose options are text, one shaped like code,
 one with quotes, each shown as written and the code-shaped one answered
@@ -379,17 +385,69 @@ var STEPS = [
         if (seen.slice().sort().join() !== listed.slice().sort().join() || !typed)
           throw new Error('accepted ' + JSON.stringify(seen) + ' (' + typed + ' typed) of ' + JSON.stringify(listed));
         return until('the way on', function () { return !q('#docs-next').disabled; });
-      }).then(function () { click('#docs-next'); }); }],
-  ['the press step waits for the button and takes the press', function () {
+      }).then(function () { return PLAN.mock ? walkMock('press_refuse=1') : null; })
+      .then(function () { click('#docs-next'); }); }],
+  ['the press step waits for the button and takes the press' +
+   (PLAN.mock ? '; a refused start shows its words and Ask again; "Do not press yet" until ready; the step left mid-wait withdraws it,' +
+    ' and so does one left before its start was answered; a request that ended says not to press' : ''), function () {
+    var notYet = function () { return q('#pressled').classList.contains('off') && /Do not press/.test(q('#pressmsg').textContent); };
     return until('the press step', function () { return on('st-press'); })
+      .then(function () {
+        if (!PLAN.mock) return;
+        return until('the refusal and Ask again', function () { return shown('#press-retry') && /a job waits/.test(q('#pressmsg').textContent); })
+          .then(function () {
+            click('#press-retry');
+            if (!notYet()) throw new Error('the press step does not say to wait while its button is not ready');
+            return untilGot('the wait standing', function () { return walkMock(''); },
+                            function (m) { return m.press_button === 'waiting'; });
+          })
+          /* The page has the start's answer and polls: leaving now is the
+           * step left mid-wait, which endPress itself withdraws. */
+          .then(function () { return until('the page polling its wait', function () { return !!w().pressTimer; }); })
+          .then(function () {
+            w().show('advisories');
+            return untilGot('the wait withdrawn when the step is left', function () { return walkMock(''); },
+                            function (m) { return m.press_button === 'idle' && !m.press_taken; });
+          })
+          .then(function () { return walkMock('press_hold=1.5'); })
+          .then(function () {
+            /* The step left while its start is on the way, the cancel taken
+             * before the start: the start's answer withdraws its wait. */
+            w().show('press');
+            w().show('advisories');
+            return untilGot('a start answered after the step was left withdrawn', function () { return walkMock(''); },
+                            function (m) { return m.press_held_done && m.press_button === 'idle' && !m.press_taken; });
+          })
+          .then(function () { return walkMock('press_ended=1'); })
+          .then(function () {
+            /* The request ended under the page: its take is refused in words
+             * that say not to press, and the page shows them with Ask again. */
+            w().show('press');
+            return until('the ended request said', function () {
+              return shown('#press-retry') && /request for the press ended: do not press/.test(q('#pressmsg').textContent); });
+          })
+          .then(function () { return walkMock('press_ended=0'); })
+          .then(function () { w().show('press'); });
+      })
       .then(function () {
         if (q('#pressled').classList.contains('pressed')) throw new Error('the press reads taken before the button was pressed');
         return until('the press taken', function () { return q('#pressled').classList.contains('pressed'); }, 20000); }); }],
-  ['the account is made, and the rail names it', function () {
+  ['the account is made, and the rail names it' + (PLAN.revoke_fails ? '; the old tokens not revoked: a warning stands until closed' : ''), function () {
+    var bad = function () { return d().querySelectorAll('.toast.t-bad').length; }, before = 0;
     return until('the account step', function () { return on('st-account'); })
-      .then(function () { set('#a-name', NAME, 'input'); set('#a-pw', PW, 'input'); set('#a-pw2', PW, 'input'); click('#a-go'); })
+      .then(function () { return PLAN.revoke_fails ? walkMock('revoke_fails=1') : null; })
+      .then(function () { before = bad(); set('#a-name', NAME, 'input'); set('#a-pw', PW, 'input'); set('#a-pw2', PW, 'input'); click('#a-go'); })
       .then(function () {
-        return until('the account made', function () { return on('st-preferences') && q('#rail').textContent.indexOf(NAME) >= 0; }); }); }],
+        return until('the account made', function () { return on('st-preferences') && q('#rail').textContent.indexOf(NAME) >= 0; }); })
+      .then(function () {
+        if (!PLAN.revoke_fails) return;
+        if (bad() <= before) throw new Error('an account whose old tokens were not revoked showed no warning');
+        /* Each half of the warning, and none when both were made. */
+        var aw = w().accountWarning;
+        if (!aw({ tokens_revoked: false, camera_key_rotated: true }) || !aw({ tokens_revoked: true, camera_key_rotated: false }) ||
+            aw({ tokens_revoked: true, camera_key_rotated: true }))
+          throw new Error('the account warning does not name each failure alone, or names one that did not happen');
+        return walkMock('revoke_fails=0'); }); }],
   ['preferences', function () {
     return until('the preferences read', function () { return on('st-preferences') && q('#p-units').value; })
       .then(function () { set('#p-units', 'metric'); click('[onclick="savePreferences()"]'); })
@@ -465,8 +523,11 @@ var STEPS = [
       .then(function () { return api('/settings'); })
       .then(function (s) { if (s.ui_units !== to) throw new Error('ui_units reads ' + s.ui_units + ' after saving ' + to); }); }],
   ['the login page ' + (PLAN.plain_login ? 'reads an answer that is not JSON as a refusal (sign-in failed, never no answer), ' : '') +
-   'refuses a wrong password and signs the account in', function () {
-    if (PLAN.logout) click('#logoutbtn'); else F.src = '/login?next=%2F';
+   'refuses a wrong password and signs the account in' +
+   (PLAN.logout ? '' : ', a next= that resolves off this origin (a tab inside //) returning to the panel'), function () {
+    /* /<TAB>/evil.example: the URL parser strips the tab, so a check on
+     * the text alone would send the browser off the machine. */
+    if (PLAN.logout) click('#logoutbtn'); else F.src = '/login?next=%2F%09%2Fevil.example';
     return until('the login page', function () { return path() === '/login' && q('#lg'); })
       .then(function () {
         if (!PLAN.plain_login) return;
@@ -1067,6 +1128,10 @@ class Walk(devserver.Handler):
     # whether each is answered a second late.
     homes = 0
     home_hold = False
+    # The next POST /wiz/advisories/press held this long before the mock
+    # takes it, and whether that start has been taken since.
+    press_hold = 0.0
+    press_held_done = False
     # Each POST /button/reserve answered 4 s late.
     reserve_hang = False
     # The POST /button/reserve held by the hang since it began.
@@ -1142,6 +1207,12 @@ class Walk(devserver.Handler):
                 return self._short()
             if Walk.late_busy and "on=1" in urlsplit(self.path).query:
                 Walk.late_others += 1
+        if self.command == "POST" and path == "/wiz/advisories/press" and Walk.press_hold:
+            hold, Walk.press_hold = Walk.press_hold, 0.0
+            time.sleep(hold)                # the start reaches the machine after the page's cancel
+            devserver.Handler._mock(self, path, q)
+            Walk.press_held_done = True
+            return
         if self.command == "POST" and path == "/button/reserve" and Walk.reserve_hang:
             Walk.reserve_held += 1
             time.sleep(4.0)                 # the machine slow to answer a renewal
@@ -1198,6 +1269,15 @@ class Walk(devserver.Handler):
                         Walk.mock._job_end()
                     if "ext" in q:
                         Walk.mock.settings["ext_enabled"] = q["ext"]
+                    if "revoke_fails" in q:
+                        Walk.mock.revoke_fails = q["revoke_fails"] == "1"
+                    if "press_refuse" in q:
+                        Walk.mock.press_refuse = q["press_refuse"] == "1"
+                    if "press_ended" in q:
+                        Walk.mock.press_ended = q["press_ended"] == "1"
+                    if "press_hold" in q:
+                        Walk.press_hold = float(q["press_hold"])
+                        Walk.press_held_done = False
                     if "reserve_hang" in q:
                         Walk.reserve_hang = q["reserve_hang"] == "1"
                         if Walk.reserve_hang:
@@ -1225,7 +1305,8 @@ class Walk(devserver.Handler):
                 Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
             return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"],
                                     "retried": Walk.mock.retried, "controller": Walk.mock.controller,
-                                    "page_asks": Walk.page_asks,
+                                    "page_asks": Walk.page_asks, "press_button": Walk.mock.wiz["button"],
+                                    "press_taken": Walk.mock.wiz["pressed"], "press_held_done": Walk.press_held_done,
                                     "panel_reserved": sum(1 for _s, u in Walk.mock.panel_res.values()
                                                           if u > time.monotonic()),
                                     "reserve_held": Walk.reserve_held, "late_rec": Walk.late_rec,
@@ -1307,7 +1388,8 @@ def main():
         # The harness counts the daemon's intake fans, so no check opens
         # between the forms and the choice. The diagnostic starts need
         # the mock's engine refusals, which a daemon does not take.
-        Walk.plan = {"check": None, "logout": True, "diag": False, "plain_login": False}
+        Walk.plan = {"check": None, "logout": True, "diag": False, "plain_login": False, "revoke_fails": False,
+                     "mock": False}
         Walk.daemon = (host, int(port))
         Walk.cfg = types.SimpleNamespace(mock=False, token="",
                                          upstream=lambda: (host, int(port), "%s:%s" % (host, port)))
@@ -1325,7 +1407,7 @@ def main():
         devserver.DARK_PROMPTS["airflow.intakes"] = CHECK_PROMPT
         Walk.plan = {"check": {"id": "airflow.intakes", "prompt": {"options": PROMPT_OPTIONS,
                                                                 "hostile": PROMPT_HOSTILE},
-                               "result_ms": 20000}, "logout": False, "diag": True, "plain_login": True,
+                               "result_ms": 20000}, "logout": False, "diag": True, "plain_login": True, "revoke_fails": True, "mock": True,
                      "report": devserver.MOCK_REPORT_SECRET}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0

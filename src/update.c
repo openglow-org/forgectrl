@@ -1363,8 +1363,9 @@ int update_upload_sink(const struct _u_request *req, const char *key,
     (void)content_type;
     (void)transfer_encoding;
     (void)user_data;
-    if (!req->http_url || strncmp(req->http_url, "/update/upload", 14))
-        return U_OK;                    /* not ours: ignore */
+    if (!req->http_url || strncmp(req->http_url, "/update/upload", 14) ||
+        (req->http_url[14] != '\0' && req->http_url[14] != '?'))
+        return U_OK;                    /* not ours (the route itself, not a longer path): ignore */
     /* Unauthorized bytes touch nothing: not the staged archive, not an
      * authorized upload in flight. The handler answers them. */
     if (!auth_write_permitted(req))

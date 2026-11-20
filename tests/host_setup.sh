@@ -165,7 +165,7 @@ start_daemon() {
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" GF_IIO_ROOT="$T/iio" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" LD_PRELOAD="$T/swshim.so $T/timeshim.so" \
-        GF_LED_ROOT="$T/leds" FORGECTRL_WIZ_SHOTS="$T/shots" \
+        GF_LED_ROOT="$T/leds" FORGECTRL_WIZ_SHOTS="$T/shots" GF_PRESS_RES_S=3 \
         GF_SYSFS_DIR="$LENS_SYS" GF_LENS_STEP_US=20000 HOST_GRBL_PORT=$GRBL_PORT \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
@@ -1378,23 +1378,38 @@ for doc in $(jget "$T/wiz.json" '" ".join(x["id"] for x in d["documents"])'); do
 done
 wiz
 expect true "$(jget "$T/wiz.json" 'json.dumps(d["advisories_complete"])')" "the documents are accepted"
-expect 200 "$(post /wiz/advisories/press "$TOKEN")" "POST /wiz/advisories/press is 200"
 led() { cat "$T/leds/button_led_$1/$2" 2>/dev/null; }
 teal() { [ "$(led 1 target)" = 0 ] && [ "$(led 2 target)" -gt 0 ] && [ "$(led 3 target)" -gt 0 ] \
              && [ "$(led 2 pulse_on)" -gt 0 ] && [ "$(led 3 pulse_on)" -gt 0 ]; }
-if teal; then
+for c in 1 2 3; do echo 0 > "$T/leds/button_led_$c/target"; echo 0 > "$T/leds/button_led_$c/pulse_on"; done
+expect 200 "$(post /wiz/advisories/press "$TOKEN")" "POST /wiz/advisories/press is 200"
+# Not teal before the reservation is in force, the page's poll included.
+post /wiz/advisories/press/take "$TOKEN" > /dev/null
+teal && bad "the button breathes teal before the press's reservation is in force" \
+    || ok "the button is not teal before the press's reservation is in force"
+# The teal comes once the press's reservation has stood on file.
+if until_ok 50 teal; then
     ok "the button breathes teal: red off, green and blue lit and pulsing"
 else bad "the button LEDs: targets $(led 1 target)/$(led 2 target)/$(led 3 target), pulse_on $(led 2 pulse_on)/$(led 3 pulse_on)"; fi
-# The cooling engine's red flash ends dark, over whatever stood: the press
-# status the page polls puts the teal back while the press is asked for.
+# The cooling engine's red flash ends dark, over whatever stood: the take
+# the page polls puts the teal back while the press is asked for.
 for c in 1 2 3; do echo 0 > "$T/leds/button_led_$c/target"; echo 0 > "$T/leds/button_led_$c/pulse_on"; done
-curl -s -o /dev/null "$URL/wiz/advisories/press"
+post /wiz/advisories/press/take "$TOKEN" > /dev/null
 teal && ok "a red flash that ended dark over the press step: the press status puts the teal back" \
     || bad "after a dark button, the press status left targets $(led 1 target)/$(led 2 target)/$(led 3 target), pulse_on $(led 2 pulse_on)/$(led 3 pulse_on)"
+# A page that stops polling (this daemon renews for GF_PRESS_RES_S=3 s):
+# the wait ends, and the teal it lit goes out with it.
+sleep 4
+expect cancelled "$(curl -s -H "X-ForgeFIRM-Token: $TOKEN" "$URL/wiz/advisories/press" | python3 -c 'import json, sys; print(json.load(sys.stdin)["button"])')" \
+    "no poll for 4 s: the wait is over"
+teal && bad "the teal still breathes after the wait ended" || ok "and the button no longer breathes teal"
+expect 200 "$(post /wiz/advisories/press "$TOKEN")" "asked again"
+until_ok 50 teal || bad "the second wait never lit the teal"
 # a new reason: the supervisor takes it up on its next tick, then holds the gate on it
 says() { mode; [ "$(jget "$T/mode.json" 'd.get("why", "")')" = "$1" ]; }
 held_next() { until_ok 50 says "$1"; held "$1"; }
-press() { curl -s -o "$T/press.json" "$URL/wiz/advisories/press" && [ "$(jget "$T/press.json" 'json.dumps(d["accepted"])')" = true ]; }
+press() { curl -s -o "$T/press.json" -X POST -H "X-ForgeFIRM-Token: $TOKEN" "$URL/wiz/advisories/press/take" \
+          && [ "$(jget "$T/press.json" 'json.dumps(d["accepted"])')" = true ]; }
 sw 12                                            # the button held
 until_ok 50 press && ok "the press is taken as the acceptance" || bad "the press was not accepted: $(cat "$T/press.json")"
 sw 8
@@ -1432,7 +1447,7 @@ echo "== the first run, walked in the browser"
 # The page the daemon serves, walked in headless Chrome as a new owner
 # walks it (tests/wizard_walk.py --daemon): no record and no account, the
 # intake fans counted. The press is the switch word, held once the
-# daemon waits for it; after the walk the record, the settings and GET
+# daemon waits for it with its reservation ready; after the walk the record, the settings and GET
 # /wiz are read beside the walk's verdict.
 OLD=$(ctl_pid)
 stop_daemon
@@ -1442,7 +1457,7 @@ start_daemon
 presser() {
     n=1500
     while [ $n -gt 0 ]; do
-        if curl -s -o "$T/btn.json" "$URL/wiz" && [ "$(jget "$T/btn.json" 'd["button"]')" = waiting ]; then
+        if curl -s -o "$T/btn.json" "$URL/wiz" && [ "$(jget "$T/btn.json" 'd["button"] + str(d["button_ready"])')" = waitingTrue ]; then
             sw 12; sleep 0.5; sw 8
             return 0
         fi

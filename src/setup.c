@@ -543,6 +543,14 @@ int setup_clear_account(void)
     return rc;
 }
 
+int setup_account_named(void)
+{
+    pthread_mutex_lock(&mu);
+    int named = rec && account_set_locked();
+    pthread_mutex_unlock(&mu);
+    return named;
+}
+
 int setup_set_machine(json_t *machine)
 {
     if (!json_is_object(machine)) {

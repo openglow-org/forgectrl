@@ -195,7 +195,7 @@ sanitizer_t *san_new(void)
                   "(token|access_token|ws_token|auth_token|refresh_token|"
                   "id_token|password|passwd|pwd|passphrase|secret|"
                   "client_secret|api_key|apikey|secret_key|private_key|psk|"
-                  "authorization|session_id|sessionid|cookie|set-cookie)"
+                  "authorization|session_id|sessionid|cookie|set-cookie|key)"
                   "[ ]*[=:][ ]*)(\"?)([^&[:space:]\"',;]+)",
                   REG_EXTENDED | REG_ICASE);
     rc |= regcomp(&s->re_email,
@@ -570,7 +570,10 @@ static char *pass_hex(sanitizer_t *s, const char *in)
         while (isxdigit((unsigned char)*q))
             q++;
         size_t len = (size_t)(q - p);
-        int lb = (p == in) || !is_word((unsigned char)p[-1]);
+        /* A scoped token's hex follows its fft_ prefix, a word
+         * character: that prefix is a boundary too. */
+        int lb = (p == in) || !is_word((unsigned char)p[-1]) ||
+                 (p - in >= 4 && !strncmp(p - 4, "fft_", 4));
         int rb = !is_word((unsigned char)*q);
         if (len >= 32 && lb && rb)
             placeholder(s, CL_HEX, p, len, &out);
@@ -638,7 +641,7 @@ static int may_have_kv(const char *s)
     static const char *const words[] = {
         "token", "password", "passwd", "pwd", "passphrase", "secret",
         "api_key", "apikey", "secret_key", "private_key", "psk",
-        "authorization", "session", "cookie",
+        "authorization", "session", "cookie", "key",
     };
     if (!strchr(s, '=') && !strchr(s, ':'))
         return 0;

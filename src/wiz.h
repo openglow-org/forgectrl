@@ -33,8 +33,15 @@ int cb_wiz_record_html(const struct _u_request *req, struct _u_response *res, vo
 int cb_wiz_changed(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_advisory_get(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_wiz_agree(const struct _u_request *req, struct _u_response *res, void *ud);
+/* The judge of the Setup page's wait for the press (button.h,
+ * button_wait_judge). */
+int wiz_press_judge(int at_press);
+/* Its end (button.h, button_wait_ended): the teal out, the reservation
+ * ended but the linger after a press. */
+void wiz_press_ended(void);
 int cb_wiz_press_start(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, void *ud);
+int cb_wiz_press_take(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_wiz_press_cancel(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *ud);
 int cb_wiz_preferences(const struct _u_request *req, struct _u_response *res, void *ud);

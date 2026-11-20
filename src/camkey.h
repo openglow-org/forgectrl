@@ -13,10 +13,12 @@
 /* Load or create the key in the data directory. Idempotent; call once
  * at startup. */
 void camkey_init(void);
-/* The key, or "" when none could be made. */
+/* The key, or "" when none could be made: a copy for the calling
+ * thread, good until its next call. */
 const char *camkey_get(void);
 /* Replace the key with a new one; every URL that carried the old one
- * stops working. Returns 0, or -1 without entropy. */
+ * stops working. Returns 0, or -1 without entropy or when the new key
+ * cannot be written, the old key then still in force. */
 int camkey_rotate(void);
 /* Constant-time check of a presented key. */
 int camkey_valid(const char *presented);

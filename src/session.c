@@ -5,15 +5,22 @@
  * SPDX-License-Identifier: MIT
  *
  * A session is 256 random bits, carried in an HttpOnly, Secure,
- * SameSite=Strict cookie, and idle-expired after twelve hours. The
- * sessions live in a root-only file in the runtime directory, so a
- * restart of the daemon keeps everyone logged in and a reboot logs
- * everyone out; the file is rewritten when a session is made or ended,
- * and its idle stamps every few minutes. The store is small: one
- * operator and a few browsers. Comparison is constant time. Login failures are counted per client address, and
- * five in a row lock that address for thirty seconds; the count is
- * the cheap brake against a guessing loop on the LAN, not a
- * substitute for a good password.
+ * SameSite=Strict cookie, and idle-expired after twelve hours. A session
+ * belongs to the address that logged in: the same cookie from another
+ * address is not it (an IPv4 peer reported as v4-mapped IPv6 is the
+ * same address). The sessions live in a root-only file in the runtime
+ * directory, so a restart of the daemon keeps everyone logged in and a
+ * reboot logs everyone out; the file is rewritten when a session is made
+ * or ended, and its idle stamps every few minutes. Every stamp is on
+ * CLOCK_MONOTONIC, which a boot starts and nothing sets, so setting the
+ * wall clock moves no expiry; the store lives no longer than the boot
+ * that wrote it. The store is small: one operator and a few browsers.
+ * Comparison is constant time. Login failures are counted per client
+ * address, and five in a row lock that address for thirty seconds; past
+ * LOGIN_GLOBAL_FAILS failures from all addresses in LOGIN_GLOBAL_S, every
+ * login waits out the rest of that window. The counts are the cheap brake
+ * against a guessing loop on the LAN, not a substitute for a good
+ * password.
  */
 #define _GNU_SOURCE
 #include "session.h"
@@ -23,6 +30,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #define MAX_SESSIONS 16
@@ -31,6 +39,7 @@
 
 typedef struct {
     char id[SESSION_ID_HEX + 1];
+    char addr[SESSION_ADDR_MAX];
     char name[40];
     time_t created;
     time_t seen;
@@ -50,12 +59,29 @@ static addr_t addrs[MAX_ADDRS];
 static time_t (*clock_fn)(void);
 static char store_path[256];    /* "" = memory only */
 static time_t saved_at;
+static time_t glob_start;       /* the global failure window's start */
+static int glob_fails;
 
 static void save_locked(void);
 
 static time_t now(void)
 {
-    return clock_fn ? clock_fn() : time(NULL);
+    if (clock_fn)
+        return clock_fn();
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
+}
+
+/* The address as one text for both families: a v4-mapped IPv6 peer
+ * ("::ffff:a.b.c.d") is a.b.c.d. */
+static void addr_norm(const char *addr, char *out, size_t len)
+{
+    if (!addr)
+        addr = "";
+    if (!strncasecmp(addr, "::ffff:", 7) && strchr(addr + 7, '.'))
+        addr += 7;
+    snprintf(out, len, "%s", addr);
 }
 
 void session_set_clock(time_t (*fn)(void))
@@ -95,7 +121,7 @@ static int expire_locked(time_t t)
     return n;
 }
 
-int session_create(const char *name, char *out, size_t len)
+int session_create(const char *name, const char *addr, char *out, size_t len)
 {
     if (len < SESSION_ID_HEX + 1)
         return -1;
@@ -120,6 +146,7 @@ int session_create(const char *name, char *out, size_t len)
     snprintf(sessions[slot].id, sizeof(sessions[slot].id), "%s", id);
     snprintf(sessions[slot].name, sizeof(sessions[slot].name), "%s",
              name ? name : "");
+    addr_norm(addr, sessions[slot].addr, sizeof(sessions[slot].addr));
     sessions[slot].created = sessions[slot].seen = t;
     sessions[slot].used = 1;
     save_locked();
@@ -138,7 +165,8 @@ static int id_well_formed(const char *id)
     return 1;
 }
 
-/* The store: one line per session, the id, the stamps, the name. */
+/* The store: one line per session, the id, the stamps, the address
+ * ("-" for none), the name. */
 static void save_locked(void)
 {
     if (!store_path[0])
@@ -156,8 +184,9 @@ static void save_locked(void)
     }
     for (int i = 0; i < MAX_SESSIONS; i++)
         if (sessions[i].used)
-            fprintf(f, "%s %ld %ld %s\n", sessions[i].id, (long)sessions[i].created,
-                    (long)sessions[i].seen, sessions[i].name);
+            fprintf(f, "%s %ld %ld %s %s\n", sessions[i].id, (long)sessions[i].created,
+                    (long)sessions[i].seen, sessions[i].addr[0] ? sessions[i].addr : "-",
+                    sessions[i].name);
     int ok = fflush(f) == 0 && fsync(fd) == 0;
     fclose(f);
     if (!ok || rename(tmp, store_path) != 0)
@@ -175,13 +204,15 @@ static void load_locked(void)
     time_t t = now();
     int n = 0;
     while (n < MAX_SESSIONS && fgets(line, sizeof(line), f)) {
-        char id[SESSION_ID_HEX + 1], name[40] = "";
+        char id[SESSION_ID_HEX + 1], addr[SESSION_ADDR_MAX] = "", name[40] = "";
         long created = 0, seen = 0;
-        if (sscanf(line, "%64s %ld %ld %39[^\n]", id, &created, &seen, name) < 3)
+        if (sscanf(line, "%64s %ld %ld %63s %39[^\n]", id, &created, &seen, addr, name) < 4)
             continue;
-        if (!id_well_formed(id) || t - (time_t)seen > SESSION_IDLE_S)
+        /* A stamp ahead of this clock is from another boot's. */
+        if (!id_well_formed(id) || seen > (long)t || t - (time_t)seen > SESSION_IDLE_S)
             continue;
         snprintf(sessions[n].id, sizeof(sessions[n].id), "%s", id);
+        snprintf(sessions[n].addr, sizeof(sessions[n].addr), "%s", strcmp(addr, "-") ? addr : "");
         snprintf(sessions[n].name, sizeof(sessions[n].name), "%s", name);
         sessions[n].created = (time_t)created;
         sessions[n].seen = (time_t)seen;
@@ -200,10 +231,12 @@ void session_set_store(const char *path)
     pthread_mutex_unlock(&mu);
 }
 
-int session_valid(const char *id)
+int session_valid(const char *id, const char *addr)
 {
     if (!id_well_formed(id))
         return 0;
+    char from[SESSION_ADDR_MAX];
+    addr_norm(addr, from, sizeof(from));
     time_t t = now();
     int found = 0;
     pthread_mutex_lock(&mu);
@@ -214,7 +247,7 @@ int session_valid(const char *id)
         /* Compare every live session in constant time; do not stop at
          * the first match. */
         int eq = ct_equal(sessions[i].id, id, SESSION_ID_HEX);
-        if (eq) {
+        if (eq && !strcmp(sessions[i].addr, from)) {
             sessions[i].seen = t;
             found = 1;
         }
@@ -302,11 +335,17 @@ int login_locked(const char *addr, int *seconds_left)
     time_t t = now();
     pthread_mutex_lock(&mu);
     addr_t *a = addr_slot_locked(addr, 0);
-    int locked = a && a->until > t;
+    int left = a && a->until > t ? (int)(a->until - t) : 0;
+    /* Past the budget of failures from every address: the window's rest. */
+    if (glob_fails >= LOGIN_GLOBAL_FAILS && t - glob_start < LOGIN_GLOBAL_S) {
+        int g = (int)(LOGIN_GLOBAL_S - (t - glob_start));
+        if (g > left)
+            left = g;
+    }
     if (seconds_left)
-        *seconds_left = locked ? (int)(a->until - t) : 0;
+        *seconds_left = left;
     pthread_mutex_unlock(&mu);
-    return locked;
+    return left > 0;
 }
 
 void login_failed(const char *addr)
@@ -316,6 +355,11 @@ void login_failed(const char *addr)
     time_t t = now();
     pthread_mutex_lock(&mu);
     addr_t *a = addr_slot_locked(addr, 1);
+    if (glob_fails == 0 || t - glob_start >= LOGIN_GLOBAL_S) {
+        glob_start = t;
+        glob_fails = 0;
+    }
+    glob_fails++;
     if (a->until && a->until <= t)
         a->fails = 0;               /* a lock that expired starts over */
     a->fails++;

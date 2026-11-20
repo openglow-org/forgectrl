@@ -17,20 +17,29 @@
  *
  * The reset: holding the button through the daemon's start marks the
  * account for re-creation. The old record stays (the panel keeps
- * refusing the old password), users_exist() reads false, and the
- * wizard's account step runs again.
+ * refusing the old password), users_exist() reads false, the replay
+ * renders no account (so the SSH login goes with the password), and
+ * the wizard's account step runs again.
+ *
+ * A record that is there and cannot be read, or one that is missing
+ * while the setup record names an account, is a fault and not "no
+ * account": users_fault() says so, and the guards then refuse what they
+ * would let a machine with no account do. The button reset clears it.
  */
 #define _GNU_SOURCE
 #include "users.h"
 #include "fflog.h"
 #include "paths.h"
 #include "sha256.h"
+#include "testhook.h"
 
 #include <crypt.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,11 +48,15 @@
 
 #define REPLAY_SCRIPT "/etc/init.d/forgefirm-users"
 
+int (*users_record_named)(void);
+
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t replay_mu = PTHREAD_MUTEX_INITIALIZER;
 static char u_name[USERS_NAME_MAX + 1];
 static char u_hash[128];
 static long u_uid;
 static int u_have;
+static int u_bad;           /* the record is there and does not read */
 static int u_reset;
 
 static void record_path(char *buf, size_t len)
@@ -61,10 +74,18 @@ static void load_locked(void)
     char path[256], line[256];
     record_path(path, sizeof(path));
     u_have = 0;
+    u_bad = 0;
     u_name[0] = u_hash[0] = '\0';
     FILE *f = fopen(path, "r");
-    if (!f)
+    if (!f) {
+        if (errno != ENOENT) {
+            u_bad = 1;
+            fflog(LOG_ERR, "users: %s cannot be read (%s)", path, strerror(errno));
+        }
+        reset_path(path, sizeof(path));
+        u_reset = access(path, F_OK) == 0;
         return;
+    }
     if (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
         char *h = strchr(line, ':');
@@ -84,8 +105,10 @@ static void load_locked(void)
         }
     }
     fclose(f);
-    if (!u_have)
-        fflog(LOG_WARNING, "users: %s is not a valid record", path);
+    if (!u_have) {
+        u_bad = 1;
+        fflog(LOG_ERR, "users: %s is not a valid record", path);
+    }
     reset_path(path, sizeof(path));
     u_reset = access(path, F_OK) == 0;
 }
@@ -105,6 +128,16 @@ int users_exist(void)
     int v = u_have && !u_reset;
     pthread_mutex_unlock(&mu);
     return v;
+}
+
+int users_fault(void)
+{
+    pthread_mutex_lock(&mu);
+    int none = !u_have && !u_reset, bad = u_bad;
+    pthread_mutex_unlock(&mu);
+    if (!none)
+        return 0;
+    return bad || (users_record_named && users_record_named());
 }
 
 int users_name(char *buf, size_t len)
@@ -136,6 +169,25 @@ int users_check_name(const char *name, char *reason, size_t rlen)
     }
     if (!strcmp(name, "root")) {
         snprintf(reason, rlen, "root is the system account");
+        return -1;
+    }
+    /* The image's own accounts and groups, and the extension packages'
+     * (ffx followed by digits): a second line under one of those names
+     * would stand beside the system's. The operator's own line (uid and
+     * gid 1000) is the one account this may be. */
+    if (!strncmp(name, "ffx", 3) && name[3] && strspn(name + 3, "0123456789") == strlen(name + 3)) {
+        snprintf(reason, rlen, "%s is the name of an extension package's account", name);
+        return -1;
+    }
+    struct passwd pw, *pwp = NULL;
+    struct group gr, *grp = NULL;
+    char buf[4096];
+    if (getpwnam_r(name, &pw, buf, sizeof(buf), &pwp) == 0 && pwp && pwp->pw_uid != (uid_t)USERS_UID) {
+        snprintf(reason, rlen, "%s is a system account", name);
+        return -1;
+    }
+    if (getgrnam_r(name, &gr, buf, sizeof(buf), &grp) == 0 && grp && grp->gr_gid != (gid_t)USERS_UID) {
+        snprintf(reason, rlen, "%s is a system group", name);
         return -1;
     }
     return 0;
@@ -241,6 +293,7 @@ int users_create(const char *name, const char *password, char *reason,
         reset_path(path, sizeof(path));
         unlink(path);
         u_reset = 0;
+        u_bad = 0;
     }
     memset(&cd, 0, sizeof(cd));
     pthread_mutex_unlock(&mu);
@@ -266,14 +319,23 @@ int users_verify(const char *name, const char *password)
     if (!have)
         return 0;
     /* Always run the hash so a wrong name costs the same as a wrong
-     * password. */
+     * password. A password longer than any account can have is not
+     * hashed (its cost grows with its length): a fixed one of the
+     * longest allowed length is, and the answer is no. */
+    int too_long = strlen(password) > USERS_PASSWORD_MAX;
+    char dummy[USERS_PASSWORD_MAX + 1];
+    if (too_long) {
+        memset(dummy, 'x', USERS_PASSWORD_MAX);
+        dummy[USERS_PASSWORD_MAX] = '\0';
+        password = dummy;
+    }
     struct crypt_data cd;
     memset(&cd, 0, sizeof(cd));
     const char *h = crypt_r(password, hash, &cd);
     int ok = h && strlen(h) == strlen(hash) && ct_equal(h, hash, strlen(hash));
     ok = ok && strlen(name) == strlen(uname) && ct_equal(name, uname, strlen(uname));
     memset(&cd, 0, sizeof(cd));
-    return ok;
+    return ok && !too_long;
 }
 
 int users_mark_reset(void)
@@ -289,6 +351,8 @@ int users_mark_reset(void)
     u_reset = 1;
     pthread_mutex_unlock(&mu);
     fflog(LOG_WARNING, "users: account reset requested; the account step runs again");
+    /* The system's copy goes now: a pending reset renders no account. */
+    users_replay();
     return 0;
 }
 
@@ -300,10 +364,21 @@ int users_reset_pending(void)
     return v;
 }
 
+/* One render at a time: two at once would share the script's temporary
+ * files. */
 void users_replay(void)
 {
-    if (access(REPLAY_SCRIPT, X_OK) != 0)
+    /* GF_USERS_REPLAY: a host test's stand-in for the script. */
+    const char *script = ff_test_hook("GF_USERS_REPLAY");
+    if (!script)
+        script = REPLAY_SCRIPT;
+    if (access(script, X_OK) != 0)
         return;                         /* host builds */
-    if (system(REPLAY_SCRIPT " start >/dev/null 2>&1") != 0)
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "'%s' start >/dev/null 2>&1", script);
+    pthread_mutex_lock(&replay_mu);
+    int rc = system(cmd);
+    pthread_mutex_unlock(&replay_mu);
+    if (rc != 0)
         fflog(LOG_ERR, "users: the account replay script failed");
 }

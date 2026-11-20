@@ -15,14 +15,44 @@
  *
  * The one physical act here is the acceptance press: after the
  * documents, the button LED breathes teal and the page waits for a
- * release-to-press edge on the machine's button. No controller runs
- * during the first run, so the press can arm nothing.
+ * release-to-press edge on the machine's button. The page can ask for it
+ * again with a controller running (a document changed by an update), so
+ * the press is a prompt like the panel's others (btnres.c): refused while
+ * a job waits for its press, runs or is paused (job_takes_button), and
+ * under its own reservation of the button for the whole wait, renewed by
+ * the asking page's poll. The LED breathes and a press counts only once
+ * the reservation has stood on file BTNRES_READY_S, and the wait has run
+ * that long; who else waits is
+ * asked again then and at the press, and a press that is somebody
+ * else's ends the wait unsaid. The reservation stands WIZPKG_LINGER_S
+ * after the press either way.
+ *
+ * The press is bound to the browser that asked for it. One request for
+ * the press stands at a time, held by the browser that made it (the
+ * ffpress cookie, which that browser alone has); another browser's
+ * request is refused while it stands, and so are its take and its
+ * cancel. A wait belongs to the request it was started for and ends when
+ * that request ends; another browser's ask never joins it. The press is
+ * taken in a POST by the holder alone, never by a read. While no account exists (a first run, or a reset until the
+ * account step), the account step takes only the holder, and only after
+ * its press was taken in this run of the daemon: an acceptance the
+ * record already holds (a reset keeps it) is no press for the new
+ * account. The owner at the machine cannot tell whose request the
+ * breathing button answers, so the refusal on the owner's own page is
+ * the sign that another browser asked first, and the page says not to
+ * press. This host (loopback) is held to none of it: loopback carries the
+ * machine's own processes, and an extension package cannot reach it (the
+ * sandbox's network rules refuse every packet a package's account sends
+ * through lo, forgefirm-sandbox ffx.nft). Making the account from none revokes
+ * every scoped token, rotates the camera key and ends every session.
  */
 #define _GNU_SOURCE
 #include "wiz.h"
 #include "advisories.h"
 #include "auth.h"
 #include "builtin.h"
+#include "btnres.h"
+#include "cool.h"
 #include "extpkg.h"
 #include "button.h"
 #include "cam.h"
@@ -40,9 +70,14 @@
 #include "wizpkg.h"
 #include "wizlive.h"
 #include "testhook.h"
+#include "camkey.h"
+#include "tokens.h"
+#include "sha256.h"
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <jansson.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +86,241 @@
 
 #define PRESS_TIMEOUT_S 600
 #define CLOCK_UNSET_BEFORE 1700000000   /* a clock earlier than this is unset */
+
+/* The press binding (see the top of this file). */
+#define CLAIM_COOKIE "ffpress"
+#define CLAIM_HEX 32
+#define CLAIM_ACCOUNT_S 1800            /* a taken press holds the account step this long */
+static pthread_mutex_t claim_mu = PTHREAD_MUTEX_INITIALIZER;
+static char claim_id[CLAIM_HEX + 1];    /* "" when no request stands */
+static double claim_until;              /* CLOCK_MONOTONIC seconds */
+static int claim_pressed;               /* the holder's press was taken */
+
+/* The press's wait and one request's life: PRESS_TIMEOUT_S, or a host
+ * test's shorter one (GF_PRESS_TIMEOUT_S). */
+static int press_timeout_s(void)
+{
+    const char *v = ff_test_hook("GF_PRESS_TIMEOUT_S");
+    return v && atoi(v) > 0 ? atoi(v) : PRESS_TIMEOUT_S;
+}
+
+static double claim_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* The ffpress cookie a request carries, into out ("" for none). */
+static void claim_presented(const struct _u_request *req, char *out, size_t len)
+{
+    out[0] = '\0';
+    const char *c = u_map_get_case(req->map_header, "Cookie");
+    size_t k = strlen(CLAIM_COOKIE);
+    while (c && *c) {
+        while (*c == ' ' || *c == ';')
+            c++;
+        if (!strncmp(c, CLAIM_COOKIE, k) && c[k] == '=') {
+            c += k + 1;
+            size_t n = strcspn(c, "; ");
+            if (n == CLAIM_HEX && n < len) {
+                memcpy(out, c, n);
+                out[n] = '\0';
+            }
+            return;
+        }
+        c += strcspn(c, ";");
+    }
+}
+
+/* Under claim_mu: a request stands. */
+static int claim_standing_locked(void)
+{
+    if (claim_id[0] && claim_now() >= claim_until) {
+        claim_id[0] = '\0';
+        claim_pressed = 0;
+    }
+    return claim_id[0] != '\0';
+}
+
+/* Under claim_mu: the request carries the standing request's cookie. */
+static int claim_mine_locked(const struct _u_request *req)
+{
+    char p[CLAIM_HEX + 1];
+    claim_presented(req, p, sizeof(p));
+    return claim_standing_locked() && strlen(p) == CLAIM_HEX && ct_equal(p, claim_id, CLAIM_HEX);
+}
+
+static void claim_end(void)
+{
+    pthread_mutex_lock(&claim_mu);
+    claim_id[0] = '\0';
+    claim_pressed = 0;
+    pthread_mutex_unlock(&claim_mu);
+}
+
+/* The press's reservation (see the top of this file), under press_mu. */
+static pthread_mutex_t press_mu = PTHREAD_MUTEX_INITIALIZER;
+static int press_in_force;              /* this wait came in force: the LED breathes, a press counts */
+static int press_lingers;               /* a press was made: the reservation stands its linger */
+static char press_why[160];             /* why this wait ended for somebody else's job */
+static char press_claim[CLAIM_HEX + 1]; /* the request this wait was started for ("" this host's) */
+static double press_began;              /* when this wait began, CLOCK_MONOTONIC seconds */
+
+/* The request this wait was started for still stands and is the one
+ * standing; a wait this host started is bound to none. */
+static int press_request_stands(void)
+{
+    char bound[CLAIM_HEX + 1];
+    pthread_mutex_lock(&press_mu);
+    snprintf(bound, sizeof(bound), "%s", press_claim);
+    pthread_mutex_unlock(&press_mu);
+    if (!bound[0])
+        return 1;
+    pthread_mutex_lock(&claim_mu);
+    int ok = claim_standing_locked() && ct_equal(bound, claim_id, CLAIM_HEX);
+    pthread_mutex_unlock(&claim_mu);
+    return ok;
+}
+
+/* The wait that stands was started for the request this browser holds. */
+static int press_wait_mine(const struct _u_request *req)
+{
+    char bound[CLAIM_HEX + 1];
+    pthread_mutex_lock(&press_mu);
+    snprintf(bound, sizeof(bound), "%s", press_claim);
+    pthread_mutex_unlock(&press_mu);
+    pthread_mutex_lock(&claim_mu);
+    int mine = bound[0] && claim_mine_locked(req) && ct_equal(bound, claim_id, CLAIM_HEX);
+    pthread_mutex_unlock(&claim_mu);
+    return mine;
+}
+
+/* button.h, button_wait_judge: the Setup page's wait, judged at every
+ * reading of the button (the wait thread's 40 ms) and at a press. */
+int wiz_press_judge(int at_press)
+{
+    char why[160], rwhy[96];
+    if (!btnres_stands(BTNRES_SETUP)) {
+        /* The page stopped asking, or the wait was canceled. A press
+         * caught as the reservation lapsed is unsaid, and reserves the
+         * button its linger again, as every press does. */
+        if (at_press) {
+            pthread_mutex_lock(&press_mu);
+            press_lingers = 1;
+            pthread_mutex_unlock(&press_mu);
+            btnres_open(BTNRES_SETUP, WIZPKG_LINGER_S, rwhy, sizeof(rwhy));
+        }
+        return -1;
+    }
+    if (!press_request_stands()) {
+        /* The request it was started for ended: its 600 s, the account,
+         * a cancel. A press caught as it ended is unsaid, and keeps the
+         * button reserved its linger as every press does. */
+        if (at_press) {
+            pthread_mutex_lock(&press_mu);
+            press_lingers = 1;
+            pthread_mutex_unlock(&press_mu);
+            btnres_open(BTNRES_SETUP, WIZPKG_LINGER_S, rwhy, sizeof(rwhy));
+        }
+        return -1;
+    }
+    /* In force once the reservation has stood on file BTNRES_READY_S, and
+     * no sooner than that after this wait began: a reservation another
+     * wait left on file does not bring the teal back at once. */
+    pthread_mutex_lock(&press_mu);
+    int first = !press_in_force;
+    double began = press_began;
+    pthread_mutex_unlock(&press_mu);
+    if (cool_button_on_file_s() < BTNRES_READY_S || claim_now() - began < BTNRES_READY_S)
+        return 0;
+    if ((first || at_press) && job_takes_button(why, sizeof(why))) {
+        pthread_mutex_lock(&press_mu);
+        snprintf(press_why, sizeof(press_why), "%s", why);
+        press_lingers = at_press;
+        pthread_mutex_unlock(&press_mu);
+        if (at_press)
+            btnres_open(BTNRES_SETUP, WIZPKG_LINGER_S, rwhy, sizeof(rwhy));
+        else
+            btnres_close(BTNRES_SETUP);
+        return -1;
+    }
+    if (at_press) {
+        pthread_mutex_lock(&press_mu);
+        press_lingers = 1;
+        pthread_mutex_unlock(&press_mu);
+        btnres_open(BTNRES_SETUP, WIZPKG_LINGER_S, rwhy, sizeof(rwhy));
+    } else if (first) {
+        pthread_mutex_lock(&press_mu);
+        press_in_force = 1;
+        pthread_mutex_unlock(&press_mu);
+        led_set(LED_BREATHE_TEAL);
+    }
+    return 1;
+}
+
+/* The wait is over unpressed: its reservation ends, but a linger. */
+static void press_res_end(void)
+{
+    pthread_mutex_lock(&press_mu);
+    int lingers = press_lingers;
+    pthread_mutex_unlock(&press_mu);
+    if (!lingers)
+        btnres_close(BTNRES_SETUP);
+}
+
+/* button.h, button_wait_ended: however the wait ended (a press, its
+ * timeout, its cancel, the judge), the teal it lit goes out and its
+ * reservation ends, but the linger after a press. The wait leaves force
+ * and its teal goes out in one hold of press_mu, the one the take's
+ * teal is written under, so no take lights the teal again after it. */
+void wiz_press_ended(void)
+{
+    pthread_mutex_lock(&press_mu);
+    int lit = press_in_force;
+    press_in_force = 0;
+    if (lit)
+        led_release();
+    pthread_mutex_unlock(&press_mu);
+    press_res_end();
+}
+
+/* The renewal the asking page's poll gives the reservation:
+ * BTNRES_PANEL_TTL_S, or a host test's shorter one (GF_PRESS_RES_S). */
+static double press_res_s(void)
+{
+    const char *v = ff_test_hook("GF_PRESS_RES_S");
+    return v && atof(v) > 0 ? atof(v) : BTNRES_PANEL_TTL_S;
+}
+
+/* The page may ask for the press: in force, still waiting, and no job
+ * that would take it as its own (a cloud print's armed session can be
+ * reported meanwhile; the press would end the wait, unsaid). */
+static int press_ready(void)
+{
+    char why[160];
+    pthread_mutex_lock(&press_mu);
+    int r = press_in_force;
+    pthread_mutex_unlock(&press_mu);
+    return r && !strcmp(button_state(), "waiting") && !job_takes_button(why, sizeof(why));
+}
+
+/* 0, or -1 with the refusal in why: a request from another browser
+ * stands. This host is held to none of it. */
+static int claim_refused(const struct _u_request *req, char *why, size_t len)
+{
+    if (auth_peer_local(req))
+        return 0;
+    pthread_mutex_lock(&claim_mu);
+    int other = claim_standing_locked() && !claim_mine_locked(req);
+    int left = other ? (int)(claim_until - claim_now()) + 1 : 0;
+    pthread_mutex_unlock(&claim_mu);
+    if (other)
+        snprintf(why, len, "another browser asked for the press first: do not press the machine's button "
+                 "for this page; that request ends in %d s, when its browser cancels it, or when the machine "
+                 "restarts", left);
+    return other ? -1 : 0;
+}
 
 /* The catalog: every wizard the page can show, in first-run order. The
  * version is the schema version the record stores on completion; the
@@ -176,7 +446,8 @@ static int finish_lit;
 
 void wiz_abort_all(void)
 {
-    button_wait_cancel();
+    button_wait_cancel();       /* the wait's end hook ends its reservation */
+    claim_end();
     finish_lit = 0;
     led_release();
 }
@@ -217,8 +488,9 @@ static int reply_obj(struct _u_response *res, unsigned status, json_t *o)
 static void requester(const struct _u_request *req, char *out, size_t len)
 {
     const char *cookie = u_map_get_case(req->map_header, "Cookie");
-    char id[SESSION_ID_HEX + 1];
-    if (cookie && session_from_cookie(cookie, id, sizeof(id)) && session_valid(id))
+    char id[SESSION_ID_HEX + 1], peer[SESSION_ADDR_MAX];
+    auth_peer_text(req, peer, sizeof(peer));
+    if (cookie && session_from_cookie(cookie, id, sizeof(id)) && session_valid(id, peer))
         snprintf(out, len, "%s", id);
     else
         out[0] = '\0';
@@ -386,7 +658,10 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
     users_name(name, sizeof(name));
     json_object_set_new(u, "exists", json_boolean(users_exist()));
     json_object_set_new(u, "reset_pending", json_boolean(users_reset_pending()));
-    json_object_set_new(u, "name", json_string(users_exist() ? name : ""));
+    json_object_set_new(u, "fault", json_boolean(users_fault()));
+    /* The name is the SSH login: a session's, or this host's, to read. */
+    int may_name = users_exist() && (auth_session_ok(req) || auth_peer_local(req));
+    json_object_set_new(u, "name", json_string(may_name ? name : ""));
     /* What a change of owner would have to be asked about. A package can
      * hold the last owner's credentials, so the account step offers to
      * take them; it is only asked when there is something to take. */
@@ -397,6 +672,7 @@ int cb_wiz_status(const struct _u_request *req, struct _u_response *res, void *u
     json_object_set_new(st, "users", u);
 
     json_object_set_new(st, "button", json_string(button_state()));
+    json_object_set_new(st, "button_ready", json_boolean(press_ready()));
     json_object_set_new(st, "tls_fingerprint", json_string(tls_fingerprint()));
     json_object_set_new(st, "session", json_boolean(auth_session_ok(req)));
 
@@ -546,6 +822,87 @@ int cb_wiz_agree(const struct _u_request *req, struct _u_response *res, void *ud
     return cb_wiz_status(req, res, NULL);
 }
 
+/* One ask at a time (cb_wiz_press_start): the refusal, the end of
+ * another request's wait, the request and the wait's binding are one
+ * step, so two browsers asking at once never both pass the refusal, and
+ * no ask joins a wait another ask is ending. */
+static pthread_mutex_t start_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int press_start(const struct _u_request *req, struct _u_response *res)
+{
+    char why[200], id[CLAIM_HEX + 1] = "";
+    if (claim_refused(req, why, sizeof(why)) != 0)
+        return reply_error(res, 409, why);
+    /* A job that waits for its press, runs or is paused would take this
+     * press as its own. */
+    if (job_takes_button(why, sizeof(why)))
+        return reply_error(res, 409, why);
+    /* A wait started for another request (one that lapsed, or this
+     * host's) is not this browser's to join: it ends here, before this
+     * ask's reservation, and this ask starts a wait of its own. */
+    if (!auth_peer_local(req) && !strcmp(button_state(), "waiting") && !press_wait_mine(req))
+        button_wait_cancel();
+    if (btnres_open(BTNRES_SETUP, press_res_s(), why, sizeof(why)) != 0)
+        return reply_error(res, 409, why);
+    /* The request, this browser's: a new one, or the one it holds. */
+    if (!auth_peer_local(req)) {
+        unsigned char raw[CLAIM_HEX / 2];
+        int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        int got = fd >= 0 && read(fd, raw, sizeof(raw)) == (ssize_t)sizeof(raw);
+        if (fd >= 0)
+            close(fd);
+        if (!got) {
+            press_res_end();
+            return reply_error(res, 500, "no randomness for the press request");
+        }
+        /* One request lives press_timeout_s() from its first ask: the
+         * holder's ask again starts a new wait, never a longer request. */
+        double end = claim_now() + press_timeout_s();
+        pthread_mutex_lock(&claim_mu);
+        if (claim_mine_locked(req)) {
+            snprintf(id, sizeof(id), "%s", claim_id);
+            if (claim_until > end)
+                claim_until = end;
+        } else {
+            for (size_t i = 0; i < sizeof(raw); i++)
+                snprintf(id + 2 * i, 3, "%02x", raw[i]);
+            snprintf(claim_id, sizeof(claim_id), "%s", id);
+            claim_until = end;
+        }
+        claim_pressed = 0;
+        pthread_mutex_unlock(&claim_mu);
+    }
+    /* A new wait comes in force afresh; one that stands keeps its state.
+     * The wait is bound to this browser's request (a wait that stands is
+     * this browser's own, above); this host's binds a new wait to none. */
+    pthread_mutex_lock(&press_mu);
+    int fresh = strcmp(button_state(), "waiting") != 0;
+    if (fresh) {
+        press_in_force = 0;
+        press_lingers = 0;
+        press_why[0] = '\0';
+        press_began = claim_now();
+    }
+    if (fresh || id[0])
+        snprintf(press_claim, sizeof(press_claim), "%s", id);
+    pthread_mutex_unlock(&press_mu);
+    if (button_wait_start(press_timeout_s()) != 0 &&
+        strcmp(button_state(), "waiting") != 0) {
+        press_res_end();
+        return reply_error(res, 500, "cannot start the button wait");
+    }
+    if (id[0]) {
+        char cookie[160];
+        snprintf(cookie, sizeof(cookie), CLAIM_COOKIE "=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d",
+                 id, CLAIM_ACCOUNT_S);
+        ulfius_add_header_to_response(res, "Set-Cookie", cookie);
+    }
+    json_t *o = json_object();
+    json_object_set_new(o, "button", json_string(button_state()));
+    json_object_set_new(o, "ready", json_boolean(press_ready()));
+    return reply_obj(res, 200, o);
+}
+
 int cb_wiz_press_start(const struct _u_request *req, struct _u_response *res, void *ud)
 {
     (void)ud;
@@ -553,24 +910,65 @@ int cb_wiz_press_start(const struct _u_request *req, struct _u_response *res, vo
         return U_CALLBACK_COMPLETE;
     if (!setup_advisories_complete())
         return reply_error(res, 409, "accept every document first");
-    if (button_wait_start(PRESS_TIMEOUT_S) != 0 &&
-        strcmp(button_state(), "waiting") != 0)
-        return reply_error(res, 500, "cannot start the button wait");
-    led_set(LED_BREATHE_TEAL);
-    json_t *o = json_object();
-    json_object_set_new(o, "button", json_string(button_state()));
-    return reply_obj(res, 200, o);
+    pthread_mutex_lock(&start_mu);
+    int rc = press_start(req, res);
+    pthread_mutex_unlock(&start_mu);
+    return rc;
 }
 
+/* GET: what the press is doing, for anyone who may read. It takes
+ * nothing and lights nothing. */
 int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, void *ud)
 {
     (void)ud;
     if (!auth_read_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    pthread_mutex_lock(&claim_mu);
+    int standing = claim_standing_locked(), mine = standing && claim_mine_locked(req);
+    pthread_mutex_unlock(&claim_mu);
+    json_t *o = json_object();
+    json_object_set_new(o, "button", json_string(button_state()));
+    json_object_set_new(o, "ready", json_boolean(press_ready()));
+    json_object_set_new(o, "accepted", json_boolean(setup_acceptance_done()));
+    json_object_set_new(o, "asked_by_other", json_boolean(standing && !mine && !auth_peer_local(req)));
+    return reply_obj(res, 200, o);
+}
+
+/* POST: the holder's poll, which takes the press when it came. */
+int cb_wiz_press_take(const struct _u_request *req, struct _u_response *res, void *ud)
+{
+    (void)ud;
+    if (!auth_write_ok(req, res))
+        return U_CALLBACK_COMPLETE;
+    char why[200];
+    if (claim_refused(req, why, sizeof(why)) != 0)
+        return reply_error(res, 409, why);
+    int bound = !auth_peer_local(req);
+    if (bound) {
+        pthread_mutex_lock(&claim_mu);
+        int mine = claim_mine_locked(req);
+        pthread_mutex_unlock(&claim_mu);
+        if (!mine) {
+            /* A request cookie with no request standing for it: this
+             * browser's request ended (its 600 s, the account step), and
+             * a teal the machine shows now is not for this page. */
+            char p[CLAIM_HEX + 1];
+            claim_presented(req, p, sizeof(p));
+            return reply_error(res, 409, p[0] ? "this browser's request for the press ended: do not press the "
+                                                "machine's button for this page until it asks again"
+                                              : "this browser has not asked for the press");
+        }
+    }
     const char *state = button_state();
     int accepted = 0;
     if (!strcmp(state, "pressed") && button_take_pressed()) {
         led_release();
+        if (bound) {
+            pthread_mutex_lock(&claim_mu);
+            claim_pressed = 1;
+            claim_until = claim_now() + CLAIM_ACCOUNT_S;
+            pthread_mutex_unlock(&claim_mu);
+        }
         if (setup_acceptance_pressed() == 0) {
             accepted = 1;
             fflog(LOG_NOTICE, "wiz: the advisories were accepted at the machine");
@@ -578,16 +976,40 @@ int cb_wiz_press_status(const struct _u_request *req, struct _u_response *res, v
             setup_wizard_done("advisories", 1, NULL, NULL);
         }
         state = "pressed";
-    } else if (!strcmp(state, "timeout") || !strcmp(state, "cancelled")) {
-        led_release();
     } else if (!strcmp(state, "waiting")) {
-        /* The press is still asked for: the teal, should the cooling
-         * engine's red flash have stood over it and ended dark. */
-        led_keep(LED_BREATHE_TEAL);
+        /* The press is still asked for: this poll keeps its reservation
+         * (a page that stops polling loses it, and the wait with it), and
+         * the teal once in force, should the cooling engine's red flash
+         * have stood over it and ended dark, written under press_mu while
+         * the wait is in force. A wait that ended has put its light and
+         * its reservation away itself (wiz_press_ended);
+         * the request stands to its own end, and its holder may ask
+         * again meanwhile. */
+        btnres_renew(BTNRES_SETUP, press_res_s());
+        char jwhy[160];
+        int job = job_takes_button(jwhy, sizeof(jwhy));
+        pthread_mutex_lock(&press_mu);
+        if (press_in_force && !job && !strcmp(button_state(), "waiting"))
+            led_keep(LED_BREATHE_TEAL);
+        pthread_mutex_unlock(&press_mu);
+    }
+    /* pressed: this browser's press was taken (this host's: the press
+     * is on record). */
+    int pressed = accepted || setup_acceptance_done();
+    if (bound) {
+        pthread_mutex_lock(&claim_mu);
+        pressed = claim_mine_locked(req) && claim_pressed;
+        pthread_mutex_unlock(&claim_mu);
     }
     json_t *o = json_object();
     json_object_set_new(o, "button", json_string(state));
+    json_object_set_new(o, "ready", json_boolean(press_ready()));
     json_object_set_new(o, "accepted", json_boolean(accepted || setup_acceptance_done()));
+    json_object_set_new(o, "pressed", json_boolean(pressed));
+    pthread_mutex_lock(&press_mu);
+    if (!strcmp(state, "cancelled") && press_why[0])
+        json_object_set_new(o, "why", json_string(press_why));
+    pthread_mutex_unlock(&press_mu);
     return reply_obj(res, 200, o);
 }
 
@@ -596,8 +1018,12 @@ int cb_wiz_press_cancel(const struct _u_request *req, struct _u_response *res, v
     (void)ud;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    button_wait_cancel();
+    char why[200];
+    if (claim_refused(req, why, sizeof(why)) != 0)
+        return reply_error(res, 409, why);
+    button_wait_cancel();       /* the wait's end hook ends its reservation */
     led_release();
+    claim_end();
     json_t *o = json_object();
     json_object_set_new(o, "button", json_string(button_state()));
     return reply_obj(res, 200, o);
@@ -616,6 +1042,18 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
      * may replace it. */
     if (users_exist() && !auth_session_ok(req))
         return reply_error(res, 403, "log in to change the account");
+    if (users_fault() && !auth_peer_local(req))
+        return reply_error(res, 409, "the account record cannot be read: hold the machine's button "
+                           "through a restart to make the account again");
+    /* With no account, the browser whose press was taken, and no other. */
+    int from_none = !users_exist();
+    if (from_none && !auth_peer_local(req)) {
+        pthread_mutex_lock(&claim_mu);
+        int held = claim_mine_locked(req) && claim_pressed;
+        pthread_mutex_unlock(&claim_mu);
+        if (!held)
+            return reply_error(res, 409, "press the machine's button for this browser first");
+    }
     const char *name = param(req, "name");
     const char *pw = param(req, "password");
     const char *wipe = param(req, "wipe_extensions");
@@ -627,6 +1065,25 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
         return reply_error(res, 400, reason);
     setup_set_account(name, USERS_UID);
     setup_wizard_done("account", 1, NULL, NULL);
+    claim_end();
+
+    /* An account made from none starts clean: no scoped token, camera
+     * key or session made before it (by whoever reached the machine
+     * first, or by the last owner) outlives it. */
+    int revoked = 1, rotated = 1;
+    if (from_none) {
+        char terr[96];
+        if (tokens_revoke_all(terr, sizeof(terr)) != 0) {
+            revoked = 0;
+            fflog(LOG_ERR, "wiz: the scoped tokens could not be revoked for the new account: %s", terr);
+        }
+        if (camkey_rotate() != 0) {
+            rotated = 0;
+            fflog(LOG_ERR, "wiz: the camera key could not be rotated for the new account");
+        }
+        session_end(NULL);
+        fflog(LOG_NOTICE, "wiz: a new account: every scoped token revoked, the camera key rotated, every session ended");
+    }
 
     /* The extension tree, when the new owner asked for it: every package,
      * its data, and every key the last owner added. They can hold that
@@ -646,14 +1103,19 @@ int cb_wiz_account(const struct _u_request *req, struct _u_response *res, void *
     }
 
     /* Log this browser in. */
-    char sid[SESSION_ID_HEX + 1], cookie[256];
-    if (session_create(name, sid, sizeof(sid)) == 0) {
+    char sid[SESSION_ID_HEX + 1], cookie[256], peer[SESSION_ADDR_MAX];
+    auth_peer_text(req, peer, sizeof(peer));
+    if (session_create(name, peer, sid, sizeof(sid)) == 0) {
         session_cookie_set(sid, cookie, sizeof(cookie));
         ulfius_add_header_to_response(res, "Set-Cookie", cookie);
     }
     json_t *o = json_object();
     json_object_set_new(o, "ok", json_true());
     json_object_set_new(o, "name", json_string(name));
+    if (from_none) {
+        json_object_set_new(o, "tokens_revoked", json_boolean(revoked));
+        json_object_set_new(o, "camera_key_rotated", json_boolean(rotated));
+    }
     if (changing_owner && wipe && !strcmp(wipe, "1")) {
         json_t *w = json_object();
         json_object_set_new(w, "ok", json_boolean(!wipe_failed));

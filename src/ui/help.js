@@ -388,7 +388,7 @@ var HELP = {
     t: 'Remote access',
     d: 'usage/control-panel/#system',
     p: [
-      'SSH is off at every boot. Turn it on here when you need a shell; it stays on until the next reboot and then is off again. Your panel name and password open it. Root has no password and cannot log in over SSH; use su from your account at the console or over SSH.',
+      'SSH is off at every boot. Turn it on here when you need a shell; it stays on until the next reboot and then is off again. Your panel name and password open it. Root has no password and cannot log in over SSH, but su from your account gives root without one, and root can change anything in the machine’s software, so share your account’s password only with people you would trust with the machine. The laser still fires only after someone presses the machine’s button with the lid closed.',
       'A development image keeps SSH on at every boot, with root login, for the bench.'
     ]
   },

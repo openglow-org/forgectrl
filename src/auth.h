@@ -38,7 +38,8 @@ int auth_loopback_ok(const struct _u_request *req, struct _u_response *res);
 /* The origin checks alone: the pages and the login itself, which must
  * answer before any session exists and whatever panel_open_reads says. */
 int auth_origin_ok(const struct _u_request *req, struct _u_response *res);
-/* Whether the request carries a valid login session cookie. */
+/* Whether the request carries a valid login session cookie, from the
+ * address that session logged in from. */
 int auth_session_ok(const struct _u_request *req);
 /* Whether the peer is this host (the init scripts, forgetest on the
  * board, the controllers). */
@@ -70,7 +71,16 @@ int auth_write_permitted_cap(const struct _u_request *req, const char *cap);
  * exist for browsers; a page cannot put the header on a cross-origin
  * request. */
 void auth_route_begin(const char *cap, int plain_http);
+/* The route's method and path as the route table names them (after
+ * auth_route_begin): while no account exists, the panel token alone
+ * writes on the setup page's own routes and on no other. */
+void auth_route_at(const char *method, const char *path);
 void auth_route_end(void);
+/* A write route on the plain listener, reached from off this host: a
+ * scoped token the request presents is judged as plain HTTP (refused,
+ * and the log names it). Returns 1 when that answered the request, 0
+ * when it presents none (the caller sends it to HTTPS). */
+int auth_plain_write_refused(const struct _u_request *req, struct _u_response *res);
 
 /* Who the guard let in, on this request's thread: the extension host's
  * own credential (whose word about a package id is the only one taken),
@@ -78,6 +88,10 @@ void auth_route_end(void);
  * camera key, or an open read. */
 int auth_by_host(void);
 int auth_by_scoped(void);
+/* The panel token passed because no account exists and the route is
+ * one the setup page calls then (no session, no loopback, no dev
+ * image). */
+int auth_by_setup(void);
 
 /* A camera request from the panel itself (a session, or the panel
  * token) or from the extension host on this machine (its client header,

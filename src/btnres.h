@@ -31,16 +31,25 @@
 /* The packages turned off on the control panel that are remembered. */
 #define BTNRES_BAR_MAX 32
 
+/* The Setup page's own wait for the acceptance press (wiz.c): it
+ * withholds every job, and no route reaches it by name. */
+#define BTNRES_SETUP "setup:press"
+
 /* Open @who's reservation for @ttl_s seconds (at most BTNRES_TTL_MAX_S),
  * or renew it. @who names one prompt: "panel:<nonce>" (one hold dialog,
- * the nonce 1 to BTNRES_NONCE_MAX of letters, digits, '-' and '_') or
+ * the nonce 1 to BTNRES_NONCE_MAX of letters, digits, '-' and '_'),
  * "check:<package>" (a package's check prompt, one at a time; that
- * package's own jobs are not withheld, btnres_pkg_holds). It ends a
+ * package's own jobs are not withheld, btnres_pkg_holds) or BTNRES_SETUP
+ * (the Setup page's press). It ends a
  * package's ask that stands: the operator's own prompt comes first.
  * 0, or -1 with the reason (a name it cannot take, every slot in use). */
 int btnres_open(const char *who, double ttl_s, char *why, size_t len);
 /* Whether @who has one of those forms. */
 int btnres_name_ok(const char *who);
+/* Move the end of @who's reservation to @ttl_s seconds from now (at
+ * most BTNRES_TTL_MAX_S), only while it stands: 0, or -1 for one that has
+ * ended, which stays ended. */
+int btnres_renew(const char *who, double ttl_s);
 /* End @who's reservation, and no other. */
 void btnres_close(const char *who);
 /* 1 while @who's reservation stands ("ask:<package>" names a package's

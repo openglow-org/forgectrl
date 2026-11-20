@@ -791,7 +791,7 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
         return NULL;
     }
     /* The bundle is a picture of the machine at rest: whatever has the
-     * machine refuses it, and an export in progress refuses them. */
+     * machine refuses it, and the staging refuses them until it is done. */
     if (lease_take("logs.export", LEASE_EXPORT, NULL, err, errlen) != 0) {
         pthread_mutex_unlock(&export_mu);
         return NULL;
@@ -986,6 +986,10 @@ logs_export_t *logs_export_begin(int sanitize, void (*settings_cb)(FILE *),
                  strerror(errno));
         goto fail;
     }
+    /* The picture of the machine at rest is taken: the archive streams
+     * from the staged copy, so the machine is free again however slowly
+     * the client reads it. One export at a time still. */
+    lease_release("logs.export");
     return e;
 
 fail_stage:
@@ -1028,5 +1032,4 @@ void logs_export_end(logs_export_t *e)
     pthread_mutex_lock(&export_mu);
     export_busy = 0;
     pthread_mutex_unlock(&export_mu);
-    lease_release("logs.export");
 }

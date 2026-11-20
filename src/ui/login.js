@@ -19,8 +19,17 @@
   /* Where the login returns to: the same-origin path that sent the
    * browser here (?next=, kept with any fragment), else the panel. */
   function nextPath() {
-    var n = new URLSearchParams(location.search).get('next') || '/';
+    var n = new URLSearchParams(location.search).get('next') || '/',
+      u;
     if (n.charAt(0) !== '/' || n.charAt(1) === '/' || n.charAt(1) === '\\') n = '/';
+    /* Resolved as the browser will resolve it (which strips tabs and
+     * newlines): anywhere but this origin is the panel instead. */
+    try {
+      u = new URL(n, location.origin);
+    } catch (e) {
+      u = null;
+    }
+    n = u && u.origin === location.origin ? u.pathname + u.search + u.hash : '/';
     if (location.hash && n.indexOf('#') < 0) n += location.hash;
     return n;
   }

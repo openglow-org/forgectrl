@@ -307,6 +307,13 @@ static void ask_cases(void)
     CHECK(!strcmp(ask(ASKER), "409 the check of " OTHER " asks for the button"),
           "an ask under a check's reservation: refused by name (%s)", ask(ASKER));
     btnres_close("check:" OTHER);
+    /* The Setup page's reservation: a renewal moves a standing one's end and
+     * never opens one that ended. */
+    CHECK(btnres_open(BTNRES_SETUP, BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0 && btnres_renew(BTNRES_SETUP, 5.0) == 0 &&
+          btnres_stands(BTNRES_SETUP), "the Setup page's reservation is renewed while it stands");
+    btnres_close(BTNRES_SETUP);
+    CHECK(btnres_renew(BTNRES_SETUP, 5.0) == -1 && !btnres_stands(BTNRES_SETUP),
+          "a renewal of the ended reservation opens nothing");
 
     /* It reserves the button against every job, and is in force only once
      * that has stood on file for BTNRES_READY_S. */

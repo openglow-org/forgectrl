@@ -8,9 +8,10 @@
  * one act that proves a person is at the machine, which no network
  * client can fake. This module waits for the release-to-press edge on
  * EV_SW bit 2 by polling the switch state (no grab, so the controller
- * is undisturbed; no controller runs during the wait in any case). A
- * button already held when the wait starts does not count: the wait
- * needs a release first, so a wedged button cannot accept anything.
+ * is undisturbed). A button already held when the wait starts does not
+ * count: the wait needs a release first, so a wedged button cannot
+ * accept anything. The wait's judge (button.h) says when a press may
+ * count and when the wait ends for somebody else.
  */
 #define _GNU_SOURCE
 #include "button.h"
@@ -31,6 +32,9 @@
 #define POLL_MS 40
 
 enum { B_IDLE, B_WAITING, B_PRESSED, B_TIMEOUT, B_CANCELLED };
+
+int (*button_wait_judge)(int at_press) = NULL;
+void (*button_wait_ended)(void) = NULL;
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static int state = B_IDLE;
@@ -65,6 +69,15 @@ int button_held(void)
     return read_button() == 1;
 }
 
+/* How long a press must still be held after it is first read: POLL_MS,
+ * or a host test's longer one (GF_PRESS_DEBOUNCE_MS), which lets a test
+ * place the press's judgment after a moment it chooses. */
+static int debounce_ms(void)
+{
+    const char *v = ff_test_hook("GF_PRESS_DEBOUNCE_MS");
+    return v && atoi(v) > 0 ? atoi(v) : POLL_MS;
+}
+
 static void sleep_ms(int ms)
 {
     struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
@@ -94,19 +107,30 @@ static void *wait_thread(void *arg)
         }
         if (elapsed_ms(&t0) >= (long long)timeout_s * 1000)
             break;
+        int j = button_wait_judge ? button_wait_judge(0) : 1;
+        if (j < 0) {
+            result = B_CANCELLED;
+            break;
+        }
         int b = read_button();
-        if (b == 0)
+        if (j == 0)
+            released = 0;       /* not in force yet: a press counts from a release read in force */
+        else if (b == 0)
             released = 1;
         else if (b == 1 && released) {
-            /* Debounce: still held two polls later. */
-            sleep_ms(POLL_MS);
+            /* Debounce: still held a poll later (a host test's longer
+             * wait, GF_PRESS_DEBOUNCE_MS). */
+            sleep_ms(debounce_ms());
             if (read_button() == 1) {
-                result = B_PRESSED;
+                result = button_wait_judge && button_wait_judge(1) <= 0 ? B_CANCELLED : B_PRESSED;
                 break;
             }
         }
         sleep_ms(POLL_MS);
     }
+    /* Before the state leaves "waiting", so no new wait starts under it. */
+    if (button_wait_ended)
+        button_wait_ended();
     pthread_mutex_lock(&mu);
     state = result;
     pthread_mutex_unlock(&mu);

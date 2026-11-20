@@ -101,6 +101,8 @@ int setup_acceptance_pressed(void);
 int setup_on_demand_accept(const char *doc_id, const char *hash, const char *method);
 int setup_set_account(const char *name, long uid);
 int setup_clear_account(void);
+/* 1 when the record names an account (users.h, users_fault). */
+int setup_account_named(void);
 int setup_set_machine(json_t *machine);   /* takes a reference */
 /* The machine the record was made on, by its sheet id (sheetid.h: the
  * serial never stands in the record). Takes a reference to @facts (the

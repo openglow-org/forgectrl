@@ -35,7 +35,7 @@
 #   /ext/call with extensions off, a package check that is no wizard,
 #   /wiz/changed, and the menu GET /wiz carries
 #   the write routes without the token, an upload (nothing staged), a
-#     4 MiB body, and the
+#     4 MiB field (no answer, the daemon still serving), and the
 #     fuse view without the token; the Host, Origin and Sec-Fetch-Site
 #     checks on a read
 #   the license bundle (FORGECTRL_LICENSES, a fixture in the image's
@@ -72,11 +72,13 @@
 #     stand-in refuses /dev/urandom while a flag file stands) is a JSON
 #     500; the reset of every setting, an unsigned
 #     install and the fuse view each refuse 403 with the button up; under
-#     an armed job the reset, the unsigned install, /ext/key, /ext/install
-#     and the fuse view each answer 409 before the button is asked for, and
-#     so do the fuse view beside a paused or a running GRBL job, the fuse
-#     view and the reset while the GRBL controller's state file says it is
-#     arming, the fuse view beside a state file past its age, and the reset
+#     an armed job the reset, the unsigned install, /ext/key, /ext/install,
+#     the fuse view and the Setup page's press each answer 409 before the
+#     button is asked for, and so do the fuse view beside a paused or a
+#     running GRBL job, the fuse view, the reset and the Setup page's press
+#     while the GRBL controller's state file says it is arming (neither
+#     refused press reserving the button), the fuse view beside a state
+#     file past its age, and the reset
 #     with the next boot on the other slot; with the
 #     button held the reset is still refused under the lease, on a machine
 #     that is not idle, and outside the panel's reservation of the button,
@@ -91,7 +93,17 @@
 #     the reset is refused with a request that cannot be written or a
 #     reboot that cannot be scheduled, leaving no request; then it is
 #     taken, its request written and the reboot scheduled, and on=0 ends
-#     the reservation; a package's ask for a press (POST /button/ask):
+#     the reservation; the Setup page's press with no job reserves the
+#     button (the verdict's button_reserved), its poll says not ready at
+#     the first verdict that carries it and ready about a second after,
+#     not ready while an armed session is reported, a press made once a
+#     GRBL job came to wait ends the wait unpressed with the job named, the
+#     reservation stands after that press and then ends, a job come to wait
+#     before it is in force ends the wait and does not write the button's
+#     light (the LED stand-in, GF_LED_ROOT), a taken press's
+#     reservation stands 4.8 s on and is gone by 7 s, the poll renews it
+#     past its renewal (GF_PRESS_RES_S), and a cancel ends the wait and the
+#     reservation at once; a package's ask for a press (POST /button/ask):
 #     the extension host's call alone (403), refused while a job waits for
 #     its press or is inside its armed window (409, in the routes' words),
 #     else reserved (the verdict's button_reserved, fire blocked), ready
@@ -190,6 +202,7 @@ launch_daemon() {
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
         GF_DATA_STATE="${DATA_STATE:-}" GF_SLOT_LIST="${SLOT_LIST:-}" GF_REBOOT_FILE="${REBOOT_FILE:-}" \
         LD_PRELOAD="${PRELOAD:-}" SWSHIM_NO_URANDOM="$T/no-urandom" \
+        GF_PRESS_RES_S="${PRESS_RES_S:-}" GF_LED_ROOT="$T/leds" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -210,7 +223,8 @@ stop_daemon() {
 # the probe write, the three fan duties, no head accelerometer; the
 # switch word with the lid chain closed (bit 3) and the interlock loop
 # closed (bit 5 clear); the pulse device a plain file.
-mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head"
+mkdir -p "$T/data" "$T/run" "$T/bin" "$SYS/cnc" "$SYS/thermal" "$SYS/head" \
+         "$T/leds/button_led_1" "$T/leds/button_led_2" "$T/leds/button_led_3"
 echo idle > "$SYS/cnc/state"
 for a in cnc/stop cnc/laser_latch cnc/laser_latch_cooling cnc/enable cnc/disable cnc/halt cnc/streaming \
          head/air_assist_pwm head/safe thermal/exhaust_pwm thermal/intake_pwm thermal/tec_on thermal/water_pump_on; do
@@ -469,8 +483,16 @@ if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
     ok "an upload without the token: 403, authentication required"
 else bad "an upload without the token -> $code $(cat "$T/body")"; fi
 [ ! -e "$T/data/upload.fw" ] && ok "and nothing is staged" || bad "an upload without the token staged data/upload.fw"
+curl -s -o /dev/null -X POST -H "X-ForgeFIRM-Token: $TOKEN" -F "file=@$T/small;filename=update.fw" "$URL/update/uploadX"
+[ ! -e "$T/data/upload.fw" ] && ok "an upload to /update/uploadX with the token stages nothing" \
+    || bad "an upload to /update/uploadX staged data/upload.fw"
 head -c 4194304 /dev/zero | tr '\0' a | sed 's/^/x=/' > "$T/big"
-expect 403 "$(post /settings - --data-binary @"$T/big")" "a 4 MiB settings body without the token is 403"
+# One field of 4 MiB is over the form bounds: the request ends with no
+# answer (curl reports its 100 Continue, or nothing).
+case $(post /settings - --data-binary @"$T/big") in
+    000|100) ok "a 4 MiB settings body without the token ends with no answer" ;;
+    *) bad "a 4 MiB settings body was answered: $(head -c 200 "$T/body")" ;;
+esac
 expect 200 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/status")" "GET /status is 200 after it"
 code=$(curl -s -o "$T/body" -w '%{http_code}' "$URL/fuse-identity")
 if [ "$code" = 403 ] && grep -q 'authentication required' "$T/body"; then
@@ -607,8 +629,8 @@ SEC=$(cat "$T/ctl.secret")
 
 echo "== the page and the reads beside it"
 expect 200 "$(curl -s -D "$T/page.h" -o "$T/page.html" -w '%{http_code}' "$URL/")" "GET / is 200"
-tr -d '\r' < "$T/page.h" | grep -qix "content-security-policy: frame-src 'none'" \
-    && ok "its Content-Security-Policy is frame-src 'none'" \
+tr -d '\r' < "$T/page.h" | grep -qix "content-security-policy: frame-src 'none'; frame-ancestors 'self'" \
+    && ok "its Content-Security-Policy is frame-src 'none'; frame-ancestors 'self'" \
     || bad "its Content-Security-Policy is '$(tr -d '\r' < "$T/page.h" | grep -i '^content-security-policy')'"
 grep -qF "$TOKEN" "$T/page.html" && ok "the page carries the panel token" || bad "the page lacks the panel token"
 grep -q -e '<link ' -e '<script src=' "$T/page.html" && bad "the page references an external asset" \
@@ -986,7 +1008,8 @@ cc -shared -fPIC -O2 -o "$T/swshim.so" "$T/swshim.c" -ldl || fatal "the switch s
 printf 'booted.root=/dev/mmcblk2p1\nslot.a.device=/dev/mmcblk2p1\nslot.a.present=yes\nslot.a.booted=yes\nslot.a.next=yes\n' \
     > "$T/slots.list"
 OLD=$(cat "$T/ctl.secret")
-SWITCH_DEV="$T/switches" PRELOAD="$T/swshim.so" SLOT_LIST="$T/slots.list" REBOOT_FILE="$T/reboot" start_daemon
+SWITCH_DEV="$T/switches" PRELOAD="$T/swshim.so" SLOT_LIST="$T/slots.list" REBOOT_FILE="$T/reboot" \
+    PRESS_RES_S=2.5 start_daemon
 until_ok 150 eval '[ "$(cat "$T/ctl.secret")" != "$OLD" ]' || fatal "no controller started beside the button's stand-in"
 SEC=$(cat "$T/ctl.secret")
 # armed <1|0>: the controller's report, its armed window open or closed
@@ -1013,6 +1036,9 @@ os.replace(tmp, sys.argv[1])
 EOF
 }
 getfuse() { curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/fuse-identity"; }
+# The published verdict's button_reserved, after the engine's next tick.
+vreserved_now() { sleep 1.2; python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("button_reserved"))' \
+                      "$T/run/cooling.state" 2>&1; }
 WAITS='a job waits for the button press: cancel it first'
 gstate Idle
 echo unsigned > "$T/data/upload.fw"
@@ -1047,6 +1073,8 @@ expect "409|$WAITS" "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(
     "POST /ext/key under an armed job: 409, a job waits"
 expect "409|$WAITS" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" "POST /ext/install under an armed job: 409, a job waits"
 expect "409|$WAITS" "$(getfuse)|$(cat "$T/body")" "GET /fuse-identity under an armed job: 409, a job waits"
+expect "409|$WAITS" "$(post /wiz/advisories/press "$TOKEN")|$(jv 'd.get("error")')" \
+    "the Setup page's press under an armed job: 409, a job waits"
 armed 0
 # A GRBL job paused with its window closed: the controller's state file says so.
 gstate Hold
@@ -1060,6 +1088,9 @@ gstate Idle arming
 expect "409|$WAITS" "$(getfuse)|$(cat "$T/body")" "GET /fuse-identity while the GRBL state file says arming: 409, a job waits"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "409|$WAITS" "$code|$(jv 'd.get("error")')" "and the reset: 409, a job waits"
+expect "409|$WAITS" "$(post /wiz/advisories/press "$TOKEN")|$(jv 'd.get("error")')" \
+    "and the Setup page's press: 409, a job waits"
+expect False "$(vreserved_now)" "neither refused press reserved the button"
 # A live controller that stopped writing its state file: what it last
 # said (Idle) is not known, and a job could be waiting for the press.
 gstale() {
@@ -1214,6 +1245,115 @@ until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "with the dialog's reservati
 # button, a reservation against every job from then on, and the press said
 # once to the package that asked.
 echo 8 > "$T/switches"
+# The Setup page's own press reserves the button for its whole wait, so
+# no job takes the press made for it: the verdict carries the
+# reservation, the poll says ready once it is on file, a job that comes
+# to wait meanwhile takes the press away from the page (the wait ends,
+# the job named), the reservation stands 5 s after that press, and a
+# cancel ends it.
+# (This daemon renews the press's reservation for GF_PRESS_RES_S=2.5 s; the
+# GRBL state file is written again before each wait, as the live
+# controller keeps it current.)
+mono_ms() { python3 -c 'import time; print(int(time.monotonic() * 1000))'; }
+gstate Idle
+# Asked just after an engine tick wrote the verdict, so the reservation
+# reaches the file about a second after the ask: the second on file, not
+# the wait's own first second, is what holds the press back then.
+python3 -c 'import os, sys, time
+p = sys.argv[1]; m = os.stat(p).st_mtime_ns; end = time.monotonic() + 3
+while os.stat(p).st_mtime_ns == m and time.monotonic() < end: time.sleep(0.01)' "$T/run/cooling.state"
+expect "200|False" "$(post /wiz/advisories/press "$TOKEN")|$(jv 'd.get("ready")')" \
+    "the Setup page asks for the press with no job: 200, not ready yet"
+# In force only once the reservation has stood in the published verdict
+# for its second: not ready at the first verdict that carries it, ready no
+# sooner than about a second after.
+until_ok 50 eval '[ "$(vreserved)" = True ]' && ok "the verdict carries the press's reservation" \
+    || bad "the Setup page's wait reserved nothing: $(vreserved)"
+T1=$(mono_ms)
+expect "200|False" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("ready")')" \
+    "at the first verdict that carries it: not ready"
+until_ok 30 eval '[ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv "d.get(\"ready\")")" = "200|True" ]' \
+    || bad "the press never came ready: $(cat "$T/body")"
+T2=$(mono_ms)
+# 700 ms: the second on file less what this poll of the verdict can lag
+[ $((T2 - T1)) -ge 700 ] && ok "ready $((T2 - T1)) ms after the verdict first carried it (1 s on file)" \
+    || bad "ready only $((T2 - T1)) ms after the verdict first carried it"
+press_ready() { [ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("ready")')" = "200|True" ]; }
+# Not ready while a controller reports its armed session (a cloud print that
+# came to wait dark under the reservation): that press would end the wait.
+armed 1
+expect "200|waiting|False" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')|$(jv 'd.get("ready")')" \
+    "an armed session reported meanwhile: still waiting, not ready"
+armed 0
+until_ok 25 press_ready || bad "not ready again after the session: $(cat "$T/body")"
+sleep 0.2                       # the button read released in force
+gstate Idle arming
+echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+until_ok 25 eval '[ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv "d.get(\"button\")")" != "200|waiting" ]'
+expect "200|cancelled|$WAITS" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')|$(jv 'd.get("why")')" \
+    "a press with a job come to wait for its own: the wait ends unpressed, the job named"
+gstate Idle
+expect True "$(vreserved_now)" "and the reservation stands after that press"
+until_ok 35 eval '[ "$(vreserved)" = False ]' && ok "for its 5 s, not the 10 s of the last poll's renewal" \
+    || bad "the press's reservation stands on: $(vreserved)"
+# A job that comes to wait before the reservation is in force keeps the
+# button: the wait ends when it would come in force, the job named, and
+# the button's light is not written: this wait lit no teal. (The light on
+# the LED stand-in is the cooling engine's red flash, which this daemon's
+# missing coolant channels hold up, standing in for whatever lights the
+# button; the engine writes only a button that is not red, so every file
+# is read with its time of writing.)
+redup() { [ "$(cat "$T/leds/button_led_1/target")/$(cat "$T/leds/button_led_1/pulse_on")" = 255/1000 ] \
+              && [ "$(cat "$T/leds/button_led_2/target")$(cat "$T/leds/button_led_3/target")" = 00 ]; }
+until_ok 25 redup || bad "the LED stand-in shows no red flash"
+sleep 1.2                       # a tick of the engine's: the red stands, nothing writes it
+leds() { python3 -c 'import os, sys
+for n in sorted(os.listdir(sys.argv[1])):
+    for a in sorted(os.listdir(os.path.join(sys.argv[1], n))):
+        p = os.path.join(sys.argv[1], n, a)
+        print(n, a, os.stat(p).st_mtime_ns, open(p).read().strip(), end="; ")' "$T/leds"; }
+LIT=$(leds)
+post /wiz/advisories/press "$TOKEN" > /dev/null
+gstate Idle arming
+until_ok 25 eval '[ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv "d.get(\"button\")")" != "200|waiting" ]'
+expect "cancelled|$WAITS" "$(jv 'd.get("button")')|$(jv 'd.get("why")')" \
+    "a job come to wait before the press's reservation was in force: the wait ends, the job named"
+[ "$(leds)" = "$LIT" ] && ok "and the button's light was not written" \
+    || bad "the wait that lit no teal wrote the button's light: $(leds) (was $LIT)"
+gstate Idle
+until_ok 25 eval '[ "$(vreserved)" = False ]' || bad "the ended wait's reservation stands on: $(vreserved)"
+# A press the page takes: the reservation stands its 5 s after it, then
+# ends: reserved 4.8 s after the press, gone by 7 s.
+gstate Idle
+post /wiz/advisories/press "$TOKEN" > /dev/null
+until_ok 50 press_ready || bad "the third wait never came ready: $(cat "$T/body")"
+sleep 0.2
+echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+T3=$(mono_ms)
+until_ok 25 eval '[ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv "d.get(\"button\")")" = "200|pressed" ]' \
+    || bad "the press was not taken: $(cat "$T/body")"
+python3 -c 'import sys, time; time.sleep(max((int(sys.argv[1]) + 4800) / 1000 - time.monotonic(), 0))' "$T3"
+expect True "$(vreserved)" "a taken press: the reservation stands 4.8 s after it (past the last poll's 2.5 s renewal)"
+gone_by() { python3 -c 'import sys, time; sys.exit(time.monotonic() * 1000 > int(sys.argv[1]) + 7000)' "$T3"; }
+until_ok 50 eval 'gone_by && [ "$(vreserved)" = False ]'
+expect "False|yes" "$(vreserved)|$(gone_by && echo yes || echo late)" "and is gone by 7 s after it"
+# The page's poll keeps the reservation past its 2.5 s renewal; the cancel
+# then ends the wait and its reservation at once: the wait reads cancelled
+# as the cancel is answered, and the verdict carries no reservation within
+# 1.5 s, inside the 2.5 s the last poll renewed it for.
+gstate Idle
+post /wiz/advisories/press "$TOKEN" > /dev/null
+for _ in 1 2 3; do gstate Idle; sleep 1; post /wiz/advisories/press/take "$TOKEN" > /dev/null; done
+expect "200|waiting|True" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')|$(vreserved)" \
+    "polled every second for 3 s: still waiting, still reserved"
+post /wiz/advisories/press/cancel "$TOKEN" > /dev/null
+T4=$(mono_ms)
+expect "200|cancelled" "$(curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/wiz/advisories/press")|$(jv 'd.get("button")')" \
+    "the cancel ends the wait at once"
+within() { python3 -c 'import sys, time; sys.exit(time.monotonic() * 1000 > int(sys.argv[1]) + int(sys.argv[2]))' "$T4" "$1"; }
+gone=late
+while within 1500; do [ "$(vreserved)" = False ] && { gone=yes; break; }; sleep 0.1; done
+expect yes "$gone" "and the button is no longer reserved within 1.5 s of the cancel"
 OTHER=org.example.other
 ask() {
     c=$(host /button/ask -d id=$1)

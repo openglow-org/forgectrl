@@ -148,7 +148,9 @@ static int res_pkg_of(const char *who, char *pkg, size_t len)
 static void res_words(const char *who, char *why, size_t len)
 {
     char pkg[BTNRES_PKG_MAX];
-    if (!res_pkg_of(who, pkg, sizeof(pkg)))
+    if (!strcmp(who, BTNRES_SETUP))
+        snprintf(why, len, "the machine waits for a press of the button for its own setup");
+    else if (!res_pkg_of(who, pkg, sizeof(pkg)))
         snprintf(why, len, "the control panel asks for the button");
     else if (who[0] == 'c')
         snprintf(why, len, "the check of %s asks for the button", pkg);
@@ -160,6 +162,8 @@ int btnres_name_ok(const char *who)
 {
     if (!who || strlen(who) >= BTNRES_WHO_MAX)
         return 0;
+    if (!strcmp(who, BTNRES_SETUP))
+        return 1;
     if (!strncmp(who, "panel:", 6))
         return res_nonce_ok(who + 6, strlen(who + 6));
     if (!strncmp(who, "check:", 6))
@@ -226,6 +230,21 @@ int btnres_open(const char *who, double ttl_s, char *why, size_t len)
         snprintf(why, len, "too many prompts reserve the button");
     pthread_mutex_unlock(&res_mu);
     return rc;
+}
+
+int btnres_renew(const char *who, double ttl_s)
+{
+    if (!btnres_name_ok(who) || !(ttl_s > 0))
+        return -1;
+    if (ttl_s > BTNRES_TTL_MAX_S)
+        ttl_s = BTNRES_TTL_MAX_S;
+    double now = res_mono();
+    pthread_mutex_lock(&res_mu);
+    int i = res_find_locked(who, now);
+    if (i >= 0)
+        res_tab[i].until = now + ttl_s;
+    pthread_mutex_unlock(&res_mu);
+    return i >= 0 ? 0 : -1;
 }
 
 void btnres_close(const char *who)

@@ -106,6 +106,7 @@ int main(void)
     expect("cfg password: \"hunter2\" ok", "cfg password: \"<REDACTED>\" ok",
            "quoted password value");
     expect("psk=\"0123456789\"", "psk=\"<REDACTED>\"", "psk value");
+    expect("GET /cam/snapshot?key=0f1e2d3c", "GET /cam/snapshot?key=<REDACTED>", "a key= value");
     expect("re-authenticating for a fresh ws_token",
            "re-authenticating for a fresh ws_token",
            "key words without a value are left alone");
@@ -152,6 +153,8 @@ int main(void)
     printf("blobs:\n");
     expect("sha 5b8e2fbd0a4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d ok",
            "sha <HEX-1> ok", "long hex blob");
+    expect("Bearer-less fft_0123456789abcdef0123456789abcdef used",
+           "Bearer-less fft_<HEX-2> used", "a scoped token's hex after its fft_ prefix");
     expect("addr 0x1234abcd len 16 hex 0123456789abcdef",
            "addr 0x1234abcd len 16 hex 0123456789abcdef",
            "short hex left alone");

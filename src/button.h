@@ -12,6 +12,16 @@
  * live returns -1. The wait runs on its own thread; button_state()
  * reports it. */
 int button_wait_start(int timeout_s);
+/* The wait's judge, asked at every reading with @at_press 0 and once more
+ * at a press with 1: 1 a press may count from here, 0 not yet (the
+ * readings until then count nothing, so a press counts only from a
+ * release read after it says 1), -1 the wait ends "cancelled" (at a
+ * press: the press is not this wait's). NULL: every press counts. */
+extern int (*button_wait_judge)(int at_press);
+/* Called once on the wait's own thread as it ends, however it ends (a
+ * press, its timeout, a cancel, the judge), before button_state() leaves
+ * "waiting". NULL: nothing. */
+extern void (*button_wait_ended)(void);
 /* Cancel a live wait. */
 void button_wait_cancel(void);
 /* "idle" (no wait), "waiting", "pressed", "timeout", "cancelled". */

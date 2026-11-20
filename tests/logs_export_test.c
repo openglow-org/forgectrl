@@ -7,8 +7,9 @@
  * In a scratch data directory and log tree: a panel token and a camera
  * key on file, loaded by auth_init and camkey_init, and an installer log
  * whose line carries both, a MAC address, and an IP address. A sanitized
- * export is staged and read as the route streams it, under the
- * logs.export lease, which the end drops. The archive holds the README,
+ * export is staged under the logs.export lease, which is released once
+ * the staging is done (a second export is still refused while the first
+ * streams), and read as the route streams it. The archive holds the README,
  * the installer's directory with the addresses gone, and the extension
  * list as extpkg_status_json writes it; the token and the camera key are
  * nowhere in it, nor the account's name, which a line written by a
@@ -37,7 +38,8 @@ int fuse_password(char *buf, size_t len) { if (len) buf[0] = '\0'; return -1; }
 int users_exist(void) { return 0; }
 #define ACCOUNT "kerfmaker"
 int users_name(char *buf, size_t len) { snprintf(buf, len, "%s", ACCOUNT); return 0; }
-int session_valid(const char *id) { (void)id; return 0; }
+int users_fault(void) { return 0; }
+int session_valid(const char *id, const char *addr) { (void)id; (void)addr; return 0; }
 int session_from_cookie(const char *cookie, char *id, size_t len) { (void)cookie; (void)id; (void)len; return 0; }
 
 static int failures;
@@ -170,8 +172,12 @@ int main(void)
         nftw(dir, rm_cb, 16, FTW_DEPTH | FTW_PHYS);
         return 1;
     }
-    CHECK(lease_holder(owner, sizeof(owner)) && !strcmp(owner, "logs.export"),
-          "the export holds the logs.export lease");
+    /* Staged: the machine is free while the archive streams, and a second
+     * export still waits for this one. */
+    CHECK(!lease_holder(owner, sizeof(owner)), "the staged export holds no lease while it streams");
+    char err2[160] = "";
+    CHECK(!logs_export_begin(1, NULL, NULL, err2, sizeof(err2)) && !strcmp(err2, "busy"),
+          "a second export while the first streams is refused as busy");
     snprintf(gzpath, sizeof(gzpath), "%s/export.tar.gz", dir);
     FILE *out = fopen(gzpath, "wb");
     char chunk[16384];
@@ -182,7 +188,7 @@ int main(void)
     if (out)
         fclose(out);
     logs_export_end(e);
-    CHECK(!lease_holder(owner, sizeof(owner)), "the end drops the lease");
+    CHECK(!lease_holder(owner, sizeof(owner)), "after the end no lease is held");
 
     /* The archive, as a reader unpacks it. */
     size_t cap = 1 << 20, len = 0;

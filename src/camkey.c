@@ -35,40 +35,43 @@ static void key_path(char *buf, size_t len)
     snprintf(buf, len, "%s/camera.key", ff_data_dir());
 }
 
+/* A new key is made aside and becomes the key only once it is on disk:
+ * a key that could not be written leaves the old one in force, in
+ * memory and in the file alike. */
 static int make_key_locked(void)
 {
     static const char hex[] = "0123456789abcdef";
     unsigned char raw[CAMKEY_HEX / 2];
+    char fresh[CAMKEY_HEX + 1];
     int fd = open("/dev/urandom", O_RDONLY);
     if (fd < 0 || read(fd, raw, sizeof(raw)) != (ssize_t)sizeof(raw)) {
         if (fd >= 0)
             close(fd);
-        key[0] = '\0';
-        fflog(LOG_ERR, "camkey: cannot read /dev/urandom - camera key unavailable");
+        fflog(LOG_ERR, "camkey: cannot read /dev/urandom - no new camera key");
         return -1;
     }
     close(fd);
     for (size_t i = 0; i < sizeof(raw); i++) {
-        key[i * 2] = hex[raw[i] >> 4];
-        key[i * 2 + 1] = hex[raw[i] & 0xf];
+        fresh[i * 2] = hex[raw[i] >> 4];
+        fresh[i * 2 + 1] = hex[raw[i] & 0xf];
     }
-    key[CAMKEY_HEX] = '\0';
+    fresh[CAMKEY_HEX] = '\0';
 
     char path[256], tmp[264];
     key_path(path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     mkdir(ff_data_dir(), 0755);
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    int ok = fd >= 0 && write(fd, key, CAMKEY_HEX) == CAMKEY_HEX &&
+    int ok = fd >= 0 && write(fd, fresh, CAMKEY_HEX) == CAMKEY_HEX &&
              write(fd, "\n", 1) == 1 && fsync(fd) == 0;
     if (fd >= 0)
         close(fd);
     if (!ok || rename(tmp, path) != 0) {
         unlink(tmp);
-        key[0] = '\0';
-        fflog(LOG_ERR, "camkey: cannot persist the camera key");
+        fflog(LOG_ERR, "camkey: cannot persist a new camera key; the key in force stays");
         return -1;
     }
+    memcpy(key, fresh, sizeof(fresh));
     return 0;
 }
 
@@ -93,9 +96,14 @@ void camkey_init(void)
     pthread_mutex_unlock(&mu);
 }
 
+/* The caller's own copy, taken under the lock a rotation holds. */
 const char *camkey_get(void)
 {
-    return key;
+    static __thread char copy[CAMKEY_HEX + 1];
+    pthread_mutex_lock(&mu);
+    memcpy(copy, key, sizeof(copy));
+    pthread_mutex_unlock(&mu);
+    return copy;
 }
 
 int camkey_rotate(void)

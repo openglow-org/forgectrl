@@ -54,9 +54,10 @@
 
 #define VALID_DAYS 820              /* under the 825-day leaf limit */
 
-/* NORMAL's protocols, key exchanges, and signatures; its ciphers,
- * reordered, with the server's order deciding. */
-#define PRIORITIES "NORMAL:%SERVER_PRECEDENCE:-CIPHER-ALL:+CHACHA20-POLY1305:" \
+/* NORMAL's key exchanges and signatures, and its protocols from TLS 1.2
+ * up whatever the GnuTLS build allows; its ciphers, reordered, with the
+ * server's order deciding. */
+#define PRIORITIES "NORMAL:%SERVER_PRECEDENCE:-VERS-TLS1.0:-VERS-TLS1.1:-CIPHER-ALL:+CHACHA20-POLY1305:" \
                    "+AES-128-GCM:+AES-256-GCM:+AES-256-CCM:+AES-128-CCM:"      \
                    "+AES-256-CBC:+AES-128-CBC"
 

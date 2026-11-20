@@ -61,9 +61,18 @@ def closed_caps():
     return set(re.findall(r'"([^"]+)"', re.search(r'CAPS\[\] = \{(.*?)\};', read('src/tokens.c'), re.S).group(1)))
 
 
+def host_only():
+    """The capability of a route the extension host alone reaches
+    (TOKENS_HOST_ONLY in tokens.h): in no closed list."""
+    return re.search(r'#define TOKENS_HOST_ONLY "([^"]+)"', read('src/tokens.h')).group(1)
+
+
 def resolves(cap, closed):
     """Whether the guards can judge a route's capability (auth.c): one of
-    the list, "camera" for the camera the request names, or a prefix.any."""
+    the list, "camera" for the camera the request names, a prefix.any, or
+    the host's own, which no operator's token holds."""
+    if cap == host_only():
+        return cap not in closed
     if cap == 'camera':
         return {'camera.lid', 'camera.head'} <= closed
     if cap.endswith('.any'):

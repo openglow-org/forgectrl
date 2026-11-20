@@ -64,6 +64,7 @@
 #include "led.h"
 #include "logs.h"
 #include "paths.h"
+#include "peer.h"
 #include "senslog.h"
 #include "session.h"
 #include "settings.h"
@@ -87,12 +88,14 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -103,6 +106,25 @@
 #include <zlib.h>
 
 #define DEFAULT_PORT 80             /* HTTP: the read-only routes, this host, the redirect */
+/* Each listener's connection slots, and the most one address holds. The
+ * peers off this host hold no more than HTTP_LAN_SLOTS of them, so this
+ * host's clients (the controllers' cooling reports, the extension host,
+ * the init scripts) find one while the LAN holds its share: their
+ * reserve is one address's limit, and a LAN connection past the share
+ * holds a slot for the moment its thread takes to shut it down. */
+#define HTTP_SLOTS 64
+#define HTTP_SLOTS_PER_ADDR 16
+#define HTTP_LAN_SLOTS (HTTP_SLOTS - HTTP_SLOTS_PER_ADDR)
+/* A connection that sends and receives nothing for this long is closed.
+ * Longer than the longest route found to answer late, a package from the
+ * catalog: the host's index (EXTPKG_TIMEOUT_S), the fetch
+ * (EXTPKG_PKG_FETCH_S) and the inspection (EXTPKG_TIMEOUT_S), 360 s in
+ * all; a stream writes far more often (the event stream's keep-alive is
+ * 5 s). */
+#define HTTP_IDLE_S 420
+_Static_assert(HTTP_IDLE_S > 2 * EXTPKG_TIMEOUT_S + EXTPKG_PKG_FETCH_S,
+               "the idle timeout must outlast a package fetched from the catalog");
+#define HTTP_FIELD_MAX (16 * 1024)  /* the longest form field a request may carry */
 #define DEFAULT_TLS_PORT 443        /* HTTPS: the login, the panel, every state change */
 #define BOUNDARY     "forgectrl-frame"
 #define SNAP_Q_DEF   75
@@ -1306,11 +1328,14 @@ static int cb_ext_settings(const struct _u_request *req, struct _u_response *res
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    const char *patch = setting_param(req, "set");
+    /* A GET reads; a change is a POST. */
+    if (patch && strcmp(req->http_verb, "POST"))
+        return reply_error(res, 405, "a change of a package's settings is a POST");
     if (!settings_get_bool("ext_enabled", 0))
         return reply_error(res, 409, "extensions are off");
     char why[300];
     int status = 500;
-    const char *patch = setting_param(req, "set");
     char *doc = extpkg_settings_json(setting_param(req, "id"), patch, &status, why, sizeof(why));
     if (!doc)
         return reply_error(res, (unsigned)status, why[0] ? why : "no settings");
@@ -1676,11 +1701,18 @@ static int cb_ext_catalog_get(const struct _u_request *req, struct _u_response *
 }
 
 /* The one file sink the framework has: every multipart file part of
- * every request lands here, and each owner knows its own route. */
+ * every request lands here, and each owner knows its own route. On the
+ * plain listener (user_data is plain_listener) a part from off this
+ * host touches nothing: the route sends such a request to HTTPS, and a
+ * staged upload would hold its sink's slot for nothing. */
+static int plain_listener;
+
 static int upload_sink(const struct _u_request *req, const char *key, const char *filename,
                        const char *content_type, const char *transfer_encoding,
                        const char *data, uint64_t off, size_t size, void *user_data)
 {
+    if (user_data == &plain_listener && !auth_peer_local(req))
+        return U_OK;
     if (jobpost_sink(req, key, data, off, size))
         return U_OK;
     if (ext_upload_sink(req, data, off, size))
@@ -2968,8 +3000,9 @@ static const char *page_html(int which)
  * can still navigate its frame to another address and carry what it was
  * shown in the URL. Navigating a frame is the embedding page's to allow,
  * so the pages allow no frame to go anywhere. A srcdoc frame still renders
- * under it; no page of the panel frames anything else. */
-#define PAGE_POLICY "frame-src 'none'"
+ * under it; no page of the panel frames anything else. No page of another
+ * origin may frame the panel's (frame-ancestors). */
+#define PAGE_POLICY "frame-src 'none'; frame-ancestors 'self'"
 
 static int serve_page(struct _u_response *res, int which)
 {
@@ -3060,7 +3093,9 @@ static int cb_login_page(const struct _u_request *req, struct _u_response *res,
     (void)user_data;
     if (!auth_origin_ok(req, res))
         return U_CALLBACK_COMPLETE;
-    if (!users_exist())
+    /* An account record in fault is no machine without an account: the
+     * login page stays, and "/" would send the browser back here. */
+    if (!users_exist() && !users_fault())
         return redirect_to(res, "/");
     if (auth_session_ok(req)) {
         const char *next = u_map_get(req->map_url, "next");
@@ -3106,7 +3141,7 @@ static int cb_login(const struct _u_request *req, struct _u_response *res,
     }
     login_succeeded(peer);
     char sid[SESSION_ID_HEX + 1], cookie[256];
-    if (session_create(name, sid, sizeof(sid)) != 0)
+    if (session_create(name, peer, sid, sizeof(sid)) != 0)
         return login_reply(res, 500, "{\"error\":\"cannot create a session\"}");
     session_cookie_set(sid, cookie, sizeof(cookie));
     ulfius_add_header_to_response(res, "Set-Cookie", cookie);
@@ -3219,6 +3254,27 @@ static const char *licenses_path(void)
     return p && *p ? p : LICENSES_BUNDLE;
 }
 
+/* The bundle streams from the file, a few downloads at a time: an open
+ * read route reaches it from the LAN, and each download costs a read of
+ * the whole file. */
+#define LICENSES_STREAMS 2
+static atomic_int licenses_streams;
+
+static ssize_t licenses_stream_cb(void *cls, uint64_t pos, char *buf, size_t max)
+{
+    (void)pos;
+    size_t n = fread(buf, 1, max, (FILE *)cls);
+    if (n == 0)
+        return ferror((FILE *)cls) ? U_STREAM_ERROR : U_STREAM_END;
+    return (ssize_t)n;
+}
+
+static void licenses_stream_free(void *cls)
+{
+    fclose((FILE *)cls);
+    atomic_fetch_sub(&licenses_streams, 1);
+}
+
 static int cb_licenses(const struct _u_request *req, struct _u_response *res,
                        void *user_data)
 {
@@ -3235,16 +3291,11 @@ static int cb_licenses(const struct _u_request *req, struct _u_response *res,
         fclose(f);
         return reply_error(res, 500, "the license bundle has an unexpected size");
     }
-    char *buf = malloc((size_t)n);
-    if (!buf) {
+    if (atomic_fetch_add(&licenses_streams, 1) >= LICENSES_STREAMS) {
+        atomic_fetch_sub(&licenses_streams, 1);
         fclose(f);
-        return reply_error(res, 500, "out of memory");
-    }
-    size_t got = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-    if (got != (size_t)n) {
-        free(buf);
-        return reply_error(res, 500, "cannot read the license bundle");
+        ulfius_add_header_to_response(res, "Retry-After", "10");
+        return reply_error(res, 503, "the license bundle is being downloaded already; try again shortly");
     }
     char fwver[48], fn[128];
     read_fw_version(fwver, sizeof(fwver));
@@ -3253,17 +3304,43 @@ static int cb_licenses(const struct _u_request *req, struct _u_response *res,
             *p = '_';
     snprintf(fn, sizeof(fn), "attachment; filename=\"forgefirm-licenses-%s.tar.gz\"",
              fwver[0] ? fwver : "unknown");
-    ulfius_set_binary_body_response(res, 200, buf, (size_t)n);
-    free(buf);
     ulfius_add_header_to_response(res, "Content-Type", "application/gzip");
     ulfius_add_header_to_response(res, "Content-Disposition", fn);
+    if (ulfius_set_stream_response(res, 200, licenses_stream_cb, licenses_stream_free,
+                                   (uint64_t)n, 64 * 1024, f) != U_OK) {
+        licenses_stream_free(f);
+        return reply_error(res, 500, "cannot send the license bundle");
+    }
     return U_CALLBACK_CONTINUE;
 }
 
 /* The manifest text, pulled out of the bundle into a malloc'd buffer
  * (NUL-terminated; *len excludes it). Returns 0, or -1 with no bundle
- * or no manifest. */
+ * or no manifest. The bundle is the image's and does not change: the
+ * manifest is pulled out once, and each answer is a copy. */
+static pthread_mutex_t manifest_mu = PTHREAD_MUTEX_INITIALIZER;
+static char *manifest_text;
+static size_t manifest_len;
+static int licenses_manifest_pull(char **out, size_t *len);
+
 static int licenses_manifest_read(char **out, size_t *len)
+{
+    *out = NULL;
+    *len = 0;
+    pthread_mutex_lock(&manifest_mu);
+    if (!manifest_text && licenses_manifest_pull(&manifest_text, &manifest_len) != 0)
+        manifest_text = NULL;
+    char *copy = manifest_text ? malloc(manifest_len + 1) : NULL;
+    if (copy) {
+        memcpy(copy, manifest_text, manifest_len + 1);
+        *out = copy;
+        *len = manifest_len;
+    }
+    pthread_mutex_unlock(&manifest_mu);
+    return copy ? 0 : -1;
+}
+
+static int licenses_manifest_pull(char **out, size_t *len)
 {
     *out = NULL;
     *len = 0;
@@ -3623,6 +3700,10 @@ static int cb_logs_export(const struct _u_request *req,
     const char *sv = setting_param(req, "sanitize");
     int sanitize = !(sv && (!strcmp(sv, "0") || !strcmp(sv, "false") ||
                             !strcmp(sv, "no")));
+    /* Before the account, the page's token reaches whoever loads it:
+     * the sanitized bundle alone. */
+    if (!sanitize && auth_by_setup())
+        return reply_error(res, 403, "make the account first: until then the bundle is the sanitized one");
     /* A CPU-bound pass over every log on the single core: not during a
      * cut, where the cooling engine shares the daemon's priority. */
     if (!machine_is_idle())
@@ -3655,10 +3736,13 @@ static int cb_root(const struct _u_request *req, struct _u_response *res,
                    void *user_data)
 {
     (void)user_data;
-    if (!auth_read_ok(req, res))
-        return U_CALLBACK_COMPLETE;
     const char *action = u_map_get(req->map_url, "action");
+    /* The camera aliases are reads; the page has its own checks
+     * (cb_root_page), so closed reads still lead to the login or the
+     * setup. */
     if (action) {
+        if (!auth_read_ok(req, res))
+            return U_CALLBACK_COMPLETE;
         if (!strcmp(action, "stream"))
             return do_stream(CAM_LID, 0, 0, -1, res);
         if (!strcmp(action, "snapshot"))
@@ -3731,6 +3815,7 @@ static int cb_route(const struct _u_request *req, struct _u_response *res, void 
 {
     const struct route *r = user_data;
     auth_route_begin(r->cap, 0);
+    auth_route_at(r->method, r->path);
     int rc = r->cb(req, res, r->ud);
     auth_route_end();
     return rc;
@@ -3740,16 +3825,25 @@ static int cb_route_plain(const struct _u_request *req, struct _u_response *res,
 {
     const struct route *r = user_data;
     auth_route_begin(r->cap, 1);
+    auth_route_at(r->method, r->path);
     int rc = r->cb(req, res, r->ud);
     auth_route_end();
     return rc;
 }
 
+/* A write route on the plain listener: this host's; from anyone else, a
+ * scoped token is judged as one that crossed the network in the clear
+ * (refused, and the log names it), and anything else goes to HTTPS. */
 static int cb_http_local(const struct _u_request *req, struct _u_response *res,
                          void *user_data)
 {
-    if (!auth_peer_local(req))
-        return cb_http_redirect(req, res, NULL);
+    if (!auth_peer_local(req)) {
+        const struct route *r = user_data;
+        auth_route_begin(r->cap, 1);
+        int answered = auth_plain_write_refused(req, res);
+        auth_route_end();
+        return answered ? U_CALLBACK_COMPLETE : cb_http_redirect(req, res, NULL);
+    }
     return cb_route_plain(req, res, user_data);
 }
 
@@ -3786,6 +3880,49 @@ static void mhd_log(void *cls, const char *fmt, va_list ap)
         fflog(LOG_DEBUG, "mhd: %s", msg);
 }
 
+/* The connections each listener holds from off this host (its count is
+ * the callback's cls). One past HTTP_LAN_SLOTS is shut down as it starts,
+ * before it is read: the listener closes it, and its slot is free again.
+ * This host's are never refused here, up to the listener's own limits.
+ * shutdown() ends the connection's traffic and leaves the descriptor to
+ * the listener, which closes it. */
+static atomic_int lan_conns_http, lan_conns_tls;
+
+static void lan_count(void *cls, struct MHD_Connection *c, void **socket_context,
+                      enum MHD_ConnectionNotificationCode code)
+{
+    atomic_int *n = cls;
+    if (code == MHD_CONNECTION_NOTIFY_STARTED) {
+        const union MHD_ConnectionInfo *ci = MHD_get_connection_info(c, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+        int lan = !ci || !peer_is_loopback(ci->client_addr);
+        *socket_context = lan ? (void *)n : NULL;
+        if (lan && atomic_fetch_add(n, 1) >= HTTP_LAN_SLOTS) {
+            const union MHD_ConnectionInfo *fi = MHD_get_connection_info(c, MHD_CONNECTION_INFO_CONNECTION_FD);
+            if (fi)
+                shutdown(fi->connect_fd, SHUT_RDWR);
+        }
+    } else if (code == MHD_CONNECTION_NOTIFY_CLOSED && *socket_context) {
+        atomic_fetch_sub(n, 1);
+        *socket_context = NULL;
+    }
+}
+
+/* The idle timeout, or a host test's shorter one (GF_HTTP_IDLE_S). */
+static unsigned http_idle_s(void)
+{
+    const char *v = ff_test_hook("GF_HTTP_IDLE_S");
+    return v && atoi(v) > 0 ? (unsigned)atoi(v) : HTTP_IDLE_S;
+}
+
+/* The account reset's hold at start, or a host test's shorter one
+ * (GF_RESET_HOLD_S). */
+#define RESET_HOLD_S 10
+static int reset_hold_s(void)
+{
+    const char *v = ff_test_hook("GF_RESET_HOLD_S");
+    return v && atoi(v) > 0 ? atoi(v) : RESET_HOLD_S;
+}
+
 /* Every environment variable the daemon reads, in one place: the start
  * notice names the ones that are set (names only), and test_routes.py
  * holds this list to the sources. The camera and port knobs are on the
@@ -3819,9 +3956,9 @@ static const char *const ENV_OVERRIDES[] = {
  * with the overrides, and the ones set in any other run as ignored.
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
-    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_IIO_ROOT", "GF_LED_ROOT", "GF_LENS_STEP_US",
-    "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RUN_DIR", "GF_SLOT_LIST", "GF_SWITCH_DEV",
-    "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT",
+    "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_HTTP_IDLE_S", "GF_IIO_ROOT", "GF_LED_ROOT",
+    "GF_LENS_STEP_US", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S", "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S", "GF_RUN_DIR", "GF_SLOT_LIST",
+    "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT", "GF_USERS_REPLAY",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
@@ -3981,6 +4118,7 @@ int main(int argc, char **argv)
      * before any thread reads them: an unset hook reads as satisfied. */
     setup_fact_hook = setup_fact;
     setup_fans_hook = setup_fans_counted;
+    users_record_named = setup_account_named;
     /* A reset request still in the folder was not carried out: the boot
      * takes it (forgefirm-data, before anything reads the folder), so one
      * left now would be carried out by some later boot, of whatever image.
@@ -4014,15 +4152,18 @@ int main(int argc, char **argv)
             fflog(LOG_WARNING, "setup: a setup seed on a release image is ignored");
     }
     /* The account reset: the button held through the daemon's start,
-     * for ten seconds, with the LED blinking amber while it counts.
-     * The old password stops working at once; the wizard's account
-     * step runs again. A press that is not a hold costs nothing. */
+     * for ten seconds (RESET_HOLD_S), with the LED blinking amber while
+     * it counts. The old password stops working at once; the wizard's
+     * account step runs again. A press that is not a hold costs nothing. */
     if (button_held()) {
         led_set(LED_BLINK_AMBER);
-        if (button_held_for(10)) {
+        if (button_held_for(reset_hold_s())) {
             users_mark_reset();
             setup_init();
             setup_clear_account();
+            /* A session a restart without a reboot kept is the old
+             * owner's: it goes with the password. */
+            session_end(NULL);
             fflog(LOG_WARNING, "account reset by the button hold at start");
         }
         led_release();
@@ -4039,6 +4180,8 @@ int main(int argc, char **argv)
     btnres_session_reported = cool_armed;
     btnres_on_file_s = cool_button_on_file_s;
     btnres_button = ask_button;
+    button_wait_judge = wiz_press_judge;
+    button_wait_ended = wiz_press_ended;
     extpkg_installed = btnres_ask_unbar;
     wizpkg_on_file_s = cool_button_on_file_s;
     wizpkg_job_waits = job_takes_button;
@@ -4119,8 +4262,8 @@ int main(int argc, char **argv)
         { "GET",  "/motion/state",         cb_motion_state,     NULL, 1, "machine.read" },
         { "POST", "/motion/jog",           cb_motion_jog,       NULL, 0, "motion.jog" },
         { "POST", "/motion/cancel",        cb_motion_cancel,    NULL, 0, "motion.jog" },
-        { "GET",  "/motion/sender",        cb_motion_sender,    NULL, 0, "motion.jog" },
-        { "POST", "/motion/sender",        cb_motion_sender,    NULL, 0, "motion.jog" },
+        { "GET",  "/motion/sender",        cb_motion_sender,    NULL, 0, "host" },
+        { "POST", "/motion/sender",        cb_motion_sender,    NULL, 0, "host" },
         { "POST", "/motion/release",       cb_motion_panel,     "release", 0, NULL },
         { "POST", "/motion/energize",      cb_motion_panel,     "energize", 0, NULL },
         { "POST", "/motion/home",          cb_motion_panel,     "home", 0, NULL },
@@ -4167,6 +4310,7 @@ int main(int argc, char **argv)
         { "POST", "/wiz/advisories/accept", cb_wiz_agree,       NULL, 0, NULL },
         { "POST", "/wiz/advisories/press", cb_wiz_press_start,  NULL, 0, NULL },
         { "GET",  "/wiz/advisories/press", cb_wiz_press_status, NULL, 1, NULL },
+        { "POST", "/wiz/advisories/press/take", cb_wiz_press_take, NULL, 0, NULL },
         { "POST", "/wiz/advisories/press/cancel", cb_wiz_press_cancel, NULL, 0, NULL },
         { "POST", "/wiz/account",          cb_wiz_account,      NULL, 0, NULL },
         { "POST", "/wiz/preferences",      cb_wiz_preferences,  NULL, 0, NULL },
@@ -4216,20 +4360,41 @@ int main(int argc, char **argv)
      * runner).
      * Nothing here reads that raw copy - the form routes read the
      * parsed body map, which the post processor fills either way.
-     * The largest legitimate form body is a settings POST, whose
-     * longest single value is a 180-character dose curve. */
+     *
+     * The form fields are bounded too, before any route or guard runs
+     * (the image's ulfius, patched): a field longer than HTTP_FIELD_MAX
+     * (a key sent more than once counts as its values joined), fields
+     * that together pass the body cap, or more than 256 fields end the
+     * request with no answer, and a field is never cut. The panel's own
+     * settings save carries its keys in the URL query, not in a body;
+     * the longest form fields it sends are a package's settings change
+     * (POST /ext/settings, set=) and a package call's body. */
     inst.max_post_body_size = 64 * 1024;
     tls.max_post_body_size = 64 * 1024;
+    inst.max_post_param_size = HTTP_FIELD_MAX;
+    tls.max_post_param_size = HTTP_FIELD_MAX;
+    /* Every answer: its type is the one it names, and a link followed
+     * from a page sends no address of this machine to another host. */
+    u_map_put(inst.default_headers, "X-Content-Type-Options", "nosniff");
+    u_map_put(inst.default_headers, "Referrer-Policy", "same-origin");
+    if (have_tls) {
+        u_map_put(tls.default_headers, "X-Content-Type-Options", "nosniff");
+        u_map_put(tls.default_headers, "Referrer-Policy", "same-origin");
+    }
     /* The path goes in as the endpoint's url_format, not its url_prefix:
      * ulfius matches both, but fills map_url with the :name parameters
      * of the format only (/advisories/:id). */
+    /* "/" on the HTTP listener: the camera aliases and this host's page,
+     * else HTTPS; through the plain wrapper like every other route there,
+     * so its guards know the request came over plain HTTP. */
+    static const struct route root_http = { "GET", "/", cb_root_http, NULL, 0, NULL };
     for (size_t i = 0; i < sizeof(routes) / sizeof(*routes); i++) {
         const struct route *r = &routes[i];
         if (have_tls)
             ulfius_add_endpoint_by_val(&tls, r->method, NULL, r->path, 0, cb_route, (void *)r);
         if (!strcmp(r->path, "/") && !strcmp(r->method, "GET"))
-            ulfius_add_endpoint_by_val(&inst, "GET", NULL, "/", 0,
-                                       have_tls ? cb_root_http : cb_root, NULL);
+            ulfius_add_endpoint_by_val(&inst, "GET", NULL, "/", 0, cb_route_plain,
+                                       (void *)(have_tls ? &root_http : r));
         else if (r->read_only || !have_tls)
             ulfius_add_endpoint_by_val(&inst, r->method, NULL, r->path, 0, cb_route_plain, (void *)r);
         else
@@ -4240,16 +4405,21 @@ int main(int argc, char **argv)
         ulfius_set_default_endpoint(&inst, cb_http_redirect, NULL);
         ulfius_set_upload_file_callback_function(&tls, &upload_sink, NULL);
     }
-    ulfius_set_upload_file_callback_function(&inst, &upload_sink, NULL);
+    /* With HTTPS up, the plain listener's uploads are this host's alone. */
+    ulfius_set_upload_file_callback_function(&inst, &upload_sink, have_tls ? (void *)&plain_listener : NULL);
 
     /* The flags ulfius computes for this configuration (a thread per
      * connection, its error log, the internal polling thread, dual
      * stack from U_USE_ALL), reproduced verbatim so only the caps are
      * new: a connection ceiling and a per-IP ceiling bound a flood at
      * the accept side (uncapped, a 500-connection flood plateaued at
-     * 379 fds). MHD's own messages (a client that drops a stream, a TLS
-     * handshake a browser probes and abandons) go through fflog at
-     * debug, not to stderr as warnings. */
+     * 379 fds). Peers off this host hold at most HTTP_LAN_SLOTS of a
+     * listener's slots (lan_count), so a LAN client that
+     * holds connections open never shuts out the controllers' cooling
+     * reports, which come from this host; a connection idle for
+     * HTTP_IDLE_S is closed. MHD's own messages (a client that drops a
+     * stream, a TLS handshake a browser probes and abandons) go through
+     * fflog at debug, not to stderr as warnings. */
     struct MHD_OptionItem mhd_ops[] = {
         /* ulfius' own connection plumbing, required by its dispatcher
          * and externalized for exactly this call: the per-request state
@@ -4258,8 +4428,10 @@ int main(int argc, char **argv)
         { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
         { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
         { MHD_OPTION_EXTERNAL_LOGGER, (intptr_t)mhd_log, NULL },
-        { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
-        { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
+        { MHD_OPTION_CONNECTION_LIMIT, HTTP_SLOTS, NULL },
+        { MHD_OPTION_PER_IP_CONNECTION_LIMIT, HTTP_SLOTS_PER_ADDR, NULL },
+        { MHD_OPTION_NOTIFY_CONNECTION, (intptr_t)lan_count, &lan_conns_http },
+        { MHD_OPTION_CONNECTION_TIMEOUT, (intptr_t)http_idle_s(), NULL },
         { MHD_OPTION_END, 0, NULL },
     };
     unsigned int mhd_flags = MHD_USE_THREAD_PER_CONNECTION |
@@ -4285,8 +4457,10 @@ int main(int argc, char **argv)
             { MHD_OPTION_NOTIFY_COMPLETED, (intptr_t)mhd_request_completed, NULL },
             { MHD_OPTION_URI_LOG_CALLBACK, (intptr_t)ulfius_uri_logger, NULL },
             { MHD_OPTION_EXTERNAL_LOGGER, (intptr_t)mhd_log, NULL },
-            { MHD_OPTION_CONNECTION_LIMIT, 64, NULL },
-            { MHD_OPTION_PER_IP_CONNECTION_LIMIT, 16, NULL },
+            { MHD_OPTION_CONNECTION_LIMIT, HTTP_SLOTS, NULL },
+            { MHD_OPTION_PER_IP_CONNECTION_LIMIT, HTTP_SLOTS_PER_ADDR, NULL },
+            { MHD_OPTION_NOTIFY_CONNECTION, (intptr_t)lan_count, &lan_conns_tls },
+            { MHD_OPTION_CONNECTION_TIMEOUT, (intptr_t)http_idle_s(), NULL },
             { MHD_OPTION_HTTPS_MEM_KEY, 0, (void *)tls_key_pem() },
             { MHD_OPTION_HTTPS_MEM_CERT, 0, (void *)tls_cert_pem() },
             { MHD_OPTION_HTTPS_PRIORITIES, 0, (void *)tls_priorities() },

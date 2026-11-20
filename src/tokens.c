@@ -372,6 +372,9 @@ int tokens_host_check(const char *presented, const char *cap)
     pthread_mutex_lock(&mu);
     if (host_tok[0] && strlen(presented) == TOKENS_TEXT_LEN
         && ct_equal((const unsigned char *)presented, (const unsigned char *)host_tok, TOKENS_TEXT_LEN)) {
+        /* A route the host alone reaches: no operator's token holds this. */
+        if (!strcmp(cap, TOKENS_HOST_ONLY))
+            ok = 1;
         for (size_t c = 0; c < NCAPS; c++) {
             if (!(host_caps & (1u << c)))
                 continue;
@@ -473,6 +476,26 @@ int tokens_revoke(const char *id, char *err, size_t elen)
         snprintf(err, elen, "no such token");
     if (rc == 0)
         fflog(LOG_NOTICE, "tokens: revoked %s (%s)", id, name);
+    return rc == 0 ? 0 : -1;
+}
+
+int tokens_revoke_all(char *err, size_t elen)
+{
+    pthread_mutex_lock(&mu);
+    int was = count;
+    token_t keep[TOKENS_MAX];
+    memcpy(keep, store, (size_t)count * sizeof(store[0]));
+    count = 0;
+    int rc = save_locked();
+    if (rc != 0) {
+        memcpy(store, keep, (size_t)was * sizeof(store[0]));
+        count = was;
+        snprintf(err, elen, "cannot write the token store");
+    }
+    memset(keep, 0, sizeof(keep));
+    pthread_mutex_unlock(&mu);
+    if (rc == 0 && was)
+        fflog(LOG_NOTICE, "tokens: every token revoked (%d)", was);
     return rc == 0 ? 0 : -1;
 }
 

@@ -10,7 +10,9 @@
  * the ".any" form, a token that is not this machine's in every shape of
  * wrong); a use is remembered in memory and reaches the file at a flush,
  * not at the use; a reload keeps every token; a revoke ends one and only
- * that one; sixteen at most, one name once; a damaged line is dropped and
+ * that one; a revoke, or a revoke of all, the store cannot write leaves
+ * every token listed and valid, and a written revoke of all ends them;
+ * sixteen at most, one name once; a damaged line is dropped and
  * its neighbors kept; the extension host's credential is written mode
  * 0600, owned by the uid that minted it, and holds exactly
  * TOKENS_HOST_CAPS of the closed list.
@@ -244,6 +246,30 @@ static void test_host_credential(void)
     host_file[0] = '\0';
 }
 
+/* A revoke the store cannot write is no revoke: the token stays listed
+ * and valid, one by one and all at once; a written one ends them all. */
+static void test_unwritten_revoke(void)
+{
+    char a[TOKENS_TEXT_LEN + 1], b[TOKENS_TEXT_LEN + 1], ida[TOKENS_ID_HEX + 1], idb[TOKENS_ID_HEX + 1];
+    char err[160] = "", seen[TOKENS_ID_HEX + 1], tmp[300];
+    CHECK(tokens_create("unwritten a", "events", a, ida, err, sizeof(err)) == 0 &&
+          tokens_create("unwritten b", "machine.read", b, idb, err, sizeof(err)) == 0, "create: %s", err);
+    /* The store's temporary name is a directory: no write lands. */
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    mkdir(tmp, 0700);
+    CHECK(tokens_revoke(ida, err, sizeof(err)) == -1 && strstr(err, "cannot write"), "an unwritten revoke: %s", err);
+    CHECK(tokens_check(a, "events", seen) == 1 && strstr(json(), "unwritten a"), "an unwritten revoke ended the token");
+    CHECK(tokens_revoke_all(err, sizeof(err)) == -1, "an unwritten revoke of all passed");
+    CHECK(tokens_check(a, "events", seen) == 1 && tokens_check(b, "machine.read", seen) == 1 &&
+          strstr(json(), "unwritten b"), "an unwritten revoke of all ended a token");
+    rmdir(tmp);
+    CHECK(tokens_revoke_all(err, sizeof(err)) == 0, "a revoke of all: %s", err);
+    CHECK(tokens_check(a, "events", seen) == -1 && tokens_check(b, "machine.read", seen) == -1 &&
+          strstr(json(), "\"tokens\":[]"), "a revoke of all left a token: %s", json());
+    tokens_init();
+    CHECK(tokens_check(a, "events", seen) == -1, "a revoked token came back at the reload");
+}
+
 int main(void)
 {
     snprintf(root, sizeof(root), "/tmp/tokens_test.%d", (int)getpid());
@@ -256,6 +282,7 @@ int main(void)
     test_shape_and_check();
     test_limits();
     test_damaged_store();
+    test_unwritten_revoke();
     test_host_credential();
 
     char cmd[192];

@@ -146,7 +146,9 @@ target_compile_options(forgectrl PRIVATE -Wall -Wextra -O2)
 # jansson: the setup record. gnutls: the panel's self-signed
 # certificate (the HTTPS listener itself is libmicrohttpd's). crypt: the
 # account's sha512-crypt hash, shared with the system's shadow file.
-target_link_libraries(forgectrl ulfius jansson gnutls crypt jpeg z pthread m
+# microhttpd: the listeners' connection callback reads a connection's peer
+# and descriptor itself.
+target_link_libraries(forgectrl ulfius microhttpd jansson gnutls crypt jpeg z pthread m
                       ${CMAKE_DL_LIBS})
 
 install(TARGETS forgectrl RUNTIME DESTINATION bin)
@@ -413,6 +415,10 @@ target_link_libraries(recordhtml_test jansson)
 # login throttle. CI runs it after the build.
 add_executable(users_test tests/users_test.c src/users.c src/session.c
                src/sha256.c src/fflog.c)
+# The account record in fault, the names the image's own accounts and
+# groups hold, the replay one run at a time and run by the reset, a
+# password over the longest refused before its hash; the sessions'
+# monotonic stamps and their login address; the global login budget.
 target_compile_options(users_test PRIVATE -Wall -Wextra)
 target_link_libraries(users_test crypt pthread)
 

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int failures;
@@ -45,6 +46,18 @@ int main(void)
     CHECK(strcmp(camkey_get(), first) != 0, "the new key differs");
     CHECK(!camkey_valid(first), "the old key stops working");
     CHECK(camkey_valid(camkey_get()), "the new key validates");
+
+    /* A rotation that cannot write its key: the key in force stays, in
+     * memory and on disk alike. The temporary name is a directory. */
+    char tmp[300], kept[CAMKEY_HEX + 1];
+    snprintf(kept, sizeof(kept), "%s", camkey_get());
+    snprintf(tmp, sizeof(tmp), "%s/camera.key.tmp", dir);
+    mkdir(tmp, 0700);
+    CHECK(camkey_rotate() == -1, "a rotation that cannot write fails");
+    CHECK(!strcmp(camkey_get(), kept) && camkey_valid(kept), "and the key in force stays valid");
+    rmdir(tmp);
+    camkey_init();
+    CHECK(!strcmp(camkey_get(), kept), "the file holds the key in force");
 
     char path[300];
     snprintf(path, sizeof(path), "%s/camera.key", dir);

@@ -75,6 +75,10 @@ int tokens_cap_known(const char *cap);
  * actually relays it. */
 #define TOKENS_HOST_FILE "/run/forgefirm/ext-host.token"
 #define TOKENS_HOST_CAPS "motion.jog,motion.job"
+/* The capability of a route the extension host's credential alone
+ * reaches: it is in no closed list, so no operator's token holds it
+ * (tokens_check answers 0 for it). */
+#define TOKENS_HOST_ONLY "host"
 
 /* Mint it and write the file. 0, or -1 with the reason in err. */
 int tokens_host_mint(char *err, size_t elen);
@@ -87,8 +91,12 @@ int tokens_host_check(const char *presented, const char *cap);
  * or -1 with the reason in err. */
 int tokens_create(const char *name, const char *caps, char *token, char *id,
                   char *err, size_t elen);
-/* Revoke by id: 0, or -1 with the reason in err. */
+/* Revoke by id: 0, or -1 with the reason in err. A revoke the store
+ * cannot write is no revoke: the token stays listed and valid. */
 int tokens_revoke(const char *id, char *err, size_t elen);
+/* Revoke every token (a new account): 0, or -1 with the reason in err,
+ * every token then still listed and valid. */
+int tokens_revoke_all(char *err, size_t elen);
 
 /* {"max":16,"caps":[...],"tokens":[{"id","name","caps":[...],"created",
  * "last_used"}]}: never a token, never a hash. 0, or -1 when it does not

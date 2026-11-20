@@ -208,8 +208,9 @@ BADGE_HTML = (
     "letter-spacing:.3px;pointer-events:none'>DEV &middot; %(label)s</div>"
 )
 # The headers the daemon's serve_page() gives every page it serves (src/main.c): no page lets a frame
-# navigate anywhere, which is what keeps a package's page from carrying data out in a URL.
-PAGE_POLICY = "frame-src 'none'"
+# navigate anywhere, which is what keeps a package's page from carrying data out in a URL, and no
+# page of another origin frames the panel's.
+PAGE_POLICY = "frame-src 'none'; frame-ancestors 'self'"
 PAGE_HEADERS = {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_POLICY}
 CONTENT_TYPES = {
     '.html': 'text/html; charset=utf-8',
@@ -822,6 +823,10 @@ class Mock:
         # was opened, and until when its last renewal holds it.
         self.panel_res = {}             # a dialog's name -> [opened, held until]
         self.upload_unsigned = False    # the staged upload is not signed with the release key
+        self.revoke_fails = False       # an account made from none answers that its token revoke failed
+        self.rotate_fails = False       # ... and that its camera key rotation failed
+        self.press_refuse = False       # the next press start is refused, a job named
+        self.press_ended = False        # the take answers that this browser's request ended
         self.cool_demo = os.environ.get('GF_MOCK_COOL', '')
         self.notices_seen = 0           # the notices dismissed: every seq up to this one
         # The setup record (GET /wiz): the mock starts with the setup complete
@@ -1402,6 +1407,12 @@ class Mock:
                     for kk, vv in e['applied'].items()) + '</div>')
         h.append('</body></html>')
         return ''.join(h)
+
+    def press_ready(self):
+        """The daemon says ready once its reservation has stood on file:
+        the mock, a second after the ask."""
+        w = self.wiz
+        return w['button'] == 'waiting' and bool(w['press_at']) and time.time() - w['press_at'] >= 1.0
 
     def wiz_reply(self):
         w = self.wiz
@@ -2509,12 +2520,29 @@ class Mock:
         if path == '/wiz/advisories/press':
             if len(w['accepted']) < len(ADVISORY_DOCS):
                 return J(409, {'error': 'accept every document first'})
+            # The daemon refuses the press while a job would take it as its own.
+            if self.press_refuse:
+                self.press_refuse = False
+                return J(409, {'error': 'a job waits for the button press: cancel it first'})
             w['button'] = 'waiting'
             w['press_at'] = time.time()
-            return J(200, {'button': 'waiting'})
+            return J(200, {'button': 'waiting', 'ready': False})
         if path == '/wiz/advisories/press/cancel':
             w['button'] = 'idle'
             return J(200, {'button': 'idle'})
+        if path == '/wiz/advisories/press/take':
+            # The daemon refuses the take of a browser whose request ended.
+            if self.press_ended:
+                return J(409, {'error': "this browser's request for the press ended: do not press the machine's "
+                                        "button for this page until it asks again"})
+            r = self.wiz_reply()
+            if w['button'] == 'pressed' and not w['pressed']:
+                w['pressed'] = True
+                w['versions']['advisories'] = 1
+                w['button'] = 'idle'
+                self._log('wiz: the advisories were accepted at the machine')
+            return J(200, {'button': r['button'], 'ready': self.press_ready(),
+                           'accepted': w['pressed'], 'pressed': w['pressed']})
         if path == '/wiz/account':
             if not w['pressed']:
                 return J(409, {'error': 'accept the advisories first'})
@@ -2533,10 +2561,15 @@ class Mock:
                          'keys': len(self.ext_keys)}
                 self.ext_packages = []
                 self.ext_keys = {}
+            from_none = not w['account'] or w['reset']
             w['account'] = name
             w['reset'] = False
             w['versions']['account'] = 1
             body = {'ok': True, 'name': name}
+            if from_none:
+                # Made from none: every scoped token revoked, the camera key changed.
+                body['tokens_revoked'] = not self.revoke_fails
+                body['camera_key_rotated'] = not self.rotate_fails
             if wiped:
                 body['wiped'] = wiped
             return 200, {'Content-Type': 'application/json',
@@ -2836,12 +2869,8 @@ class Mock:
                              'Cache-Control': 'no-store'}, self.wiz_record_html().encode()
             if path == '/wiz/advisories/press':
                 r = self.wiz_reply()
-                if self.wiz['button'] == 'pressed' and not self.wiz['pressed']:
-                    self.wiz['pressed'] = True
-                    self.wiz['versions']['advisories'] = 1
-                    self.wiz['button'] = 'idle'
-                    self._log('wiz: the advisories were accepted at the machine')
-                return J(200, {'button': r['button'], 'accepted': self.wiz['pressed']})
+                return J(200, {'button': r['button'], 'accepted': self.wiz['pressed'],
+                               'ready': self.press_ready(), 'asked_by_other': False})
             if path.startswith('/advisories/'):
                 d = path[len('/advisories/'):]
                 if d not in self.docs:

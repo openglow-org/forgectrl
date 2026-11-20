@@ -22,7 +22,14 @@
  * shortens the lens hunt's step cadence. Two more stand in for a
  * program a host test must not run: GF_SLOT_LIST names a file that holds
  * the slot inventory in place of `ffboot -l`, and GF_REBOOT_FILE a file
- * a reboot the daemon schedules is written to in place of the reboot.
+ * a reboot the daemon schedules is written to in place of the reboot,
+ * and GF_USERS_REPLAY a script run in place of the account replay
+ * (/etc/init.d/forgefirm-users). GF_HTTP_IDLE_S shortens the listeners'
+ * idle connection timeout, GF_PRESS_TIMEOUT_S the Setup page's press
+ * wait and its request's life, GF_PRESS_RES_S the renewal its poll gives
+ * the press's reservation, GF_RESET_HOLD_S the button hold at start
+ * that resets the account, and GF_PRESS_DEBOUNCE_MS lengthens how long a
+ * press must still be held after the wait first reads it.
  * ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion

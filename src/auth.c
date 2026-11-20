@@ -36,12 +36,22 @@
  * valid session cookie (users.c, session.c), except from this host
  * (the init scripts, the controllers, the acceptance tool on the
  * board) and on a dev image, where the token alone still writes so the
- * bench tools keep working. Before the account exists, the token alone
- * writes: the wizard's own calls need it, and the page that carries it
- * is served to whoever reaches the machine first. The read-only routes
+ * bench tools keep working. Before the account exists (a first run, or
+ * a reset until the account step), the page that carries the token is
+ * served to whoever reaches the machine, so the token alone writes on
+ * the routes that page calls before it has an account and on no other:
+ * the documents, the press, the account step, and the sanitized log
+ * bundle (SETUP_ROUTES). The account step itself takes only the
+ * browser that holds the press (wiz.c). A machine whose account record
+ * cannot be read is no machine without an account (users_fault): the
+ * token alone writes nothing there. The read-only routes
  * stay open to the LAN by default (panel_open_reads = 1) so a Grbl sender
- * reads the camera; the setting closes them to sessions and this host.
- * The login itself and the session cookie travel over HTTPS only.
+ * reads the camera; the setting closes them to sessions, this host, and
+ * the panel token where it may write. A setting that cannot be read, or
+ * reads as neither 0 nor 1, closes them; a settings file with no such
+ * key, or none, leaves them open. The login itself and the session
+ * cookie travel over HTTPS only. The panel token is taken from its
+ * header alone, never from a URL.
  *
  * A scoped token (tokens.c) is the credential of a client with no
  * browser and no session. A request that presents one is judged by it
@@ -227,7 +237,7 @@ static void origin_authority(const char *origin, char *out, size_t len)
 
 static int deny(struct _u_response *res, unsigned status, const char *msg)
 {
-    char body[128];
+    char body[256];
     snprintf(body, sizeof(body), "{\"error\":\"%s\"}", msg);
     ulfius_set_string_body_response(res, status, body);
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -258,9 +268,11 @@ static int origin_ok(const struct _u_request *req)
 int auth_session_ok(const struct _u_request *req)
 {
     const char *cookie = u_map_get_case(req->map_header, "Cookie");
-    char id[SESSION_ID_HEX + 1];
-    return cookie && session_from_cookie(cookie, id, sizeof(id)) &&
-           session_valid(id);
+    char id[SESSION_ID_HEX + 1], peer[SESSION_ADDR_MAX];
+    if (!cookie || !session_from_cookie(cookie, id, sizeof(id)))
+        return 0;
+    auth_peer_text(req, peer, sizeof(peer));
+    return session_valid(id, peer);
 }
 
 int auth_peer_local(const struct _u_request *req)
@@ -295,21 +307,36 @@ int auth_dev_image(void)
 
 static __thread const char *route_cap;
 static __thread int route_plain;
+static __thread const char *route_method, *route_path;
 static __thread int judged_host;        /* the host's credential passed */
 static __thread int judged_scoped;      /* an operator's scoped token passed */
+static __thread int judged_setup;       /* the token passed on a setup route, no account */
 
 void auth_route_begin(const char *cap, int plain_http)
 {
     route_cap = cap;
     route_plain = plain_http;
-    judged_host = judged_scoped = 0;
+    route_method = route_path = NULL;
+    judged_host = judged_scoped = judged_setup = 0;
+}
+
+void auth_route_at(const char *method, const char *path)
+{
+    route_method = method;
+    route_path = path;
 }
 
 void auth_route_end(void)
 {
     route_cap = NULL;
     route_plain = 0;
-    judged_host = judged_scoped = 0;
+    route_method = route_path = NULL;
+    judged_host = judged_scoped = judged_setup = 0;
+}
+
+int auth_by_setup(void)
+{
+    return judged_setup;
 }
 
 int auth_by_host(void)
@@ -421,12 +448,77 @@ int auth_local_viewer(const struct _u_request *req)
     return token_eq(u_map_get_case(req->map_header, "X-ForgeFIRM-Token"));
 }
 
-/* Who may change state, beyond the token: a logged-in session, this
- * host, a dev image, or a machine with no account yet. */
-static int writer_ok(const struct _u_request *req)
+/* The routes the setup page calls before the account exists: the
+ * documents, the press that seals them (taken by the browser that asked
+ * for it, wiz.c), the account step, and the log bundle the page offers
+ * when a step stops (sanitized, cb_logs_export). Nothing else answers the
+ * token alone in that window: not the settings, the tokens, the camera
+ * key, the cameras' writes, a package, the boot slot, the factory
+ * return, nor the setup's machine checks, which come after the account. */
+static const char *const SETUP_ROUTES[][2] = {
+    { "POST", "/wiz/advisories/accept" },
+    { "POST", "/wiz/advisories/press" },
+    { "POST", "/wiz/advisories/press/take" },
+    { "POST", "/wiz/advisories/press/cancel" },
+    { "POST", "/wiz/account" },
+    { "POST", "/logs/export" },
+};
+
+static int setup_route(void)
 {
-    return auth_session_ok(req) || auth_peer_local(req) || auth_dev_image() ||
-           !users_exist();
+    if (!route_method || !route_path)
+        return 0;
+    for (size_t i = 0; i < sizeof(SETUP_ROUTES) / sizeof(*SETUP_ROUTES); i++)
+        if (!strcmp(route_method, SETUP_ROUTES[i][0]) && !strcmp(route_path, SETUP_ROUTES[i][1]))
+            return 1;
+    return 0;
+}
+
+#define FAULT_WORDS "the account record cannot be read: hold the machine's button " \
+                    "through a restart to make the account again"
+
+/* Who may change state, beyond the token: a logged-in session, this
+ * host, a dev image, or, while no account exists, a setup route. *why
+ * says which refusal it is (never "login" where no login can help: the
+ * pages send a "login" refusal to the login page). */
+static int writer_ok(const struct _u_request *req, const char **why)
+{
+    *why = "login required";
+    if (auth_session_ok(req) || auth_peer_local(req) || auth_dev_image())
+        return 1;
+    if (users_exist())
+        return 0;
+    if (users_fault()) {
+        *why = FAULT_WORDS;
+        return 0;
+    }
+    if (setup_route()) {
+        judged_setup = 1;
+        return 1;
+    }
+    *why = "make the account first";
+    return 0;
+}
+
+/* The panel token reads wherever it writes: a dev image, and a machine
+ * with no account (whose page serves it to anyone). */
+static int token_reader(const struct _u_request *req)
+{
+    if (!token_eq(u_map_get_case(req->map_header, "X-ForgeFIRM-Token")))
+        return 0;
+    return auth_dev_image() || (!users_exist() && !users_fault());
+}
+
+/* panel_open_reads: 1 when the file or the key is absent (the default),
+ * the value when it is 0 or 1, and 0 (closed) for anything else: a file
+ * that cannot be read, a value too long, or one that is neither. */
+static int reads_open(void)
+{
+    char v[8];
+    int rc = settings_get("panel_open_reads", v, sizeof(v));
+    if (rc == SETTINGS_ABSENT)
+        return 1;
+    return rc == 0 && !strcmp(v, "1");
 }
 
 int auth_origin_ok(const struct _u_request *req, struct _u_response *res)
@@ -458,11 +550,20 @@ int auth_read_ok(const struct _u_request *req, struct _u_response *res)
         return 1;
     if (!origin_ok(req))
         return deny(res, 403, "request origin refused");
-    if (settings_get_bool("panel_open_reads", 1))
+    if (reads_open())
         return 1;
-    if (auth_session_ok(req) || auth_peer_local(req))
+    if (auth_session_ok(req) || auth_peer_local(req) || token_reader(req))
         return 1;
     return deny(res, 403, "login required");
+}
+
+int auth_plain_write_refused(const struct _u_request *req, struct _u_response *res)
+{
+    char why[96];
+    if (scoped_judge(req, route_cap, 1, why, sizeof(why)) != 0)
+        return 0;
+    deny(res, 403, why);
+    return 1;
 }
 
 int auth_write_permitted_cap(const struct _u_request *req, const char *cap)
@@ -481,10 +582,8 @@ int auth_write_permitted(const struct _u_request *req)
         return 0;
     if (!origin_ok(req))
         return 0;
-    const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
-    if (!tok)
-        tok = u_map_get(req->map_url, "token");
-    return token_eq(tok) && writer_ok(req);
+    const char *why;
+    return token_eq(u_map_get_case(req->map_header, "X-ForgeFIRM-Token")) && writer_ok(req, &why);
 }
 
 int auth_write_ok(const struct _u_request *req, struct _u_response *res)
@@ -495,13 +594,11 @@ int auth_write_ok(const struct _u_request *req, struct _u_response *res)
         return scoped ? 1 : deny(res, 403, why);
     if (!origin_ok(req))
         return deny(res, 403, "request origin refused");
-    const char *tok = u_map_get_case(req->map_header, "X-ForgeFIRM-Token");
-    if (!tok)
-        tok = u_map_get(req->map_url, "token");
-    if (!token_eq(tok))
+    if (!token_eq(u_map_get_case(req->map_header, "X-ForgeFIRM-Token")))
         return deny(res, 403, "authentication required");
-    if (!writer_ok(req))
-        return deny(res, 403, "login required");
+    const char *refusal;
+    if (!writer_ok(req, &refusal))
+        return deny(res, 403, refusal);
     return 1;
 }
 

@@ -130,10 +130,32 @@ static void check_cipher_order(void)
      * own order. */
     CHECK(agree(prio, DESKTOP, &v) == GNUTLS_CIPHER_CHACHA20_POLY1305 && v == GNUTLS_TLS1_3,
           "a desktop browser gets ChaCha20-Poly1305 over TLS 1.3");
+
+    /* No protocol below TLS 1.2, whatever the GnuTLS build allows. */
+    const unsigned *protos = NULL;
+    int nproto = 0, old = 0;
+    if (gnutls_priority_init(&p, prio, NULL) == 0) {
+        nproto = gnutls_priority_protocol_list(p, &protos);
+        for (int i = 0; i < nproto; i++)
+            old |= protos[i] == GNUTLS_TLS1_0 || protos[i] == GNUTLS_TLS1_1 || protos[i] == GNUTLS_SSL3;
+        gnutls_priority_deinit(p);
+    }
+    CHECK(nproto > 0 && !old, "it allows no protocol below TLS 1.2");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    (void)argc;
+    /* GnuTLS reads the host's system priority file as it loads, and a
+     * distribution's file can leave TLS 1.0 and 1.1 out of NORMAL on its
+     * own: the test runs again without it, so the floor it checks is the
+     * listener's, as on an image whose GnuTLS has no such file. */
+    if (!getenv("GNUTLS_SYSTEM_PRIORITY_FILE")) {
+        setenv("GNUTLS_SYSTEM_PRIORITY_FILE", "/nonexistent", 1);
+        execv("/proc/self/exe", argv);
+        printf("FAIL the test could not run again without the system priority file\n");
+        return 1;
+    }
     char dir[] = "/tmp/tls-test-XXXXXX";
     if (!mkdtemp(dir)) {
         printf("FAIL mkdtemp\n");

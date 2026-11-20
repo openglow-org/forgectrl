@@ -207,7 +207,8 @@ function exportSetupLogs() {
     });
 }
 
-function toast(title, body, ok) {
+/* stay: the toast stands until it is closed (a warning the owner must act on). */
+function toast(title, body, ok, stay) {
   var el = document.createElement('div');
   el.className = 'toast ' + (ok ? 't-ok' : 't-bad');
   el.setAttribute('role', 'status');
@@ -216,7 +217,8 @@ function toast(title, body, ok) {
   el.addEventListener('hidden.bs.toast', function () {
     el.remove();
   });
-  new bootstrap.Toast(el, { delay: ok ? 3500 : 8000 }).show();
+  if (stay) el.addEventListener('click', function () { el.remove(); });
+  new bootstrap.Toast(el, stay ? { autohide: false } : { delay: ok ? 3500 : 8000 }).show();
 }
 function setMsg(id, text, cls) {
   var el = $(id);
@@ -358,6 +360,7 @@ function renderRail(active) {
   $('estimate').textContent = done ? 'Choose a step to run it again.' : 'About forty-five minutes.';
 }
 function show(id) {
+  if (id !== 'press') endPress();
   var steps = document.querySelectorAll('.wz-step');
   for (var i = 0; i < steps.length; i++) steps[i].className = 'wz-step';
   var dark = CHECK_IDS.indexOf(id) >= 0;
@@ -388,7 +391,7 @@ function show(id) {
 }
 /* The user's units: lengths in a check's result show in them. */
 function loadUnits() {
-  fetch('/settings')
+  fx('/settings')
     .then(function (r) { return r.json(); })
     .then(function (s) { IMPERIAL = s.ui_units === 'imperial'; })
     .catch(function () {});
@@ -402,7 +405,7 @@ function go(id) {
   show(id);
 }
 function load(then) {
-  return fetch('/wiz')
+  return fx('/wiz')
     .then(function (r) {
       if (r.status === 403) {
         location.replace(loginUrl());
@@ -424,7 +427,7 @@ function load(then) {
 
 /* ---- Welcome ---------------------------------------------------------- */
 function initWelcome() {
-  fetch('/settings')
+  fx('/settings')
     .then(function (r) {
       return r.json();
     })
@@ -483,7 +486,7 @@ function openDoc(id) {
     render(DOCS[id].text, DOCS[id].hash);
     return;
   }
-  fetch('/advisories/' + id)
+  fx('/advisories/' + id)
     .then(function (r) {
       var hash = (r.headers.get('ETag') || '').replace(/"/g, '');
       return r.text().then(function (t) {
@@ -560,26 +563,52 @@ function acceptDoc(id) {
 function showPress() {
   show('press');
 }
+/* The machine reserves its button for this press first: the page asks
+ * for the press once the reservation is ready (the button breathes then). */
+function pressReady(ready) {
+  $('pressled').className = ready ? 'wz-button' : 'wz-button off';
+  $('pressmsg').textContent = ready ? 'Waiting for your press…' : 'Getting the button ready. Do not press yet.';
+}
+/* Whether this page has a wait standing that it polls: a step left while
+ * it does withdraws it (endPress), so no hidden page keeps the button. */
+var pressWaiting = false;
+function endPress() {
+  if (pressTimer) clearTimeout(pressTimer);
+  pressTimer = null;
+  if (!pressWaiting) return;
+  pressWaiting = false;
+  post('/wiz/advisories/press/cancel', {}).catch(function () {});
+}
 function startPress() {
-  $('pressled').className = 'wz-button';
-  $('pressmsg').textContent = 'Waiting for your press…';
+  pressReady(false);
   $('press-retry').style.display = 'none';
+  pressWaiting = true;
   post('/wiz/advisories/press', {})
-    .then(function () {
+    .then(function (j) {
+      /* The step was left before the answer: the cancel endPress sent can
+       * have reached the machine first, so this wait is withdrawn now. */
+      if (!pressWaiting) return post('/wiz/advisories/press/cancel', {}).catch(function () {});
+      pressReady(!!(j && j.ready));
       pollPress();
     })
     .catch(function (e) {
+      pressWaiting = false;
+      $('pressled').className = 'wz-button off';
       $('pressmsg').textContent = String(e);
+      $('press-retry').style.display = '';
     });
 }
+/* The poll is this browser's take: the machine hands the press to the
+ * browser that asked for it and to no other, and says when this one's
+ * was taken (pressed). Another browser's request refuses the poll. */
 function pollPress() {
   if (pressTimer) clearTimeout(pressTimer);
-  fetch('/wiz/advisories/press')
-    .then(function (r) {
-      return r.json();
-    })
+  pressTimer = null;
+  post('/wiz/advisories/press/take', {})
     .then(function (j) {
-      if (j.accepted) {
+      if (!pressWaiting) return;
+      if (j.pressed || j.button === 'timeout' || j.button === 'cancelled') pressWaiting = false;
+      if (j.pressed) {
         $('pressled').className = 'wz-button pressed';
         $('pressmsg').textContent = 'Thank you. Accepted.';
         setTimeout(function () {
@@ -592,19 +621,27 @@ function pollPress() {
       if (j.button === 'timeout' || j.button === 'cancelled') {
         $('pressled').className = 'wz-button off';
         $('pressmsg').textContent =
-          j.button === 'timeout' ? 'No press within ten minutes.' : 'The wait was cancelled.';
+          j.button === 'timeout' ? 'No press within ten minutes.' : j.why ? 'The wait ended: ' + j.why + '.' : 'The wait was canceled.';
         $('press-retry').style.display = '';
         return;
       }
+      pressReady(!!j.ready);
       pressTimer = setTimeout(pollPress, 800);
     })
-    .catch(function () {
+    .catch(function (e) {
+      if (!pressWaiting) return;
+      if (/another browser|has not asked|request for the press ended/.test(String(e))) {
+        pressWaiting = false;
+        $('pressled').className = 'wz-button off';
+        $('pressmsg').textContent = String(e);
+        $('press-retry').style.display = '';
+        return;
+      }
       pressTimer = setTimeout(pollPress, 2000);
     });
 }
 function cancelPress() {
-  if (pressTimer) clearTimeout(pressTimer);
-  post('/wiz/advisories/press/cancel', {}).catch(function () {});
+  endPress();
   show('advisories');
 }
 
@@ -630,6 +667,17 @@ function initAccount() {
       : n + ' packages are installed. They and their data go, with any signing key the last owner added: a package can hold their credentials.';
 }
 
+/* An account made from none revokes every API token and changes the camera
+ * key: what of that failed, for a warning that stands until the owner
+ * closes it ('' when nothing did). */
+function accountWarning(j) {
+  if (!j) return '';
+  var w =
+    (j.tokens_revoked === false ? 'The old API tokens could not be revoked: revoke them there. ' : '') +
+    (j.camera_key_rotated === false ? 'The camera key could not be changed: change it there. ' : '');
+  return w ? w + 'Click to close.' : '';
+}
+
 $('acct').addEventListener('submit', function (e) {
   e.preventDefault();
   var name = $('a-name').value.trim(),
@@ -646,6 +694,8 @@ $('acct').addEventListener('submit', function (e) {
   post('/wiz/account', body)
     .then(function (j) {
       var w = j && j.wiped;
+      var warn = accountWarning(j);
+      if (warn) toast('Account made: finish on the System card', warn, false, true);
       if (w && w.ok === false) setMsg('a-msg', 'account made; the packages were not removed: ' + w.error, 'bad');
       else if (w) setMsg('a-msg', 'done; ' + w.packages + ' package(s) and ' + w.keys + ' key(s) removed', 'ok');
       else setMsg('a-msg', 'done', 'ok');
@@ -654,6 +704,14 @@ $('acct').addEventListener('submit', function (e) {
       });
     })
     .catch(function (e) {
+      /* With no account, the account step takes the browser whose press
+       * of the machine's button was taken: the press first, then back
+       * here, the form as it was. */
+      if (/press the machine's button/.test(String(e))) {
+        setMsg('a-msg', '');
+        show('press');
+        return;
+      }
       setMsg('a-msg', String(e), 'bad');
     })
     .then(function () {
@@ -668,7 +726,7 @@ function initPreferences() {
     fillRegions($('p-region'));
     prefsInit = true;
   }
-  fetch('/settings')
+  fx('/settings')
     .then(function (r) {
       return r.json();
     })
@@ -794,7 +852,7 @@ function initCloud() {
       showCloudChoice(this.value === '1');
     };
   /* The current choice, so a re-run starts from what is set. */
-  fetch('/settings')
+  fx('/settings')
     .then(function (r) { return r.json(); })
     .then(function (s) {
       var on = s.cloud_enabled === '1';
@@ -829,7 +887,7 @@ function saveCloud() {
 
 /* ---- Done ------------------------------------------------------------- */
 function initDone() {
-  fetch('/settings')
+  fx('/settings')
     .then(function (r) {
       return r.json();
     })
@@ -892,7 +950,7 @@ function doReturn() {
 }
 function pollReturn() {
   if (returnTimer) clearTimeout(returnTimer);
-  fetch('/update/status')
+  fx('/update/status')
     .then(function (r) {
       return r.json();
     })
@@ -963,7 +1021,7 @@ function initDark(id) {
   /* A run of this check already in flight (a reload mid-check) resumes
    * through the poll, which shows its question; a finished one shows its
    * outcome. */
-  fetch('/wiz/dark')
+  fx('/wiz/dark')
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (d && d.id === id && !d.running && (d.result || d.error)) darkRender(d);
@@ -1035,7 +1093,7 @@ function darkPoll() {
   K.timer = null;
   var sent = performance.now(),
     sentWall = Date.now();
-  fetch('/wiz/dark')
+  fx('/wiz/dark')
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d || d.id !== K.id) return;
