@@ -86,8 +86,13 @@ The board binary is a cross-build, never a native one:
 - **The enclosure check runs before every spawn, respawns included.** The
   motion probe runs once per broker hold.
 - **A respawn waits** for the homing runner to be gone and the kernel idle.
-- **A fail-tier verdict stops the controller through the supervisor.** The
-  kernel writes come first; they are never the only action.
+- **A fail-tier verdict writes the kernel pair first** (`cnc/stop`, then the
+  engine's latch hold) in the tick it rises, before its words. `FIRE` and
+  `CRASH`, and a coolant short's `SENSOR` in a run, also stop the
+  controller through the supervisor; on `AIRFLOW` and `CRITICAL` the
+  controller takes the verdict on its own terms. A short's `SENSOR` stands
+  until the controller reports the job ended (idle, no window) or no
+  controller remains.
 - `super.c` and `cool.c` are unit-tested by inclusion (`tests/super_test.c`,
   `tests/cool_engine_test.c`). A new supervisor or engine path gets a case
   there.

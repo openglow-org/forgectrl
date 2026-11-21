@@ -1672,7 +1672,8 @@ static int shot(cam_id_t cam, const char *name)
  * half-steps each way, or as the fallback that clears the stops on any
  * head when they cannot be found on this one; the controller opens its
  * Z limit from the same two keys at its next start, and the focus burn
- * steps its ladder inside them. */
+ * steps its ladder inside them. A quiet hold the cooling engine refuses
+ * measures nothing: the check ends in an error and writes no window. */
 static void run_lens_travel(void)
 {
     int stopped = 0;
@@ -1696,6 +1697,12 @@ static void run_lens_travel(void)
     lensfind_run(&st, r);
     if (aborted())
         goto out;
+    if (st.refused) {
+        /* Nothing was listened to: the window stored stands, the
+         * fallback is not written over it. */
+        finish_err("%s: run the check again once the cooling engine is idle", st.why);
+        goto out;
+    }
     progress(90);
     int down = st.found ? st.below : LENS_WINDOW_DOWN;
     int up = st.found ? st.above : LENS_WINDOW_UP;

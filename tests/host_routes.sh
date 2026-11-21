@@ -361,11 +361,13 @@ else bad "the exhaust stayed at '$(cat "$EXH")' after the idle report"; fi
 rm -f "$SYS/pic/water_temp_1" "$SYS/pic/water_temp_2"
 echo idle > "$SYS/cnc/state"
 # The machine idle and the engine cooling down after the session: a quiet
-# hold may not take the pump.
-code=$(post /cool/quiet "$TOKEN" -d on=1 -d pump=1)
-if [ "$code" = 409 ] && grep -q 'the pump stays on' "$T/body"; then
-    ok "POST /cool/quiet pump=1 while the engine cools down: 409, the pump stays on"
-else bad "POST /cool/quiet pump=1 while the engine cools down -> $code $(cat "$T/body")"; fi
+# hold is not taken, with the pump or without it.
+for pump in 1 0; do
+    code=$(post /cool/quiet "$TOKEN" -d on=1 -d pump=$pump)
+    if [ "$code" = 409 ] && grep -q 'the fans stay on' "$T/body"; then
+        ok "POST /cool/quiet pump=$pump while the engine cools down: 409, the engine not idle"
+    else bad "POST /cool/quiet pump=$pump while the engine cools down -> $code $(cat "$T/body")"; fi
+done
 
 echo "== the event streams"
 for i in 2 3 4; do

@@ -25,7 +25,7 @@ void cool_diag_aa(long duty);
 void cool_diag_purge(int on);       /* the head's purge fan */
 /* The quiet hold for a listening to the head accelerometer. cool_quiet_hold
  * (the lens stop finder): every fan off, and while held the engine's own
- * fan writes go to zero as well. cool_quiet_hold_ex with with_pump (the
+ * fan writes go to zero as well. cool_quiet_hold_try with with_pump (the
  * bench's tools through POST /cool/quiet?pump=1): the coolant pump and
  * the TEC off too, so the machine is silent; dry by construction (idle
  * only, the laser latched), the one pump-off state. A call sets the hold
@@ -37,16 +37,16 @@ void cool_diag_purge(int on);       /* the head's purge fan */
  * COOL_QUIET_HOLD_MAX_S, so a listener that died cannot leave it. While it
  * stands the verdict blocks fire (QUIET), and holds an open window. */
 #define COOL_QUIET_HOLD_MAX_S 600
-void cool_quiet_hold(int on);
-void cool_quiet_hold_ex(int on, int with_pump);
-/* The bench tools' hold, its terms checked and its flags set in one
+/* cool_quiet_hold(on) is cool_quiet_hold_try(on, 0). */
+int cool_quiet_hold(int on);
+/* Every hold a caller takes, its terms checked and its flags set in one
  * critical section: 0 when set; -1 while a run session is open, a warm-up
  * and a run included (the engine publishes a session's opening before it
- * opens it, so no tools' hold ever stands in one); -3 while OVERTEMP's
- * cooling airflow stands (the engine releases any hold when the ceiling's
- * gate rises); -2 for a pump hold outside the idle phase (a smoke clear,
- * a thermal cooldown) or under a diagnostic. A release (on 0) is always
- * taken. */
+ * opens it, so no hold ever stands in one); -3 while OVERTEMP's cooling
+ * airflow stands (the engine releases any hold when the ceiling's gate
+ * rises); -2 outside the idle phase (a smoke clear, a thermal cooldown)
+ * and under a diagnostic, from its take on, fans only or with the pump.
+ * A release (on 0) is always taken. */
 int cool_quiet_hold_try(int on, int with_pump);
 int cool_quiet_held(void);
 int cool_quiet_pump_held(void);

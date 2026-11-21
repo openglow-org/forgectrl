@@ -66,7 +66,9 @@
 #     back from the loopback posture
 #   the Lens travel check: the fallback window written (no i2c bus on a
 #     host), and with the pulse engine busy at its end the lens stays
-#     where it stands and the marker goes
+#     where it stands and the marker goes; in the cooling engine's
+#     cooldown the finder's quiet hold is refused, the check ends in an
+#     error before the listening, and the window stored stands
 #   the first run, in the page's order: each document accepted at its
 #     hash, the press step breathing teal, and again once a red flash
 #     has left the button dark (the press status puts it back), the
@@ -1028,7 +1030,12 @@ put(T + '/ctl.secret', SECRET + '\n')
 put(RUN + '/grbl.settings', '$100=213.333\n$101=213.333\n$102=2.922\n')
 armed = [0]
 def report():
-    data = urllib.parse.urlencode({'mode': 'idle', 'armed': str(armed[0])}).encode()
+    # the mode a case puts in ctl.mode (a run session), else idle
+    try:
+        mode = open(T + '/ctl.mode').read().strip() or 'idle'
+    except OSError:
+        mode = 'idle'
+    data = urllib.parse.urlencode({'mode': mode, 'armed': str(armed[0])}).encode()
     try:
         urllib.request.urlopen(urllib.request.Request(URL + '/cool/state', data=data,
                                                       headers={'X-ForgeFIRM-Report': SECRET}), timeout=5).read()
@@ -1255,6 +1262,33 @@ up && ok "the controller comes back" || bad "no controller after the check"
 [ ! -e "$T/run/lens.home" ] && ok "the engine did not go idle: the lens kept where it stands, the marker gone" \
     || bad "the lens was referenced over a busy engine: $(cat "$T/run/lens.home")"
 echo idle > "$SYS/cnc/state"
+
+echo "== the Lens travel check in the cooling engine's cooldown"
+# A run session's tail: the coolant at 32.4 C (575 counts), over the 31 C
+# resume gate and under the 33 C ceiling, so the thermal cooldown stands
+# once the session ends. The finder's quiet hold is refused there: the
+# check ends in an error before anything is listened to, and the window
+# stored stands (no fallback written over it).
+cphase() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cool/status" | python3 -c 'import json, sys; print(json.load(sys.stdin)["phase"])'; }
+expect 200 "$(post /settings "$TOKEN" -d lens_stop_below_steps=20 -d lens_stop_above_steps=17)" \
+    "a window stored as found: 20 half-steps below, 17 above"
+grep '^lens_stop' "$CONF" > "$T/lens.before"
+echo 575 > "$SYS/pic/water_temp_1"
+echo 575 > "$SYS/pic/water_temp_2"
+echo run > "$T/ctl.mode"
+until_ok 50 eval '[ "$(cphase)" = run ]' || bad "no run session: the engine's phase is $(cphase)"
+rm -f "$T/ctl.mode"
+until_ok 50 eval '[ "$(cphase)" = thermal ]' || bad "no cooldown after the session: the engine's phase is $(cphase)"
+OLD=$(ctl_pid)
+check lens.travel
+expect '200|True|False|True' \
+    "$(run '"%s|%s|%s|%s" % (d["start"], "once the cooling engine is idle" in (d["dark"]["error"] or ""), any("the fans stop before the listening" in p for p in d["phases"]), d["dark"]["result"] is None)')" \
+    "in the cooldown the check ends in an error before the listening, with no result ($(run 'd["dark"]["error"]'))"
+grep '^lens_stop' "$CONF" | cmp -s - "$T/lens.before" && ok "the window stored stands" \
+    || bad "the conf file has $(grep lens_stop "$CONF" | tr '\n' ' ')"
+up && ok "the controller comes back" || bad "no controller after the check"
+echo 666 > "$SYS/pic/water_temp_1"
+echo 666 > "$SYS/pic/water_temp_2"
 
 OLD=$(ctl_pid)
 stop_daemon

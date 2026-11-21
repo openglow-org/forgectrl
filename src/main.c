@@ -2719,7 +2719,8 @@ static int cb_cool_quiet(const struct _u_request *req,
     case -1:
         return reply_error(res, 409, "a run session is open");
     case -2:
-        return reply_error(res, 409, "the cooling engine is not idle: the pump stays on");
+        return reply_error(res, 409, "the cooling engine is not idle (a job's smoke clear, its cooldown, "
+                                     "or a diagnostic): the fans stay on");
     case -3:
         return reply_error(res, 409, "the coolant is over its temperature limit and the fans are cooling it: "
                                      "try again once it has cooled");

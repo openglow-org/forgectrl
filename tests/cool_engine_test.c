@@ -220,6 +220,11 @@ static int heater_fd = -1;
 static long heater_written_max = 0;
 /* Heater writes above zero that landed while the pump read off. */
 static int heat_with_pump_off = 0;
+/* The kernel pair's order: the turn of the last cnc/stop "1" and of the
+   last cnc/laser_latch_cooling "1" among the writes since a case zeroed
+   write_turn. */
+static int stop_fd = -1, cool_lock_fd = -1;
+static int write_turn, stop_turn, cool_lock_turn;
 static long get_long(const char *attr);
 /* Something done once, at the engine's next open of a path ending so: a
    report landing inside a tick, between its snapshot and its publish. */
@@ -254,6 +259,11 @@ static int fake_open(const char *path, int flags, ...)
         size_t lh = strlen("thermal/heater_pwm");
         if (fd >= 0 && (flags & O_WRONLY) && lp >= lh && !strcmp(path + lp - lh, "thermal/heater_pwm"))
             heater_fd = fd;
+        size_t ls = strlen("cnc/stop"), lc = strlen("cnc/laser_latch_cooling");
+        if (fd >= 0 && (flags & O_WRONLY) && lp >= ls && !strcmp(path + lp - ls, "cnc/stop"))
+            stop_fd = fd;
+        if (fd >= 0 && (flags & O_WRONLY) && lp >= lc && !strcmp(path + lp - lc, "cnc/laser_latch_cooling"))
+            cool_lock_fd = fd;
     }
     return fd;
 }
@@ -279,6 +289,14 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
             heater_written_max = d;
         if (d > 0 && get_long("thermal/water_pump_on") == 0)
             heat_with_pump_off++;
+    }
+    if (fd == stop_fd || fd == cool_lock_fd) {
+        if (n > 0 && ((const char *)buf)[0] == '1')
+            *(fd == stop_fd ? &stop_turn : &cool_lock_turn) = ++write_turn;
+        if (fd == stop_fd)
+            stop_fd = -1;
+        else
+            cool_lock_fd = -1;
     }
     if (fd == drop_fd && drop_left != 0) {
         if (drop_left > 0)
@@ -517,9 +535,16 @@ static long throttle_stub;              /* the kernel's CPU cooling state */
 long soc_throttle_state(void) { return throttle_stub; }
 
 /* The factory conversion (status.c), and its inverse for the model. */
+/* A count the case has read as exactly degc_exact_c (the 70 C line's own
+ * edge, which no count converts to), or -1. */
+static long degc_exact_raw = -1;
+static double degc_exact_c;
+
 double coolant_degc(long raw)
 {
     static const double adc_f = 1024.0 * 1.3;
+    if (raw == degc_exact_raw)
+        return degc_exact_c;
     if (raw <= 0 || (double)raw >= adc_f)
         return -273.15;
     double r = 10000.0 / (adc_f / (double)raw - 1.0);
@@ -2558,6 +2583,8 @@ static void flow_yield_now(loop_t *L)
           "a diagnostic's take: one yield, the take already published");
     CHECK(cool_quiet_hold_try(1, 1) == -2 && !quiet_held,
           "the route's pump hold refused from it, before its first tick");
+    CHECK(!strcmp(pub_phase, "idle") && cool_quiet_hold_try(1, 0) == -2 && cool_quiet_hold(1) == -2 && !quiet_held,
+          "a fans-only hold and the finder's refused from it too, the phase still idle");
     cool_diag_release();
     run_idle_tick(L);
 }
@@ -2820,11 +2847,12 @@ static void tec(loop_t *L)
           "on again once the dwell has passed, not before");
     session_end_tick(L);
     CHECK(cool_state != Cool_Idle && get_long("thermal/tec_on") == 1, "the cooldown keeps it on");
-    CHECK(cool_quiet_hold_try(1, 0) == 0, "the route takes a fans-only hold in the cooldown");
+    CHECK(cool_quiet_hold_try(1, 0) == -2 && !quiet_held, "the route refuses a fans-only hold in the cooldown");
+    cool_quiet_hold_ex(1, 0);           /* set past the route's check */
     loop_tick(L);
     tick("idle", 0);
     CHECK(get_long("thermal/exhaust_pwm") == 0 && get_long("thermal/tec_on") == 0,
-          "a fans-only hold in the cooldown: every fan off, and the TEC with them");
+          "a fans-only hold set past it in the cooldown: every fan off, and the TEC with them");
     cool_quiet_hold(0);
     close_session(L);
     kv[1] = "0";
@@ -3144,10 +3172,11 @@ static void quiet_over_ceiling_cooldown(loop_t *L)
         run_tick(L);
     session_end_tick(L);
     int rc = cool_quiet_hold_try(1, 0);
+    cool_quiet_hold_ex(1, 0);           /* set past the route's check */
     loop_tick(L);
     tick("idle", 0);
-    CHECK(rc == 0 && cool_state != Cool_Idle && quiet_applied && get_long("thermal/exhaust_pwm") == 0,
-          "the hold applied in the cooldown: every fan off");
+    CHECK(rc == -2 && cool_state != Cool_Idle && quiet_applied && get_long("thermal/exhaust_pwm") == 0,
+          "the route refuses the hold in the cooldown; one set past it applied: every fan off");
     L->bulk_c = 13.0;                   /* 35.3 C: over the 33 C ceiling */
     int rose = 0, fans_off_over = 0;
     for (int i = 0; i < 8; i++) {
@@ -3275,6 +3304,36 @@ static void quiet_posture(loop_t *L)
         int rc = cool_quiet_hold_try(1, 1);
         CHECK(strcmp(pub_phase, "idle") && !pub_session && rc == -2 && !quiet_held,
               "the cooldown: no session, the pump hold refused as a busy engine");
+    }
+    /* No hold stands over an airflow the engine runs for safety: the
+     * route's fans-only hold and the finder's are refused in the smoke
+     * clear and in the thermal cooldown, and the fans keep their duties. */
+    {
+        int rc_fans = cool_quiet_hold_try(1, 0), rc_finder = cool_quiet_hold(1), fans_off = 0;
+        run_idle_tick(L);
+        fans_off += get_long("thermal/exhaust_pwm") != EXHAUST_RUN;
+        CHECK(cool_state == Cool_Smoke && rc_fans == -2 && rc_finder == -2 && !quiet_held && !fans_off,
+              "the smoke clear: a fans-only hold and the finder's refused, the run airflow stands");
+    }
+    close_session(L);
+    {
+        double bulk_was = L->bulk_c;
+        L->bulk_c = 10.0;               /* about 32 C: over the 31 C resume gate, under the 33 C ceiling */
+        settle_and_open(L);
+        for (int i = 0; i < 3; i++)
+            run_tick(L);
+        L->session = 0;
+        int thermal = 0;
+        for (int i = 0; i < 40 && !thermal; i++) {
+            run_idle_tick(L);
+            thermal = cool_state == Cool_Thermal;
+        }
+        int rc_fans = cool_quiet_hold_try(1, 0), rc_finder = cool_quiet_hold(1);
+        run_idle_tick(L);
+        CHECK(thermal && cool_state == Cool_Thermal && rc_fans == -2 && rc_finder == -2 && !quiet_held &&
+              get_long("thermal/exhaust_pwm") == EXHAUST_COOL,
+              "the thermal cooldown: a fans-only hold and the finder's refused, the cooling airflow stands");
+        L->bulk_c = bulk_was;
     }
     close_session(L);
 
@@ -3689,10 +3748,11 @@ static void shutdown_order(loop_t *L)
 /* A count that is no temperature (coolant.h) is no reading, as a read that
  * fails is: SENSOR at the second tick, the heater off. Judged on the count
  * as read: at the legal maximum air-assist share (60 counts at the run
- * duty) and correction (+5 C), 990 counts would convert to about +9 C. */
+ * duty) and correction (+5 C), 990 counts would convert to about +9 C. A
+ * count of 0 in a run is a short, not a dropout (gates F). */
 static void counts_no_reading(loop_t *L)
 {
-    static const long counts[] = { 1023, 0, 65535, 990 };
+    static const long counts[] = { 1023, 65535, 990 };
     char msg[128];
     printf("H2. a count that is no temperature: SENSOR, judged before the corrections\n");
     kv[0] = "cool_aa_offset_counts"; kv[1] = "60"; kv[2] = "cool_temp_offset_c"; kv[3] = "5";
@@ -3728,49 +3788,475 @@ static void counts_no_reading(loop_t *L)
     close_session(L);
 }
 
-/* An upstream reading over 70 C (a short reads a few counts over 0,
- * hundreds of degrees) releases no cold-side gate. With the ceiling and
- * the critical line at their off ends nothing else judges it, so the floor
- * stands shut on it and a warm-up's decision waits; and at idle, where the
- * ceiling (on) forces the cooling airflow on such a reading, the TEC stays
- * off. */
+/* A coolant reading over 70 C (a short reads a few counts over 0, hundreds
+ * of degrees) is no reading, whatever the gates are set to. In a run session
+ * it is SENSOR's fail tier in its own tick: fire blocked, hold, cnc/stop and
+ * the engine's latch hold written, all standing until the job has ended,
+ * whatever the readings do meanwhile. With the floor, the ceiling, the
+ * critical line and the warm-up gate all at their off ends no gate would
+ * judge it. It is judged on the count's own conversion and after the
+ * corrections. At idle it is the plain SENSOR: no pair, released with the
+ * readings, no cooling airflow forced on it, and a TEC fitted never driven. */
+static void pair_cleared(void)
+{
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
+}
+
+static int short_failed(const char *which)
+{
+    return !pub_fire_ok && pub_hold && !strcmp(pub_verdict, "SENSOR") && strstr(pub_reason, which) &&
+           get_long("cnc/stop") == 1 && get_long("cnc/laser_latch_cooling") == 1;
+}
+
+static void gates_off_session(loop_t *L, const char *offset)
+{
+    close_session(L);
+    kv[0] = "cool_temp_min"; kv[1] = "0"; kv[2] = "cool_temp_max"; kv[3] = "60";
+    kv[4] = "cool_temp_critical_c"; kv[5] = "70"; kv[6] = "cool_temp_start"; kv[7] = "0";
+    kv[8] = "cool_temp_offset_c"; kv[9] = offset; kv[10] = NULL;
+    settle_and_open(L);
+    run_tick(L);
+}
+
+static void near_short_reads(loop_t *L, const char *offset, double c, int whole, const char *msg)
+{
+    gates_off_session(L, offset);
+    CHECK(cool_state == Cool_Run && pub_fire_ok && !strcmp(pub_verdict, "OK") &&
+          strstr(pub_gates_off, "\"coolant_min\"") && strstr(pub_gates_off, "\"coolant_max\"") &&
+          strstr(pub_gates_off, "\"coolant_critical\""),
+          "the floor, the ceiling and the critical line at their off ends, a settled run: fire permitted");
+    pair_cleared();
+    stops = 0;
+    L->fix_up = c > 0 ? raw_for(c) : 3;
+    run_tick(L);
+    CHECK(short_failed("upstream"), msg);
+    L->fix_up = -1;
+    if (whole) {
+        int stood = 1;
+        for (int k = 0; k < SENSOR_FAIL_CAP + 6; k++) {
+            run_tick(L);
+            stood &= !pub_fire_ok && pub_hold && !strcmp(pub_verdict, "SENSOR") &&
+                     get_long("cnc/laser_latch_cooling") == 1;
+        }
+        CHECK(stood, "the reading back: SENSOR, the hold and the engine's latch hold stand, no resume");
+        kv[0] = NULL;
+        close_session(L);
+        CHECK(get_long("cnc/laser_latch_cooling") == 0 && !sensor_alarm && stops == 1,
+              "the job ended (idle reported): the latch hold released, SENSOR gone with the readings, no "
+              "second restart");
+    }
+    kv[0] = NULL;
+    close_session(L);
+}
+
+/* The line's own edge, every gate off: count 245 (70.09 C) is a short; a
+ * reading of exactly 70.0 C is a temperature. */
+static void near_short_edge(loop_t *L)
+{
+    gates_off_session(L, "0");
+    L->fix_up = 245;
+    run_tick(L);
+    CHECK(!pub_fire_ok && !strcmp(pub_verdict, "SENSOR"),
+          "upstream at count 245 (70.09 C), every gate off: SENSOR in its own tick");
+    L->fix_up = -1;
+    gates_off_session(L, "0");
+    degc_exact_raw = 250;
+    degc_exact_c = 70.0;
+    L->fix_up = 250;
+    run_tick(L);
+    run_tick(L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK") && !sensor_alarm,
+          "upstream at exactly 70.0 C, every gate off: a temperature, fire permitted");
+    degc_exact_raw = -1;
+    L->fix_up = -1;
+    kv[0] = NULL;
+    close_session(L);
+}
+
+/* The shipped gates (gates.c): a near-short frame in a run is SENSOR's fail
+ * tier in its own tick, on either sensor; one every 12 s, under the dropout
+ * window's six in 60 s, ends the job at its first frame. */
+static void shipped_run(loop_t *L)
+{
+    close_session(L);
+    settle_and_open(L);
+    double t0 = fake_now;
+    while (fake_now < t0 + FAN_GRACE_S + 1)
+        run_tick(L);
+}
+
+/* One tick with no report at all (a silent or stopped controller). */
+static void tick_silent(loop_t *L)
+{
+    loop_tick(L);
+    fake_now += 1.0;
+    engine_tick();
+}
+
+static void near_short_shipped(loop_t *L)
+{
+    shipped_run(L);
+    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK"), "the shipped gates, a settled run past the grace: fire permitted");
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 3;
+    run_tick(L);
+    CHECK(short_failed("upstream"),
+          "the shipped gates, upstream at count 3 (about 371 C): SENSOR's fail tier and the kernel pair in the "
+          "frame's own tick");
+    CHECK(stops == 1 && stop_seen_stop == 1 && stop_seen_latch == 1 && !strcmp(stop_why, "coolant sensor short"),
+          "and the controller ended through the supervisor, once, after the kernel pair");
+    /* The supervisor's stop of that controller (no report since): the job
+     * is gone with it. */
+    L->fix_up = -1;
+    cool_controller_stopped();
+    for (int k = 0; k < SENSOR_FAIL_CAP + 1; k++)
+        tick_silent(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0 && !sensor_alarm && !pub_fire_ok && stops == 1,
+          "no controller remains: the tier released, fire still blocked, no second restart");
+    close_session(L);
+
+    shipped_run(L);
+    pair_cleared();
+    int first = -1, open_after = 0;
+    for (int f = 0; f < 5; f++) {
+        for (int k = 0; k < 11; k++) {
+            run_tick(L);
+            open_after |= first >= 0 && pub_fire_ok;
+        }
+        L->fix_up = 3;
+        run_tick(L);
+        if (first < 0 && short_failed("upstream"))
+            first = f;
+        open_after |= first >= 0 && pub_fire_ok;
+        L->fix_up = -1;
+    }
+    CHECK(first == 0 && !open_after,
+          "one near-short frame every 12 s: the job ended at the first frame, fire never permitted after it");
+    close_session(L);
+
+    shipped_run(L);
+    pair_cleared();
+    stops = 0;
+    L->fix_down = 3;
+    run_tick(L);
+    CHECK(short_failed("downstream") && stops == 1,
+          "downstream at count 3: SENSOR's fail tier, the kernel pair and the restart in its own tick, the "
+          "downstream sensor named");
+    L->fix_down = -1;
+    close_session(L);
+}
+
+/* One tick with the controller's report as given. */
+static void tick_report(loop_t *L, const char *mode, int armed)
+{
+    loop_tick(L);
+    fake_now += 1.0;
+    cool_state_report(mode, armed, -1, -1, -1, NULL);
+    engine_tick();
+}
+
+static int short_stands(void)
+{
+    return !pub_fire_ok && pub_hold && !strcmp(pub_verdict, "SENSOR") && get_long("cnc/laser_latch_cooling") == 1;
+}
+
+/* The short's words, and the kernel pair as it stood when they were logged. */
+static long short_pair_at_words;
+static void short_words_hook(const char *line)
+{
+    if (strstr(line, "a short") && strstr(line, "job stopped") && short_pair_at_words == -2)
+        short_pair_at_words = get_long("cnc/stop") * 10 + get_long("cnc/laser_latch_cooling");
+}
+
+/* The short's fail tier, rule by rule: the pair before the words, stop
+ * then latch, the pair and the controller's end once; until the
+ * supervisor's stop of that controller lands (the stopped controller
+ * releases it, near_short_shipped) it stands through a silence, an idle
+ * report with a window open, a closed window in an open session
+ * (an M8 left on), and past the session's end while the controller still
+ * reports the job (a window that ran out of grace reports cooldown; an
+ * Acknowledge and a re-arm meet it too); it ends when the controller
+ * reports idle with no window. */
+static void short_tier_rules(loop_t *L)
+{
+    shipped_run(L);
+    pair_cleared();
+    write_turn = stop_turn = cool_lock_turn = 0;
+    short_pair_at_words = -2;
+    fflog_hook = short_words_hook;
+    L->fix_up = 3;
+    run_tick(L);
+    fflog_hook = NULL;
+    CHECK(short_pair_at_words == 11, "a short: cnc/stop and the engine's latch hold written before the words");
+    CHECK(stop_turn > 0 && cool_lock_turn > stop_turn, "a short: cnc/stop first, then the engine's latch hold");
+    put("cnc/stop", "0\n");
+    stops = 0;
+    run_tick(L);
+    run_tick(L);
+    CHECK(get_long("cnc/stop") == 0 && stops == 0, "a short that stands: the stop and the controller's end once");
+    L->fix_up = -1;
+    /* The controller's end is the supervisor's to carry out; until it
+     * reports or stops, the tier stands on whatever it reports. */
+    int stood = 1;
+    for (int k = 0; k < 10; k++) {
+        tick_silent(L);
+        stood &= get_long("cnc/laser_latch_cooling") == 1 && short_alarm;
+    }
+    tick_unarmed_run(L);
+    stood &= short_stands();
+    CHECK(stood, "a silent controller, then a report again: the tier stands");
+    for (int k = 0; k < 3; k++) {
+        tick_unarmed_run(L);
+        stood &= short_stands();
+    }
+    CHECK(stood, "the window closed with M8 on: SENSOR, the hold and the engine's latch hold stand");
+    tick_report(L, "idle", 1);
+    CHECK(short_stands(), "idle reported with a window open: the tier stands");
+    stood = 1;
+    for (int k = 0; k < 70; k++) {
+        tick_report(L, "cooldown", 0);
+        stood &= short_stands();
+    }
+    CHECK(stood && cool_state != Cool_Run,
+          "the window ran out with no M8 (cooldown reported, the session ended): the tier stands, no ACK, no fire");
+    (void)cool_attention_ack();
+    tick_report(L, "cooldown", 0);
+    stood = short_stands();
+    for (int k = 0; k < 3; k++) {
+        tick_report(L, "run", 1);
+        stood &= short_stands();
+    }
+    CHECK(stood, "an Acknowledge and a re-arm while the controller still reports the job: refused, the tier stands");
+    tick_report(L, "idle", 0);
+    tick_report(L, "idle", 0);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0 && !sensor_alarm && !strcmp(pub_verdict, "ACK") && !pub_fire_ok,
+          "the controller reports idle, no window: the job has ended, the tier released, ACK");
+    close_session(L);
+
+    /* A session no window ever opened in (M8 alone). */
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    L->session = 1;
+    {
+        double t0 = fake_now;
+        while (fake_now < t0 + FAN_GRACE_S + 1)
+            tick_unarmed_run(L);
+    }
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 3;
+    tick_unarmed_run(L);
+    CHECK(short_failed("upstream") && stops == 1,
+          "an unarmed session: a short takes SENSOR's fail tier, the kernel pair and the restart");
+    L->fix_up = -1;
+    close_session(L);
+
+    /* Over a SENSOR already standing (an open sensor, then a short). */
+    shipped_run(L);
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 1023;
+    run_tick(L);
+    run_tick(L);
+    int plain = !strcmp(pub_verdict, "SENSOR") && get_long("cnc/stop") == 0 && stops == 0;
+    L->fix_up = 3;
+    run_tick(L);
+    int failed = short_failed("upstream") && stops == 1;
+    L->fix_up = -1;
+    stood = 1;
+    for (int k = 0; k < SENSOR_FAIL_CAP + 2; k++) {
+        run_tick(L);
+        stood &= short_stands();
+    }
+    CHECK(plain && failed && stood,
+          "an open sensor in a run: the plain SENSOR, no restart; a short over it: the fail tier, the pair and "
+          "the restart, no resume");
+    close_session(L);
+
+    /* A stop the kernel refuses: the latch lock lands all the same. */
+    shipped_run(L);
+    pair_cleared();
+    drop_attr = "cnc/stop";
+    refuse = 1;
+    drop_left = -1;
+    L->fix_up = 3;
+    run_tick(L);
+    drop_attr = NULL;
+    refuse = 0;
+    drop_left = 0;
+    CHECK(get_long("cnc/laser_latch_cooling") == 1 && !pub_fire_ok && !strcmp(pub_verdict, "SENSOR"),
+          "a short with the stop refused: the engine's latch hold locked all the same");
+    L->fix_up = -1;
+    close_session(L);
+
+    /* A short in a job's tail (the smoke clear) is the plain SENSOR. */
+    shipped_run(L);
+    run_idle_tick(L);
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 3;
+    run_idle_tick(L);
+    CHECK(cool_state == Cool_Smoke && !strcmp(pub_verdict, "SENSOR") && get_long("cnc/stop") == 0 &&
+          get_long("cnc/laser_latch_cooling") == 0 && stops == 0,
+          "a short in the smoke clear: the plain SENSOR, no kernel pair, no controller stop");
+    L->fix_up = -1;
+    close_session(L);
+}
+
+/* A count of 0 (the shorted thermistor itself, coolant.h) in a run is the
+ * short's fail tier, on either sensor, in its own tick; one every 12 s ends
+ * the job at its first frame. At idle it stays a dropout: tolerated for a
+ * tick, SENSOR at the second, no pair. */
+static void zero_count_in_run(loop_t *L)
+{
+    shipped_run(L);
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 0;
+    run_tick(L);
+    CHECK(short_failed("upstream") && strstr(pub_reason, "count 0") && stops == 1 &&
+          !strcmp(stop_why, "coolant sensor short"),
+          "the shipped gates, upstream at count 0: SENSOR's fail tier, the kernel pair and the restart in its own "
+          "tick");
+    /* The job ends at once (idle reported): SENSOR keeps a short's full
+     * score, so it stands through two reading ticks and goes after four. */
+    L->fix_up = -1;
+    tick_report(L, "idle", 0);
+    tick_report(L, "idle", 0);
+    int still = sensor_alarm;
+    tick_report(L, "idle", 0);
+    tick_report(L, "idle", 0);
+    CHECK(still && !sensor_alarm, "after a count-0 trip and the job's end: SENSOR goes after four reading ticks");
+    close_session(L);
+
+    shipped_run(L);
+    pair_cleared();
+    L->fix_down = L->fix_up = 0;
+    run_tick(L);
+    CHECK(short_failed("sensors"), "both sensors at count 0 in a run: SENSOR's fail tier and the kernel pair");
+    L->fix_down = L->fix_up = -1;
+    close_session(L);
+
+    shipped_run(L);
+    run_idle_tick(L);
+    pair_cleared();
+    L->fix_up = 0;
+    run_idle_tick(L);
+    CHECK(cool_state == Cool_Smoke && get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 0,
+          "a count of 0 in the smoke clear: a dropout, no kernel pair");
+    L->fix_up = -1;
+    close_session(L);
+
+    pair_cleared();
+    L->fix_up = 0;
+    settle_and_open(L);
+    run_tick(L);
+    CHECK(cool_state == Cool_Warmup && get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 0,
+          "a count of 0 as a warm-up session opens: no kernel pair");
+    L->fix_up = -1;
+    close_session(L);
+
+    shipped_run(L);
+    pair_cleared();
+    int first = -1, open_after = 0;
+    for (int f = 0; f < 5; f++) {
+        for (int k = 0; k < 11; k++) {
+            run_tick(L);
+            open_after |= first >= 0 && pub_fire_ok;
+        }
+        L->fix_up = 0;
+        run_tick(L);
+        if (first < 0 && short_failed("upstream"))
+            first = f;
+        open_after |= first >= 0 && pub_fire_ok;
+        L->fix_up = -1;
+    }
+    CHECK(first == 0 && !open_after, "one count-0 frame every 12 s: the job ended at the first frame");
+    close_session(L);
+
+    shipped_run(L);
+    pair_cleared();
+    L->fix_down = 0;
+    run_tick(L);
+    CHECK(short_failed("downstream"), "downstream at count 0: SENSOR's fail tier and the kernel pair");
+    L->fix_down = -1;
+    close_session(L);
+
+    close_session(L);
+    pair_cleared();
+    L->fix_up = 0;
+    run_idle_tick(L);
+    int tolerated = strcmp(pub_verdict, "SENSOR") != 0;
+    run_idle_tick(L);
+    CHECK(tolerated && !strcmp(pub_verdict, "SENSOR") && get_long("cnc/stop") == 0 &&
+          get_long("cnc/laser_latch_cooling") == 0,
+          "at idle, upstream at count 0: a dropout, tolerated a tick, SENSOR at the second, no pair");
+    L->fix_up = -1;
+    for (int i = 0; i < SENSOR_FAIL_CAP; i++)
+        run_idle_tick(L);
+}
+
 static void cold_side(loop_t *L)
 {
-    printf("gates F. an upstream reading over 70 C releases no cold-side gate\n");
-    close_session(L);
-    kv[0] = "cool_temp_max"; kv[1] = "60"; kv[2] = "cool_temp_critical_c"; kv[3] = "70";
-    kv[4] = NULL;
-    L->fix_up = 3;                      /* about 371 C */
+    printf("gates F. a near-short coolant sensor ends a run in its own tick, whatever the gates are set to; "
+           "at idle it is SENSOR\n");
+    void (*stop_was)(const char *) = cool_fail_tier_stop;
+    cool_fail_tier_stop = fake_stop;
+    near_short_reads(L, "0", -1.0, 1,
+                     "upstream at count 3 (about 371 C), every gate off: SENSOR's fail tier and the kernel pair "
+                     "in its own tick");
+    near_short_reads(L, "-5", 72.0, 0,
+                     "72 C on the count's own conversion, 67 C after a -5 C correction: SENSOR's fail tier");
+    near_short_reads(L, "5", 67.0, 0,
+                     "67 C on the count's own conversion, 72 C after a +5 C correction: SENSOR's fail tier");
+    near_short_edge(L);
+    near_short_shipped(L);
+    short_tier_rules(L);
+    zero_count_in_run(L);
+
+    /* The warm-up gate on: the session opens undecided, no heat, and SENSOR
+     * names it; the warm-up is no run, so no kernel pair. */
+    pair_cleared();
+    stops = 0;
+    L->fix_up = 3;
     settle_and_open(L);
     run_tick(L);
     CHECK(!pub_fire_ok && pub_hold && cool_state == Cool_Warmup && warmup_pending && heater_pct == 0 &&
-          !pub_armed_ack, "the ceiling and the critical line off, the warm-up gate on: undecided, no heat, fire blocked");
-    CHECK(cold_gate && !strcmp(pub_verdict, "COLD"), "and the floor stands shut on it: COLD");
-    kv[4] = "cool_temp_start"; kv[5] = "0"; kv[6] = NULL;
-    close_session(L);
-    settle_and_open(L);
-    run_tick(L);
-    CHECK(cool_state == Cool_Run && !pub_fire_ok && !strcmp(pub_verdict, "COLD"),
-          "the warm-up gate off too: the floor alone blocks fire");
+          !pub_armed_ack && !strcmp(pub_verdict, "SENSOR") && get_long("cnc/stop") == 0 &&
+          get_long("cnc/laser_latch_cooling") == 0 && stops == 0,
+          "the warm-up gate on: undecided, no heat, fire blocked, the plain SENSOR, no kernel pair, no controller "
+          "stop");
     L->fix_up = -1;
-    run_tick(L);
-    run_tick(L);
-    CHECK(pub_fire_ok && !strcmp(pub_verdict, "OK") && !cold_gate, "a reading under 70 C again: released");
+    close_session(L);
+
+    /* At idle, the ceiling on and a TEC fitted. */
     kv[0] = "cool_tec_present"; kv[1] = "1"; kv[2] = NULL;
     close_session(L);
+    pair_cleared();
+    stops = 0;
     L->fix_up = 3;
-    for (int i = 0; i < TEC_DWELL_S + 5; i++)
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "SENSOR") && !pub_fire_ok, "at idle, upstream at count 3: SENSOR in its own tick");
+    int forced = 0, tec = 0;
+    for (int i = 0; i < TEC_DWELL_S + 5; i++) {
         run_idle_tick(L);
-    CHECK(cool_state == Cool_Idle && forced_cool && get_long("thermal/exhaust_pwm") == EXHAUST_COOL &&
-          !strcmp(pub_verdict, "OVERTEMP"),
-          "at idle, the ceiling on: OVERTEMP, the cooling airflow forced while it reads so");
-    CHECK(get_long("thermal/tec_on") == 0 && !tec_on_state, "and a TEC fitted is never driven on it");
+        forced |= forced_cool || over_temp_gate || get_long("thermal/exhaust_pwm") != EXHAUST_IDLE;
+        tec |= get_long("thermal/tec_on") != 0 || tec_on_state;
+    }
+    CHECK(cool_state == Cool_Idle && !strcmp(pub_verdict, "SENSOR") && !pub_fire_ok && !forced &&
+          get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 0 && stops == 0,
+          "at idle, the ceiling on: the plain SENSOR, no kernel pair, no controller stop, no cooling airflow "
+          "forced on it");
+    CHECK(!tec, "and a TEC fitted is never driven on it");
     L->fix_up = -1;
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < SENSOR_FAIL_CAP; i++)
         run_idle_tick(L);
-    CHECK(!forced_cool && !strcmp(pub_verdict, "OK"), "the reading back: the airflow stands down");
+    CHECK(!sensor_alarm, "the reading back: SENSOR released");
     kv[0] = NULL;
     close_session(L);
+    cool_fail_tier_stop = stop_was;
 }
 
 /* The hold's reason tells the truth about the warm-up: never "heater off"
@@ -4040,6 +4526,130 @@ static void ext_unknown_at_start(void)
     int st = 0;
     CHECK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
           "the fresh engine's case passed");
+}
+
+/* AIRFLOW and CRITICAL take the kernel pair on their rising edge: cnc/stop
+ * and the engine's latch hold, written before the words, once; the hold
+ * stands for the session and is released at its end. The controller is not
+ * ended through the supervisor: it ends the job itself on the verdict. */
+static const char *pair_words;
+static long pair_stop_at_words, pair_latch_at_words;
+static void pair_hook(const char *line)
+{
+    if (pair_words && strstr(line, pair_words) && pair_stop_at_words == -2) {
+        pair_stop_at_words = get_long("cnc/stop");
+        pair_latch_at_words = get_long("cnc/laser_latch_cooling");
+    }
+}
+
+static void fail_tier_pair(loop_t *L, int critical)
+{
+    printf("N2%s. %s: the kernel pair on the rising edge, before the words; no controller stop\n",
+           critical ? "b" : "a", critical ? "CRITICAL" : "AIRFLOW");
+    close_session(L);
+    if (critical) {
+        kv[0] = "cool_temp_max"; kv[1] = "60"; kv[2] = "cool_temp_resume"; kv[3] = "16";
+        kv[4] = "cool_temp_critical_c"; kv[5] = "30"; kv[6] = NULL;
+    }
+    settle_and_open(L);
+    {
+        double t0 = fake_now;
+        while (fake_now < t0 + FAN_GRACE_S + 1)
+            run_tick(L);
+    }
+    CHECK(pub_armed_ack && pub_fire_ok, "an acknowledged window past the grace");
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
+    stops = 0;
+    pair_words = critical ? "CRITICAL:" : "AIRFLOW:";
+    pair_stop_at_words = pair_latch_at_words = -2;
+    fflog_hook = pair_hook;
+    write_turn = stop_turn = cool_lock_turn = 0;
+    int stop_before = 0, ticks = 0;
+    if (critical)
+        L->bulk_c = 10.0;                   /* 32.3 C: over the 30 C critical line */
+    else
+        put_long("thermal/tach_exhaust", 10000000);     /* 3000 rpm: under the 6400 floor */
+    while (!(critical ? critical_alarm : airflow_alarm) && ticks < 10) {
+        stop_before |= get_long("cnc/stop") != 0;
+        run_tick(L);
+        ticks++;
+    }
+    fflog_hook = NULL;
+    CHECK(!strcmp(pub_verdict, critical ? "CRITICAL" : "AIRFLOW") && !pub_fire_ok && !stop_before &&
+          ticks == (critical ? 1 : 3),
+          critical ? "the critical line crossed: CRITICAL at that tick, nothing written before it"
+                   : "the exhaust under its floor: AIRFLOW at the gate's third tick, nothing written before it");
+    CHECK(pair_stop_at_words == 1 && pair_latch_at_words == 1,
+          "motion stopped and the engine's latch hold locked before the words were logged");
+    CHECK(stop_turn > 0 && cool_lock_turn > stop_turn, "cnc/stop written first, then the engine's latch hold");
+    CHECK(stops == 0, "the controller is not ended through the supervisor");
+    put("cnc/stop", "0\n");
+    run_tick(L);
+    run_tick(L);
+    CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 1,
+          "the tier stands: the stop written once, the engine's latch hold stands with it");
+    /* The window closes and the session stays open (a paused, disarmed
+     * cloud print reports run; an M8 left on): the hold stands. */
+    for (int k = 0; k < 3; k++)
+        tick_unarmed_run(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 1 && !strcmp(pub_verdict, critical ? "CRITICAL" : "AIRFLOW"),
+          "the window closed in the open session: the tier and the engine's latch hold stand");
+    L->bulk_c = 0.0;
+    put_long("thermal/tach_exhaust", 300);
+    kv[0] = NULL;
+    close_session(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "the tier ended with its session: the hold released");
+    if (critical)
+        return;
+
+    /* A session no window ever opened in (an M8 job with no M3): AIRFLOW
+     * takes the pair there too. */
+    for (int i = 0; i < 20; i++)
+        run_idle_tick(L);
+    L->session = 1;
+    {
+        double t0 = fake_now;
+        while (fake_now < t0 + FAN_GRACE_S + 1)
+            tick_unarmed_run(L);
+    }
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
+    put_long("thermal/tach_exhaust", 10000000);
+    ticks = 0;
+    while (!airflow_alarm && ticks < 10) {
+        tick_unarmed_run(L);
+        ticks++;
+    }
+    CHECK(ticks == 3 && get_long("cnc/stop") == 1 && get_long("cnc/laser_latch_cooling") == 1 && stops == 0,
+          "an unarmed session: AIRFLOW at the third low tick takes the pair, no controller stop");
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
+
+    /* A stop the kernel refuses: the latch lock lands all the same, and
+     * the failed write is named. */
+    settle_and_open(L);
+    {
+        double t0 = fake_now;
+        while (fake_now < t0 + FAN_GRACE_S + 1)
+            run_tick(L);
+    }
+    put("cnc/laser_latch_cooling", "0\n");
+    logbuf[0] = '\0';
+    drop_attr = "cnc/stop";
+    refuse = 1;
+    drop_left = -1;
+    put_long("thermal/tach_exhaust", 10000000);
+    for (int k = 0; k < 10 && !airflow_alarm; k++)
+        run_tick(L);
+    drop_attr = NULL;
+    refuse = 0;
+    drop_left = 0;
+    CHECK(airflow_alarm && get_long("cnc/laser_latch_cooling") == 1 && !pub_fire_ok &&
+          log_has("safing write cnc/stop=1 failed"),
+          "the stop refused: the engine's latch hold locked all the same, the failed write named");
+    put_long("thermal/tach_exhaust", 300);
+    close_session(L);
 }
 
 int main(void)
@@ -4543,6 +5153,8 @@ int main(void)
     crash_src2 = 0;
     close_session(&L);
     CHECK(get_long("cnc/laser_latch_cooling") == 0, "the tier ended with its session: the hold released");
+    fail_tier_pair(&L, 0);
+    fail_tier_pair(&L, 1);
 
     /* The kernel sets the cooling holder at every final close of the pulse
      * device, long after the engine's first tick (a controller that

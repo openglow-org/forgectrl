@@ -160,8 +160,22 @@ int lensfind_run(lensfind_t *st, json_t *r)
     wiz_wr_attr("head/z_mode", "1");
     wiz_wr_attr("head/z_enable", "0");
     /* Every fan off, and a set time for them to run down, before the
-     * accelerometer is listened to: a running fan is in the reading. */
-    cool_quiet_hold(1);
+     * accelerometer is listened to: a running fan is in the reading. The
+     * engine takes the hold only at idle (cool_quiet_hold_try): in a run
+     * session, under over-temperature's cooling, in a job's smoke clear or
+     * its cooldown, or under a diagnostic the fans stay on and nothing is
+     * listened to. The check's own stop of the controller can leave such a
+     * tail: a session the controller held open ends at the engine's next
+     * tick after the stop, which forgets the controller's report, and its
+     * smoke clear and cooldown follow. */
+    st->refused = cool_quiet_hold(1);
+    if (st->refused != 0) {
+        snprintf(st->why, sizeof(st->why), "%s: the fans stay on",
+                 st->refused == -1 ? "a run session is open"
+                 : st->refused == -3 ? "the coolant is over its temperature limit and the fans are cooling it"
+                 : "the cooling engine is not idle (a job's smoke clear, its cooldown, or a diagnostic)");
+        goto done;
+    }
     for (int i = 0; i < FIND_QUIET_S; i++) {
         wiz_phase("the fans stop before the listening: %d s of %d", i, FIND_QUIET_S);
         wiz_msleep(1000);
@@ -211,7 +225,8 @@ int lensfind_run(lensfind_t *st, json_t *r)
 done:
     if (opened)
         crash_hw_listen(0);
-    cool_quiet_hold(0);
+    if (!st->refused)
+        cool_quiet_hold(0);
     if (!st->found) {
         wiz_log("the stops could not be found: %s", st->why);
         /* Whatever happened, the lens ends on the edge. */
