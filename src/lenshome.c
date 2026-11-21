@@ -22,13 +22,17 @@
  * reads the focal height for it out of lens_hall_edge_z_mm - this file
  * never interprets the edge, it only puts the lens on it.
  *
- * A sweep that runs past MAX_SWEEP_STEPS is a hard fault, not a retry: the
- * lens motor is wedged, the carriage is jammed, or the hall sensor is
- * dead, and a laser whose focal height is a guess does not get to run. The
- * bound also keeps a dead sensor from driving the carriage onto a stop.
- * Behind the probe the caller turns a fault into the motion-fault gate, so
- * no controller spawns and the panel says why; before a respawn a fault
- * leaves the marker absent, and the controller holds Z unreferenced.
+ * Each sweep is bounded by MAX_SWEEP_STEPS, the whole travel ForgeFIRM
+ * takes for any head plus a slack, whatever the lens travel check wrote;
+ * the cloud runner's reference takes the same bound. A sweep that runs
+ * past it is a hard fault, not a retry: the lens motor is wedged, the
+ * carriage is jammed, or the hall sensor is dead, and a laser whose focal
+ * height is a guess does not get to run. A dead sensor still steps the
+ * lens up to the bound, which can reach a stop: the bound limits how far,
+ * not whether. Behind the probe the caller turns a fault into the
+ * motion-fault gate, so no controller spawns and the panel says why;
+ * before a respawn a fault leaves the marker absent, and the controller
+ * holds Z unreferenced.
  */
 #define _GNU_SOURCE
 #include "lenshome.h"
@@ -61,10 +65,19 @@
 #define DIR_UP        "1"
 #define DIR_DOWN      "0"
 
-/* The carriage's whole travel is a few dozen full steps; several times
- * that bounds a sweep, so a dead sensor cannot step the lens onward
- * indefinitely and a slow head is never failed for being slow. */
-#define MAX_SWEEP_STEPS 200
+/* The lens travel ForgeFIRM takes for every head, in half-steps, whatever
+ * a head's own free travel: where the edge sits in the travel differs
+ * from head to head, so either sweep may have to cross all of it. */
+#define TRAVEL_HALF_STEPS      36
+/* Half-steps a sweep may take past that travel. A sweep down from the top
+ * stop crosses at most a head's stop-to-stop travel (the sensor lets go
+ * above the bottom stop), which can run two past the 36 (the bench
+ * reference counts 38), and a rotor that starts against a stop can lose
+ * up to two full steps: about 21 full steps on the bench reference. The
+ * 25 this gives covers any head up to a 44-half-step travel. */
+#define SWEEP_SLACK_HALF_STEPS 14
+/* The most full steps either sweep takes, the same for every head: 25. */
+#define MAX_SWEEP_STEPS ((TRAVEL_HALF_STEPS + SWEEP_SLACK_HALF_STEPS + 1) / 2)
 /* The factory path's step cadence. Fast enough that a healthy hunt costs
  * a few seconds, slow enough that the carriage never loses a step. */
 #define STEP_DELAY_US   180000

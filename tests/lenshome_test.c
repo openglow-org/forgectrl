@@ -12,11 +12,13 @@
  * so each case is a file layout rather than a broken machine.
  *
  * The healthy sweep needs a carriage that moves, and it is driven by the
- * steps the sweep itself writes rather than by a clock: a child watches
- * the step attribute and answers the sensor after the same counts the
- * bench reference gives. Nothing here depends on how fast the machine
- * running the test happens to be, and the sweep cannot run past a
+ * steps the sweep itself writes rather than by a clock: a child reads each
+ * step from the step attribute's pipe and answers the sensor after the
+ * same counts the bench reference gives, so the sweep cannot run past a
  * transition, because the transition is what its own stepping causes.
+ * The carriage must still answer within one step cadence after a step:
+ * the case whose transition falls on the bound's last step runs at a
+ * 50 ms cadence, so a loaded host answers in time.
  *
  * The failing sweeps count their steps: the step attribute is a pipe the
  * test holds open, so every write the sweep makes is a byte the test
@@ -40,14 +42,18 @@
 #include <unistd.h>
 
 /* The bench reference's counts: the carriage starts on the sensor, comes
- * off it in three full steps, and trips it again three steps later. */
-#define STEPS_TO_CLEAR 3
-#define STEPS_TO_TRIP  6
-/* The sweep's bound (lenshome.c): a stuck sensor costs exactly this. */
-#define MAX_SWEEP_STEPS 200
+ * off it in three full steps, and trips it again three steps later. A
+ * case can start it higher (steps_to_clear), up to the bound itself. */
+static int steps_to_clear = 3;
+#define STEPS_BACK_TO_TRIP 3
+/* The sweep's bound (lenshome.c): the 36-half-step travel plus 14 of
+ * slack, in full steps; a stuck sensor costs exactly this. */
+#define SWEEP_BOUND 25
 
 static char root[128];
 static int failures;
+
+static int read_attr(const char *rel);
 
 static void path_of(char *buf, size_t len, const char *rel)
 {
@@ -149,33 +155,34 @@ static int not_the_lens_untouched(void)
 }
 
 /* The carriage: every step the sweep writes moves it, and the sensor
- * answers the count. Runs until the sweep has stepped it past the edge. */
+ * answers the count. The step attribute is the FIFO steps_begin() makes,
+ * so each step is one byte: the carriage blocks on its own read end and
+ * takes them one at a time, none missed or merged however the host
+ * schedules it. At every step it reads the lens driver's posture, which
+ * the bound assumes (full step, drive current), and marks a step taken in
+ * any other as run/posture.bad. Runs until the sweep has stepped it past
+ * the edge. */
 static void carriage(void)
 {
-    char step[256];
-    struct stat st;
-    struct timespec last = { 0, 0 };
-    int seen = 0, steps = 0;
+    char step[256], c;
+    int steps = 0;
 
     path_of(step, sizeof(step), "cnc/z_step");
-    for (;;) {
-        if (stat(step, &st) == 0) {
-            if (st.st_mtim.tv_sec != last.tv_sec ||
-                st.st_mtim.tv_nsec != last.tv_nsec) {
-                if (seen)
-                    steps++;
-                seen = 1;
-                last = st.st_mtim;
-                if (steps == STEPS_TO_CLEAR)
-                    put_atomic("head/hall_sensor", "1");
-                else if (steps == STEPS_TO_TRIP)
-                    put_atomic("head/hall_sensor", "0");
-            }
-        }
-        if (steps >= STEPS_TO_TRIP)
+    int fd = open(step, O_RDONLY);
+    if (fd < 0)
+        _exit(1);
+    while (read(fd, &c, 1) == 1) {
+        steps++;
+        if (read_attr("head/z_mode") != 0 || read_attr("head/z_current") != 0)
+            put("run/posture.bad", "1\n");
+        if (steps == steps_to_clear)
+            put_atomic("head/hall_sensor", "1");
+        else if (steps == steps_to_clear + STEPS_BACK_TO_TRIP) {
+            put_atomic("head/hall_sensor", "0");
             _exit(0);
-        usleep(200);
+        }
     }
+    _exit(0);
 }
 
 /* The step attribute as a pipe the test holds both ends of: the sweep's
@@ -214,6 +221,13 @@ static int read_attr(const char *rel)
     int ok = fgets(buf, sizeof(buf), f) != NULL;
     fclose(f);
     return ok ? atoi(buf) : -1;
+}
+
+static int file_present(const char *rel)
+{
+    char path[256];
+    path_of(path, sizeof(path), rel);
+    return access(path, F_OK) == 0;
 }
 
 /* A stop input that answers 1 from its nth question on. */
@@ -275,9 +289,10 @@ int main(void)
     stage("1");
     put("run/lens.home", "edge 1 3 6\n");
     int sfd = steps_begin();
-    expect("sensor stuck clear, over an old marker", lenshome_run(detail, sizeof(detail), NULL), 0, 0);
+    expect("sensor stuck clear, over an old marker",
+           lenshome_run(detail, sizeof(detail), NULL), 0, 0);
     int steps = steps_end(sfd);
-    check("sensor stuck clear: exactly the bound in steps", steps == MAX_SWEEP_STEPS);
+    check("sensor stuck clear: exactly the bound in steps", steps == SWEEP_BOUND);
 
     /* A dead sensor stuck tripped, or a carriage that cannot move off it:
      * the sweep away from the sensor runs out its bound. */
@@ -285,7 +300,7 @@ int main(void)
     sfd = steps_begin();
     expect("sensor stuck tripped", lenshome_run(detail, sizeof(detail), NULL), 0, 0);
     steps = steps_end(sfd);
-    check("sensor stuck tripped: exactly the bound in steps", steps == MAX_SWEEP_STEPS);
+    check("sensor stuck tripped: exactly the bound in steps", steps == SWEEP_BOUND);
 
     /* The stop input ends the hunt between two steps: no marker (an old
      * one included), and the motor back at its hold current, half step. */
@@ -309,19 +324,46 @@ int main(void)
     steps = steps_end(sfd);
     check("the second sweep ends at the step its stop came", steps == 1);
 
-    /* The healthy sweep, against a carriage the sweep's own steps move. */
+    /* The healthy sweep, against a carriage the sweep's own steps move,
+     * every step in full-step mode at the drive current: the bound counts
+     * full steps. */
     stage("0");
+    rm("run/posture.bad");
+    sfd = steps_begin();
     pid_t child = fork();
     if (child == 0)
         carriage();
     int rc = lenshome_run(detail, sizeof(detail), NULL);
     kill(child, SIGKILL);
     waitpid(child, NULL, 0);
+    steps_end(sfd);
     expect("edge found", rc, 1, 1);
     check("the hunt leaves X, Y, the stepper enable and the motor lock alone",
           not_the_lens_untouched());
+    check("every step of the sweep in full steps at the drive current",
+          !file_present("run/posture.bad"));
 
     check("the marker reads present", lenshome_present());
+
+    /* A healthy lens resting at the top of its travel: the sensor lets go
+     * on exactly the bound's last step down, the reading after it ends the
+     * sweep, and the lens is on its edge. The sweep reads no setting, so
+     * the fallback window (10, 12) a lens travel check writes when it
+     * cannot find a head's stops cannot shorten it. */
+    steps_to_clear = SWEEP_BOUND;
+    setenv("GF_LENS_STEP_US", "50000", 1);
+    stage("0");
+    sfd = steps_begin();
+    child = fork();
+    if (child == 0)
+        carriage();
+    rc = lenshome_run(detail, sizeof(detail), NULL);
+    kill(child, SIGKILL);
+    waitpid(child, NULL, 0);
+    steps_end(sfd);
+    expect("a lens at the top of its travel: edge found", rc, 1, 1);
+    steps_to_clear = 3;
+    setenv("GF_LENS_STEP_US", "2000", 1);
 
     /* The reference is only good until a controller has run. */
     lenshome_clear();
