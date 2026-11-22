@@ -359,10 +359,18 @@ static void *runner_aa(void *arg)
 {
     (void)arg;
     dlog("start: air assist %d <-> %d, %d cycles", AA_IDLE, AA_RUN, AA_CYCLES);
+    /* The controller stops before the engine hands the hardware over, as
+     * the wizards do: until the take, the engine's watches (the fire
+     * watch, the crash watch, the hang dead-man) keep running over a
+     * controller that still runs. */
     set_phase("stopping the motion controller");
     if (controller_stop()) {
         set_result("{\"error\":\"could not stop the motion controller\"}");
-        cool_diag_release();
+        controller_start();
+        goto out_norestart;
+    }
+    if (cool_diag_take() != 0) {
+        set_result("{\"error\":\"the cooling engine is busy\"}");
         controller_start();
         goto out_norestart;
     }
@@ -505,10 +513,10 @@ int diag_start(const char *tool, char *why, size_t len)
     snprintf(st_tool, sizeof(st_tool), "%s", tool);
     pthread_mutex_unlock(&mu);
 
-    /* The engine hands the thermal hardware over before the tool's
-     * thread exists; a busy engine (a session, its cooldown, another
-     * takeover) refuses here, and so does OVERTEMP's cooling airflow. */
-    int took = cool_diag_take();
+    /* A busy engine (a session, its cooldown, another takeover) refuses
+     * here, and so does OVERTEMP's cooling airflow. The take itself is
+     * the tool's thread's, after it has stopped the controller. */
+    int took = cool_diag_can_take();
     if (took != 0) {
         pthread_mutex_lock(&mu);
         st_running = 0;
@@ -522,7 +530,6 @@ int diag_start(const char *tool, char *why, size_t len)
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &at, runner_aa, NULL) != 0) {
-        cool_diag_release();
         pthread_mutex_lock(&mu);
         st_running = 0;
         pthread_mutex_unlock(&mu);

@@ -159,6 +159,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <regex.h>
 #include <sys/types.h>
 #include <time.h>
 
@@ -293,6 +294,7 @@ static int ctl_unlocks_late;            /* ...and before the SIGKILL lands it op
 static double fork_at = -1.0;           /* the fake clock at the last controller fork (Q) */
 static double stop_at = -1.0;           /* ...and at the last cnc/stop write (Q) */
 static int stop_faults;                 /* a cnc/stop write finds a fault landed and is refused (Q) */
+static int stop_eperm;                  /* a cnc/stop write refused with EPERM, the state left as it is (G2) */
 static int runner_alive;                /* pgrep -x gfhome.py answers 0 */
 static int runner_term_ignored;         /* ...and SIGTERM does not end it */
 static int flock_fails;
@@ -353,6 +355,7 @@ static int safe_probes = -1;                            /* motion probes at head
 static int probes;                                      /* (the probe fake's count, below) */
 static long stream_seen_stop = -1, stream_seen_latch = -1;  /* the pair as cnc/streaming's first write found it (A) */
 static int enable_opens, disable_opens;                 /* writes of cnc/enable and cnc/disable tried (Q, U) */
+static int open_turn, stop_open_turn, latch_open_turn;  /* the order of the last cnc/stop and cnc/laser_latch writes */
 static int warn_logs, notice_logs;                      /* lines logged at LOG_WARNING and at LOG_NOTICE (J, Q) */
 
 /* The path names this attribute. */
@@ -388,11 +391,18 @@ int fake_open(const char *path, int flags, ...)
         enable_opens++;
     if ((flags & O_WRONLY) && names(path, "cnc/disable"))
         disable_opens++;
+    if ((flags & O_WRONLY) && names(path, "cnc/laser_latch"))
+        latch_open_turn = ++open_turn;
     if ((flags & O_WRONLY) && names(path, "cnc/stop")) {
+        stop_open_turn = ++open_turn;
         if (stop_faults) {
             /* A fault lands after the state was read: the kernel refuses
              * the stop in it (EPERM). */
             put("cnc/state", "fault\n");
+            errno = EPERM;
+            return -1;
+        }
+        if (stop_eperm) {
             errno = EPERM;
             return -1;
         }
@@ -462,6 +472,12 @@ int fake_kill(pid_t pid, int sig)
 static int check_pgrep_lock;            /* note a process search made under mu (V) */
 static int pgrep_under_mu;
 static int runner_term_broker = -2;     /* the broker fd as the runner's SIGTERM found it (W; -2: none sent) */
+static int runner_moves_on_term;        /* the runner's SIGTERM leaves a homing move playing (B) */
+static int grbl_proc;                   /* the pid pgrep -x grblHAL_glowfor finds (0: none) */
+static long kill_seen_stop = -1, kill_seen_latch = -1;  /* the pair as the runner's SIGKILL found it */
+static int runner_unsafes_on_term;      /* the runner's SIGTERM leaves the pair cleared (B) */
+static struct { int pid; const char *cmdline; } procs[4];   /* the command lines pgrep -f matches */
+static long pkill_stop = -1, pkill_latch = -1;  /* the pair as the takeover's pkill found it */
 
 int fake_system(const char *cmd)
 {
@@ -472,17 +488,57 @@ int fake_system(const char *cmd)
         else
             pgrep_under_mu++;
     }
+    if (strstr(cmd, "pgrep -x grblHAL_glowfor")) {
+        /* The search leaves out the pid it names after grep -qvx. */
+        const char *x = strstr(cmd, "grep -qvx '");
+        int left_out = x ? atoi(x + strlen("grep -qvx '")) : -1;
+        return grbl_proc && grbl_proc != left_out ? 0 : 1;
+    }
+    if (strstr(cmd, "pkill -x grblHAL_glowfor")) {
+        pkill_stop = get_long("cnc/stop");
+        pkill_latch = get_long("cnc/laser_latch");
+        put("cnc/stop", "0\n");             /* the controller's own exit, as far as the pair goes */
+        put("cnc/laser_latch", "0\n");
+        return 0;
+    }
     if (strstr(cmd, "pgrep -x gfhome.py"))
         return runner_alive ? 0 : 1;
     if (strstr(cmd, "pkill -TERM -x gfhome.py")) {
+        if (runner_moves_on_term)
+            put("cnc/stop", "0\n");         /* a homing move it queued plays on */
+        if (runner_unsafes_on_term) {
+            put("cnc/stop", "0\n");
+            put("cnc/laser_latch", "0\n");
+        }
         runner_term_broker = broker_fd;
         if (!runner_term_ignored)
             runner_alive = 0;
         return 0;
     }
     if (strstr(cmd, "pkill -KILL -x gfhome.py")) {
+        kill_seen_stop = get_long("cnc/stop");
+        kill_seen_latch = get_long("cnc/laser_latch");
         runner_alive = 0;
         return 0;
+    }
+    if (strstr(cmd, "pgrep -f '")) {
+        /* The pattern against the fake process table, the pid after grep
+         * -qvx left out. */
+        const char *p = strstr(cmd, "pgrep -f '") + strlen("pgrep -f '");
+        const char *q = strchr(p, '\'');
+        char re_text[160];
+        snprintf(re_text, sizeof(re_text), "%.*s", q ? (int)(q - p) : 0, p);
+        const char *x = strstr(cmd, "grep -qvx '");
+        int left_out = x ? atoi(x + strlen("grep -qvx '")) : -1;
+        regex_t re;
+        if (regcomp(&re, re_text, REG_EXTENDED | REG_NOSUB) != 0)
+            return 1;
+        int found = 0;
+        for (int i = 0; i < 4; i++)
+            if (procs[i].pid && procs[i].pid != left_out && regexec(&re, procs[i].cmdline, 0, NULL, 0) == 0)
+                found = 1;
+        regfree(&re);
+        return found ? 0 : 1;
     }
     return 1;
 }
@@ -897,6 +953,9 @@ static void reset_state(void)
     machine_idle = 1;
     runner_alive = 0;
     runner_term_ignored = 0;
+    runner_moves_on_term = 0;
+    grbl_proc = 0;
+    pkill_stop = pkill_latch = -1;
     ctl_term_ignored = 0;
     ctl_unlocks_late = 0;
     stop_faults = 0;
@@ -1055,21 +1114,28 @@ int main(void)
     printf("B. the homing runner is ended before the respawn\n");
     bring_up();
     runner_alive = 1;
+    runner_moves_on_term = 1;
     die(0x0900);
     tick();
+    runner_moves_on_term = 0;
     CHECK(strstr(calls, "pkill -TERM -x gfhome.py") != NULL, "a GRBL death looks for the runner and ends it");
     CHECK(!runner_alive, "the runner is gone");
+    CHECK(get_long("cnc/stop") == 1, "a homing move it left playing is stopped after its end");
     CHECK(strstr(calls, "fork-controller") == NULL, "no controller was started while it lived");
     CHECK(run_until_spawned(5.0), "the respawn follows");
     CHECK(strstr(calls, "pkill -TERM") < strstr(calls, "fork-controller"), "the runner's end came first");
     bring_up();
     runner_alive = 1;
     runner_term_ignored = 1;
+    runner_unsafes_on_term = 1;         /* what the TERM's wait leaves, the pair written over */
+    kill_seen_stop = kill_seen_latch = -1;
     double t_dead = fake_now;
     die(0x0900);
     tick();
+    runner_unsafes_on_term = 0;
     CHECK(strstr(calls, "pkill -KILL -x gfhome.py") != NULL && !runner_alive,
           "a runner that ignores SIGTERM is killed");
+    CHECK(kill_seen_stop == 1 && kill_seen_latch == 1, "the safing pair written again before its SIGKILL");
     CHECK(fake_now - t_dead >= RUNNER_TERM_WAIT_S, "after its SIGTERM grace");
     CHECK(run_until_spawned(5.0) && probes == 1, "the respawn follows, with no second motion probe");
 
@@ -1661,7 +1727,7 @@ int main(void)
     standby_takeover = 1;
     suspended = SUSP_STANDBY;
     tick();
-    CHECK(strstr(calls, "/etc/init.d/grblhal stop") && !standby_takeover && !suspended,
+    CHECK(strstr(calls, "pkill -x grblHAL_glowfor") && !standby_takeover && !suspended,
           "standing by over a stepper fault: the machine is taken over");
     machine_idle = 1;
 
@@ -1957,7 +2023,7 @@ int main(void)
     standby_takeover = 1;
     suspended = SUSP_STANDBY;
     tick();
-    CHECK(standby_takeover && !strstr(calls, "/etc/init.d/grblhal stop"),
+    CHECK(standby_takeover && !strstr(calls, "pkill -x grblHAL_glowfor"),
           "standing by over a kernel whose state cannot be read: no takeover");
     reset_state();
 
@@ -1973,10 +2039,11 @@ int main(void)
         /* A daemon's start with no unmanaged controller: the head made
          * safe there, before the lifecycle thread's probe and any fork. */
         reset_state();
+        int unmanaged_1 = unmanaged_controller_running();
         pthread_mutex_lock(&mu);
         head_safed = 0;
         n = safe_writes;
-        init_locked(unmanaged_controller_running());
+        init_locked(unmanaged_1);
         int safed_at_start = head_safed;
         pthread_mutex_unlock(&mu);
         CHECK(safe_writes == n + 1 && safed_at_start && safe_probes == 0 && safe_forks == 0,
@@ -1987,10 +2054,11 @@ int main(void)
          * alone, and makes it safe before its own first fork. */
         reset_state();
         runner_alive = 1;
+        int unmanaged_2 = unmanaged_controller_running();
         pthread_mutex_lock(&mu);
         head_safed = 0;
         n = safe_writes;
-        init_locked(unmanaged_controller_running());
+        init_locked(unmanaged_2);
         int standing_by = standby_takeover && !head_safed;
         standby_takeover = 0;
         suspended = 0;
@@ -2176,7 +2244,7 @@ int main(void)
         standby_takeover = 1;
         suspended = SUSP_STANDBY;
         pthread_mutex_unlock(&mu);
-        CHECK(run_until_spawned(5.0) && strstr(calls, "/etc/init.d/grblhal stop") && safe_writes == n + 1 &&
+        CHECK(run_until_spawned(5.0) && strstr(calls, "pkill -x grblHAL_glowfor") && safe_writes == n + 1 &&
               safe_probes == 0 && safe_forks == 0 && get_long("head/safe") == 1,
               "a takeover makes the head safe as it ends the unmanaged controller, before the probe and the "
               "fork, and the spawn writes it no second time");
@@ -2188,9 +2256,10 @@ int main(void)
         int n;
         put("cnc/state", "idle\n");
         runner_alive = 1;
+        int unmanaged_3 = unmanaged_controller_running();
         pthread_mutex_lock(&mu);
         head_safed = 0;
-        init_locked(unmanaged_controller_running());
+        init_locked(unmanaged_3);
         pthread_mutex_unlock(&mu);
         runner_alive = 0;               /* it ended on its own */
         n = safe_writes;
@@ -2211,15 +2280,16 @@ int main(void)
          * safe under it. */
         put("cnc/state", "idle\n");
         runner_alive = 1;
+        int unmanaged_4 = unmanaged_controller_running();
         pthread_mutex_lock(&mu);
         head_safed = 0;
-        init_locked(unmanaged_controller_running());
+        init_locked(unmanaged_4);
         pthread_mutex_unlock(&mu);
         super_controller_start();
         calls[0] = '\0';
         int n = safe_writes;
         switch_takeover();
-        CHECK(strstr(calls, "/etc/init.d/grblhal stop") != NULL && safe_writes == n + 1,
+        CHECK(strstr(calls, "pkill -x grblHAL_glowfor") != NULL && safe_writes == n + 1,
               "a mode switch after /controller/start over a live unmanaged controller takes it over");
     }
     reset_state();
@@ -2233,15 +2303,51 @@ int main(void)
         pthread_mutex_unlock(&mu);
         runner_alive = 1;
         calls[0] = '\0';
+        clear_safing();
         int n = safe_writes;
         check_pgrep_lock = 1;
         switch_takeover();
         check_pgrep_lock = 0;
-        CHECK(strstr(calls, "/etc/init.d/grblhal stop") != NULL && safe_writes == n + 1,
+        CHECK(strstr(calls, "pkill -x grblHAL_glowfor") != NULL && safe_writes == n + 1,
               "a mode switch over the stop lever's suspension takes a live unmanaged controller over");
+        CHECK(strstr(calls, "/etc/init.d/") == NULL,
+              "by its signals alone: no init script asked (its stop would ask this daemon back)");
+        CHECK(pkill_stop == 1 && pkill_latch == 1 && safed(),
+              "the safing pair before the signals, and again after them");
         CHECK(strstr(calls, "pgrep") != NULL && pgrep_under_mu == 0,
               "and its process search runs with the supervisor's lock free, so no taker of the lock waits on it");
         runner_alive = 0;
+    }
+    reset_state();
+    {
+        /* The managed controller answers the process search too: it is no
+         * unmanaged controller, and a mode switch under the stop lever's
+         * hold does not take it over by signal. Another one is. */
+        bring_up();
+        pthread_mutex_lock(&mu);
+        suspended = SUSP_HOLD;
+        pthread_mutex_unlock(&mu);
+        grbl_proc = (int)child_pid;
+        calls[0] = '\0';
+        switch_takeover();
+        CHECK(strstr(calls, "pkill") == NULL, "the supervisor's own child: no takeover");
+        grbl_proc = (int)child_pid + 77;
+        switch_takeover();
+        CHECK(strstr(calls, "pkill -x grblHAL_glowfor") != NULL, "another controller process: taken over");
+        grbl_proc = 0;
+        /* The cloud client by its whole command line from its start: a
+         * command line that only holds it (a wrapper, a test run) is no
+         * controller; the client as the supervisor starts it is one. */
+        calls[0] = '\0';
+        procs[0].pid = 900;
+        procs[0].cmdline = "timeout 5 /usr/bin/python3 /usr/sbin/gfcloud.py --test";
+        switch_takeover();
+        CHECK(strstr(calls, "pkill") == NULL, "a command line that holds the client's: no takeover");
+        procs[1].pid = 901;
+        procs[1].cmdline = "/usr/bin/python3 /usr/sbin/gfcloud.py";
+        switch_takeover();
+        CHECK(strstr(calls, "pkill -x grblHAL_glowfor") != NULL, "the client's own command line: taken over");
+        memset(procs, 0, sizeof(procs));
     }
     reset_state();
     {
@@ -2379,7 +2485,7 @@ int main(void)
     pthread_mutex_unlock(&mu);
     calls[0] = '\0';
     tick();
-    CHECK(standby_takeover && !strstr(calls, "/etc/init.d/grblhal stop"), "and a standby takes nothing over");
+    CHECK(standby_takeover && !strstr(calls, "pkill -x grblHAL_glowfor"), "and a standby takes nothing over");
     reset_state();
 
     printf("X. the stop lever: the pair at once; beside an unmanaged controller; a wait that runs out\n");
@@ -2428,7 +2534,7 @@ int main(void)
               "beside an unmanaged controller the lever answers so at once, the pair in and the hold standing");
         calls[0] = '\0';
         tick();
-        CHECK(strstr(calls, "/etc/init.d/grblhal stop") && !standby_takeover && !run_until_spawned(3.0),
+        CHECK(strstr(calls, "pkill -x grblHAL_glowfor") && !standby_takeover && !run_until_spawned(3.0),
               "the takeover at idle ends that controller, and the hold leaves no controller after it");
     }
     reset_state();
@@ -2525,6 +2631,66 @@ int main(void)
     super_listening();
     CHECK(run_until_spawned(5.0) && probes == 1, "once it is up, the probe, then the controller");
     reset_state();
+
+    printf("G2. the safing pair: the latch first; a stop the kernel refuses in its fault state is no failure\n");
+    bring_up();
+    die(0x0900);
+    tick();
+    CHECK(latch_open_turn > 0 && latch_open_turn < stop_open_turn, "the reap writes the latch lock before the stop");
+    bring_up();
+    put("cnc/state", "fault\n");
+    machine_idle = 0;
+    stop_faults = 1;                    /* every stop refused (EPERM), the state fault */
+    crit_reset();
+    logs[0] = '\0';
+    die(0x0900);
+    tick();
+    stop_faults = 0;
+    CHECK(get_long("cnc/laser_latch") == 1 && crit_logs == 0 && stop_open_turn - latch_open_turn == 1,
+          "a controller exit in the fault state: the latch locked, the refused stop never named critical, "
+          "not tried again");
+    machine_idle = 1;
+    put("cnc/state", "idle\n");
+    bring_up();
+    stop_eperm = 1;                     /* EPERM with the state reading idle */
+    crit_reset();
+    open_turn = 0;
+    die(0x0900);
+    tick();
+    stop_eperm = 0;
+    CHECK(crit_logs >= 1 && named_at(0) == 'S' && stop_open_turn - latch_open_turn == WR_ATTR_TRIES,
+          "EPERM outside the fault state: the stop tried again and named critical");
+    reset_state();
+
+    printf("H4. a cloud client whose last controller was not one hunts: the no-hunt marker goes\n");
+    {
+        const char *marker = "super-test/run/gfcloud-nohunt";
+        setenv("GF_NOHUNT_MARKER", marker, 1);
+        unlink("super-test/run/last-controller");
+        struct stat sb;
+        int cases[3][2] = { { Ctl_Cloud, 1 }, { Ctl_Cloud, 0 }, { Ctl_Grbl, 0 } };
+        const char *what[3] = { "no controller recorded since the boot: the marker goes",
+                                "a cloud client after a cloud client: the marker stays",
+                                "a GRBL controller spawned: its kind recorded" };
+        for (int i = 0; i < 3; i++) {
+            reset_state();
+            FILE *mf = fopen(marker, "w");
+            if (mf)
+                fclose(mf);
+            pthread_mutex_lock(&mu);
+            spawn_locked((ctl_t)cases[i][0]);
+            pthread_mutex_unlock(&mu);
+            CHECK((stat(marker, &sb) != 0) == cases[i][1], what[i]);
+        }
+        reset_state();
+        pthread_mutex_lock(&mu);
+        spawn_locked(Ctl_Cloud);
+        pthread_mutex_unlock(&mu);
+        CHECK(stat(marker, &sb) != 0, "a cloud client after a GRBL controller: the marker goes");
+        unlink(marker);
+        unsetenv("GF_NOHUNT_MARKER");
+        reset_state();
+    }
 
     printf(failures ? "super_test: %d FAILED\n" : "super_test: all ok\n", failures);
     return failures ? 1 : 0;

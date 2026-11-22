@@ -314,6 +314,15 @@ static void verdict_path(char *buf, size_t len, const char *name)
 #define FIRE_IR_TICKS      2        /* sustained breach, alert or critical */
 #define FIRE_CLEAR_TICKS   5        /* a cleared alert releases after this */
 
+/* The emission witness: the kernel's count of the gated laser output over
+ * its ~1 s window. A count above 0 with no armed report in the last
+ * EMISSION_WINDOW_TOL_S (the sample window's lag and a job's tail) is
+ * EMISSION. A count that cannot be read for EMISSION_BLIND_TICKS ticks in a
+ * row is named once, and outside that tolerance it gets the kernel pair
+ * once per stretch. */
+#define EMISSION_WINDOW_TOL_S 3.0
+#define EMISSION_BLIND_TICKS  3
+
 typedef enum {
     Cool_Idle = 0,
     Cool_Run,
@@ -456,7 +465,14 @@ static float fire_q2_critical = 1022.0f;
 static int flame_alert = 0;         /* the pause tier's hold */
 static int flame_clear_ticks = 0;
 static double last_armed_at = -1.0; /* last fresh armed report seen */
-static int emission_warned = 0;
+/* EMISSION, the emission witness's fail tier: the gated laser output
+ * counted with no armed window in the last EMISSION_WINDOW_TOL_S. It stands
+ * while the count reads above 0, and the operator's acknowledgment carries
+ * it from there (attention_tick). */
+static int emission_alarm = 0;
+static int emission_blind_ticks = 0;    /* ticks in a row the count could not be read */
+static int emission_blind_said = 0;     /* the unreadable stretch named */
+static int emission_blind_safed = 0;    /* its pair written */
 static int pgood_warned = 0;        /* once per run session */
 static long last_faults = 0;
 static int ir_over_ticks = 0;
@@ -587,16 +603,49 @@ static int wr_attr(const char *attr, const char *val)
  * (a write that cannot open the attribute finds no module to play
  * anything), and a stop refuses a run start already in flight (the
  * module's cnc_cmd_answer; pulse-feeder-contract.md, "run" and "stop").
- * So the fail tiers (FIRE, CRASH, AIRFLOW, CRITICAL, and a short's
- * SENSOR) write their stop and their latch lock once, at their rising
- * edge, and the latch lock lands whether or not the stop took; a silence
- * with the kernel running and emission sensed with no armed window write
- * the pair on every tick their reason stands. */
+ * So the other fail tiers (FIRE, CRASH, AIRFLOW, CRITICAL, and a short's
+ * SENSOR) write their stop once, at their rising edge, and their latch
+ * lock on every tick they stand (latch_hold_tick), which lands whether or
+ * not the stop took; a silence with the kernel running and emission sensed
+ * with no armed window (EMISSION) write the pair on every tick their
+ * reason stands. */
+static int stop_fault_said = 0;     /* a stop refused in the fault state, said this stretch */
+
+/* Whether the kernel's state reads "fault" now. */
+static int cnc_reads_fault(void)
+{
+    char path[128], buf[16];
+    snprintf(path, sizeof(path), "%scnc/state", sysfs_root());
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return strncmp(buf, "fault", 5) == 0;
+}
+
+/* A stop the kernel refuses in its fault state (EPERM), where nothing plays
+ * and FIRE is parked already, is no failure: said once a stretch, below the
+ * highest severity. Any other failure is named at the highest. */
 static void safing_write(const char *attr, const char *val)
 {
-    if (wr_attr(attr, val) != 0)
-        fflog(LOG_CRIT, "cool: safing write %s=%s failed: %s", attr, val,
-              strerror(errno));
+    if (wr_attr(attr, val) == 0) {
+        if (!strcmp(attr, "cnc/stop"))
+            stop_fault_said = 0;
+        return;
+    }
+    int err = errno;
+    if (err == EPERM && !strcmp(attr, "cnc/stop") && cnc_reads_fault()) {
+        if (!stop_fault_said) {
+            stop_fault_said = 1;
+            fflog(LOG_INFO, "cool: the kernel is in its fault state: no stop to make");
+        }
+        return;
+    }
+    fflog(LOG_CRIT, "cool: safing write %s=%s failed: %s", attr, val, strerror(err));
 }
 
 /* The engine's own hold on the laser latch: the kernel's cooling holder,
@@ -604,8 +653,7 @@ static void safing_write(const char *attr, const char *val)
  * controller's hold with it, no controller unlock is taken while it
  * stands, and only the engine releases it, which never unlocks the latch
  * by itself: a controller's next unlock does. The engine holds it while
- * a reason it locked for stands (the release's call at the end of
- * engine_tick names them), and writes the release on every tick on which
+ * a reason it locked for stands (latch_hold_tick names them), and writes the release on every tick on which
  * none stands: the kernel also sets the holder at every final close of
  * the pulse device, which can come at any time (an unmanaged controller,
  * or a homing runner that outlived a daemon restart, closing the device
@@ -1586,16 +1634,31 @@ static int tick_busy = 0;           /* the engine thread is inside a tick (under
 /* Never while OVERTEMP's cooling airflow stands (pub_cooling_forced, -2,
  * said to the operator as the cooldown it is): the tools would take the
  * fans off a loop above its ceiling. */
+/* Under mu. */
+static int diag_refusal(void)
+{
+    if (pub_cooling_forced)
+        return -2;
+    if (diag_owned || cool_state != Cool_Idle || strcmp(pub_phase, "idle"))
+        return -1;
+    return 0;
+}
+
+int cool_diag_can_take(void)
+{
+    pthread_mutex_lock(&mu);
+    int rc = diag_refusal();
+    pthread_mutex_unlock(&mu);
+    return rc;
+}
+
 int cool_diag_take(void)
 {
     pthread_mutex_lock(&mu);
-    if (pub_cooling_forced) {
+    int rc = diag_refusal();
+    if (rc != 0) {
         pthread_mutex_unlock(&mu);
-        return -2;
-    }
-    if (diag_owned || cool_state != Cool_Idle || strcmp(pub_phase, "idle")) {
-        pthread_mutex_unlock(&mu);
-        return -1;
+        return rc;
     }
     diag_owned = 1;
     /* A tick in flight may still write the fans it decided on before
@@ -2022,14 +2085,15 @@ double cool_button_on_file_s(void)
  * fire must never happen without the cut airflow, which only lives
  * inside a run session. */
 /* The operator's attention. Whatever blocks firing and needs the operator
- * flashes the button red, and the panel says why: FIRE, CRASH, FLAME, BUMP,
- * AIRFLOW, CRITICAL, SENSOR, and a failed motion check. Holds that clear on
- * their own (the warm-up, a cold or a hot loop, an extension's hold) do not:
- * they are the machine's own to wait out.
+ * flashes the button red, and the panel says why: FIRE, CRASH, EMISSION,
+ * FLAME, BUMP, AIRFLOW, CRITICAL, SENSOR, and a failed motion check. Holds
+ * that clear on their own (the warm-up, a cold or a hot loop, an extension's
+ * hold) do not: they are the machine's own to wait out.
  *
  * Red always means firing is blocked. A failure of the fail tier (FIRE,
- * CRASH, AIRFLOW, CRITICAL), or one that still stands when its session ends,
- * ends with the session as far as its own verdict goes, so it stays up as
+ * CRASH, EMISSION, AIRFLOW, CRITICAL), or one that still stands when its
+ * session ends, ends with the session (EMISSION: with the emission it saw)
+ * as far as its own verdict goes, so it stays up as
  * the verdict ACK, which blocks fire and holds any armed window until the
  * operator has acknowledged it on the panel. Motion is free. A pause tier's
  * cause that goes away under a job still held needs no acknowledgment: the
@@ -2130,7 +2194,7 @@ void cool_notices_dismiss(unsigned upto)
 
 static int attn_needs_operator(const char *verdict)
 {
-    static const char *const names[] = { "FIRE", "CRASH", "FLAME", "BUMP", "AIRFLOW",
+    static const char *const names[] = { "FIRE", "CRASH", "EMISSION", "FLAME", "BUMP", "AIRFLOW",
                                          "CRITICAL", "SENSOR" };
     for (size_t i = 0; i < sizeof(names) / sizeof(*names); i++)
         if (!strcmp(verdict, names[i]))
@@ -2140,7 +2204,7 @@ static int attn_needs_operator(const char *verdict)
 
 static int attn_fail_tier(const char *verdict)
 {
-    return !strcmp(verdict, "FIRE") || !strcmp(verdict, "CRASH") ||
+    return !strcmp(verdict, "FIRE") || !strcmp(verdict, "CRASH") || !strcmp(verdict, "EMISSION") ||
            !strcmp(verdict, "AIRFLOW") || !strcmp(verdict, "CRITICAL");
 }
 
@@ -2403,6 +2467,123 @@ static void flood_apply(int on, double now)
     }
 }
 
+/* Dead-man for a HUNG controller, not just a dead one (the supervisor
+ * covers deaths): a reporter that went silent with the armed window open,
+ * or with the kernel still playing the ring, has nobody left to stop the
+ * beam - stop motion and lock the laser here. The armed case fires once per
+ * silence episode; the running case repeats until the stop takes, so a
+ * failed write cannot be a one-shot miss. Gated on at >= 0: a freshly
+ * (re)started engine must not shoot down a healthy unmanaged controller, or
+ * a homing runner a stopped daemon's controller left behind, that has not
+ * reported to it yet. Run on every tick, a diagnostic's included. */
+static void hang_deadman(double at, int fresh, int armed)
+{
+    if (fresh) {
+        silent_safed = 0;
+        return;
+    }
+    if (at >= 0 && ((armed && !silent_safed) || cnc_is_running())) {
+        /* The writes first, the words after: a log line waits for
+         * nothing, but nothing waits for a log line. */
+        safing_write("cnc/stop", "1");
+        cool_latch_lock();
+        if (!silent_safed) {
+            warn("controller silent while armed/running - "
+                 "stopping motion, locking laser");
+            senslog_event("controller silent while armed/running");
+        }
+        silent_safed = 1;
+    }
+}
+
+/* Emission witness: laser_on_sampled counts the ~1 s window's emitting
+ * samples on the gated output of the hardware AND-gate - physical evidence,
+ * not a commanded state. Emission with no armed window in the recent past
+ * (EMISSION_WINDOW_TOL_S) is EMISSION, the fail tier: the latch lock (the
+ * light is live, and the latch is what cuts it) and then the stop, on every
+ * tick the count stands, then the words, then the controller ended through
+ * the supervisor, once (under a diagnostic, where the supervisor holds the
+ * controller down, that starts nothing; with no controller running it ends
+ * any respawn backoff). An armed report while the count reads above 0
+ * clears nothing and stops no write: once the tier stands, the pair is
+ * written on every tick the count reads above 0. The tier blocks
+ * fire and stands while the count reads above 0; the acknowledgment
+ * follows it (attention_tick). A count that cannot be read neither raises
+ * nor clears the tier: past EMISSION_BLIND_TICKS ticks in a row it is
+ * named once, and outside the tolerance it gets the pair once per
+ * stretch. Run on every tick, a diagnostic's included, with the armed
+ * report's time kept there too. */
+static void emission_witness(double now, int fresh_armed)
+{
+    if (fresh_armed)
+        last_armed_at = now;
+    int in_tol = last_armed_at >= 0 && now - last_armed_at <= EMISSION_WINDOW_TOL_S;
+    long em = rd_long("cnc/laser_on_sampled");
+    if (em < 0) {
+        if (emission_blind_ticks < EMISSION_BLIND_TICKS)
+            emission_blind_ticks++;
+        if (emission_blind_ticks < EMISSION_BLIND_TICKS)
+            return;
+        if (!in_tol && !emission_blind_safed) {
+            emission_blind_safed = 1;
+            cool_latch_lock();
+            safing_write("cnc/stop", "1");
+        }
+        if (!emission_blind_said) {
+            emission_blind_said = 1;
+            fflog(LOG_WARNING, "cool: the laser emission count cannot be read (%d ticks): %s",
+                  EMISSION_BLIND_TICKS, in_tol ? "the armed window is open, so only said"
+                                              : "motion stopped, laser locked");
+            senslog_event("laser emission count unreadable");
+        }
+        return;
+    }
+    if (emission_blind_said)
+        info("the laser emission count reads again");
+    emission_blind_ticks = 0;
+    emission_blind_said = 0;
+    emission_blind_safed = 0;
+    if (em > 0 && (!in_tol || emission_alarm)) {
+        cool_latch_lock();
+        safing_write("cnc/stop", "1");
+        if (!emission_alarm) {
+            emission_alarm = 1;
+            warn("EMISSION: laser emission sensed with no armed window - "
+                 "motion stopped, laser locked, controller ended");
+            senslog_event("laser emission sensed with no armed window");
+            if (cool_fail_tier_stop)
+                cool_fail_tier_stop("laser emission with no armed window");
+        }
+    } else if (em == 0 && emission_alarm) {
+        emission_alarm = 0;
+        info("laser emission no longer sensed; firing waits for the acknowledgment");
+    }
+}
+
+/* The engine's hold on the latch stands while a reason it locked for
+ * stands: the fail tiers' alarms (FIRE, CRASH, AIRFLOW, CRITICAL, and
+ * SENSOR's on a short in a run), a silence it safed (until a report is
+ * fresh again), and EMISSION (until the witness reads none). The fail
+ * tiers' latch lock (EMISSION's included, also on a tick its count cannot
+ * be read) is written again on every tick they stand, so a lock
+ * that did not take is not a one-shot miss (the stop is not: the kernel
+ * refuses it in its fault state, safing_write). Released here, on every
+ * tick, a diagnostic's included, before the verdict. */
+static void latch_hold_tick(void)
+{
+    if (fire_alarm || crash_w.alarm || airflow_alarm || critical_alarm || short_alarm ||
+        emission_alarm)
+        cool_latch_lock();
+    cool_latch_release_tick(fire_alarm || crash_w.alarm || airflow_alarm || critical_alarm ||
+                            short_alarm || silent_safed || emission_alarm);
+}
+
+/* The live cause the last diagnostic tick passed to the operator's attention
+ * was EMISSION: once the witness reads none, nothing live stands, and an
+ * older record that waits for its acknowledgment is not made live again by
+ * it. Cleared by every tick outside a diagnostic. */
+static int diag_emission_live = 0;
+
 /* One engine tick at 1 Hz. */
 static void engine_tick(void)
 {
@@ -2410,35 +2591,49 @@ static void engine_tick(void)
     cnc_state_sample(now);
 
     /* Diagnostics own the hardware between cool_diag_take and
-     * cool_diag_release: publish the phase, keep fire blocked, and
-     * touch nothing until the release reasserts the idle posture. */
+     * cool_diag_release: publish the phase, keep fire blocked, and touch
+     * no thermal output until the release reasserts the idle posture. The
+     * hang dead-man and the emission witness run all the same. */
     pthread_mutex_lock(&mu);
     int dia = diag_owned;
     pthread_mutex_unlock(&mu);
     if (dia) {
         pthread_mutex_lock(&mu);
         pub_phase = "diag";
+        int d_armed = rep_armed;
+        double d_at = rep_at;
         pthread_mutex_unlock(&mu);
+        int d_fresh = d_at >= 0 && now - d_at <= REPORT_TIMEOUT_S;
+        hang_deadman(d_at, d_fresh, d_armed);
+        emission_witness(now, d_fresh && d_armed);
         flowrun_ctx_t fc = { .t = now, .yield = 1, .yield_why = "diagnostics", .session = 0,
                              .fans = FW_FANS_OTHER };
         flowrun_engine(&fc);
-        /* Nothing is sensed while a diagnostic owns the hardware, so the
-         * operator's attention stands as the last tick left it: a cause
+        /* Nothing else is sensed while a diagnostic owns the hardware, so
+         * the operator's attention stands as the last tick left it: a cause
          * that was live is still counted live (no notice says it cleared),
          * the red flash is kept up over whatever the diagnostic's side
-         * wrote, and an acknowledgment that waits keeps its name. Fire is
+         * wrote, and an acknowledgment that waits keeps its name. EMISSION
+         * is sensed here: it takes the name while it stands, and once the
+         * witness reads none it waits for the acknowledgment. Fire is
          * blocked and the hold stands either way. */
         char held[COOL_VERDICT_MAX];
         pthread_mutex_lock(&mu);
-        snprintf(held, sizeof(held), "%s", attn_live ? attn_verdict : "OK");
+        snprintf(held, sizeof(held), "%s",
+                 emission_alarm ? "EMISSION"
+                 : attn_live && !diag_emission_live ? attn_verdict : "OK");
         pthread_mutex_unlock(&mu);
+        diag_emission_live = emission_alarm;
         attention_tick(held);
         pthread_mutex_lock(&mu);
         int ack_wait = attn_latched && !attn_live;
         pthread_mutex_unlock(&mu);
-        verdict_publish(0, ack_wait ? "ACK" : "OK", 1, 0, 0, 0, 0);
+        latch_hold_tick();
+        verdict_publish(0, emission_alarm ? "EMISSION" : ack_wait ? "ACK" : "OK", 1, 0, 0, 0, 0);
         return;
     }
+
+    diag_emission_live = 0;
 
     /* Snapshot the report. */
     pthread_mutex_lock(&mu);
@@ -2451,29 +2646,8 @@ static void engine_tick(void)
 
     int fresh = at >= 0 && now - at <= REPORT_TIMEOUT_S;
     limits_apply(&hdr, fresh);
+    hang_deadman(at, fresh, armed);
     if (!fresh) {
-        /* Dead-man for a HUNG controller, not just a dead one (the
-         * supervisor covers deaths): a reporter that went silent with
-         * the armed window open, or with the kernel still playing the
-         * ring, has nobody left to stop the beam - stop motion and
-         * lock the laser here. The armed case fires once per silence
-         * episode; the running case repeats until the stop takes, so a
-         * failed write cannot be a one-shot miss. Gated on at >= 0: a
-         * freshly (re)started engine must not shoot down a healthy
-         * unmanaged controller, or a homing runner a stopped daemon's
-         * controller left behind, that has not reported to it yet. */
-        if (at >= 0 && ((armed && !silent_safed) || cnc_is_running())) {
-            /* The writes first, the words after: a log line waits for
-             * nothing, but nothing waits for a log line. */
-            safing_write("cnc/stop", "1");
-            cool_latch_lock();
-            if (!silent_safed) {
-                warn("controller silent while armed/running - "
-                     "stopping motion, locking laser");
-                senslog_event("controller silent while armed/running");
-            }
-            silent_safed = 1;
-        }
         mode = 0;
         armed = 0;
         if (at >= 0 && !silent_warned && (flood_on || cool_state == Cool_Run)) {
@@ -2482,7 +2656,6 @@ static void engine_tick(void)
         }
     } else {
         silent_warned = 0;
-        silent_safed = 0;
     }
 
     /* A short's fail tier ends when the job does: a fresh report of idle
@@ -2591,26 +2764,7 @@ static void engine_tick(void)
         }
     }
 
-    /* Emission witness: laser_on_sampled counts the ~1 s window's
-     * emitting samples on the gated output of the hardware AND-gate -
-     * physical evidence, not a commanded state. Emission with no armed
-     * window in the recent past (3 s covers the sample-window lag plus
-     * the job-end tail) gets the same treatment as a hung controller.
-     * The stop repeats while the evidence persists. */
-    if (fresh && armed)
-        last_armed_at = now;
-    long em = rd_long("cnc/laser_on_sampled");
-    if (em > 0 && (last_armed_at < 0 || now - last_armed_at > 3.0)) {
-        safing_write("cnc/stop", "1");
-        cool_latch_lock();
-        if (!emission_warned) {
-            warn("LASER EMISSION SENSED with no armed window - "
-                 "stopping motion, locking laser");
-            senslog_event("laser emission sensed with no armed window");
-        }
-        emission_warned = 1;
-    } else if (em == 0)
-        emission_warned = 0;
+    emission_witness(now, fresh && armed);
 
     /* Supply power-good witness: the supply drives the line good the whole
      * time it is healthy (it follows neither HV_ENABLE nor emission), so
@@ -3542,6 +3696,7 @@ static void engine_tick(void)
      * flight recorder and the cloud client's fault all see it. */
     const char *verdict = fire_alarm ? "FIRE"
                         : crash_w.alarm ? "CRASH"
+                        : emission_alarm ? "EMISSION"
                         : flame_alert ? "FLAME"
                         : crash_w.alert ? "BUMP"
                         : airflow_alarm ? "AIRFLOW"
@@ -3569,12 +3724,12 @@ static void engine_tick(void)
     /* A quiet hold (every fan off for a listening) and a reserved button
      * block fire like ACK does: always, and they hold only an open window,
      * so motion stays free. */
-    int hold = fire_alarm || crash_w.alarm || flame_alert || crash_w.alert
+    int hold = fire_alarm || crash_w.alarm || emission_alarm || flame_alert || crash_w.alert
              || airflow_alarm || fans_held || critical_alarm || sensor_alarm || ir_blind_alarm
              || over_temp_gate || cold_gate || warming
              || ext.standing || (ack_wait && eff_armed)
              || ((quiet_now || button_withheld) && eff_armed);
-    int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !flame_alert
+    int fire_ok = fresh && !fire_alarm && !crash_w.alarm && !emission_alarm && !flame_alert
                 && !crash_w.alert && !airflow_alarm && !fans_held
                 && !critical_alarm && !sensor_alarm && !ir_blind_alarm
                 && !over_temp_gate && !cold_gate && !warming
@@ -3657,13 +3812,7 @@ static void engine_tick(void)
         flowrun_engine(&fc);
     }
 
-    /* The engine's hold on the latch stands while a reason it locked for
-     * stands: the fail tiers' alarms (FIRE, CRASH, AIRFLOW, CRITICAL, and
-     * SENSOR's on a short in a run), a silence it safed (until a report is
-     * fresh again), and emission sensed with no armed window (until the
-     * witness reads none). Released here, before the verdict. */
-    cool_latch_release_tick(fire_alarm || crash_w.alarm || airflow_alarm || critical_alarm ||
-                            short_alarm || silent_safed || emission_warned);
+    latch_hold_tick();
     verdict_publish(fire_ok, verdict, hold, have_down, down, have_up, up);
 }
 

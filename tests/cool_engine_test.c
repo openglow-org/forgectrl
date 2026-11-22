@@ -205,6 +205,7 @@
 static const char *drop_attr;       /* a path suffix, or NULL */
 static int drop_left;               /* writes to drop; -1 = every one */
 static int refuse;                  /* refuse instead of dropping */
+static int refuse_errno;            /* the refusal's errno (0: EIO) */
 static int drop_fd = -1;
 /* The engine's latch hold as the kernel had it when the verdict was
    written: the order of the release and the verdict shows in it. */
@@ -220,9 +221,9 @@ static int heater_fd = -1;
 static long heater_written_max = 0;
 /* Heater writes above zero that landed while the pump read off. */
 static int heat_with_pump_off = 0;
-/* The kernel pair's order: the turn of the last cnc/stop "1" and of the
-   last cnc/laser_latch_cooling "1" among the writes since a case zeroed
-   write_turn. */
+/* The kernel pair's order: the turn of the first cnc/stop "1" and of the
+   first cnc/laser_latch_cooling "1" among the writes since a case zeroed
+   the three. */
 static int stop_fd = -1, cool_lock_fd = -1;
 static int write_turn, stop_turn, cool_lock_turn;
 static long get_long(const char *attr);
@@ -291,8 +292,12 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
             heat_with_pump_off++;
     }
     if (fd == stop_fd || fd == cool_lock_fd) {
-        if (n > 0 && ((const char *)buf)[0] == '1')
-            *(fd == stop_fd ? &stop_turn : &cool_lock_turn) = ++write_turn;
+        if (n > 0 && ((const char *)buf)[0] == '1') {
+            int *turn = fd == stop_fd ? &stop_turn : &cool_lock_turn;
+            ++write_turn;
+            if (*turn == 0)
+                *turn = write_turn;
+        }
         if (fd == stop_fd)
             stop_fd = -1;
         else
@@ -303,7 +308,7 @@ static ssize_t fake_write(int fd, const void *buf, size_t n)
             drop_left--;
         drop_fd = -1;
         if (refuse) {
-            errno = EIO;
+            errno = refuse_errno ? refuse_errno : EIO;
             return -1;
         }
         return (ssize_t)n;          /* taken, as far as the writer sees */
@@ -377,6 +382,7 @@ static char last_log[256];
 static char logbuf[16384];          /* every line since an intake case began */
 
 static int log_errs;                /* lines at LOG_ERR, counted by level */
+static int log_crits, log_warns, log_infos;  /* lines at LOG_CRIT, LOG_WARNING, LOG_INFO */
 /* Called with each line as it is logged: a case that lands a call at
    that moment (another thread, on one core). */
 static void (*fflog_hook)(const char *line);
@@ -385,6 +391,9 @@ void fflog(int prio, const char *fmt, ...)
 {
     if (prio == LOG_ERR)
         log_errs++;
+    log_crits += prio == LOG_CRIT;
+    log_warns += prio == LOG_WARNING;
+    log_infos += prio == LOG_INFO;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
@@ -3639,6 +3648,234 @@ static void no_engine_heat(loop_t *L)
           "120 s armed at a normal coolant, and the tail to idle: the heater never above 0");
 }
 
+/* The kernel pair and the controller's latch back to 0, as a case reads
+ * what the next tick writes. */
+static void em_cleared(void)
+{
+    put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
+    put("cnc/laser_latch_cooling", "0\n");
+}
+
+static int em_pair_written(void)
+{
+    return get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1 &&
+           get_long("cnc/laser_latch_cooling") == 1;
+}
+
+static int em_nothing_written(void)
+{
+    return get_long("cnc/stop") == 0 && get_long("cnc/laser_latch") == 0;
+}
+
+/* The emission witness: a count above 0 with no armed window in the last
+ * 3 s is EMISSION, the fail tier; a count that cannot be read gets the
+ * pair once per stretch; the witness and the hang dead-man run while a
+ * diagnostic owns the hardware. */
+static void emission_tier(loop_t *L)
+{
+    printf("E. emission with no armed window: EMISSION, the fail tier\n");
+    cool_fail_tier_stop = fake_stop;
+    close_session(L);
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);               /* the armed window well past */
+    em_cleared();
+    stops = 0;
+    led_red = 0;
+    write_turn = stop_turn = cool_lock_turn = 0;
+    put_long("cnc/laser_on_sampled", 1);
+    run_idle_tick(L);
+    CHECK(em_pair_written(), "a count of 1: motion stopped, the controller's latch and the engine's hold locked");
+    CHECK(cool_lock_turn > 0 && cool_lock_turn < stop_turn, "the latch locked first, then the stop");
+    CHECK(!strcmp(pub_verdict, "EMISSION") && !pub_fire_ok && pub_hold && led_red,
+          "the verdict EMISSION: fire blocked, a hold, the red flash");
+    CHECK(stops == 1 && stop_seen_stop == 1 && stop_seen_latch == 1,
+          "the controller ended through the supervisor once, after the kernel writes");
+    em_cleared();
+    run_idle_tick(L);
+    CHECK(em_pair_written() && stops == 1, "the count still 1 a tick later: the pair again, no second stop");
+    em_cleared();
+    cool_state_report("idle", 1, -1, -1, -1, NULL);     /* an armed report, the count still 1 */
+    fake_now += 1.0;
+    engine_tick();
+    CHECK(!strcmp(pub_verdict, "EMISSION") && !pub_fire_ok && cool_attention_ack() == -1,
+          "an armed report while the count reads 1 clears nothing: EMISSION, the Acknowledge refused");
+    CHECK(em_pair_written(), "and stops no write: the pair again");
+    em_cleared();
+    unlink(GF_SYSFS "cnc/laser_on_sampled");
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "EMISSION") && get_long("cnc/laser_latch") == 1 &&
+          get_long("cnc/laser_latch_cooling") == 1,
+          "a tick the count cannot be read while EMISSION stands: the latch locked again");
+    put_long("cnc/laser_on_sampled", 1);
+    em_cleared();
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    CHECK(em_nothing_written() && get_long("cnc/laser_latch_cooling") == 0,
+          "the count back at 0: nothing written, the engine's hold released");
+    CHECK(!strcmp(pub_verdict, "ACK") && !pub_fire_ok && led_red,
+          "and fire waits for the operator's acknowledgment");
+    CHECK(cool_attention_ack() == 0, "the Acknowledge is taken");
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "then fire is permitted again");
+
+    printf("E1. a stop the kernel refuses in its fault state is no failure; in another state it is\n");
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);
+    em_cleared();
+    put("cnc/state", "fault\n");
+    drop_attr = "cnc/stop";
+    drop_left = -1;
+    refuse = 1;
+    refuse_errno = EPERM;
+    int crits0 = log_crits;
+    int infos0 = log_infos;
+    put_long("cnc/laser_on_sampled", 1);
+    run_idle_tick(L);
+    run_idle_tick(L);
+    CHECK(get_long("cnc/laser_latch") == 1 && log_crits == crits0,
+          "EMISSION in the fault state: the latch locked, the refused stop never named critical");
+    CHECK(log_infos == infos0 + 1, "the refused stop said once over two ticks");
+    refuse = 0;                         /* one stop the kernel takes */
+    run_idle_tick(L);
+    refuse = 1;
+    infos0 = log_infos;
+    run_idle_tick(L);
+    CHECK(log_infos == infos0 + 1, "refused again after one that took: said again, once");
+    put("cnc/state", "idle\n");
+    run_idle_tick(L);
+    CHECK(log_crits == crits0 + 1, "EPERM with the state reading idle: named critical");
+    drop_attr = NULL;
+    drop_left = 0;
+    refuse = 0;
+    refuse_errno = 0;
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    (void)cool_attention_ack();
+    run_idle_tick(L);
+
+    printf("E2. the 3 s after a window closes are tolerated\n");
+    open_session(L);
+    em_cleared();
+    put_long("cnc/laser_on_sampled", 2);
+    for (int i = 0; i < 3; i++)
+        tick_unarmed_run(L);            /* 1, 2 and 3 s after the last armed report */
+    CHECK(em_nothing_written() && strcmp(pub_verdict, "EMISSION"), "a count of 2 up to 3 s after the window: nothing");
+    tick_unarmed_run(L);
+    CHECK(em_pair_written() && !strcmp(pub_verdict, "EMISSION"), "4 s after it: EMISSION");
+    put_long("cnc/laser_on_sampled", 0);
+    close_session(L);
+
+    printf("E3. a count that cannot be read: the pair once per stretch, outside the window\n");
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);
+    em_cleared();
+    unlink(GF_SYSFS "cnc/laser_on_sampled");
+    run_idle_tick(L);
+    run_idle_tick(L);
+    CHECK(em_nothing_written(), "two ticks unreadable: nothing yet");
+    int warns0 = log_warns;
+    write_turn = stop_turn = cool_lock_turn = 0;
+    run_idle_tick(L);
+    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1 && log_warns == warns0 + 1,
+          "the third: motion stopped, the latch locked, said once");
+    CHECK(cool_lock_turn > 0 && cool_lock_turn < stop_turn, "the latch locked first, then the stop");
+    CHECK(strcmp(pub_verdict, "EMISSION"), "no emission was counted: no EMISSION");
+    em_cleared();
+    warns0 = log_warns;
+    run_idle_tick(L);
+    CHECK(em_nothing_written() && log_warns == warns0, "the stretch goes on: not written or said again");
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    em_cleared();
+    unlink(GF_SYSFS "cnc/laser_on_sampled");
+    for (int i = 0; i < 3; i++)
+        run_idle_tick(L);
+    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch") == 1,
+          "a second stretch at idle, after a count read between: the pair again");
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    settle_and_open(L);
+    em_cleared();
+    warns0 = log_warns;
+    unlink(GF_SYSFS "cnc/laser_on_sampled");
+    for (int i = 0; i < 3; i++)
+        run_tick(L);
+    CHECK(em_nothing_written() && log_warns > warns0, "inside an armed window: only said");
+    put_long("cnc/laser_on_sampled", 0);
+    close_session(L);
+
+    printf("E4. under a diagnostic: the witness and the hang dead-man run\n");
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);
+    CHECK(cool_diag_take() == 0, "a diagnostic takes the thermal hardware");
+    em_cleared();
+    stops = 0;
+    put_long("cnc/laser_on_sampled", 3);
+    run_idle_tick(L);
+    CHECK(em_pair_written() && !strcmp(pub_verdict, "EMISSION") && !pub_fire_ok && stops == 1,
+          "emission under the diagnostic: the pair, EMISSION, the supervisor asked");
+    put("cnc/stop", "0\n");             /* the engine's own hold left standing */
+    put("cnc/laser_latch", "0\n");
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    CHECK(em_nothing_written() && get_long("cnc/laser_latch_cooling") == 0 && !strcmp(pub_verdict, "ACK"),
+          "the count back at 0: the hold released, ACK");
+    CHECK(cool_attention_ack() == 0, "acknowledged under the diagnostic");
+    /* An armed report under the diagnostic keeps the tolerance. */
+    cool_state_report("idle", 1, -1, -1, -1, NULL);
+    fake_now += 1.0;
+    engine_tick();
+    put_long("cnc/laser_on_sampled", 2);
+    fake_now += 1.0;
+    engine_tick();
+    CHECK(em_nothing_written() && strcmp(pub_verdict, "EMISSION"),
+          "a count 1 s after an armed report under the diagnostic: nothing");
+    put_long("cnc/laser_on_sampled", 0);
+    /* That report gone silent with the window open: the dead-man. */
+    fake_now += 6.0;
+    engine_tick();
+    CHECK(get_long("cnc/stop") == 1 && get_long("cnc/laser_latch_cooling") == 1,
+          "silence while armed under the diagnostic: motion stopped, the engine's hold locked");
+    cool_controller_stopped();
+    cool_diag_release();
+    run_idle_tick(L);
+    CHECK(get_long("cnc/laser_latch_cooling") == 0, "released with the diagnostic");
+
+    printf("E5. an EMISSION that clears under a diagnostic makes no older acknowledgment live again\n");
+    attn_keep = 1;
+    settle_and_open(L);
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 800);                        /* FIRE */
+    }
+    run_tick(L);
+    run_tick(L);
+    for (int i = 1; i <= 4; i++) {
+        char attr[20];
+        snprintf(attr, sizeof(attr), "pic/lid_ir_%d", i);
+        put_long(attr, 100);
+    }
+    close_session(L);
+    attn_keep = 0;
+    for (int i = 0; i < 4; i++)
+        run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "ACK") && !strcmp(attn_verdict, "FIRE"), "a FIRE that waits for its acknowledgment");
+    CHECK(cool_diag_take() == 0, "a diagnostic takes the thermal hardware over it");
+    put_long("cnc/laser_on_sampled", 3);
+    run_idle_tick(L);
+    put_long("cnc/laser_on_sampled", 0);
+    run_idle_tick(L);
+    run_idle_tick(L);
+    CHECK(!strcmp(pub_verdict, "ACK") && cool_attention_ack() == 0,
+          "the count back at 0 under the diagnostic: ACK, and the Acknowledge is taken");
+    cool_diag_release();
+    run_idle_tick(L);
+    cool_fail_tier_stop = NULL;
+    stops = 0;
+}
+
 /* The engine's warnings that change no verdict ask the flight recorder for
  * the minutes around them, each once (the silent controller is M's). */
 static void recorder_warnings(loop_t *L)
@@ -3992,10 +4229,12 @@ static void short_tier_rules(loop_t *L)
     CHECK(short_pair_at_words == 11, "a short: cnc/stop and the engine's latch hold written before the words");
     CHECK(stop_turn > 0 && cool_lock_turn > stop_turn, "a short: cnc/stop first, then the engine's latch hold");
     put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
     stops = 0;
     run_tick(L);
     run_tick(L);
     CHECK(get_long("cnc/stop") == 0 && stops == 0, "a short that stands: the stop and the controller's end once");
+    CHECK(get_long("cnc/laser_latch") == 1, "and its latch lock written again on every tick it stands");
     L->fix_up = -1;
     /* The controller's end is the supervisor's to carry out; until it
      * reports or stops, the tier stands on whatever it reports. */
@@ -4585,10 +4824,12 @@ static void fail_tier_pair(loop_t *L, int critical)
     CHECK(stop_turn > 0 && cool_lock_turn > stop_turn, "cnc/stop written first, then the engine's latch hold");
     CHECK(stops == 0, "the controller is not ended through the supervisor");
     put("cnc/stop", "0\n");
+    put("cnc/laser_latch", "0\n");
     run_tick(L);
     run_tick(L);
     CHECK(get_long("cnc/stop") == 0 && get_long("cnc/laser_latch_cooling") == 1,
           "the tier stands: the stop written once, the engine's latch hold stands with it");
+    CHECK(get_long("cnc/laser_latch") == 1, "and the latch lock is written again on every tick it stands");
     /* The window closes and the session stays open (a paused, disarmed
      * cloud print reports run; an M8 left on): the hold stands. */
     for (int k = 0; k < 3; k++)
@@ -5120,7 +5361,9 @@ int main(void)
           "FIRE ends the controller through the hook, once, naming the signal");
     CHECK(stop_seen_stop == 1 && stop_seen_latch == 1,
           "the kernel writes had landed when the hook was called");
+    put("cnc/laser_latch", "0\n");
     run_tick(&L);
+    CHECK(get_long("cnc/laser_latch") == 1, "FIRE stands: the latch lock written again the next tick");
     run_tick(&L);
     CHECK(stops == 1 && !strcmp(pub_verdict, "FIRE"), "the tier stands, the hook is not called again");
     CHECK(get_long("cnc/laser_latch_cooling") == 1, "and the engine's latch hold stands with it");
@@ -5145,9 +5388,11 @@ int main(void)
           "CRASH ends the controller through the hook, once, naming the signal");
     CHECK(stop_seen_stop == 1 && stop_seen_latch == 1,
           "the kernel writes had landed when the hook was called");
+    put("cnc/laser_latch", "0\n");
     run_tick(&L);
     CHECK(stops == 1, "the tier stands, the hook is not called again");
     CHECK(get_long("cnc/laser_latch_cooling") == 1, "and the engine's latch hold stands with it");
+    CHECK(get_long("cnc/laser_latch") == 1, "CRASH stands: the latch lock written again the next tick");
     CHECK(attn_latched && attn_sticky && !strcmp(attn_verdict, "CRASH"),
           "CRASH is the fail tier: it takes the acknowledgment to end it");
     crash_src2 = 0;
@@ -5384,6 +5629,7 @@ int main(void)
     notices_json_safe(&L);
     attention_takeover(&L);
     no_engine_heat(&L);
+    emission_tier(&L);
     recorder_warnings(&L);
     retired_tunables();
     shutdown_order(&L);

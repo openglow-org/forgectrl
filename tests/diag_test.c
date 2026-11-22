@@ -41,7 +41,12 @@ static unsigned fake_sleep(unsigned s) { (void)s; return 0; }
 
 /* --- the daemon around the diagnostic, which these cases never reach -- */
 
-int  cool_diag_take(void) { return 0; }
+/* The order of the controller's stop and the engine's take, by turn. */
+static int turn, stop_turn, take_turn;
+static int engine_busy;                 /* the engine refuses the take (-1) */
+static int starts;                      /* controller hand-backs */
+int  cool_diag_can_take(void) { return engine_busy ? -1 : 0; }
+int  cool_diag_take(void) { take_turn = ++turn; return engine_busy ? -1 : 0; }
 void cool_diag_release(void) { }
 void cool_diag_pump(int on) { (void)on; }
 void cool_diag_heater_pct(double pct) { (void)pct; }
@@ -53,8 +58,8 @@ int  lease_take(const char *owner, lease_kind_t kind, const char *under, char *w
     return 0;
 }
 void lease_release(const char *owner) { (void)owner; }
-int  super_takeover_begin(void) { return 0; }
-void super_takeover_end(void) { }
+int  super_takeover_begin(void) { stop_turn = ++turn; return 0; }
+void super_takeover_end(void) { starts++; }
 int  wizdark_lease_owner(char *buf, size_t len) { (void)buf; (void)len; return 0; }
 int  machine_is_idle(void) { return 1; }
 void fflog(int prio, const char *fmt, ...) { (void)prio; (void)fmt; }
@@ -147,6 +152,32 @@ int main(void)
         pthread_mutex_unlock(&mu);
         pthread_join(t, NULL);
         CHECK(ended, "the run was asked to end, and the stop returned once it had");
+    }
+
+    printf("the air-assist run stops the controller before the engine hands the hardware over\n");
+    {
+        pthread_mutex_lock(&mu);
+        st_running = 1;
+        abort_req = 1;                  /* the run stands down at its first look */
+        pthread_mutex_unlock(&mu);
+        turn = stop_turn = take_turn = 0;
+        runner_aa(NULL);
+        CHECK(stop_turn == 1 && take_turn == 2, "the controller's stop first, then the engine's take");
+        /* The engine busy at the take (it went busy after the start's
+         * check): the controller is handed back, and nothing runs. */
+        pthread_mutex_lock(&mu);
+        st_running = 1;
+        abort_req = 0;
+        pthread_mutex_unlock(&mu);
+        engine_busy = 1;
+        starts = 0;
+        runner_aa(NULL);
+        CHECK(starts == 1 && !diag_running(), "a take the engine refuses: the controller handed back, the run over");
+        /* A busy engine refuses the start itself, with no thread. */
+        char why[64] = "";
+        CHECK(diag_start("aa-offset-calibrate", why, sizeof(why)) == -2 && !diag_running(),
+              "a busy engine: the start refused");
+        engine_busy = 0;
     }
 
     unlink(ROOT "pic/water_temp_1");

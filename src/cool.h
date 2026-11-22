@@ -14,7 +14,10 @@
  * Take succeeds (0) only from an idle engine with no OVERTEMP cooling
  * airflow standing: -2 while that airflow stands, -1 for any other busy
  * engine (a session, its cooldown, another takeover). Release reasserts
- * the engine's posture in one place. */
+ * the engine's posture in one place. cool_diag_can_take answers what a
+ * take would, and takes nothing: a tool that stops the controller first
+ * asks it before the stop, and takes after it. */
+int  cool_diag_can_take(void);
 int  cool_diag_take(void);
 void cool_diag_release(void);
 void cool_diag_pump(int on);

@@ -3957,8 +3957,10 @@ static const char *const ENV_OVERRIDES[] = {
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
     "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_HTTP_IDLE_S", "GF_IIO_ROOT", "GF_LED_ROOT",
-    "GF_LENS_STEP_US", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S", "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S", "GF_RUN_DIR", "GF_SLOT_LIST",
-    "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR", "GF_SYSFS_ROOT", "GF_USERS_REPLAY",
+    "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S",
+    "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S",
+    "GF_RUN_DIR", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
+    "GF_SYSFS_ROOT", "GF_USERS_REPLAY",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */

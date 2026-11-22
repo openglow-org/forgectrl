@@ -289,10 +289,17 @@ static int kernel_playing(void)
 
 static int head_safe_write(void);
 static int head_safed;
+static void safing_pair(void);
+
+/* The cloud client as the supervisor starts it, for pgrep and pkill -f: the
+ * interpreter its first line names, then the script, then nothing or its
+ * arguments, from the command line's start (never a substring of another
+ * command line, an editor's or a test run's). Quoted for the shell. */
+#define CLOUD_CLIENT_RE "'^/usr/bin/python3 " CLOUD_BIN "( |$)'"
 
 /* Stop an unmanaged controller (one a legacy script or a hand started, or
  * a GRBL controller's homing runner that outlived its controller and the
- * daemon) the legacy way so the supervisor can take over, and make the
+ * daemon) by its signals so the supervisor can take over, and make the
  * head safe after it, as a reap does: whatever it left on the head goes
  * off before the motion probe and the lens sweep that come next. Called
  * with mu NOT held. */
@@ -300,12 +307,14 @@ static void takeover_unmanaged(void)
 {
     fflog(LOG_WARNING, "super: taking over from unmanaged "
                        "controller");
-    (void)!system("/etc/init.d/grblhal stop >/dev/null 2>&1");
-    (void)!system("/etc/init.d/gfcloud stop >/dev/null 2>&1");
+    /* The safing pair before the signals and after them, as every stop of
+     * a controller writes it. */
+    safing_pair();
     (void)!system("pkill -x grblHAL_glowfor 2>/dev/null");
-    (void)!system("pkill -f '[g]fcloud\\.py' 2>/dev/null");
+    (void)!system("pkill -f " CLOUD_CLIENT_RE " 2>/dev/null");
     (void)!system("pkill -x gfhome.py 2>/dev/null");
     sleep(1);
+    safing_pair();
     pthread_mutex_lock(&mu);
     head_safe_write();
     head_safed = 1;
@@ -357,17 +366,23 @@ static void runner_reap(void)
         return;
     fflog(LOG_WARNING, "super: the homing runner outlived its controller - "
                        "stopping it");
+    /* The safing pair before each signal and after the runner's end: a
+     * homing move it queued stops, whatever lifecycle state follows (no
+     * respawn may come to halt it). */
+    safing_pair();
     (void)!system("pkill -TERM -x gfhome.py 2>/dev/null");
     double deadline = wall_s() + RUNNER_TERM_WAIT_S;
     while (runner_running() && wall_s() < deadline)
         usleep(100 * 1000);
     if (runner_running()) {
         fflog(LOG_WARNING, "super: escalating the homing runner to SIGKILL");
+        safing_pair();
         (void)!system("pkill -KILL -x gfhome.py 2>/dev/null");
         deadline = wall_s() + 1.0;
         while (runner_running() && wall_s() < deadline)
             usleep(100 * 1000);
     }
+    safing_pair();
 }
 
 /* The pulse-device broker: one open for the daemon's lifetime, handed
@@ -792,6 +807,37 @@ static int wr_attr(const char *attr, const char *val)
     return -1;
 }
 
+/* The safing pair: the latch lock first, which severs FIRE whatever state
+ * the kernel is in, then the stop. The kernel refuses a stop in its fault
+ * state (EPERM), where nothing plays and FIRE is parked already: that
+ * refusal is nothing to stop, said below the safing writes' severity and
+ * not tried again. Any other failure is wr_attr's: tried again, then named
+ * at the highest severity. */
+static void safing_stop(void)
+{
+    int err = 0;
+    for (int i = 0; i < WR_ATTR_TRIES; i++) {
+        if (i)
+            usleep(WR_ATTR_RETRY_US);
+        err = wr_attr_try("cnc/stop", "1");
+        if (!err)
+            return;
+        char st[24];
+        if (err == EPERM && rd_attr("cnc/state", st, sizeof(st)) == 0 && !strcmp(st, "fault")) {
+            fflog(LOG_INFO, "super: the kernel is in its fault state: no stop to make");
+            return;
+        }
+    }
+    fflog(LOG_CRIT, "super: writing 1 to cnc/stop failed %d times: %s", WR_ATTR_TRIES,
+          strerror(err));
+}
+
+static void safing_pair(void)
+{
+    wr_attr("cnc/laser_latch", "1");
+    safing_stop();
+}
+
 /* The stepper enable is no safing write, and it is written once: its
  * refusal is the answer. An enable the kernel refuses for a fault that
  * lands in its own power-on has already taken the 40 V rail on and off
@@ -1118,6 +1164,51 @@ static int head_safe_write(void)
  * switch, or the mode switch once that controller has ended on its own
  * (switch_takeover). The spawn writes it if none did. */
 
+/* The cloud client's no-hunt marker (gfcloud.py reads it at its start):
+ * the test hook GF_NOHUNT_MARKER in a host-test run (testhook.h). */
+static const char *nohunt_marker(void)
+{
+    const char *v = ff_test_hook("GF_NOHUNT_MARKER");
+    return v ? v : "/run/gfcloud-nohunt";
+}
+
+/* The kind of every controller spawned, recorded in the run directory
+ * before the fork. A cloud client whose last controller was not a cloud
+ * client (no record included: the first spawn since the boot) hunts the
+ * head and the lens at its start: the no-hunt marker goes first. So a
+ * switch to cloud mode from GRBL always hunts, whichever way it comes (a
+ * mode switch, the cloud wizard's, a daemon start with cloud mode saved, a
+ * standby's takeover). Called with mu held. */
+static void controller_record(ctl_t ctl)
+{
+    char path[256], prev[16] = "";
+    snprintf(path, sizeof(path), "%s/last-controller", ff_run_dir());
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (!fgets(prev, sizeof(prev), f))
+            prev[0] = '\0';
+        fclose(f);
+    }
+    prev[strcspn(prev, "\n")] = '\0';
+    if (ctl == Ctl_Cloud && strcmp(prev, "cloud") != 0 && unlink(nohunt_marker()) == 0)
+        fflog(LOG_NOTICE, "super: the cloud client follows %s: it hunts at its start (the no-hunt "
+                          "marker removed)", prev[0] ? prev : "no recorded controller");
+    char tmp[272];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (mkdir(ff_run_dir(), 0755) != 0 && errno != EEXIST)
+        fflog(LOG_WARNING, "super: mkdir %s: %s", ff_run_dir(), strerror(errno));
+    f = fopen(tmp, "w");
+    int ok = f != NULL;
+    if (f) {
+        ok = fprintf(f, "%s\n", ctl_name(ctl)) >= 0;
+        ok = fclose(f) == 0 && ok;
+    }
+    if (!ok || rename(tmp, path) != 0) {
+        fflog(LOG_WARNING, "super: the controller record could not be written: %s", strerror(errno));
+        unlink(tmp);
+    }
+}
+
 static void spawn_locked(ctl_t ctl)
 {
     broker_open_locked();
@@ -1141,6 +1232,8 @@ static void spawn_locked(ctl_t ctl)
         head_safe_write();
         head_safed = 1;
     }
+
+    controller_record(ctl);
 
     const char *data_dir = ff_data_dir();
     char nvs[256] = "";
@@ -1277,8 +1370,7 @@ static void reap_locked(int status)
      * never fires for managed controllers - these two writes are the
      * real safing mechanism, and both are harmless when the machine is
      * already idle and latched. */
-    wr_attr("cnc/stop", "1");
-    wr_attr("cnc/laser_latch", "1");
+    safing_pair();
     /* Then the live-feed declaration, behind the pair and never ahead of
      * it: the controller is gone and declares nothing again. One that died
      * mid-stream leaves cnc/streaming at 1: the ring it left draining would
@@ -1361,14 +1453,12 @@ static void stop_locked(void)
      * SIGTERM grace to leave. cnc/stop is a controlled deceleration and
      * the latch relock severs FIRE - both instantaneous at the kernel,
      * both harmless no-ops when the machine is already idle and latched. */
-    wr_attr("cnc/stop", "1");
-    wr_attr("cnc/laser_latch", "1");
+    safing_pair();
     kill(-pid, SIGTERM);
     kill(pid, SIGTERM);
     /* Once more after the signal: a write that failed its retries the
      * first time gets a second chance while the controller leaves. */
-    wr_attr("cnc/stop", "1");
-    wr_attr("cnc/laser_latch", "1");
+    safing_pair();
     /* The cooling engine's hang dead-man watches the seconds since the
      * controller's last report; this stop is deliberate, so the report
      * is forgotten and the liveness probe that may follow plays with
@@ -1400,8 +1490,7 @@ static void stop_locked(void)
              * the pair, the live-feed declaration goes as it does at the
              * reap: a killed child declares nothing again, and the reap
              * writes it once more. */
-            wr_attr("cnc/stop", "1");
-            wr_attr("cnc/laser_latch", "1");
+            safing_pair();
             wr_attr("cnc/streaming", "0");
             deadline = wall_s() + STOP_TERM_WAIT_S;
         }
@@ -1757,12 +1846,20 @@ static void switch_takeover(void)
     }
 }
 
-/* The bracketed patterns keep pgrep/pkill -f from matching their own
- * sh -c wrapper. */
+/* A controller process that is not the supervisor's own child: the
+ * managed controller answers the same search, and is left out of it (it
+ * ends through stop_locked, never through the takeover's signals). The
+ * cloud client's pattern is anchored at the command line's start, so it
+ * never matches the sh -c wrapper that runs the search. */
 static int unmanaged_controller_running(void)
 {
-    return system("pgrep -x grblHAL_glowfor >/dev/null 2>&1") == 0 ||
-           system("pgrep -f '[g]fcloud\\.py' >/dev/null 2>&1") == 0 ||
+    pthread_mutex_lock(&mu);
+    int own = (int)child_pid;
+    pthread_mutex_unlock(&mu);
+    char grbl[96], cloud[160];
+    snprintf(grbl, sizeof(grbl), "pgrep -x grblHAL_glowfor | grep -qvx '%d'", own);
+    snprintf(cloud, sizeof(cloud), "pgrep -f " CLOUD_CLIENT_RE " | grep -qvx '%d'", own);
+    return system(grbl) == 0 || system(cloud) == 0 ||
            system("pgrep -x gfhome.py >/dev/null 2>&1") == 0;
 }
 
@@ -1846,8 +1943,7 @@ void super_listening(void)
  * no-op again, and at idle. */
 void super_shutdown_begin(void)
 {
-    wr_attr("cnc/stop", "1");
-    wr_attr("cnc/laser_latch", "1");
+    safing_pair();
     pthread_mutex_lock(&mu);
     int first = !(suspended & SUSP_SHUTDOWN);
     suspended |= SUSP_SHUTDOWN;
@@ -2050,8 +2146,7 @@ static int suspend_for(unsigned reason)
     int had = (suspended & reason) != 0;
     suspended |= reason;
     if (reason == SUSP_HOLD) {
-        wr_attr("cnc/stop", "1");
-        wr_attr("cnc/laser_latch", "1");
+        safing_pair();
         term_child_locked();
     }
     if (probing) {
