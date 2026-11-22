@@ -329,6 +329,8 @@ int grblport_explain(const char *reply, char *why, size_t len)
         snprintf(why, len, "the controller is busy (a program, a hold, an alarm, or the sender's own jog)");
     else if (!strcmp(reply, "busy:mcode"))
         snprintf(why, len, "a job waits at an extension's M-code");
+    else if (!strcmp(reply, "busy:armed"))
+        snprintf(why, len, "the laser's armed window is open: no jog until the job ends");
     else if (!strcmp(reply, "error:saved"))
         snprintf(why, len, "the controller could not save the tray mode: nothing changed");
     else if (!strcmp(reply, "error:mode"))

@@ -724,6 +724,17 @@ expect 409 "$(host /motion/jog -d id=org.example.other -d x=1)" "the credential'
 expect "$n" "$(lines)" "the port got nothing"
 expect 200 "$(host /motion/jog -d id=$PKG -d x=1)" "the credential's jog for $PKG is taken as ext:$PKG"
 case $(last) in "jog G91 G21 X1"*) ok "the port got: $(last)" ;; *) bad "the port's last line is '$(last)'" ;; esac
+# A package's cancel ends only its own jog; the panel's own ends any. A jog
+# the machine refused (another package's, beside the claim) takes no jog's
+# ownership.
+expect 409 "$(host /motion/jog -d id=org.example.other -d x=1)" "another package's jog beside the claim is 409"
+n=$(lines)
+expect 409 "$(host /motion/cancel -d id=org.example.other)" "the credential's cancel for another package is 409"
+expect 409 "$(post /motion/cancel "$TOKEN" -d page=org.example.other)" "a page's cancel of another package's jog is 409"
+expect "$n" "$(lines)" "the port got nothing"
+expect 200 "$(host /motion/cancel -d id=$PKG)" "the credential's cancel for $PKG, whose jog it is, is taken"
+expect cancel "$(last)" "the port got cancel"
+expect 200 "$(post /motion/cancel "$TOKEN")" "the panel's own cancel is taken"
 expect 403 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-ForgeFIRM-Token: $CRED" "$URL/cam/snapshot?cam=lid")" \
     "the same credential on GET /cam/snapshot is 403"
 # let through to the camera's own refusal: with no switch device the lid
@@ -731,6 +742,17 @@ expect 403 "$(curl -s -o /dev/null -w '%{http_code}' -H "X-ForgeFIRM-Token: $CRE
 expect 409 "$(curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cam/snapshot?cam=lid")" \
     "where the panel token is let through: 409, the camera's lid refusal"
 expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
+# Inside the laser's armed window no package jogs: the controller reports
+# its window open, and the host's jog and a page's are refused here.
+expect 200 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-ForgeFIRM-Report: $SEC" \
+              -d mode=run -d armed=1 "$URL/cool/state")" "the controller reports its window open"
+n=$(lines)
+expect 409 "$(host /motion/jog -d id=$PKG -d x=1)" "the credential's jog under the open window is 409"
+expect 409 "$(post /motion/jog "$TOKEN" -d page=$PKG -d x=1)" "a page's jog under the open window is 409"
+expect "$n" "$(lines)" "the port got nothing"
+expect 200 "$(post /motion/jog "$TOKEN" -d x=1)" "the panel's own jog goes to the controller, which judges it"
+expect 200 "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-ForgeFIRM-Report: $SEC" \
+              -d mode=idle -d armed=0 "$URL/cool/state")" "the controller reports its window closed"
 
 echo "== SSH until the next reboot"
 FLAG=$T/run/ssh-enabled

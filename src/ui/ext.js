@@ -666,9 +666,14 @@ function extBridgeCall(id, call, args) {
       if (typeof (args || {})[k] === 'number' && isFinite(args[k])) jog.set(k, String(args[k]));
     });
     if (!jog.has('x') && !jog.has('y') && !jog.has('z')) return Promise.reject('a jog moves at least one axis');
+    /* Whose jog it is: the panel's word, never the page's. The machine
+     * refuses a page's jog inside the laser's armed window, and a page's
+     * cancel ends only its own jog. */
+    jog.set('page', id);
     return fx('/motion/jog', { method: 'POST', body: jog }).then(extAnswer);
   }
-  if (call === 'motion.cancel') return fx('/motion/cancel', { method: 'POST' }).then(extAnswer);
+  if (call === 'motion.cancel')
+    return fx('/motion/cancel', { method: 'POST', body: new URLSearchParams({ page: id }) }).then(extAnswer);
   if (call === 'motion.job') {
     /* A program the page wrote, run as the machine's one sender under
      * every gate a sender is under, the arm press included. Who it is

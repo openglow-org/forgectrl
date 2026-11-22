@@ -85,7 +85,10 @@ watch's four settings, and the Cooling card then shows the watch's hold
 from GET /cool/flow. A package's page shown on the Extensions tab is
 seen at once and reserves nothing (no request names a package to the
 button's reservation), and the machine's status it reads through the
-bridge carries no level of the button. The hold
+bridge carries no level of the button. The page's own jog and cancel,
+sent from inside its frame through the bridge, reach the machine marked
+as that page's (page=<id>): the machine refuses a page's jog inside the
+laser's armed window and ends only a page's own jog at its cancel. The hold
 dialog's OK sends nothing on a ready 3 s old by either clock or on none;
 a tab back in view, a focused window and a page shown again check its
 ready at once, and the first frames after a wake that brings no event
@@ -900,6 +903,45 @@ if (PLAN.diag) STEPS = STEPS.concat([
         if ('button' in st.switches) throw new Error('the page read the button\'s level from the machine\'s status');
         click('#t-system');
         return walkMock('ext=0'); }); }],
+  /* A page's jog and cancel are the page's: the page asks for them from
+   * inside its frame, through the bridge, and the machine gets each with
+   * page=<id>, the panel's word for whose they are. */
+  ['a package\'s page jogs and cancels through the bridge, each marked as that page\'s', function () {
+    var frame = function () { return q('#extcards .extcard iframe'); }, got = null, part = null, id = '', ready = [];
+    var W = w();
+    W.addEventListener('message', function (ev) {
+      var m = ev.data || {};
+      if (m.walkReady) ready.push(ev.source);
+      if (m.walkPart) part = m.walkPart;
+      if (m.walkMoved) got = m.walkMoved;
+    });
+    return walkMock('ext=1&moves=0')
+      .then(function () {
+        click('#t-ext');
+        /* The page in the frame now, ready: a frame the panel replaces as
+         * its list comes in would lose the walk's word. */
+        return until('the page loaded, seen and ready', function () {
+          var f = frame();
+          return f && f.style.visibility !== 'hidden' && ready.indexOf(f.contentWindow) >= 0; }, 10000); })
+      .then(function () {
+        id = W.EXT_FRAMES.filter(function (x) { return x.el; })[0].id;
+        frame().contentWindow.postMessage({ walk: 'move' }, '*');
+        return until('the page\'s jog and cancel answered (so far: ' + JSON.stringify(part) + ')',
+                     function () { return got; }, 10000); })
+      .then(function () {
+        if (got.jog !== 'ok' || got.cancel !== 'ok') throw new Error('the page\'s calls answered ' + JSON.stringify(got));
+        return walkMock(''); })
+      .then(function (s) {
+        /* The mock's page asks for a jog of its own as it loads (x=5); the
+         * walk's is x=1. Every cancel is a page's. */
+        var jog = (s.moves || []).filter(function (m) { return m[0] === '/motion/jog' && m[1].x === '1'; }),
+          cancel = (s.moves || []).filter(function (m) { return m[0] === '/motion/cancel'; });
+        if (jog.length !== 1 || jog[0][1].page !== id)
+          throw new Error('the page\'s jog reached the machine as ' + JSON.stringify(jog) + ', not marked page=' + id);
+        if (cancel.length !== 1 || cancel[0][1].page !== id)
+          throw new Error('the page\'s cancel reached the machine as ' + JSON.stringify(cancel) + ', not marked page=' + id);
+        click('#t-system');
+        return walkMock('ext=0'); }); }],
   /* OK sends nothing on a ready that no answer has confirmed for 2.5 s, by
    * either clock, nor on one the dialog does not hold, whatever reaches the
    * button; and a tab that comes back into view checks its ready's age at
@@ -1109,6 +1151,38 @@ run();
 """
 
 
+# Added to every package page the mock serves: on the walk's word, the
+# page asks the bridge for a jog and then a cancel, and tells the panel
+# what each answered.
+PAGE_MOVE = r"""<script>
+parent.postMessage({ walkReady: 1 }, "*");
+window.addEventListener("message", function (ev) {
+  if (!ev.data || ev.data.walk !== "move") return;
+  var n = 9000, out = {};
+  function ask(call, args) {
+    return new Promise(function (done) {
+      var rid = ++n;
+      window.addEventListener("message", function on(e) {
+        if (e.data && e.data.forgefirm === 1 && e.data.id === rid) {
+          window.removeEventListener("message", on);
+          done(e.data);
+        }
+      });
+      parent.postMessage({ forgefirm: 1, id: rid, call: call, args: args }, "*");
+    });
+  }
+  ask("motion.jog", { x: 1, feed: 600 }).then(function (r) {
+    out.jog = r.ok ? "ok" : String(r.error);
+    parent.postMessage({ walkPart: out }, "*");
+    return ask("motion.cancel");
+  }).then(function (r) {
+    out.cancel = r.ok ? "ok" : String(r.error);
+    parent.postMessage({ walkMoved: out }, "*");
+  });
+});
+</script>"""
+
+
 class Walk(devserver.Handler):
     """The dev server's handler with main.c's page routes in front of the
     mock: the bundled pages, the walk's own page, and its verdict. With a
@@ -1147,6 +1221,9 @@ class Walk(devserver.Handler):
     late_rec = []
     # The POST /button/reserve requests that named a package (pkg=).
     page_asks = 0
+    # The POST /motion/jog and /motion/cancel requests since the walk last
+    # cleared them: (path, the form) each.
+    moves = []
     late_busy = 0
     late_others = 0
     # Each GET /wiz/dark held this long, or answered short; the answers
@@ -1184,6 +1261,10 @@ class Walk(devserver.Handler):
         self.wfile.write(b'{"reserv')
 
     def _mock(self, path, q):
+        if self.command == "POST" and path in ("/motion/jog", "/motion/cancel"):
+            form = dict(parse_qsl(self._read_body().decode("utf-8", "replace"), keep_blank_values=True))
+            Walk.moves.append((path, form))
+            return self._json(200, {"ok": True})
         if self.command == "POST" and path == "/login" and Walk.login_plain:
             Walk.login_plain = False
             self._read_body()
@@ -1296,6 +1377,8 @@ class Walk(devserver.Handler):
                         Walk.dark_drop = q["dark_drop"] == "1"
                     if "page_asks" in q:
                         Walk.page_asks = 0
+                    if "moves" in q:
+                        Walk.moves = []
                     if q.get("stepper_fault") == "1":
                         Walk.mock.stepper_fault = True
                         Walk.mock.controller = "motion-fault"
@@ -1305,7 +1388,8 @@ class Walk(devserver.Handler):
                 Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
             return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"],
                                     "retried": Walk.mock.retried, "controller": Walk.mock.controller,
-                                    "page_asks": Walk.page_asks, "press_button": Walk.mock.wiz["button"],
+                                    "page_asks": Walk.page_asks, "moves": Walk.moves,
+                                    "press_button": Walk.mock.wiz["button"],
                                     "press_taken": Walk.mock.wiz["pressed"], "press_held_done": Walk.press_held_done,
                                     "panel_reserved": sum(1 for _s, u in Walk.mock.panel_res.values()
                                                           if u > time.monotonic()),
@@ -1411,6 +1495,20 @@ def main():
                      "report": devserver.MOCK_REPORT_SECRET}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0
+        # The package with an interface may jog, and its page carries the
+        # walk's few lines that ask the bridge for a jog and a cancel.
+        for pk in Walk.mock.ext_packages:
+            if pk["package"].get("runtime") == "ui" and "motion.jog" not in pk["package"]["capabilities"]:
+                pk["package"]["capabilities"] = pk["package"]["capabilities"] + ["motion.jog"]
+        page_of = Walk.mock.ext_page
+
+        def ext_page(pk):
+            page = page_of(pk)
+            if page is None:
+                return None
+            k = page.rfind("</body>")
+            return page + PAGE_MOVE if k < 0 else page[:k] + PAGE_MOVE + page[k:]
+        Walk.mock.ext_page = ext_page
         Walk.cfg = types.SimpleNamespace(mock=True)
     Walk.panel = None
     Walk.bundled = True

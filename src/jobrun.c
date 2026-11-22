@@ -54,7 +54,16 @@ static struct {
     int set;
     long gen;
     long ctl;
+    long alarm3;                        /* the controller's own alarm-3 count it showed then */
 } stop_mark;
+/* The controller's count of the alarm-3 raises it made itself (its
+ * emission witness, a refused arm: grbl.state "alarm3_raised"), read as
+ * the run began; -1 when it cannot be read. A stop is marked as the
+ * runner's only when the document that shows it carries the same count:
+ * a raise of the controller's own during the run or inside the end's read
+ * reads exactly like the alarm 3 of a soft reset in motion, and is not the
+ * runner's to clear. */
+static long run_alarm3 = -1;
 
 static long (*jobrun_controller)(void);
 
@@ -103,31 +112,44 @@ static int reads_alarm3(const char *body)
 /* After a run's own soft reset: the sender generation of the first
  * document that shows that stop, alarm 3 with no connection on the
  * socket, within JOBRUN_STOP_SEEN_S. 0, or -1 when the state cannot be
- * read or never shows it (a stop at rest raises no alarm of its own; an
- * alarm 3 the driver raises inside the read is taken for it). Asked while
+ * read or never shows it (a stop at rest raises no alarm of its own), or
+ * when the controller's own alarm-3 count moved since the run began (its
+ * emission witness under the run or inside the read). Asked while
  * the run still keeps the Grbl socket to this host, so no sender from the
  * network can come between. After a lost connection the alarm is raised
  * only once the controller has read the ^X of the reset connection, so
  * the document that shows it with no connection comes after that
  * connection's drop. */
-static int stop_seen(long *gen)
+static int stop_seen(long *gen, long *alarm3)
 {
     char body[JOBSTREAM_STATE_MAX];
     struct timespec tick = { 0, 20 * 1000000L };
+    if (run_alarm3 < 0)
+        return -1;
     for (double t0 = mono_s(); mono_s() - t0 < JOBRUN_STOP_SEEN_S; nanosleep(&tick, NULL)) {
         if (jobstream_grbl_state(body, sizeof(body)) != 0)
             return -1;
-        if (strstr(body, "\"connected\":false") && reads_alarm3(body))
+        /* An alarm 3 the controller raised itself since the run began,
+         * under the run or in this read: whatever the document shows, the
+         * alarm that stands is not only the runner's. */
+        if (state_number(body, "\"alarm3_raised\":") != run_alarm3)
+            return -1;
+        if (strstr(body, "\"connected\":false") && reads_alarm3(body)) {
+            *alarm3 = state_number(body, "\"alarm3_raised\":");
             return (*gen = state_number(body, "\"generation\":")) < 0 ? -1 : 0;
+        }
     }
     return -1;
 }
 
 /* The runner's own stop still stands: the controller that showed it reads
  * the alarm a soft reset in motion leaves (alarm 3), no session has had
- * the Grbl socket since (the same sender generation), and nothing of this
- * daemon's has cleared or changed the alarm since (jobrun_forget_stop:
- * the port's home, release and energize). Anything else (another alarm,
+ * the Grbl socket since (the same sender generation), the controller has
+ * raised no alarm 3 of its own since (the same alarm3_raised: its emission
+ * witness reads exactly like the runner's alarm while that stands), and
+ * nothing of this daemon's has cleared or changed the alarm since
+ * (jobrun_forget_stop: the port's home, release and energize). Anything
+ * else (another alarm,
  * another sender's session, a controller started since, a state that
  * cannot be read) is not the runner's to clear. Called with mu held. */
 static int stop_stands_locked(void)
@@ -136,7 +158,8 @@ static int stop_stands_locked(void)
     if (!stop_mark.set || jobstream_grbl_state(body, sizeof(body)) != 0)
         return 0;
     return controller_id() == stop_mark.ctl && reads_alarm3(body) &&
-           state_number(body, "\"generation\":") == stop_mark.gen;
+           state_number(body, "\"generation\":") == stop_mark.gen &&
+           state_number(body, "\"alarm3_raised\":") == stop_mark.alarm3;
 }
 
 void jobrun_forget_stop(void)
@@ -227,6 +250,11 @@ static void record_open_locked(jobstream_run_t *run, int program, int nlines)
     t_started = mono_s();
     memset(run, 0, sizeof(*run));
     cur = run;
+    /* Before any of the run's lines goes out: the baseline its stop is
+     * judged against (stop_seen). */
+    char body[JOBSTREAM_STATE_MAX];
+    run_alarm3 = jobstream_grbl_state(body, sizeof(body)) == 0
+        ? state_number(body, "\"alarm3_raised\":") : -1;
 }
 
 /* The way out: the counters kept, the socket and the lease back if the
@@ -242,9 +270,9 @@ static void end(int rc, const jobstream_run_t *run, const char *err)
      * controller's identity is read before the state, and the next
      * program's check compares it: a controller started inside the read
      * is not the one marked. No identity (nothing wired), no mark. */
-    long gen = -1;
+    long gen = -1, alarm3 = -1;
     long ctl = controller_id();
-    int stopped = rc != 0 && run->own_stop && run->acked > 0 && ctl > 0 && stop_seen(&gen) == 0;
+    int stopped = rc != 0 && run->own_stop && run->acked > 0 && ctl > 0 && stop_seen(&gen, &alarm3) == 0;
     pthread_mutex_lock(&mu);
     sender_give_locked();
     last = *run;
@@ -252,6 +280,7 @@ static void end(int rc, const jobstream_run_t *run, const char *err)
     stop_mark.set = stopped;
     stop_mark.gen = gen;
     stop_mark.ctl = ctl;
+    stop_mark.alarm3 = alarm3;
     cur = NULL;
     snprintf(reason, sizeof(reason), "%s", rc == 0 ? "" : err);
     snprintf(who, sizeof(who), "%s", holder);

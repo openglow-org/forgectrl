@@ -365,6 +365,10 @@ static long test_controller(void)
     return ctl_pid;
 }
 
+/* The driver's count of the alarm-3 raises it made itself (its emission
+ * witness), as every document below carries it. */
+static volatile long ctl_alarm3 = 0;
+
 /* The controller's state file as the driver publishes it: its state, its
  * alarm code, whether a sender is on the socket, the sender generation. */
 static void ctl_doc(const char *state, int alarm, long gen, int connected)
@@ -377,13 +381,16 @@ static void ctl_doc(const char *state, int alarm, long gen, int connected)
     FILE *f = fopen(tmp, "w");
     if (!f)
         return;
-    char g[48] = "";
+    char g[48] = "", a3[40] = "";
     if (gen >= 0)                       /* a document with no generation: gen below 0 */
         snprintf(g, sizeof(g), ",\"generation\":%ld", gen);
-    fprintf(f, "{\"ts_mono\":%.3f,\"state\":\"%s\",\"alarm\":%d,"
+    if (ctl_alarm3 >= 0)                /* a driver that publishes no count: below 0 */
+        snprintf(a3, sizeof(a3), "\"alarm3_raised\":%ld,", (long)ctl_alarm3);
+    fprintf(f, "{\"ts_mono\":%.3f,\"state\":\"%s\",\"alarm\":%d,%s"
                "\"sender\":{\"connected\":%s%s,\"for_s\":0,\"peer\":\"\"},"
                "\"laser\":{\"armed\":false,\"arming\":false}}\n",
-            (double)ts.tv_sec + ts.tv_nsec / 1e9, state, alarm, connected ? "true" : "false", g);
+            (double)ts.tv_sec + ts.tv_nsec / 1e9, state, alarm, a3,
+            connected ? "true" : "false", g);
     fclose(f);
     rename(tmp, path);
 }
@@ -558,6 +565,8 @@ static void failed_run(const char *name, const char *text)
 /* The runner's own stop: a run aborted mid-move (the controller took its
  * first line), or one aborted at its first line, which the controller
  * has not answered. */
+static void (*before_abort)(void);     /* what the controller does just before the runner's abort */
+
 static void aborted_run_of(const char *text, int acked)
 {
     char err[160] = "", key[24];
@@ -568,7 +577,28 @@ static void aborted_run_of(const char *text, int acked)
     snprintf(key, sizeof(key), "\"acked\":%d,", acked);
     for (int t = 0; t < 3000 && !strstr(status(), key); t += 10)
         msleep(10);                     /* the runner has read the answers before the held line */
+    if (before_abort)
+        before_abort();
     CHECK(jobrun_program_abort(err, sizeof(err)) == 0, "abort: \"%s\"", err);
+}
+
+/* The driver's emission witness raises its alarm 3 (its count moves on),
+ * and the document shows it with no sender on the socket. */
+static void witness_raises(void)
+{
+    ctl_alarm3++;
+    ctl_state("Alarm", 3, 7);
+}
+
+/* The same inside the end's read, after the runner's soft reset. */
+static void *witness_in_the_read(void *unused)
+{
+    (void)unused;
+    wait_for(&mock.holding, 1, 3000);
+    wait_for(&mock.resets, 1, 3000);
+    msleep(100);
+    witness_raises();
+    return NULL;
 }
 
 static void aborted_run(void)
@@ -715,6 +745,43 @@ static void test_unlock(void)
     aborted_run();
     ctl_state_gone();
     unlock_run("no-state", 0);
+
+    /* The driver's own alarm 3 (its emission witness) reads exactly like
+     * the runner's: raised while the runner's stands, under the run in the
+     * tick the runner aborts it, or inside the end's read after a stop at
+     * rest. Its count moved, so none is the runner's to clear. */
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    witness_raises();
+    unlock_run("a-witness-alarm-while-it-stands", 0);
+    ctl_state("Alarm", 3, 7);
+    before_abort = witness_raises;
+    aborted_run();
+    before_abort = NULL;
+    wait_state("failed", 3000);
+    unlock_run("a-witness-alarm-under-the-run", 0);
+    ctl_state("Idle", 0, 7);
+    {
+        pthread_t t;
+        pthread_create(&t, NULL, witness_in_the_read, NULL);
+        aborted_run();
+        pthread_join(t, NULL);
+        wait_state("failed", 3000);
+    }
+    unlock_run("a-witness-alarm-in-the-read", 0);
+    /* And with the count where the run began, the runner's own stop still
+     * clears. */
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    unlock_run("the-count-unmoved", 1);
+    /* A driver that publishes no count marks no stop: no $X. */
+    long kept = ctl_alarm3;
+    ctl_alarm3 = -1;
+    ctl_state("Alarm", 3, 7);
+    aborted_run();
+    unlock_run("no-count-no-unlock", 0);
+    ctl_alarm3 = kept;
+    ctl_state("Alarm", 3, 7);
 }
 
 /* A reset the controller reports (its banner a second time, as the lid's

@@ -43,17 +43,19 @@
  * soft reset at rest keeps one that stands); the controller showed that
  * stop at the run's end (its published state read alarm 3 with no
  * connection, within JOBRUN_STOP_SEEN_S: a stop at rest raises no alarm
- * of its own, though an alarm 3 the driver raises inside that read is
- * taken for it), and which controller process it was is read
+ * of its own), with the driver's own count of the alarm-3 raises it made
+ * itself (alarm3_raised: its emission witness, a refused arm) where it was
+ * when the run began, and which controller process it was is read
  * before that state; nothing of this
  * daemon's has cleared or changed the alarm since (the port's home,
  * release, energize: jobrun_wire); and, once the new run keeps the
  * Grbl socket, the state still reads alarm 3, with the sender generation
- * it showed after that stop and from the same controller process.
- * Another alarm, another sender's session since, a controller started
- * since, or a state that cannot be read: no $X, and the program's first
- * line meets whatever stands. The driver's own alarm 3 raised while the
- * runner's stands reads the same and is cleared with it. Outside a
+ * and the driver's count it showed after that stop and from the same
+ * controller process. Another alarm, another sender's session since, a
+ * controller started since, an alarm 3 the driver raised itself (under the
+ * run, inside the end's read, or while the runner's stands), or a state
+ * that cannot be read: no $X, and the program's first
+ * line meets whatever stands. Outside a
  * package's claim the run's keep is refused on an alarmed machine, so the
  * $X goes out only under a claim. While the X and Y motors are released
  * the controller refuses the $X, and the job ends there.

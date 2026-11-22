@@ -2242,6 +2242,28 @@ static const char *motion_as(const struct _u_request *req, char *buf, size_t len
     return buf;
 }
 
+/* Whose jog or cancel a request is: "ext:<id>" from the extension host for
+ * a package (its id is the host's word), "page:<id>" from the panel's
+ * bridge for a package's page (the bridge adds page=<id> to every call a
+ * page makes, and the page cannot take it off), "panel" for the panel's
+ * own. A request the host makes for no valid package is no package's: "". */
+static const char *motion_who(const struct _u_request *req, char *buf, size_t len)
+{
+    const char *id = setting_param(req, "id"), *page = setting_param(req, "page");
+    if (auth_by_host())
+        snprintf(buf, len, "%s%s", senderout_id_ok(id) ? "ext:" : "", senderout_id_ok(id) ? id : "");
+    else if (page)
+        snprintf(buf, len, "page:%s", page);
+    else
+        snprintf(buf, len, "panel");
+    return buf;
+}
+
+/* The owner of the last port jog this daemon relayed (motion_who): a
+ * package's cancel ends only its own. */
+static pthread_mutex_t jog_owner_mu = PTHREAD_MUTEX_INITIALIZER;
+static char jog_owner[LEASE_OWNER_MAX + 8];
+
 /* A number in a request: absent reads as the default, and anything that
  * is not wholly a number is an error, never a zero. */
 static int motion_num(const struct _u_request *req, const char *key,
@@ -2271,18 +2293,41 @@ static int cb_motion_jog(const struct _u_request *req,
     if (motion_num(req, "x", 0, &x) || motion_num(req, "y", 0, &y) ||
         motion_num(req, "z", 0, &z) || motion_num(req, "feed", MOTION_JOG_FEED_DEFAULT, &feed))
         return reply_error(res, 400, "x, y, z, and feed must be numbers");
-    char words[96], err[96], as[LEASE_OWNER_MAX];
+    char words[96], err[96], as[LEASE_OWNER_MAX], who[LEASE_OWNER_MAX + 8];
     if (grblport_jog_words(x, y, z, feed, words, sizeof(words), err, sizeof(err)) != 0)
         return reply_error(res, 400, err);
-    return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_JOG, words, motion_as(req, as, sizeof(as)));
+    /* No package jogs inside the laser's armed window: a job can sit at
+     * Idle there, and its next cut would start where the jog left the
+     * head. The controller refuses every port jog there too; this keeps a
+     * package's from reaching it. */
+    motion_who(req, who, sizeof(who));
+    if (strcmp(who, "panel") && cool_armed())
+        return reply_error(res, 409, "the laser's armed window is open: a package does not jog inside it");
+    int rc = motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_JOG, words, motion_as(req, as, sizeof(as)));
+    if (res->status == 200) {           /* the controller took it: the jog that runs is this one */
+        pthread_mutex_lock(&jog_owner_mu);
+        snprintf(jog_owner, sizeof(jog_owner), "%s", who);
+        pthread_mutex_unlock(&jog_owner_mu);
+    }
+    return rc;
 }
 
+/* A cancel ends the port jog that runs. The panel's own cancel ends any
+ * (the operator's key-up, whoever started it); a package's, from the host
+ * or from its page, ends only a jog that package started. */
 static int cb_motion_cancel(const struct _u_request *req,
                             struct _u_response *res, void *user_data)
 {
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    char who[LEASE_OWNER_MAX + 8];
+    motion_who(req, who, sizeof(who));
+    pthread_mutex_lock(&jog_owner_mu);
+    int theirs = !strcmp(who, "panel") || (who[0] && !strcmp(who, jog_owner));
+    pthread_mutex_unlock(&jog_owner_mu);
+    if (!theirs)
+        return reply_error(res, 409, "the jog that runs is not this package's");
     return motion_port(res, GRBLPORT_SET_PACKAGE, GRBLPORT_CANCEL, NULL, NULL);
 }
 
