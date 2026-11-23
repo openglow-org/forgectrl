@@ -100,11 +100,10 @@ int auth_by_setup(void);
  * or a token from the network is none of these. */
 int auth_local_viewer(const struct _u_request *req);
 
-/* Operator-present factor: true only while the physical button is held.
- * Gates the irrevocable fuse view, unsigned-firmware installs, the reset
- * of every setting, an owner's key and an unverified package. A level
- * read with no regard for a job: every route that asks for it asks
- * job_takes_button() (hooks.h) first, so the hold is never a job's press. */
-int operator_present(void);
+/* Who a consent of the panel's is for (btnres.h, btnres_consent_t): the
+ * request's session, when it carries one that stands, or else the address
+ * it comes from (this host's own clients, a development image's). Into
+ * @out; compared, never logged. */
+void auth_holder(const struct _u_request *req, char *out, size_t len);
 
 #endif /* FORGECTRL_AUTH_H */

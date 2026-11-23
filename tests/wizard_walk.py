@@ -65,24 +65,27 @@ once: the press cancels the first press's second start. A start refused
 once, where another client starts the diagnostic and the operator aborts
 it, never goes again: the Abort alone cancels the second start, and
 clears the press's "starting" text. Then the System tab's Reset all
-settings, with the mock's button not held: the dialog asks for the
-button only once its reservation is ready (OK off until then), OK leaves
-the dialog open, saying the button is not held, and Cancel closes it
-with nothing reset; with a job that arms while the dialog is open, OK
-goes off and the dialog names the waiting job, and asks again once the
-job is gone; and with the job armed before it, the button opens no
-dialog and says so. The fuse view asks through the hold dialog, which
-shows the mock's plain-text refusal as it came. An upload the release key did
-not sign (the walk's /__walk/mock stages one and holds the button) asks
-through the hold dialog once its install is refused, and OK installs it
-with confirm_unsigned=1; one not newer than the installed version asks
-through the hold dialog before it installs, and OK installs it with
-downgrade=1 and its SHA-256; another client's install refused for its
-signature opens no dialog in this tab; a restart refused after an install
-says the firmware is installed and selected and to finish the job. On the
-setup page, the way back to the factory firmware offers Go back only once
-its reservation is ready, says when the button is not held, and its
-reservation ends with the dialog. The cooling engine's banners, in the mock's
+settings, with the mock's button not held: the dialog registers its
+consent for the reset and asks for the press only once it is ready (OK
+off until then), OK leaves the dialog open, saying the button was not
+pressed, and Cancel closes it with nothing reset; with a job that arms
+while the dialog is open, OK goes off and the dialog names the waiting
+job, and asks again once the job is gone; and with the job armed before
+it, the button opens no dialog and says so. The fuse view asks through
+the hold dialog, which shows the mock's plain-text refusal of its own
+consent as it came. An upload the release key did not sign (the walk's
+/__walk/mock stages one and holds the button) asks through the hold
+dialog once its install is refused; the dialog says the press was read,
+and OK installs it with confirm_unsigned=1 and the consent for that
+archive; one not newer than the installed version asks through the hold
+dialog before it installs, and once the press is read OK installs it
+with downgrade=1, its SHA-256 and the consent for that archive; another
+client's install refused for its signature opens no dialog in this tab;
+a restart refused after an install says the firmware is installed and
+selected and to finish the job. On the setup page, the way back to the
+factory firmware registers its consent and offers Go back only once it
+is ready, says when the button was not pressed, and its reservation ends
+with the dialog. The cooling engine's banners, in the mock's
 demos: a live failure offers no Acknowledge, one that waits does, a 409
 says the failure still stands and a taken one clears the banner; two
 notices go with one Dismiss. Set home here asks whether the head is
@@ -97,7 +100,10 @@ sent from inside its frame through the bridge, reach the machine marked
 as that page's (page=<id>): the machine refuses a page's jog inside the
 laser's armed window and ends only a page's own jog at its cancel. Its
 job goes marked the same way, and its job's abort names the package
-(id=<id>), so it ends that package's own job alone. The hold
+(id=<id>), so it ends that package's own job alone. The
+extension list's poll asks nothing from a hidden tab unless a background
+page runs, asks at once when the tab shows, and backs off after answers
+that failed, to a minute apart at most, until one answers. The hold
 dialog's OK sends nothing on a ready 3 s old by either clock or on none;
 a tab back in view, a focused window and a page shown again check its
 ready at once, and the first frames after a wake that brings no event
@@ -461,11 +467,11 @@ var STEPS = [
             aw({ tokens_revoked: true, camera_key_rotated: true }))
           throw new Error('the account warning does not name each failure alone, or names one that did not happen');
         return walkMock('revoke_fails=0'); }); }],
-  /* The way back to the factory firmware takes the button held inside a
-   * reservation of the page's own: Go back is offered only once the
-   * machine says the reservation is ready, a button that is not held is
-   * said in the dialog, and the reservation ends with the dialog. */
-  ['the way back to the factory firmware asks for the button only once its reservation is ready, says when it is not held, and its reservation ends with the dialog', function () {
+  /* The way back to the factory firmware takes the button pressed for
+   * its own dialog (a consent, for=factory): Go back is offered only once
+   * the machine says the consent is ready, a button that was not pressed
+   * is said in the dialog, and the reservation ends with the dialog. */
+  ['the way back to the factory firmware asks for the press only once its consent is ready, says when it was not pressed, and its reservation ends with the dialog', function () {
     var m = function () { return q('#retmodal'); };
     var open = function () { return !!(m() && m().classList.contains('show')); };
     if (!PLAN.mock) return Promise.resolve();          /* the mock's button and reservations alone */
@@ -478,7 +484,7 @@ var STEPS = [
       .then(function (s) {
         if (!s.panel_reserved) throw new Error('Go back is offered with no reservation standing');
         click('#ret-go');
-        return until('the refusal in the dialog', function () { return /not held/.test(q('#ret-msg').textContent); }, 5000); })
+        return until('the refusal in the dialog', function () { return /not pressed/.test(q('#ret-msg').textContent); }, 5000); })
       .then(function () {
         if (!open()) throw new Error('the dialog closed on the refusal');
         w().bootstrap.Modal.getInstance(m()).hide();
@@ -697,7 +703,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
   /* The mock's button is not held (the walk clears GF_MOCK_BUTTON). A
    * reset the mock took would take it down: /status answers after Cancel
    * only if nothing was reset. */
-  ['the reset dialog asks for the button only once its reservation is ready, stays open on OK while the button is not held, and says so; Cancel closes it, nothing reset', function () {
+  ['the reset dialog asks for the press only once its consent is ready, stays open on OK while the button was not pressed, and says so; Cancel closes it, nothing reset', function () {
     var open = function () { var m = q('#holdmodal'); return !!(m && m.classList.contains('show')); };
     /* Bootstrap ignores a hide while the dialog is still fading in. */
     var opened = false;
@@ -717,8 +723,8 @@ if (PLAN.diag) STEPS = STEPS.concat([
         return until('a refusal in the dialog', function () { return shown('#hold-err') && !el('#hold-ok').disabled; }, 10000); })
       .then(function () {
         if (!open()) throw new Error('the dialog closed on the refusal');
-        if (q('#hold-err').textContent !== w().HOLD_NOT_HELD)
-          throw new Error('the dialog says ' + JSON.stringify(q('#hold-err').textContent) + ', not that the button is not held');
+        if (q('#hold-err').textContent !== w().HOLD_NOT_PRESSED)
+          throw new Error('the dialog says ' + JSON.stringify(q('#hold-err').textContent) + ', not that the button was not pressed');
         click('#hold-cancel');
         return until('the dialog closed', function () { return !open() && q('#holdmodal').style.display === 'none'; }, 5000); })
       .then(function () {
@@ -776,19 +782,20 @@ if (PLAN.diag) STEPS = STEPS.concat([
         return reportCtl('idle', 0); })
       .then(function () { w().loadCool(); return until('the panel reads the window closed', function () { return w().CL && !w().CL.armed; }, 5000); }); }],
   /* The fuse view asks for the button in the hold dialog. The mock's
-   * button is up: the daemon refuses the view in plain text, and the
-   * dialog shows that text as it came. */
+   * button is up: the daemon refuses the view of the dialog's own consent
+   * in plain text (its press not made), and the dialog shows that text as
+   * it came. */
   ['the fuse view asks through the hold dialog, which shows the daemon\'s plain-text refusal as it came', function () {
     var said, opened = false;
     el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
     return until('the dialog before it wholly closed', modalGone, 5000)
-      .then(function () { return w().fx('/fuse-identity'); })
-      .then(function (r) { return r.text(); })
-      .then(function (t) {
-        said = t;
+      .then(function () {
         click('button[onclick="showFuse()"]');
         return until('the fuse dialog asking for the press', function () {
           return opened && modalOpen() && !el('#hold-ok').disabled; }, 10000); })
+      .then(function () { return w().fx('/fuse-identity?consent=' + encodeURIComponent(w().holdReq.nonce)); })
+      .then(function (r) { return r.text(); })
+      .then(function (t) { said = t; })
       .then(function () {
         click('#hold-ok');
         return until('the refusal', function () { return shown('#hold-err') && q('#hold-err').textContent; }, 5000); })
@@ -798,14 +805,93 @@ if (PLAN.diag) STEPS = STEPS.concat([
         click('#hold-cancel');
         return until('the dialog closed', modalGone, 5000); }); }],
   /* An upload the release key did not sign: its install ends refused, the
-   * page asks through the hold dialog, and OK (the button held) sends the
-   * install again with confirm_unsigned=1. The walk ends each mock job at
-   * once, and polls through the page's own poll (every 2 s on its own). */
-  ['an archive the release key did not sign asks through the hold dialog, and OK installs it with confirm_unsigned=1', function () {
+   * page asks through the hold dialog, the dialog stops asking for the
+   * press once the machine read it (the mock's button held), and OK sends
+   * the install again with confirm_unsigned=1 and the consent for that file
+   * and slot. The walk ends each mock job at once, and polls through the
+   * page's own poll (every 2 s on its own). */
+  /* A package uploaded through the panel installs as the archive the page
+   * was shown: the install names the upload's digest, and the mock, as
+   * the daemon, installs nothing for any other. */
+  ['a package uploaded through the panel installs by the digest the page was shown', function () {
+    if (!PLAN.mock) return Promise.resolve();
+    var dt = new (w().DataTransfer)();
+    dt.items.add(new (w().File)(['an archive'], 'package.ffx'));
+    el('#extfile').files = dt.files;
+    w().extUpload();
+    return until('the staged package shown', function () {
+      return shown('#extstaged') && w().extStaged && /^[0-9a-f]{64}$/.test(w().extStaged.digest || ''); }, 5000)
+      .then(function () {
+        var boxes = d().querySelectorAll('.extgrant');
+        for (var i = 0; i < boxes.length; i++) boxes[i].checked = true;
+        set('#extinstallphrase', 'I UNDERSTAND', 'input');
+        w().extInstall();
+        return until('the staged package installed', function () { return !shown('#extstaged'); }, 5000); })
+      .then(function () { return w().fx('/ext/status').then(function (r) { return r.json(); }); })
+      .then(function (j) {
+        if (!(j.packages || []).some(function (x) { return x.id === 'org.example.filter'; }))
+          throw new Error('the uploaded package was not installed: ' + q('#msg-extinstall').textContent); }); }],
+  /* The extension list's poll (ext.js extPollTick, each tick of its 5 s
+   * timer; the walk calls the ticks itself, with no timer of the page's
+   * ticking): none from a hidden tab, unless a page granted ui.background
+   * runs (the walk names one in the page's list and cards for that tick);
+   * one at once when the tab shows again; after answers that failed, the
+   * ticks back off (one failure: the next tick asks nothing; two: the next
+   * three ask nothing, the fourth asks; three: seven; four and on: eleven,
+   * never more), and an answer ends the backoff. */
+  ['the extension list is not polled from a hidden tab but for a background page, is polled when it shows, and backs off after failed answers', function () {
+    if (!PLAN.mock) return Promise.resolve();
+    var pw = w(), doc = d(), timer = pw.extTabTimer, hide = true, last, frames;
+    function polls(n, what) {
+      return untilGot(what, function () { return walkMock(''); }, function (s) { return s.ext_polls === n; }, 3000); }
+    function none(n, what) {
+      return sleep(300).then(function () { return walkMock(''); }).then(function (s) {
+        if (s.ext_polls !== n) throw new Error(what + ': ' + s.ext_polls + ' polls, not ' + n); }); }
+    function fails(n, what) { return until(what, function () { return pw.extPollFails === n; }, 3000); }
+    function ticks(n) { for (var i = 0; i < n; i++) pw.extPollTick(); }
+    if (timer) pw.clearInterval(timer);
+    pw.extTabTimer = -1;                   /* the poll wanted, no timer of its own */
+    pw.extPollFails = pw.extPollSkip = 0;
+    Object.defineProperty(doc, 'hidden', { configurable: true, get: function () { return hide; } });
+    return walkMock('ext_polls=0&ext_fail=1')
+      .then(function () { ticks(1); return none(0, 'a tick from a hidden tab'); })
+      .then(function () {
+        last = pw.EXT_LAST;
+        frames = pw.EXT_FRAMES;
+        pw.EXT_LAST = { packages: [{ id: 'org.example.bg', enabled: true, effective: ['ui.background'] }] };
+        pw.EXT_FRAMES = [{ id: 'org.example.bg' }];
+        ticks(1);
+        pw.EXT_LAST = last;
+        pw.EXT_FRAMES = frames;
+        return polls(1, 'a tick from a hidden tab while a background page runs'); })
+      .then(function () { return fails(1, 'the failed answer read'); })
+      .then(function () {
+        hide = false;
+        doc.dispatchEvent(new pw.Event('visibilitychange'));
+        return polls(2, 'the poll at once when the tab shows'); })
+      .then(function () { return fails(2, 'the second failed answer read'); })
+      .then(function () { ticks(3); return none(2, 'three ticks after two failed answers'); })
+      .then(function () { ticks(1); return polls(3, 'the fourth tick'); })
+      .then(function () { return fails(3, 'the third failed answer read'); })
+      .then(function () { ticks(7); return none(3, 'seven ticks after three failed answers'); })
+      .then(function () { ticks(1); return polls(4, 'the eighth tick'); })
+      .then(function () { return fails(4, 'the fourth failed answer read'); })
+      .then(function () { ticks(11); return none(4, 'eleven ticks after four failed answers'); })
+      .then(function () { return walkMock('ext_fail=0'); })
+      .then(function () { ticks(1); return polls(5, 'the twelfth tick: the backoff stops at 11'); })
+      .then(function () { return fails(0, 'the answer read'); })
+      .then(function () { ticks(1); return polls(6, 'the tick after an answer'); })
+      .then(function () {
+        delete doc.hidden;
+        pw.extTabTimer = null;
+        pw.extPollKeep(); });                 /* its own timer again, as the page had it */
+  }],
+  ['an archive the release key did not sign asks through the hold dialog, which says once the press is read, and OK installs it with confirm_unsigned=1', function () {
     var opened = false;
     el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
     return walkMock('unsigned=1&button=1')
-      .then(function () { w().loadSlots(); return until('a slot to install to', function () { return q('#applyslot') && q('#applyslot').value; }, 5000); })
+      .then(function () { w().loadSlots(); return until('the unsigned upload listed, a slot to install to', function () {
+        return w().SL && w().SL.staged && w().SL.staged.upload.sha256 === 'ef'.repeat(32) && q('#applyslot') && q('#applyslot').value; }, 5000); })
       .then(function () {
         w().confirm = function () { return true; };   /* the browser's own OK */
         w().applyStaged('upload', 'the upload');
@@ -813,15 +899,19 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function () { return walkMock('job_end=1'); })
       .then(function () {
         return until('the hold dialog for the unsigned archive', function () { if (!opened) w().jobPoll(); return opened && modalOpen(); }, 5000); })
-      .then(function () { return until('the dialog asking for the press', function () { return !el('#hold-ok').disabled; }, 10000); })
+      .then(function () {
+        return until('the dialog saying the press was read, no longer asking for it', function () {
+          return !el('#hold-ok').disabled && shown('#hold-pressed') && !shown('#hold-press'); }, 10000); })
       .then(function () { click('#hold-ok'); return until('the dialog closed on the install', function () { return !modalOpen(); }, 5000); })
       .then(function () { return walkMock('job_end=1&button=0'); })
       .then(function (s) {
         if (!s.job || s.job.unsigned !== true || s.job.file !== 'upload' || s.running)
           throw new Error('the install went again as ' + JSON.stringify(s)); }); }],
   /* An archive not newer than the installed version: the page asks
-   * through the hold dialog before it installs, and OK installs it with
-   * downgrade=1 and the SHA-256 the inventory named. */
+   * through the hold dialog before it installs, the dialog says once the
+   * press is read (the mock's button held), and OK installs it with
+   * downgrade=1, the SHA-256 the inventory named and the consent for that
+   * archive. */
   ['an archive not newer than the installed version asks through the hold dialog, and OK installs it with downgrade=1 and its SHA-256', function () {
     var opened = false;
     el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
@@ -833,7 +923,9 @@ if (PLAN.diag) STEPS = STEPS.concat([
         w().applyStaged('upload', 'the upload');
         return until('the hold dialog for the older archive', function () {
           return opened && modalOpen() && /not newer/.test(q('#holdmodal').textContent); }, 5000); })
-      .then(function () { return until('the dialog asking for the press', function () { return !el('#hold-ok').disabled; }, 10000); })
+      .then(function () {
+        return until('the dialog saying the press was read', function () {
+          return !el('#hold-ok').disabled && shown('#hold-pressed') && !shown('#hold-press'); }, 10000); })
       .then(function () { click('#hold-ok'); return until('the dialog closed on the install', function () { return !modalOpen(); }, 5000); })
       .then(function () { return walkMock('job_end=1&button=0'); })
       .then(function (s) {
@@ -1331,6 +1423,10 @@ class Walk(devserver.Handler):
     # The POST /motion/jog and /motion/cancel requests since the walk last
     # cleared them: (path, the form) each.
     moves = []
+    # The GET /ext/status requests since the walk last cleared them, and
+    # whether each is answered 502 (the host's command line not answering).
+    ext_polls = 0
+    ext_fail = False
     late_busy = 0
     late_others = 0
     # Each GET /wiz/dark held this long, or answered short; the answers
@@ -1378,6 +1474,10 @@ class Walk(devserver.Handler):
             form = dict(re.findall(r'name="(\w+)"\r\n\r\n([^\r]*)\r\n', body))
             Walk.moves.append((path, form))
             return self._json(200, {"ok": True})
+        if self.command == "GET" and path == "/ext/status":
+            Walk.ext_polls += 1
+            if Walk.ext_fail:
+                return self._json(502, {"error": "the extension host's command line does not answer"})
         if self.command == "POST" and path == "/login" and Walk.login_plain:
             Walk.login_plain = False
             self._read_body()
@@ -1460,7 +1560,8 @@ class Walk(devserver.Handler):
                         Walk.mock._job_end()
                     if q.get("unsigned") == "1":
                         Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1,
-                                                               "version": devserver.MOCK_RELEASE}
+                                                               "version": devserver.MOCK_RELEASE,
+                                                               "sha256": "ef" * 32}
                         Walk.mock.upload_unsigned = True
                     if q.get("signed") == "1":
                         Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1,
@@ -1506,6 +1607,10 @@ class Walk(devserver.Handler):
                         Walk.page_asks = 0
                     if "moves" in q:
                         Walk.moves = []
+                    if "ext_polls" in q:
+                        Walk.ext_polls = 0
+                    if "ext_fail" in q:
+                        Walk.ext_fail = q["ext_fail"] == "1"
                     if q.get("stepper_fault") == "1":
                         Walk.mock.stepper_fault = True
                         Walk.mock.controller = "motion-fault"
@@ -1515,7 +1620,7 @@ class Walk(devserver.Handler):
                 Walk.login_plain = Walk.login_plain or q.get("login_plain") == "1"
             return self._json(200, {"job": Walk.mock.job_args, "running": Walk.mock.update["running"],
                                     "retried": Walk.mock.retried, "controller": Walk.mock.controller,
-                                    "page_asks": Walk.page_asks, "moves": Walk.moves,
+                                    "page_asks": Walk.page_asks, "moves": Walk.moves, "ext_polls": Walk.ext_polls,
                                     "press_button": Walk.mock.wiz["button"],
                                     "press_taken": Walk.mock.wiz["pressed"], "press_held_done": Walk.press_held_done,
                                     "panel_reserved": sum(1 for _s, u in Walk.mock.panel_res.values()

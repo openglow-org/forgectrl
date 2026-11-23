@@ -798,8 +798,8 @@
               </div>
               <div id="extconsent-button" style="display: none">
                 <p class="hint">
-                  Nobody this machine trusts signed this package. Install asks you to <b>hold the button on
-                  the machine</b>, as unsigned firmware does.
+                  Nobody this machine trusts signed this package. Install asks you to <b>press the button on
+                  the machine</b> for it, as unsigned firmware does.
                 </p>
               </div>
               <div class="btns">
@@ -886,7 +886,7 @@
             Puts ForgeFIRM back as it was just after the install: the machine restarts and the setup
             runs again. Your account, every setting, the setup record, the API tokens and every
             extension package are removed. The factory firmware archive, the logs, the SSH host keys
-            and the certificate stay. The reset asks you to hold the machine button.
+            and the certificate stay. The reset asks you to press the machine's button.
           </p>
           <div class="btns">
             <button class="btn btn-sm btn-outline-danger" onclick="doReset()">Reset all settings…</button
@@ -973,7 +973,8 @@
           <div class="modal-body">
             <div id="hold-body"></div>
             <p id="hold-wait" class="hint">Making sure no job can take the press&hellip;</p>
-            <p id="hold-press" style="display: none"><b>Hold the machine's button, then press OK.</b></p>
+            <p id="hold-press" style="display: none"><b>Press the machine's button once, then press OK.</b></p>
+            <p id="hold-pressed" style="display: none"><b>The machine read your press. Press OK.</b></p>
             <div class="banner banner-bad" id="hold-err" style="display: none"></div>
           </div>
           <div class="modal-footer">

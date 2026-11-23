@@ -928,16 +928,23 @@ function finish() {
 }
 
 /* ---- The exit: back to the factory firmware ---------------------------
- * The return takes the machine's button held while Go back is pressed, as
+ * The return takes the machine's button pressed for its own dialog, as
  * every change does that needs an operator at the machine. While the
- * dialog stands it reserves the button (POST /button/reserve, under a
- * name of its own, renewed every second), so no job can take the hold as
- * its own press; Go back is offered only once the machine says the
- * reservation is ready. A ready older than RET_FRESH_MS asks for nothing. */
+ * dialog stands it registers that consent and renews it (POST
+ * /button/reserve, for=factory, under a name of its own, every second), so
+ * no job can take the press as its own; the page asks for the press only
+ * once the machine says the consent is ready, says so once the machine has
+ * read it, and Go back then sends it. A ready older than RET_FRESH_MS asks
+ * for nothing. A refusal other than "not pressed" used the press or ended
+ * the consent: the dialog starts a new one, so the next Go back needs a
+ * new press. */
 var RET_FRESH_MS = 2500;
-var ret = { nonce: '', timer: null, ready: false, at: 0, pending: false };
-function retReserve(on) {
-  return fx('/button/reserve?on=' + (on ? '1' : '0') + '&id=' + encodeURIComponent(ret.nonce), {
+var ret = { nonce: '', timer: null, ready: false, pressed: false, at: 0, pending: false };
+function retNonce() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+function retReserve(on, nonce) {
+  return fx('/button/reserve?on=' + (on ? '1&for=factory' : '0') + '&id=' + encodeURIComponent(nonce || ret.nonce), {
     method: 'POST'
   }).then(function (r) {
     return r.json().catch(function () {
@@ -945,11 +952,15 @@ function retReserve(on) {
     });
   });
 }
-function retShowReady(ready, why) {
-  ret.ready = ready;
-  $('ret-go').disabled = !ready;
-  if (!ready) $('ret-msg').textContent = why || 'Making sure no job can take the press…';
-  else if (/Making sure|no answer/.test($('ret-msg').textContent)) $('ret-msg').textContent = '';
+function retShowReady(ready, why, pressed) {
+  ret.ready = !!(ready || pressed);
+  ret.pressed = !!pressed;
+  $('ret-go').disabled = !ret.ready;
+  if (!ret.ready) $('ret-msg').textContent = why || 'Making sure no job can take the press…';
+  else
+    $('ret-msg').textContent = pressed
+      ? 'The machine read the press. Press Go back now.'
+      : "Press the machine's button once now.";
 }
 function retTick() {
   if (!ret.nonce || ret.pending) return;
@@ -959,7 +970,8 @@ function retTick() {
     .then(function (j) {
       if (!ret.nonce) return;
       ret.at = sent;
-      retShowReady(!!j.ready && Date.now() - sent <= RET_FRESH_MS, j.waits || j.error || '');
+      var fresh = Date.now() - sent <= RET_FRESH_MS;
+      retShowReady(!!j.ready && fresh, j.waits || j.error || '', !!j.pressed && fresh);
     })
     .catch(function () {
       if (ret.nonce) retShowReady(false, 'no answer from the machine');
@@ -970,7 +982,7 @@ function retTick() {
 }
 function askReturn() {
   $('ret-msg').textContent = '';
-  ret.nonce = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  ret.nonce = retNonce();
   retShowReady(false, '');
   var m = $('retmodal');
   if (!m.dataset.wired) {
@@ -994,7 +1006,7 @@ function doReturn() {
   }
   $('ret-go').disabled = true;
   $('ret-msg').textContent = 'starting…';
-  fx('/restore/factory-return?confirm=1', { method: 'POST' })
+  fx('/restore/factory-return?confirm=1&consent=' + encodeURIComponent(ret.nonce), { method: 'POST' })
     .then(function (r) {
       return r
         .json()
@@ -1003,20 +1015,24 @@ function doReturn() {
         })
         .then(function (j) {
           if (r.ok) {
-            /* The machine took the hold at the request: it reads the
-             * button no longer, so the operator lets go now, well before
-             * the restart. */
             bootstrap.Modal.getInstance($('retmodal')).hide();
             show('return');
-            $('r-lead').textContent =
-              'Let go of the button now. The machine is putting the Glowforge firmware back.';
+            $('r-lead').textContent = 'The machine is putting the Glowforge firmware back.';
             $('exitlink').style.display = 'none';
             pollReturn();
             return;
           }
+          /* Not pressed yet (403): the consent stands, and a press then
+           * Go back takes it. Anything else used the press or ended the
+           * consent: a new one, under a new name. */
+          if (r.status !== 403) {
+            retReserve(false, ret.nonce).catch(function () {});
+            ret.nonce = retNonce();
+            retShowReady(false, '');
+          }
           $('ret-msg').textContent =
-            j.button === 'not held'
-              ? "The machine's button is not held. Hold it down, then press Go back again."
+            j.button === 'not pressed'
+              ? "The machine's button was not pressed for this. Press it once, then press Go back again."
               : j.error || 'the machine refused it (HTTP ' + r.status + ')';
           $('ret-go').disabled = !ret.ready;
         });

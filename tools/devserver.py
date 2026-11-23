@@ -758,12 +758,13 @@ class Mock:
     the handlers in main.c, {"error":...} from the update module and
     the token check.
 
-    GF_MOCK_BUTTON=1 in the environment holds the machine button down
-    (the fuse-identity viewer, the reset of every setting and an unsigned
-    install need an operator at the machine). GF_MOCK_UNSIGNED=1 makes an
+    GF_MOCK_BUTTON=1 in the environment holds the machine button down:
+    a consent of the panel's dialog (the fuse-identity viewer, the reset of
+    every setting, an unsigned install, an owner's key) counts it as the
+    operator's press once it is in force. GF_MOCK_UNSIGNED=1 makes an
     uploaded firmware archive one the release key did not sign: the
     upload says so, and its install is refused until it is asked for with
-    confirm_unsigned=1 and the button held."""
+    confirm_unsigned=1 and the press for its dialog."""
 
     # The gate settings, one row per line of the table in src/gates.c:
     # key, the gate name /status reports (None for a key that tunes a
@@ -822,8 +823,12 @@ class Mock:
         self.reboot_refuse = False     # the walk's: a restart refused as for a connected sender
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
         # The panel's reservation of the button (POST /button/reserve): when it
-        # was opened, and until when its last renewal holds it.
+        # was opened, and until when its last renewal holds it; and the
+        # consent each one registered (btnres.h): its kind and subject, and
+        # the words of every one that ended (no nonce registers twice).
         self.panel_res = {}             # a dialog's name -> [opened, held until]
+        self.consents = {}              # a dialog's name -> (kind, subject)
+        self.consent_ended = {}         # a dialog's name -> the words it ended in
         self.upload_unsigned = False    # the staged upload is not signed with the release key
         self.revoke_fails = False       # an account made from none answers that its token revoke failed
         self.rotate_fails = False       # ... and that its camera key rotation failed
@@ -1075,9 +1080,9 @@ class Mock:
         return self.status['state'] == 'idle'
 
     def job_takes_button(self):
-        """main.c's job_takes_button: the refusal of a route that asks for
-        the machine button held, while a job would take the hold as its
-        own press, or None. An armed window (the controller's report), the
+        """main.c's job_takes_button: the refusal of a route that takes a
+        press of the machine button, while a job would take that press as
+        its own, or None. An armed window (the controller's report), the
         GRBL controller's own wait for the press, a controller that reports
         a job in progress (mode run, a print paused past its grace among
         them), or a GRBL job running or paused."""
@@ -1090,15 +1095,70 @@ class Mock:
             return 'a job is running or paused: finish or cancel it first'
         return None
 
-    def press_unreserved(self):
-        """main.c's panel_press_reserved, as a refusal or None: the button
-        held counts only inside the panel's own reservation of it, standing
-        for 1 s (the daemon counts that from the verdict that carried it).
-        The reservations run on the monotonic clock, as the daemon's do."""
+    @staticmethod
+    def consent_subject(kind, form):
+        """main.c's consent_subject: what a consent of @kind is bound to, from
+        the request's own parameters, as (subject, None) or (None, refusal)."""
+        if kind == 'install':
+            d = form.get('digest') or ''
+            if not re.fullmatch(r'[0-9a-f]{64}', d):
+                return None, 'digest is the one the upload answered with (64 hex digits): a client that sends none is older than this firmware (update tools/ffx)'
+            return d, None
+        if kind == 'key':
+            if form.get('name') is None or form.get('key') is None:
+                return None, "a key's consent names the key: name and key"
+            return hashlib.sha256((form['name'] + '\n' + form['key']).encode()).hexdigest(), None
+        if kind == 'firmware':
+            if (form.get('file') not in ('upload', 'download') or form.get('slot') not in ('a', 'b') or
+                    not re.fullmatch(r'[0-9a-f]{64}', form.get('sha256') or '')):
+                return None, ("a firmware install's consent names the file (upload or download), the slot (a or b) "
+                              "and the archive's sha256")
+            return '%s:%s:%s:%s%s' % (form['file'], form['slot'], form['sha256'],
+                                      'u' if form.get('confirm_unsigned') == '1' else '-',
+                                      'd' if form.get('downgrade') == '1' else '-'), None
+        if kind == 'factory':
+            if form.get('slot') not in (None, 'a', 'b'):
+                return None, "the factory return's consent names the slot (a or b) or none"
+            return form.get('slot') or '', None
+        if kind in ('fuse', 'reset'):
+            return '', None
+        return None, 'no consent of the panel\'s is for %s' % kind if kind else 'for names what the press is for'
+
+    def consent_state(self, nonce):
+        """The consent of one dialog: (reserved, in force, pressed). The mock's
+        button held counts as the press once the consent is in force (1 s on,
+        no job that would take the press). The reservations run on the
+        monotonic clock, as the daemon's do."""
         now = time.monotonic()
-        if any(until > now and now - since >= 1.0 for since, until in self.panel_res.values()):
-            return None
-        return 'the button was not reserved for this: start it again from the control panel'
+        r = self.panel_res.get(nonce)
+        reserved = bool(r and r[1] > now and nonce in self.consents)
+        in_force = reserved and now - r[0] >= 1.0 and not self.job_takes_button()
+        return reserved, in_force, bool(in_force and self.button)
+
+    def consent_take(self, kind, form):
+        """main.c's panel_consent_take: None when the press made for this
+        request's own dialog is taken (once), or (status, words)."""
+        nonce = form.get('consent')
+        if nonce is None:
+            return 403, "press the machine's button for this when the control panel asks for it"
+        subject, why = self.consent_subject(kind, form)
+        if why:
+            return 400, why
+        if nonce not in self.consents or not self.consent_state(nonce)[0]:
+            return 409, self.consent_ended.get(nonce, 'the button was not reserved for this: start it again from '
+                                                      'the control panel')
+        if self.consents[nonce] != (kind, subject):
+            self.consent_end(nonce, 'the press was asked for something else: start it again from the control panel')
+            return 409, 'the press was asked for something else: start it again from the control panel'
+        if not self.consent_state(nonce)[2]:
+            return 403, "the machine's button was not pressed for this since the panel asked: press it once, then OK"
+        self.consent_end(nonce, 'the press was used: start it again from the control panel')
+        return None
+
+    def consent_end(self, nonce, why):
+        self.consents.pop(nonce, None)
+        self.panel_res.pop(nonce, None)
+        self.consent_ended[nonce] = why
 
     # The machine lease (src/lease.c): who has the machine, in the daemon's
     # order of nesting (a diagnostic under its wizard is the innermost), and
@@ -1767,14 +1827,21 @@ class Mock:
     # granted, and every other capability it asked for it may use as installed.
     EXT_NEEDS_GRANT = ('motion.job', 'hold', 'job_time.run', 'ui.background')
     # What an upload to the mock is: a package a person signed with a key the owner added, which wants a hold.
+    EXT_DIGEST = 'cd' * 32
     EXT_UPLOAD = {'id': 'org.example.filter', 'name': 'Filter life', 'version': '0.2.0',
                   'description': 'Holds a job when the filter is spent.', 'author': 'A maker', 'license': 'MIT',
                   'runtime': 'python', 'capabilities': ['hold', 'machine.read', 'storage:4'], 'modes': ['grbl', 'cloud']}
 
     def ext_key_post(self, path, form, J, T):
-        # a key is added with the button held: a job that would take the hold is refused first
-        if not path.endswith('/remove') and self.job_takes_button():
-            return T(409, self.job_takes_button())
+        # a key is added on the button pressed for it: gated as the install is, and a job that would take the press
+        # is refused first
+        if not path.endswith('/remove'):
+            if self.lease_refusal():
+                return T(409, self.lease_refusal())
+            if not self.idle():
+                return T(409, 'the machine is not idle')
+            if self.job_takes_button():
+                return T(409, self.job_takes_button())
         name = form.get('name', '')
         if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,47}', name):
             return T(400, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes")
@@ -1785,10 +1852,18 @@ class Mock:
             self._log("ext: the owner's key %s was removed (by the operator)" % name)
             return J(200, self.ext_status_reply())
         key = form.get('key', '')
+        if form.get('consent') is not None:
+            refused = self.consent_take('key', form)
+            if refused:
+                return T(*refused)
         if not key or len(key) > 4096:
             return T(400, 'key is the public key fwup wrote, at most 4096 bytes')
-        # the mock stands in for the machine's button: it is never held here
-        return T(409, "a key you add is what this machine will trust: hold the machine's button while you add it")
+        if form.get('consent') is None:
+            return T(409, "a key you add is what this machine will trust: press the machine's button for it when "
+                          'the control panel asks')
+        self.ext_keys[name] = hashlib.sha256(key.encode()).hexdigest()
+        self._log("ext: the owner's key %s was added (by the operator, the button pressed for it)" % name)
+        return J(200, self.ext_status_reply())
 
     def ext_upload_post(self, body, J, T):
         if self.lease_refusal():
@@ -1799,6 +1874,7 @@ class Mock:
             return T(400, 'no file data received')
         self.ext_staged = True
         return J(200, {'ok': True, 'package': self.EXT_UPLOAD, 'tier': 'community', 'key': 'ab' * 32, 'files': 6,
+                       'digest': self.EXT_DIGEST,
                        'bytes': len(body), 'update': False, 'downgrade': False, 'from_version': '',
                        'needs_grant': ['hold'], 'new_capabilities': self.EXT_UPLOAD['capabilities'], 'consent': 'typed'})
 
@@ -1911,9 +1987,10 @@ class Mock:
         pkg.update(version=v['version'], runtime='python', capabilities=list(v['capabilities']), modes=['grbl', 'cloud'])
         need = [c for c in v['capabilities'] if c in self.EXT_NEEDS_GRANT]
         have = self.ext_find(pid)
-        self.ext_staged = {'package': pkg, 'key': e['key_id'], 'needs_grant': need}
+        digest = hashlib.sha256(('%s %s' % (pid, v['version'])).encode()).hexdigest()
+        self.ext_staged = {'package': pkg, 'key': e['key_id'], 'needs_grant': need, 'digest': digest}
         self._log('ext: %s %s was fetched from the catalog and is staged' % (pid, v['version']))
-        return J(200, {'ok': True, 'package': pkg, 'tier': 'community', 'endorsed': True, 'key': e['key_id'],
+        return J(200, {'ok': True, 'package': pkg, 'tier': 'community', 'endorsed': True, 'key': e['key_id'], 'digest': digest,
                        'files': 4, 'bytes': v['size'], 'update': have is not None, 'downgrade': False,
                        'from_version': have['version'] if have else '', 'needs_grant': need,
                        'new_capabilities': pkg['capabilities'], 'withdrawn': None, 'consent': 'typed', 'catalog': True})
@@ -1923,15 +2000,20 @@ class Mock:
             return T(409, self.lease_refusal())
         if not self.idle():
             return T(409, 'the machine is not idle')
-        # the button held is the consent for an unverified package: a job that would take the hold is refused
+        # the press is the consent for an unverified package: a job that would take it is refused first
         if self.job_takes_button():
             return T(409, self.job_takes_button())
         grants = [g for g in form.get('grants', '').split(',')] if form.get('grants') else []
         if len(grants) > 8 or not all(re.fullmatch(r'[a-z_.]{1,40}', g) for g in grants):
             return T(400, 'grants is a comma-separated list of at most 8 capability names')
+        if not re.fullmatch(r'[0-9a-f]{64}', form.get('digest') or ''):
+            return T(400, 'digest is the one the upload answered with (64 hex digits): a client that sends none is older than this firmware (update tools/ffx)')
         if not getattr(self, 'ext_staged', False):
             return T(409, 'no package is staged: upload one first')
         staged = self.ext_staged
+        # the install is of the archive that was shown, or of none
+        if form['digest'] != (staged['digest'] if isinstance(staged, dict) else self.EXT_DIGEST):
+            return T(409, 'the staged package is not the one that was shown: upload it again')
         if isinstance(staged, dict):
             # one from the catalog: signed by its author's key, which the index endorses
             if form.get('phrase') != 'I UNDERSTAND':
@@ -2649,8 +2731,8 @@ class Mock:
             return J(200, self._camkey_reply({}))
         if path == '/restore/factory-return':
             # update.c's order: confirm, the lease, no job (a job that would
-            # take the hold among them), then the button held inside the
-            # panel's reservation.
+            # take the press among them), then the press made for the
+            # return's own dialog (its consent, for=factory).
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
             if self.lease_refusal():
@@ -2659,11 +2741,12 @@ class Mock:
                 return J(409, {'error': 'machine is not idle'})
             if self.job_takes_button():
                 return J(409, {'error': self.job_takes_button()})
-            if not self.button:
-                return J(403, {'error': 'hold the machine button to go back to the factory firmware',
-                               'button': 'not held'})
-            if self.press_unreserved():
-                return J(409, {'error': self.press_unreserved()})
+            refused = self.consent_take('factory', form)
+            if refused and refused[0] == 403:
+                return J(403, {'error': "press the machine's button to go back to the factory firmware, when the "
+                                        'control panel asks for it', 'button': 'not pressed'})
+            if refused:
+                return J(refused[0], {'error': refused[1]})
             return self._job_start('factory-return',
                                    {'slot': 'b', 'archive': {'version': '2.6.0'}}, J)
         return J(404, {'error': 'mock: no such endpoint'})
@@ -2845,11 +2928,11 @@ class Mock:
             if path == '/fuse-identity':
                 if self.job_takes_button():
                     return T(409, self.job_takes_button())
-                if not self.button:
-                    return T(403, 'hold the machine button to reveal the '
-                                  'fuse identity')
-                if self.press_unreserved():
-                    return T(409, self.press_unreserved())
+                if q.get('consent') is None:
+                    return T(403, "press the machine's button to reveal the fuse identity, when the panel asks for it")
+                refused = self.consent_take('fuse', q)
+                if refused:
+                    return T(*refused)
                 return J(200, {'serial': '123456789', 'hostname': 'ABC-123',
                                'password': '0123456789abcdef' * 4})
             if path == '/wiz':
@@ -2973,10 +3056,13 @@ class Mock:
             self.notices_seen = max(self.notices_seen, n)
             return J(200, {'dismissed': True})
 
-        # The machine's button reserved for one hold dialog (main.c,
-        # cb_button_reserve) under the caller's own name (id), each renewal
-        # good for 10 s; ready once it has stood 1 s with no job taking the
-        # press. A package's page reserves nothing.
+        # The panel's consent (main.c, cb_button_reserve): one hold dialog
+        # registers what its press is for (for=<kind> and the parameters its
+        # action carries) under the caller's own name (id), each renewal good
+        # for 10 s; ready once it has stood 1 s with no job taking the press,
+        # pressed once the mock's button is held then. One consent at a time:
+        # this browser's next dialog replaces its own. An ended one's name
+        # registers nothing again. A package's page reserves nothing.
         if path == '/button/reserve':
             on, nonce = form.get('on'), form.get('id') or ''
             if on not in ('0', '1'):
@@ -2988,16 +3074,32 @@ class Mock:
             now = time.monotonic()
             table = self.panel_res
             if on == '1':
-                if nonce not in table or table[nonce][1] <= now:
-                    table[nonce] = [now, now + 10.0]
-                else:
+                kind = form.get('for')
+                subject, why = self.consent_subject(kind, form)
+                if why:
+                    return T(400, why)
+                if nonce in self.consent_ended:
+                    return T(409, self.consent_ended[nonce])
+                if nonce in table and table[nonce][1] > now and nonce in self.consents:
+                    if self.consents[nonce] != (kind, subject):
+                        self.consent_end(nonce, 'the press was asked for something else: start it again from the '
+                                                'control panel')
+                        return T(409, self.consent_ended[nonce])
                     table[nonce][1] = now + 10.0
+                else:
+                    for other in [n for n in self.consents if n != nonce]:
+                        self.consent_end(other, 'another dialog of this session asked for the press: start it again '
+                                                'from the control panel')
+                    table[nonce] = [now, now + 10.0]
+                    self.consents[nonce] = (kind, subject)
+            elif nonce in self.consents:
+                self.consent_end(nonce, 'the dialog was closed: start it again from the control panel')
             else:
                 table.pop(nonce, None)
-            reserved = nonce in table and table[nonce][1] > now
+            reserved, in_force, pressed = self.consent_state(nonce)
             waits = self.job_takes_button() if reserved else None
-            ready = reserved and now - table[nonce][0] >= 1.0 and not waits
-            return J(200, {'reserved': reserved, 'ready': bool(ready), 'waits': waits or ''})
+            return J(200, {'reserved': reserved, 'ready': bool(in_force and not pressed), 'pressed': pressed,
+                           'waits': waits or ''})
 
         if path == '/cool/quiet':
             on = form.get('on')
@@ -3256,11 +3358,12 @@ class Mock:
                 return J(409, {'error': 'the next boot cannot be read'})
             if [k for k, s in self.slots['slots'].items() if s.get('next')][:1] != booted[:1]:
                 return J(409, {'error': 'the next boot is set to the other slot: set it back to this one first'})
-            if not self.button:
-                return J(403, {'error': 'hold the machine button to reset every setting',
-                               'button': 'not held'})
-            if self.press_unreserved():
-                return J(409, {'error': self.press_unreserved()})
+            refused = self.consent_take('reset', form)
+            if refused and refused[0] == 403:
+                return J(403, {'error': "press the machine's button to reset every setting, when the control panel "
+                                        'asks for it', 'button': 'not pressed'})
+            if refused:
+                return J(refused[0], {'error': refused[1]})
             self._log('system: every setting is reset at the next boot '
                       '(mock: down for %d s, nothing reset)' % MOCK_REBOOT_S)
             self.down_until = time.time() + 1.5 + MOCK_REBOOT_S
@@ -3297,12 +3400,14 @@ class Mock:
             if unsigned or downgrade:
                 if self.job_takes_button():
                     return J(409, {'error': self.job_takes_button()})
-                if not self.button:
-                    return J(403, {'error': 'hold the machine button to install unsigned firmware'
-                                   if unsigned else 'hold the machine button to install an older version',
-                                   'button': 'not held'})
-                if self.press_unreserved():
-                    return J(409, {'error': self.press_unreserved()})
+                refused = self.consent_take('firmware', form)
+                if refused and refused[0] == 403:
+                    return J(403, {'error': "press the machine's button to install unsigned firmware, when the "
+                                            'control panel asks for it' if unsigned else
+                                            "press the machine's button to install an older version, when the "
+                                            'control panel asks for it', 'button': 'not pressed'})
+                if refused:
+                    return J(refused[0], {'error': refused[1]})
             slot, err = self._slot_target(form, J)
             if err:
                 return err

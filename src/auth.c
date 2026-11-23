@@ -75,21 +75,17 @@
 
 #include <ctype.h>
 #include <fcntl.h>
-#include <linux/input.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define TOKEN_NAME  "panel.token"   /* in the data directory (paths.h) */
 #define TOKEN_HEX   32                 /* 128 bits */
-#define SWITCH_DEV  "/dev/input/event0"
-#define SW_BIT_BUTTON 2
 
 static char token[TOKEN_HEX + 1];
 
@@ -616,16 +612,13 @@ int auth_loopback_ok(const struct _u_request *req, struct _u_response *res)
     return 1;
 }
 
-int operator_present(void)
+void auth_holder(const struct _u_request *req, char *out, size_t len)
 {
-    uint8_t sw[2] = { 0 };
-    /* The switch device, or the test hook GF_SWITCH_DEV in a host-test
-     * run (testhook.h), as button.c reads it. */
-    const char *hook = ff_test_hook("GF_SWITCH_DEV");
-    int fd = open(hook ? hook : SWITCH_DEV, O_RDONLY | O_NONBLOCK);
-    if (fd < 0)
-        return 0;
-    int ok = ioctl(fd, EVIOCGSW(sizeof(sw)), sw) >= 0;
-    close(fd);
-    return ok && (sw[SW_BIT_BUTTON / 8] & (1u << (SW_BIT_BUTTON % 8)));
+    const char *cookie = u_map_get_case(req->map_header, "Cookie");
+    char id[SESSION_ID_HEX + 1], peer[SESSION_ADDR_MAX];
+    auth_peer_text(req, peer, sizeof(peer));
+    if (cookie && session_from_cookie(cookie, id, sizeof(id)) && session_valid(id, peer))
+        snprintf(out, len, "s:%s", id);
+    else
+        snprintf(out, len, "a:%s", peer);
 }

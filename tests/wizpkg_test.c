@@ -28,9 +28,22 @@
  * BTNRES_READY_S, and ended by a job that came to wait before that; the
  * press taken from a release read in force and the button down twice,
  * said once, never one begun earlier or made with the reservation off the
- * file; the linger after it; ended by the operator's prompt, the daemon's
+ * file; the linger after it; ended by the operator's prompt (the Setup
+ * page's wait leaving its reservation WIZPKG_LINGER_S), by the check of a
+ * package that holds the machine, or comes to hold it after the check
+ * reserved the button (the same linger, every job withheld,
+ * the check's prompt waiting it out), the daemon's
  * own wait, its withdrawal, BTNRES_PANEL_TTL_S with no renewal, and
- * BTNRES_TTL_MAX_S however often it is renewed.
+ * BTNRES_TTL_MAX_S however often it is renewed. The panel's consent: in
+ * force only once on file and BTNRES_READY_S old, with no other prompt's
+ * reservation beside it and nobody else waiting; its press from a release
+ * read in force and two readings down, never one held from before, asked
+ * again at the press; taken once; the linger after a press, its own or
+ * not; ended by its dialog's close, BTNRES_PANEL_TTL_S with no renewal,
+ * BTNRES_CONSENT_S however often renewed, an unreadable button and a
+ * renewal for another subject, its nonce never registered again; the same
+ * holder's next dialog replacing its own; a package's ask ended and
+ * refused while it stands.
  */
 #include "../src/btnres.h"
 #include "../src/extpkg.h"
@@ -137,6 +150,7 @@ const char *wiz_current_id(void) { return current; }
 static int abort_after = -1, abort_asks;
 int wiz_aborted(void) { return abort_after >= 0 && ++abort_asks > abort_after; }
 static int reserved_at_ask = -1;     /* the button reserved for the package while it asked */
+static int ask_lingered_at_ask = -1; /* another package's ask still reserved the button then */
 static int outlives_prompt = -1;     /* its reservation still stood past the prompt's whole time */
 /* The reservations' clock, which the prompt moves on. */
 static double clock_s = 1000.0;
@@ -162,6 +176,15 @@ static int job_waits_once_asked(char *why, size_t len)
     snprintf(why, len, "a job waits for the button press: cancel it first");
     return 1;
 }
+/* No job waits, and the reservations' clock moves a second at each ask:
+ * the prompt's wait for a linger to end, run in a few real steps. */
+static int waits_and_tick(char *why, size_t len)
+{
+    (void)why;
+    (void)len;
+    clock_s += 1.0;
+    return 0;
+}
 /* The package keeps the machine once it has been asked own_keeps_after times. */
 static int holds_asks, own_keeps_after;
 static int fake_pkg_holds(const char *pkg)
@@ -174,6 +197,7 @@ int wiz_ask(const char *kind, const char *pid, const char *text, const char *con
     char why[96];
     on_file_at_ask = on_file_asks > on_file_after ? on_file_value : -1.0;
     reserved_at_ask = btnres_stands("check:org.example.check") && btnres_withheld(why, sizeof(why));
+    ask_lingered_at_ask = btnres_any("ask:");
     /* The prompt stands its whole time: the reservation is still there. */
     clock_s += WIZPKG_READY_WAIT_S + WIZ_PROMPT_TIMEOUT_S;
     outlives_prompt = btnres_stands("check:org.example.check");
@@ -384,6 +408,78 @@ static void ask_cases(void)
     btnres_close("panel:d2");
     ask_clear();
 
+    /* The Setup page's wait ends it too, and refuses the next one; the
+     * ask's reservation lingers WIZPKG_LINGER_S, as after a press (the
+     * Setup's wait does not come in force beside it, wiz.c). */
+    ask_in_force();
+    double setup_at = clock_s;
+    CHECK(btnres_open(BTNRES_SETUP, BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0 &&
+          !strcmp(ask(ASKER), "409 the machine waits for a press of the button for its own setup"),
+          "the Setup page's wait ends the ask, and refuses its next one (%s)", ask(ASKER));
+    clock_s = setup_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("ask:" ASKER), "the ask's reservation lapsed before WIZPKG_LINGER_S after the Setup's wait ended it");
+    clock_s = setup_at + WIZPKG_LINGER_S + 0.5;
+    CHECK(!btnres_stands("ask:" ASKER), "the ask's reservation stands past WIZPKG_LINGER_S after the Setup's wait ended it");
+    btnres_close(BTNRES_SETUP);
+    ask_clear();
+
+    /* A package that comes to hold the machine while another package's ask
+     * is in force leaves that ask standing; its check then ends the ask,
+     * whose reservation lingers WIZPKG_LINGER_S and withholds every job
+     * meanwhile (the check withholds nothing from its own package's jobs),
+     * and the check's prompt waits the linger out. */
+    btnres_pkg_holds = fake_pkg_holds;
+    own_keeps = 1;
+    own_keeps_after = 0;
+    ask_on_file = -1.0;
+    ask(OTHER);
+    ask_on_file = BTNRES_READY_S;
+    button(0, 1);
+    ask_waiter = "the package org.example.check holds the machine";
+    CHECK(!strcmp(ask(OTHER), "ready"), "an ask in force while another package came to hold the machine: it stands (%s)", ask(OTHER));
+    ask_waiter = NULL;
+    double check_at = clock_s;
+    CHECK(btnres_open("check:org.example.check", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "the check reserves the button");
+    clock_s = check_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("ask:" OTHER) && btnres_withheld(why, sizeof(why)) && strstr(why, OTHER),
+          "the check of a package that holds the machine ended another package's ask with no linger: its own job withheld by nothing");
+    btnres_close("check:org.example.check");
+    ask_clear();
+    /* The same when the check's package comes to hold the machine only
+     * after its check reserved the button. */
+    own_keeps = 0;
+    ask_on_file = -1.0;
+    ask(OTHER);
+    ask_on_file = BTNRES_READY_S;
+    button(0, 1);
+    check_at = clock_s;
+    CHECK(btnres_open("check:org.example.check", BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "the check reserves the button");
+    own_keeps = 1;
+    clock_s = check_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("ask:" OTHER) && btnres_withheld(why, sizeof(why)) && strstr(why, OTHER),
+          "a check whose package came to hold the machine after it reserved the button ended another package's ask with no linger");
+    btnres_close("check:org.example.check");
+    ask_clear();
+    ask_on_file = -1.0;
+    ask(OTHER);
+    ask_on_file = BTNRES_READY_S;
+    button(0, 1);
+    wizpkg_on_file_s = fake_on_file;
+    wizpkg_job_waits = waits_and_tick;
+    reset();
+    answers("answer", "{\"ok\": true, \"status\": 200, \"body\": {\"result\": {\"ok\": true, \"summary\": \"done\"}}}");
+    ask_lingered_at_ask = -1;
+    alarm(10);
+    wizpkg_run();
+    alarm(0);
+    CHECK(shown && ask_lingered_at_ask == 0,
+          "the check's prompt asked while another package's ask it ended still lingered (%d, %s)", ask_lingered_at_ask, finished);
+    wizpkg_on_file_s = NULL;
+    wizpkg_job_waits = NULL;
+    btnres_pkg_holds = NULL;
+    own_keeps = 0;
+    ask_clear();
+
     /* This daemon coming to wait for a press of its own ends it too. */
     ask_in_force();
     ask_daemon = 1;
@@ -577,6 +673,320 @@ static void on_hang(int sig)
     _exit(1);
 }
 
+/* ---- the panel's consent (btnres.h) ---- */
+
+static const char *consent_waiter;      /* who else waits on the button, NULL nobody */
+static int consent_other(char *why, size_t len)
+{
+    if (!consent_waiter)
+        return 0;
+    snprintf(why, len, "%s", consent_waiter);
+    return 1;
+}
+
+/* One registration or renewal of @c: its state, or "409 <why>". */
+static const char *consent(const btnres_consent_t *c)
+{
+    static char said[240];
+    char why[200], other[120];
+    int st = btnres_consent_open(c, why, sizeof(why), other, sizeof(other));
+    if (st < 0) {
+        snprintf(said, sizeof(said), "409 %s", why);
+        return said;
+    }
+    return st == BTNRES_CONSENT_PRESSED ? "pressed" : st == BTNRES_CONSENT_READY ? "ready" : "waiting";
+}
+
+/* The button read @n times at @level for the consent, BTNRES_ASK_POLL_MS apart. */
+static void creads(int level, int n)
+{
+    for (int i = 0; i < n; i++) {
+        clock_s += BTNRES_ASK_POLL_MS / 1000.0;
+        btnres_consent_step(level);
+    }
+}
+
+/* @c registered, renewed in force, and the button read released. */
+static void consent_in_force(const btnres_consent_t *c)
+{
+    ask_on_file = BTNRES_READY_S;
+    consent(c);
+    clock_s += BTNRES_READY_S + BTNRES_CONSENT_JUDGE_S;
+    consent(c);
+    creads(0, 1);
+}
+
+/* Every consent and reservation lapsed between cases. */
+static void consent_clear(void)
+{
+    clock_s += BTNRES_CONSENT_S + 1.0;
+    creads(0, 1);
+    consent_waiter = NULL;
+    ask_on_file = -1.0;
+}
+
+static void consent_cases(void)
+{
+    char why[200];
+    btnres_consent_refused = consent_other;
+    btnres_on_file_s = ask_file;
+    btnres_consent_t c = { "c1", "reset", "", "s:one", "192.0.2.1" };
+
+    /* Registered: the button reserved against every job, and not yet in
+     * force. A press begun before it is in force is nobody's, and one held
+     * down as it comes in force must be released first. */
+    ask_on_file = -1.0;
+    CHECK(!strcmp(consent(&c), "waiting") && btnres_stands("panel:c1") && btnres_withheld(why, sizeof(why)),
+          "a consent registered: reserved against every job, waiting");
+    creads(1, 3);
+    ask_on_file = BTNRES_READY_S;
+    clock_s += BTNRES_READY_S + BTNRES_CONSENT_JUDGE_S;
+    CHECK(!strcmp(consent(&c), "ready"), "in force once on file and BTNRES_READY_S old: %s", consent(&c));
+    creads(1, 3);
+    CHECK(!strcmp(consent(&c), "ready"), "a press held from before it came in force is not its press: %s", consent(&c));
+    /* The press: a release read in force, then down twice in a row. */
+    creads(0, 1);
+    creads(1, 1);
+    creads(0, 1);
+    CHECK(!strcmp(consent(&c), "ready"), "one reading down is no press: %s", consent(&c));
+    creads(1, 2);
+    double pressed_at = clock_s;
+    CHECK(!strcmp(consent(&c), "pressed"), "released in force, then down twice: its press (%s)", consent(&c));
+    /* Taken once, and the reservation stands WIZPKG_LINGER_S after the
+     * press, its dialog closed or not. Its nonce is not registered again. */
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) == BTNRES_TAKEN &&
+          btnres_consent_take(&c, why, sizeof(why)) == BTNRES_NOT_STANDING, "the press taken once (%s)", why);
+    btnres_consent_close("c1");
+    clock_s = pressed_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("panel:c1"), "the press's reservation lapsed before WIZPKG_LINGER_S");
+    clock_s = pressed_at + WIZPKG_LINGER_S + 0.5;
+    CHECK(!btnres_stands("panel:c1"), "the press's reservation stands past WIZPKG_LINGER_S");
+    CHECK(!strncmp(consent(&c), "409 ", 4) && !btnres_stands("panel:c1"), "an ended consent's nonce registers nothing again");
+    consent_clear();
+
+    /* Closed with no press: its reservation ends at once. */
+    c.nonce = "c2";
+    consent_in_force(&c);
+    btnres_consent_close("c2");
+    CHECK(!btnres_stands("panel:c2"), "a consent closed with no press: its reservation ended");
+    consent_clear();
+
+    /* Another prompt's reservation beside it (a package's check), or
+     * somebody else waiting on the button: not in force, and a press then
+     * is not its own. Asked again at the press: somebody who came to wait
+     * once it was in force takes the press, and the reservation stands
+     * WIZPKG_LINGER_S after it. */
+    c.nonce = "c3";
+    CHECK(btnres_open("check:" OTHER, BTNRES_PANEL_TTL_S, why, sizeof(why)) == 0, "a check reserves the button");
+    consent_in_force(&c);
+    CHECK(!strcmp(consent(&c), "waiting"), "a check's reservation beside it: not in force (%s)", consent(&c));
+    creads(1, 2);
+    creads(0, 1);
+    creads(1, 2);
+    CHECK(!strcmp(consent(&c), "waiting"), "and a press then is not its own: %s", consent(&c));
+    btnres_close("check:" OTHER);
+    clock_s += BTNRES_CONSENT_JUDGE_S;
+    CHECK(!strcmp(consent(&c), "ready"), "the check gone: in force (%s)", consent(&c));
+    creads(0, 1);
+    consent_waiter = "a job waits for the button press: cancel it first";
+    creads(1, 2);
+    double unsaid_at = clock_s;
+    consent_waiter = NULL;
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) == BTNRES_NOT_PRESSED,
+          "a job come to wait at the press: the press is not the consent's (%s)", why);
+    btnres_consent_close("c3");
+    clock_s = unsaid_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("panel:c3"), "the reservation after a press not its own lapsed before WIZPKG_LINGER_S");
+    consent_clear();
+    c.nonce = "c4";
+    consent_waiter = "the machine waits for a press of the button for its own setup";
+    consent_in_force(&c);
+    CHECK(!strcmp(consent(&c), "waiting"), "somebody else waiting: not in force (%s)", consent(&c));
+    consent_clear();
+
+    /* Not renewed: it ends BTNRES_PANEL_TTL_S after its last renewal. */
+    c.nonce = "c5";
+    consent_in_force(&c);
+    clock_s += BTNRES_PANEL_TTL_S + 0.5;
+    creads(0, 1);
+    CHECK(!btnres_stands("panel:c5") && !strncmp(consent(&c), "409 the dialog stopped asking", 29),
+          "a consent not renewed: ended (%s)", consent(&c));
+    consent_clear();
+
+    /* Renewed all along, it ends BTNRES_CONSENT_S after its registration. */
+    c.nonce = "c6";
+    double began = clock_s;
+    consent_in_force(&c);
+    while (clock_s < began + BTNRES_CONSENT_S - 2.0) {
+        clock_s += 2.0;
+        consent(&c);
+    }
+    CHECK(btnres_stands("panel:c6"), "a consent renewed all along lapsed before BTNRES_CONSENT_S");
+    clock_s = began + BTNRES_CONSENT_S + 0.1;
+    CHECK(!strncmp(consent(&c), "409 ", 4) && !btnres_stands("panel:c6"),
+          "a consent renewed all along stands past BTNRES_CONSENT_S: %s", consent(&c));
+    consent_clear();
+
+    /* Pressed near BTNRES_CONSENT_S, with no renewal after the press: the
+     * press and its use come within BTNRES_CONSENT_S, so a take past it is
+     * refused; and the reservation stands WIZPKG_LINGER_S after the press,
+     * past the cap the renewals kept to. */
+    c.nonce = "c6b";
+    began = clock_s;
+    consent_in_force(&c);
+    while (clock_s < began + BTNRES_CONSENT_S - 2.0) {
+        clock_s += 2.0;
+        consent(&c);
+    }
+    clock_s = began + BTNRES_CONSENT_S - 0.6;
+    creads(0, 1);
+    creads(1, 2);
+    double pressed_late = clock_s;
+    clock_s = pressed_late + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("panel:c6b"), "a press near BTNRES_CONSENT_S: its reservation lapsed before WIZPKG_LINGER_S");
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) != BTNRES_TAKEN, "a press taken past BTNRES_CONSENT_S");
+    consent_clear();
+
+    /* The button unreadable BTNRES_ASK_UNREAD_MAX readings in a row: it ends. */
+    c.nonce = "c7";
+    consent_in_force(&c);
+    creads(-1, BTNRES_ASK_UNREAD_MAX);
+    CHECK(!btnres_stands("panel:c7") && strstr(consent(&c), "cannot be read"), "the button unreadable: the consent ended");
+    consent_clear();
+
+    /* A take before the press leaves it standing; a renewal for another
+     * subject ends it; the same holder's next dialog replaces its own. */
+    c.nonce = "c8";
+    consent_in_force(&c);
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) == BTNRES_NOT_PRESSED && !strcmp(consent(&c), "ready"),
+          "a take before its press: refused, the consent stands");
+    btnres_consent_t d = c;
+    d.subject = "something else";
+    CHECK(!strncmp(consent(&d), "409 the press was asked for something else", 42) && !btnres_stands("panel:c8"),
+          "a renewal for another subject: the consent ended");
+    c.nonce = "c9";
+    consent(&c);
+    btnres_consent_t e = c;
+    e.nonce = "c10";
+    e.kind = "fuse";
+    CHECK(!strcmp(consent(&e), "waiting") && !btnres_stands("panel:c9") && btnres_stands("panel:c10"),
+          "the same holder's next dialog replaces its own");
+    consent_clear();
+
+    /* The operator's consent ends a package's ask that stands, and a
+     * package's ask is refused while it stands. The ask's reservation
+     * lingers WIZPKG_LINGER_S: the consent is not in force meanwhile, so a
+     * press made for the package's prompt before its page learned of the
+     * end is not the consent's; after the linger the consent comes in
+     * force. */
+    ask_waiter = NULL;
+    ask_on_file = -1.0;
+    CHECK(!strcmp(ask(ASKER), "waiting"), "a package asks");
+    c.nonce = "c11";
+    double dropped_at = clock_s;
+    consent(&c);
+    CHECK(!strcmp(ask(ASKER), "409 the control panel asks for the button"),
+          "a consent ends the package's ask, and refuses its next one (%s)", ask(ASKER));
+    ask_on_file = BTNRES_READY_S;
+    clock_s += BTNRES_READY_S + BTNRES_CONSENT_JUDGE_S;
+    CHECK(btnres_stands("ask:" ASKER) && !strcmp(consent(&c), "waiting"),
+          "the ask's reservation lingers, and the consent is not in force beside it (%s)", consent(&c));
+    creads(0, 1);
+    creads(1, 2);
+    CHECK(!strcmp(consent(&c), "waiting"), "a press made for the package's prompt is not the consent's: %s", consent(&c));
+    clock_s = dropped_at + WIZPKG_LINGER_S - 0.5;
+    CHECK(btnres_stands("ask:" ASKER) && !strcmp(consent(&c), "waiting"),
+          "the ask's reservation lapsed before WIZPKG_LINGER_S, or the consent came in force beside it (%s)", consent(&c));
+    creads(0, 1);
+    creads(1, 2);
+    CHECK(!strcmp(consent(&c), "waiting"), "a press late in the ask's linger is the consent's: %s", consent(&c));
+    creads(0, 1);
+    clock_s = dropped_at + WIZPKG_LINGER_S + 0.1;
+    CHECK(!strcmp(consent(&c), "ready"), "the ask's linger over: the consent in force (%s)", consent(&c));
+    consent_clear();
+
+    /* An earlier consent's press keeps the next consent out for its
+     * linger: a double press made for the first dialog is never the
+     * second's. */
+    c.nonce = "c12";
+    consent_in_force(&c);
+    creads(1, 2);
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) == BTNRES_TAKEN, "the first dialog's press taken (%s)", why);
+    btnres_consent_close("c12");
+    double taken_at = clock_s;
+    btnres_consent_t n2 = c;
+    n2.nonce = "c13";
+    consent(&n2);
+    clock_s += BTNRES_READY_S + BTNRES_CONSENT_JUDGE_S;
+    CHECK(!strcmp(consent(&n2), "waiting"), "an earlier consent's linger beside it: not in force (%s)", consent(&n2));
+    creads(0, 1);
+    creads(1, 2);
+    CHECK(!strcmp(consent(&n2), "waiting"), "a second press inside that linger is not the next consent's: %s", consent(&n2));
+    clock_s = taken_at + WIZPKG_LINGER_S + 0.1;
+    CHECK(!strcmp(consent(&n2), "ready"), "the linger over: the next consent in force (%s)", consent(&n2));
+    consent_clear();
+
+    /* In force, then somebody comes to wait on the button: the next
+     * renewal answers waiting, so the dialog stops asking for the press. */
+    c.nonce = "c14";
+    consent_in_force(&c);
+    CHECK(!strcmp(consent(&c), "ready"), "in force (%s)", consent(&c));
+    consent_waiter = "a job waits for the button press: cancel it first";
+    clock_s += BTNRES_CONSENT_JUDGE_S;
+    CHECK(!strcmp(consent(&c), "waiting"), "somebody waits: the renewal answers waiting (%s)", consent(&c));
+    consent_clear();
+
+    /* Pressed, then not renewed for BTNRES_PANEL_TTL_S (a tab the browser
+     * throttles): the consent lapsed, and a take finds no consent. */
+    c.nonce = "c15";
+    consent_in_force(&c);
+    creads(1, 2);
+    CHECK(!strcmp(consent(&c), "pressed"), "pressed (%s)", consent(&c));
+    clock_s += BTNRES_PANEL_TTL_S + 0.5;
+    CHECK(btnres_consent_take(&c, why, sizeof(why)) == BTNRES_NOT_STANDING,
+          "a take after the consent lapsed unrenewed takes nothing (%s)", why);
+    consent_clear();
+
+    /* The take holds every field: the same name with another subject, or
+     * another holder, is refused and ends the consent. */
+    btnres_consent_t t = c;
+    c.nonce = "c16";
+    t = c;
+    t.subject = "another archive";
+    consent_in_force(&c);
+    creads(1, 2);
+    CHECK(btnres_consent_take(&t, why, sizeof(why)) == BTNRES_MISMATCH && !strncmp(consent(&c), "409 ", 4),
+          "a take naming another subject: refused, the consent ended (%s)", why);
+    consent_clear();
+    c.nonce = "c17";
+    t = c;
+    t.holder = "s:two";
+    consent_in_force(&c);
+    creads(1, 2);
+    CHECK(btnres_consent_take(&t, why, sizeof(why)) == BTNRES_MISMATCH && !strncmp(consent(&c), "409 ", 4),
+          "a take by another holder: refused, the consent ended (%s)", why);
+    consent_clear();
+
+    /* A renewal holds every field too: one with another kind, or by
+     * another holder, under the same name ends the consent. */
+    c.nonce = "c18";
+    t = c;
+    t.kind = "fuse";
+    consent_in_force(&c);
+    CHECK(!strncmp(consent(&t), "409 ", 4) && !btnres_stands("panel:c18"),
+          "a renewal for another kind: the consent ended (%s)", consent(&t));
+    consent_clear();
+    c.nonce = "c19";
+    t = c;
+    t.holder = "s:two";
+    consent_in_force(&c);
+    CHECK(!strncmp(consent(&t), "409 ", 4) && !btnres_stands("panel:c19"),
+          "a renewal by another holder: the consent ended (%s)", consent(&t));
+    consent_clear();
+    btnres_consent_refused = NULL;
+    btnres_on_file_s = NULL;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && (!strcmp(argv[1], "list") || !strcmp(argv[1], "wizard")))
@@ -738,6 +1148,7 @@ int main(int argc, char **argv)
     btnres_pkg_holds = NULL;
 
     ask_cases();
+    consent_cases();
 
     /* A result that did not pass. */
     reset();

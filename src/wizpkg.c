@@ -32,8 +32,9 @@ _Static_assert((int)BTNRES_TTL_MAX_S > (int)WIZPKG_READY_WAIT_S + WIZ_PROMPT_TIM
  * BTNRES_READY_S with no job that would take the press as its own: both
  * controllers have read it by then, and no job waits that a press could
  * reach. Meanwhile the Setup page names the job that waits. A package
- * that keeps the machine waits for nothing: its reservation withholds
- * nothing from its own job, whenever it comes to keep it. Past
+ * that keeps the machine waits for nothing else: its reservation withholds
+ * nothing from its own job, whenever it comes to keep it. Every check
+ * waits while a package's ask stands (one it ended lingers 5 s). Past
  * WIZPKG_READY_WAIT_S, or on an abort, the check ends: 0 to show the
  * prompt, -1 when it has ended. */
 static int ready_wait(const char *id, const char *step_phase)
@@ -43,13 +44,18 @@ static int ready_wait(const char *id, const char *step_phase)
     struct timespec step = { 0, 100 * 1000 * 1000 };
     char said[160] = "", jw[160];
     for (double waited = 0;; waited += 0.1) {
-        if (btnres_pkg_holds && btnres_pkg_holds(id)) {
+        /* A package's ask this check's reservation ended lingers its
+         * WIZPKG_LINGER_S (btnres.c, btnres_open): the prompt waits it out,
+         * so a press made for that package's prompt is nobody's, never
+         * this package's own job's. */
+        int lingers = btnres_any("ask:");
+        if (!lingers && btnres_pkg_holds && btnres_pkg_holds(id)) {
             if (said[0])
                 wiz_phase("%s", step_phase);
             return 0;
         }
         int waits = wizpkg_job_waits && wizpkg_job_waits(jw, sizeof(jw));
-        if (!waits && wizpkg_on_file_s() >= BTNRES_READY_S) {
+        if (!lingers && !waits && wizpkg_on_file_s() >= BTNRES_READY_S) {
             if (said[0])
                 wiz_phase("%s", step_phase);
             return 0;

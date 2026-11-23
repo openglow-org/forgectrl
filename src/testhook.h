@@ -35,11 +35,13 @@
  * idle connection timeout, GF_PRESS_TIMEOUT_S the Setup page's press
  * wait and its request's life, GF_PRESS_RES_S the renewal its poll gives
  * the press's reservation, GF_RESET_HOLD_S the button hold at start
- * that resets the account, and GF_PRESS_DEBOUNCE_MS lengthens how long a
- * press must still be held after the wait first reads it. GF_PAUSE_DIR
- * names a directory of pauses (ff_test_pause): a route that reaches a
- * named point waits there while the file of that name stands in it, so a
- * test lands a second request between a route's check and its act.
+ * that resets the account, GF_PRESS_DEBOUNCE_MS lengthens how long a
+ * press must still be held after the wait first reads it, and
+ * GF_CONSENT_LINGER_S shortens how long a consent's reservation stands
+ * after its press. GF_PAUSE_DIR names a directory of pauses
+ * (ff_test_pause): a route that reaches a named point waits there while
+ * the file of that name stands in it, so a test lands a second request
+ * between a route's check and its act.
  * GF_RUN_END_GAP_MS pauses an update job and a setup check that long
  * once each reads ended, so a host test can start the next in that gap.
  * GF_THREAD_FAIL_FILE names a file: while it stands, the next start of an

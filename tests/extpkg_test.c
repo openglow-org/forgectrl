@@ -10,8 +10,17 @@
  * become exactly the host's commands, nothing of a request is ever a shell
  * word, the host's refusal is passed on in its words, a host that cannot
  * be run or says something that is no JSON is 502, the status document
- * carries the host's own status only while that host is alive, a page's
- * call to its service is held to its form before the host runs, and the
+ * carries the host's own status only while that host is alive, and its
+ * two lists are read once per EXTPKG_STATUS_CACHE_S unless a command ran
+ * through the host since, kept only when both answered, a read made while
+ * a command runs answered afresh and not kept past its end, a page's
+ * call to its service is held to its form before the host runs; an install
+ * of the archive that was shown or of none (the digest the install names,
+ * held to forgectrl's own inspect and handed to the host for its read), its
+ * grants its own, and the two-session install: another session's upload
+ * during a consent, the press taken for the archive shown and nothing
+ * installed, a second session's consent refusing both, and one naming
+ * another session's consent ending it; and the
  * catalog: the index fetched from its one address with curl held to https
  * and a bound, and verified by the host; the version of a listed package
  * the host offers fetched from where the kept index says, held to its size
@@ -22,8 +31,10 @@
  * file staged over it since is refused; two installs at once each carry
  * their own grants.
  */
+#include "../src/btnres.h"
 #include "../src/extpkg.h"
 #include "../src/sha256.h"
+#include "../src/wizpkg.h"
 
 #include <jansson.h>
 #include <pthread.h>
@@ -35,6 +46,8 @@
 
 static int fails;
 #define CHECK(cond, ...) do { if (!(cond)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
+/* The digest the stand-in's inspect gives the staged archive. */
+#define DIG "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 static char dir[] = "/tmp/extpkg-test-XXXXXX";
 static char stand_in[300], args_file[300], status_file[300];
@@ -67,8 +80,39 @@ static void *install_with_hold(void *arg)
     (void)arg;
     int st;
     char w[300];
-    extpkg_install("hold", NULL, 0, &st, w, sizeof(w));
+    extpkg_install("hold", NULL, DIG, 0, NULL, 0, &st, w, sizeof(w));
     return NULL;
+}
+
+/* A command run through the host, slow (the status lists' case below). */
+static void *enable_slow(void *arg)
+{
+    (void)arg;
+    int st;
+    char w[300];
+    extpkg_action("org.example.notify", "enable", &st, w, sizeof(w));
+    return NULL;
+}
+
+/* The reservations' clock, which the two-session cases move on, and the
+ * time the reservation has stood in the published verdict. */
+static double clock_s = 1000.0;
+static double fake_clock(void) { return clock_s; }
+static double fake_on_file(void) { return BTNRES_READY_S + 0.5; }
+
+/* @c's consent in force and its press made: BTNRES_READY_S after its
+ * registration (renewed by its dialog), the button read released, then
+ * down twice, BTNRES_ASK_POLL_MS apart. */
+static void consent_pressed(const btnres_consent_t *c)
+{
+    static const int reads[] = { 0, 1, 1 };
+    char w[200], other[120];
+    clock_s += BTNRES_READY_S + BTNRES_CONSENT_JUDGE_S;
+    btnres_consent_open(c, w, sizeof(w), other, sizeof(other));
+    for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+        clock_s += BTNRES_ASK_POLL_MS / 1000.0;
+        btnres_consent_step(reads[i]);
+    }
 }
 
 static void host_says(const char *script_body)
@@ -92,6 +136,7 @@ int main(void)
     snprintf(status_file, sizeof(status_file), "%s/status.json", dir);
     setenv("FORGECTRL_FORGEEXT", stand_in, 1);
     setenv("FORGECTRL_EXT_STATUS", status_file, 1);
+    extpkg_clock = fake_clock;
 
     /* The form of a package id. */
     static const char *const good[] = { "org.example.notify", "io.a-b.c9", "a.b" };
@@ -136,7 +181,8 @@ int main(void)
     CHECK(extpkg_action("org.example.notify", "enable", &status, why, sizeof(why)) != 0 && status == 502, "no host to run: %d", status);
 
     /* The status document. */
-    host_says("echo '{\"ok\": true, \"packages\": [{\"id\": \"org.example.notify\", \"enabled\": true, \"hold\": \"advisory\"}]}'");
+    host_says("if [ \"$1\" = keys ]; then echo '{\"ok\": true, \"keys\": []}'; exit 0; fi\n"
+              "echo '{\"ok\": true, \"packages\": [{\"id\": \"org.example.notify\", \"enabled\": true, \"hold\": \"advisory\"}]}'");
     write_file(status_file, "{\"pid\": 1, \"enabled\": true, \"services\": [{\"id\": \"org.example.notify\", \"state\": \"running\"}]}", 0644);
     char *doc = extpkg_status_json(1);
     json_t *j = doc ? json_loads(doc, 0, NULL) : NULL;
@@ -148,6 +194,66 @@ int main(void)
           "a status file whose pid is not a running host is a dead host's: its word is not passed on: %s", doc ? doc : "none");
     json_decref(j);
     free(doc);
+    /* The two lists kept EXTPKG_STATUS_CACHE_S: a second read runs the host
+     * for neither; a command run through the host since drops them. */
+    unlink(args_file);
+    doc = extpkg_status_json(1);
+    j = doc ? json_loads(doc, 0, NULL) : NULL;
+    CHECK(j && json_array_size(json_object_get(j, "packages")) == 1 && !ran()[0],
+          "a second read within EXTPKG_STATUS_CACHE_S: ran [%s], %s", ran(), doc ? doc : "none");
+    json_decref(j);
+    free(doc);
+    host_says("echo '{\"ok\": true}'");
+    extpkg_action("org.example.notify", "disable", &status, why, sizeof(why));
+    host_says("if [ \"$1\" = keys ]; then echo '{\"ok\": true, \"keys\": []}'; exit 0; fi\n"
+              "echo '{\"ok\": true, \"packages\": []}'");
+    doc = extpkg_status_json(1);
+    j = doc ? json_loads(doc, 0, NULL) : NULL;
+    CHECK(j && json_array_size(json_object_get(j, "packages")) == 0 && !strcmp(ran(), "keys\n"),
+          "a read after a command run through the host lists afresh: ran [%s], %s", ran(), doc ? doc : "none");
+    json_decref(j);
+    free(doc);
+    /* Kept only when both lists answered: a read whose keys failed is not
+     * kept, so the next read asks the host again. */
+    clock_s += EXTPKG_STATUS_CACHE_S;
+    host_says("if [ \"$1\" = keys ]; then echo '{\"ok\": false, \"error\": \"no keys\"}'; exit 1; fi\n"
+              "echo '{\"ok\": true, \"packages\": []}'");
+    free(extpkg_status_json(1));
+    unlink(args_file);
+    free(extpkg_status_json(1));
+    CHECK(!strcmp(ran(), "keys\n"), "a read whose keys failed was kept: the next read ran [%s]", ran());
+    host_says("if [ \"$1\" = list ]; then echo '{\"ok\": false, \"error\": \"no list\"}'; exit 1; fi\n"
+              "echo '{\"ok\": true, \"keys\": []}'");
+    free(extpkg_status_json(1));
+    unlink(args_file);
+    free(extpkg_status_json(1));
+    CHECK(!strcmp(ran(), "keys\n"), "a read whose list failed was kept: the next read ran [%s]", ran());
+    /* A read made while a command runs through the host, and ended before
+     * it, is not kept past the command's end. */
+    {
+        host_says("if [ \"$1\" = enable ]; then sleep 0.6; echo '{\"ok\": true}'; exit 0; fi\n"
+                  "if [ \"$1\" = keys ]; then echo '{\"ok\": true, \"keys\": []}'; exit 0; fi\n"
+                  "echo '{\"ok\": true, \"packages\": []}'");
+        pthread_t slow;
+        pthread_create(&slow, NULL, enable_slow, NULL);
+        usleep(200000);
+        free(extpkg_status_json(1));
+        pthread_join(slow, NULL);
+        unlink(args_file);
+        free(extpkg_status_json(1));
+        CHECK(!strcmp(ran(), "keys\n"), "a read made while a command ran was kept past its end: the next read ran [%s]", ran());
+        /* And a read made while a command runs is not answered from the
+         * lists kept before it began. */
+        pthread_create(&slow, NULL, enable_slow, NULL);
+        usleep(200000);
+        unlink(args_file);
+        free(extpkg_status_json(1));
+        CHECK(!strcmp(ran(), "keys\n"), "a read made while a command ran was answered from lists kept before it: ran [%s]", ran());
+        pthread_join(slow, NULL);
+        free(extpkg_status_json(1));
+    }
+    /* Past EXTPKG_STATUS_CACHE_S the host is asked again. */
+    clock_s += EXTPKG_STATUS_CACHE_S;
     unlink(stand_in);
     doc = extpkg_status_json(0);
     j = doc ? json_loads(doc, 0, NULL) : NULL;
@@ -161,7 +267,7 @@ int main(void)
     snprintf(stage, sizeof(stage), "%s/upload.ffx", dir);
     setenv("FORGECTRL_EXT_STAGE", stage, 1);
     host_says("echo '{\"ok\": true}'");
-    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 409 && !ran()[0],
+    CHECK(extpkg_install(NULL, NULL, DIG, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 && !ran()[0],
           "nothing staged: %d %s, ran [%s]", status, why, ran());
     CHECK(extpkg_inspect_json(&status, why, sizeof(why)) == NULL && status == 409, "inspect with nothing staged: %d", status);
 
@@ -190,9 +296,10 @@ int main(void)
           access(stage, F_OK) != 0, "a refused archive: %d %s, staged file %s", status, why, access(stage, F_OK) ? "gone" : "kept");
 
     /* The stand-in answers inspect with a tier and records what install was run with. */
-    char script[1200];
+    char script[1400];
 #define HOST_TIER(tier) do { \
-    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"" tier "\"}'; exit 0; fi\n" \
+    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"" tier "\", " \
+             "\"digest\": \"" DIG "\", \"package\": {\"id\": \"org.example.x\", \"version\": \"1.0.0\"}}'; exit 0; fi\n" \
              "for a in \"$@\"; do echo \"$a\"; done > %s.install\necho '{\"ok\": true}'", args_file); \
     host_says(script); \
     write_file(stage, "an archive", 0600); \
@@ -200,29 +307,44 @@ int main(void)
     unlink(script); } while (0)
 #define INSTALL_RAN() ({ static char t[1024]; char pth[340]; snprintf(pth, sizeof(pth), "%s.install", args_file); \
     FILE *f = fopen(pth, "r"); size_t n = f ? fread(t, 1, sizeof(t) - 1, f) : 0; if (f) fclose(f); t[n] = 0; t; })
-    char expect[400], want_any[700];
+    char expect[800], want_any[700];
 
     HOST_TIER("official");
-    CHECK(extpkg_install("hold,job_time.run", NULL, 0, &status, why, sizeof(why)) == 0 && status == 200, "official: %d %s", status, why);
-    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--grant\njob_time.run\n", stage);
+    char what[120];
+    CHECK(extpkg_install("hold,job_time.run", NULL, DIG, 0, what, sizeof(what), &status, why, sizeof(why)) == 0 &&
+          status == 200 && !strcmp(what, "org.example.x 1.0.0"), "official: %d %s, installed [%s]", status, why, what);
+    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--grant\njob_time.run\n--digest\n" DIG "\n", stage);
     CHECK(!strcmp(INSTALL_RAN(), expect) && access(stage, F_OK) != 0, "official: the login is enough, the grants go on, no consent "
-          "flag, the staged file gone: [%s]", INSTALL_RAN());
+          "flag, the host held to the digest, the staged file gone: [%s]", INSTALL_RAN());
+
+    /* The install is of the archive that was shown: a digest of no such
+     * form, and an archive staged since whose digest is another, run no
+     * install. */
+    HOST_TIER("official");
+    CHECK(extpkg_install(NULL, NULL, "0123", 0, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0] &&
+          !INSTALL_RAN()[0], "a digest that is none: %d %s, ran [%s]", status, why, ran());
+    CHECK(extpkg_install(NULL, NULL, NULL, 0, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
+          "no digest: %d %s, ran [%s]", status, why, ran());
+    CHECK(extpkg_install(NULL, NULL, "f123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0, NULL, 0, &status,
+                         why, sizeof(why)) != 0 && status == 409 && !INSTALL_RAN()[0] &&
+          access(stage, F_OK) == 0, "an archive that is not the one shown: %d %s, install ran [%s]", status, why, INSTALL_RAN());
 
     HOST_TIER("community");
-    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, EXTPKG_PHRASE) &&
+    CHECK(extpkg_install(NULL, NULL, DIG, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, EXTPKG_PHRASE) &&
           !INSTALL_RAN()[0] && access(stage, F_OK) == 0, "community without the phrase: %d, ran [%s]", status, INSTALL_RAN());
-    CHECK(extpkg_install(NULL, "i understand", 1, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
+    CHECK(extpkg_install(NULL, "i understand", DIG, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
           "community with the phrase in another case: %d", status);
-    CHECK(extpkg_install("", EXTPKG_PHRASE, 0, &status, why, sizeof(why)) == 0, "community with the phrase: %d %s", status, why);
-    snprintf(expect, sizeof(expect), "install\n%s\n--consent-community\n", stage);
+    CHECK(extpkg_install("", EXTPKG_PHRASE, DIG, 0, NULL, 0, &status, why, sizeof(why)) == 0, "community with the phrase: %d %s", status, why);
+    snprintf(expect, sizeof(expect), "install\n%s\n--consent-community\n--digest\n" DIG "\n", stage);
     CHECK(!strcmp(INSTALL_RAN(), expect), "community: the host is told of the consent forgectrl took: [%s]", INSTALL_RAN());
 
     HOST_TIER("unverified");
-    CHECK(extpkg_install(NULL, EXTPKG_PHRASE, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
+    CHECK(extpkg_install(NULL, EXTPKG_PHRASE, DIG, 0, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
           !INSTALL_RAN()[0] && access(stage, F_OK) == 0, "unverified without the button (the phrase is no substitute): %d, ran [%s]",
           status, INSTALL_RAN());
-    CHECK(extpkg_install("hold", NULL, 1, &status, why, sizeof(why)) == 0, "unverified with the button held: %d %s", status, why);
-    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--consent-unverified\n", stage);
+    CHECK(extpkg_install("hold", NULL, DIG, 1, NULL, 0, &status, why, sizeof(why)) == 0, "unverified with the button pressed: %d %s",
+          status, why);
+    snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--consent-unverified\n--digest\n" DIG "\n", stage);
     CHECK(!strcmp(INSTALL_RAN(), expect), "unverified: [%s]", INSTALL_RAN());
 
     /* What installs is what the dialog showed: the inspect document names
@@ -254,7 +376,7 @@ int main(void)
         write_file(marker, "", 0600);
         snprintf(script, sizeof(script),
                  "if [ \"$1\" = inspect ]; then if [ -e %s ]; then rm -f %s; sleep 0.6; fi; "
-                 "echo '{\"ok\": true, \"tier\": \"official\"}'; exit 0; fi\n"
+                 "echo '{\"ok\": true, \"tier\": \"official\", \"digest\": \"" DIG "\"}'; exit 0; fi\n"
                  "for a in \"$@\"; do echo \"$a\"; done >> %s.install\necho '{\"ok\": true}'",
                  marker, marker, args_file);
         host_says(script);
@@ -264,7 +386,7 @@ int main(void)
         pthread_t first;
         pthread_create(&first, NULL, install_with_hold, NULL);
         usleep(200000);
-        int rc2 = extpkg_install("job_time.run", NULL, 0, &status, why, sizeof(why));
+        int rc2 = extpkg_install("job_time.run", NULL, DIG, 0, NULL, 0, &status, why, sizeof(why));
         pthread_join(first, NULL);
         const char *both = INSTALL_RAN();
         CHECK(rc2 == 0 && strstr(both, "--grant\nhold\n") && strstr(both, "--grant\njob_time.run\n"),
@@ -276,37 +398,123 @@ int main(void)
     static const char *const bad_grants[] = { "hold;reboot", "--consent-unverified", "a,b,c,d,e,f,g,h,i",
                                               "net.outbound:evil.example:443" };
     for (size_t i = 0; i < sizeof(bad_grants) / sizeof(bad_grants[0]); i++)
-        CHECK(extpkg_install(bad_grants[i], NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
+        CHECK(extpkg_install(bad_grants[i], NULL, DIG, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !INSTALL_RAN()[0],
               "grants \"%s\": %d, ran [%s]", bad_grants[i], status, INSTALL_RAN());
 
     /* The host's refusal of the install, in its words; the staged file stays for another try. */
-    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"official\"}'; exit 0; fi\n"
-             "echo '{\"ok\": false, \"error\": \"only the operator grants: hold\"}'; exit 1");
+    snprintf(script, sizeof(script), "if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"official\", \"digest\": \""
+             DIG "\"}'; exit 0; fi\necho '{\"ok\": false, \"error\": \"only the operator grants: hold\"}'; exit 1");
     host_says(script);
     write_file(stage, "an archive", 0600);
-    CHECK(extpkg_install(NULL, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
+    CHECK(extpkg_install(NULL, NULL, DIG, 0, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
           access(stage, F_OK) == 0, "the host's refusal: %d %s", status, why);
     extpkg_stage_discard();
     CHECK(access(stage, F_OK) != 0, "discard left the staged file");
 
+    /* Two sessions of one account, one staging file between them. Session
+     * 1 uploads X, a package nobody the machine trusts signed, and its
+     * dialog registers the consent for X's digest (btnres.h); session 2
+     * uploads Y over it; session 1's press is taken for X, and the install
+     * refuses Y: nothing is installed. Without the second upload X installs
+     * on the same steps. A second session's dialog while one consent stands
+     * refuses both, and a session naming another's consent ends it. The
+     * stand-in names an archive by its content's SHA-256, as the host names
+     * a payload by its digest. */
+    {
+        static const char X[] = "archive X", Y[] = "archive Y";
+        char dx[2 * SHA256_LEN + 1], dy[2 * SHA256_LEN + 1], w[200], other[120];
+        unsigned char d[SHA256_LEN];
+        sha256(X, strlen(X), d);
+        sha256_hex(d, SHA256_LEN, dx);
+        sha256(Y, strlen(Y), d);
+        sha256_hex(d, SHA256_LEN, dy);
+        btnres_clock = fake_clock;
+        btnres_on_file_s = fake_on_file;
+        snprintf(script, sizeof(script),
+                 "if [ \"$1\" = inspect ]; then printf '{\"ok\": true, \"tier\": \"unverified\", \"digest\": \"%%s\", "
+                 "\"package\": {\"id\": \"org.example.x\", \"version\": \"1.0.0\"}}\\n' \"$(sha256sum \"$2\" | cut -c1-64)\"; "
+                 "exit 0; fi\nfor a in \"$@\"; do echo \"$a\"; done > %s.install\necho '{\"ok\": true}'", args_file);
+        btnres_consent_t s1 = { "s1-a", "install", dx, "s:one", "192.0.2.1" };
+        btnres_consent_t s2 = { "s2-a", "install", dy, "s:two", "192.0.2.2" };
+
+        for (int swap = 1; swap >= 0; swap--) {
+            host_says(script);
+            snprintf(want_any, sizeof(want_any), "%s.install", args_file);
+            unlink(want_any);
+            write_file(stage, X, 0600);
+            s1.nonce = swap ? "s1-a" : "s1-b";
+            doc = extpkg_inspect_json(&status, why, sizeof(why));
+            j = doc ? json_loads(doc, 0, NULL) : NULL;
+            CHECK(j && !strcmp(json_string_value(json_object_get(j, "consent")), "button") &&
+                  json_string_value(json_object_get(j, "digest")) && !strcmp(json_string_value(json_object_get(j, "digest")), dx),
+                  "session 1 is shown X, its consent the button and its digest: %s", doc ? doc : why);
+            json_decref(j);
+            free(doc);
+            CHECK(btnres_consent_open(&s1, w, sizeof(w), other, sizeof(other)) == BTNRES_CONSENT_WAITING,
+                  "session 1's dialog registers its consent: %s", w);
+            consent_pressed(&s1);
+            if (swap)
+                write_file(stage, Y, 0600);             /* session 2's upload, during the consent */
+            CHECK(btnres_consent_take(&s1, w, sizeof(w)) == BTNRES_TAKEN, "session 1's press, taken for X: %s", w);
+            int rc = extpkg_install(NULL, NULL, dx, 1, NULL, 0, &status, why, sizeof(why));
+            if (swap)
+                CHECK(rc != 0 && status == 409 && !INSTALL_RAN()[0] && access(stage, F_OK) == 0,
+                      "session 2's archive under session 1's press: refused, nothing installed: %d %s, install ran [%s]",
+                      status, why, INSTALL_RAN());
+            else {
+                snprintf(expect, sizeof(expect), "install\n%s\n--consent-unverified\n--digest\n%s\n", stage, dx);
+                CHECK(rc == 0 && !strcmp(INSTALL_RAN(), expect), "no second upload: X installs on the same steps, the host "
+                      "held to its digest: %d %s [%s]", status, why, INSTALL_RAN());
+            }
+            CHECK(btnres_consent_take(&s1, w, sizeof(w)) == BTNRES_NOT_STANDING, "and the press was taken once: %s", w);
+            clock_s += WIZPKG_LINGER_S + 1.0;
+        }
+
+        /* Session 2's own consent while session 1's stands: both refused,
+         * with session 1's named for the log. */
+        s1.nonce = "s1-c";
+        CHECK(btnres_consent_open(&s1, w, sizeof(w), other, sizeof(other)) == BTNRES_CONSENT_WAITING,
+              "session 1's dialog: %s", w);
+        CHECK(btnres_consent_open(&s2, w, sizeof(w), other, sizeof(other)) == -1 && strstr(other, "192.0.2.1"),
+              "session 2's dialog beside it: refused, session 1's named (%s)", other);
+        CHECK(btnres_consent_open(&s1, w, sizeof(w), other, sizeof(other)) == -1 &&
+              btnres_consent_open(&s2, w, sizeof(w), other, sizeof(other)) == -1,
+              "and both stay refused: neither renews (%s)", w);
+        clock_s += BTNRES_PANEL_TTL_S + 1.0;
+
+        /* Session 2 naming session 1's consent (its nonce, its own kind and
+         * subject): refused, and the consent ends with it. */
+        s1.nonce = "s1-d";
+        CHECK(btnres_consent_open(&s1, w, sizeof(w), other, sizeof(other)) == BTNRES_CONSENT_WAITING, "session 1 again: %s", w);
+        consent_pressed(&s1);
+        btnres_consent_t s2_named = s2;
+        s2_named.nonce = s1.nonce;
+        CHECK(btnres_consent_take(&s2_named, w, sizeof(w)) == BTNRES_MISMATCH, "session 2 names session 1's consent: refused");
+        CHECK(btnres_consent_take(&s1, w, sizeof(w)) == BTNRES_NOT_STANDING, "and that consent ended: %s", w);
+        clock_s += BTNRES_PANEL_TTL_S + 1.0;
+        extpkg_stage_discard();
+    }
+
     /* The owner's keys: the button, the name's form, and the key through a
      * file and never an argument. */
     host_says("echo '{\"ok\": true, \"keys\": [{\"name\": \"maker\", \"key\": \"ab\"}]}'");
-    CHECK(extpkg_key_add("maker", "AAAA", 4, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
-          !ran()[0], "a key without the button held: %d %s, ran [%s]", status, why, ran());
+    CHECK(extpkg_key_add("maker", "AAAA", 4, 0, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409 &&
+          !ran()[0], "a key without its press: %d %s, ran [%s]", status, why, ran());
     static const char *const bad_names[] = { "../../etc/passwd", "-rf", "maker;reboot",
                                              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX" };
     for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); i++)
-        CHECK(extpkg_key_add(bad_names[i], "AAAA", 4, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
+        CHECK(extpkg_key_add(bad_names[i], "AAAA", 4, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
               "the name \"%s\": %d, ran [%s]", bad_names[i], status, ran());
-    CHECK(extpkg_key_add("maker", "", 0, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0], "an empty key");
+    CHECK(extpkg_key_add("maker", "", 0, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0], "an empty key");
     {
         static char big[EXTPKG_KEY_MAX + 8];
         memset(big, 'A', sizeof(big) - 1);
-        CHECK(extpkg_key_add("maker", big, sizeof(big) - 1, 1, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
+        CHECK(extpkg_key_add("maker", big, sizeof(big) - 1, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && !ran()[0],
               "a key over the bound");
     }
-    CHECK(extpkg_key_add("maker", "AAAA", 4, 1, &status, why, sizeof(why)) == 0 && status == 200, "the key: %d %s", status, why);
+    char kid[80];
+    CHECK(extpkg_key_add("maker", "AAAA", 4, 1, kid, sizeof(kid), &status, why, sizeof(why)) == 0 && status == 200 &&
+          !strcmp(kid, "ab"), "the key, its id as the host lists it: %d %s [%s]", status, why, kid);
     {
         /* key-add <name> <file>: the key is in the file, never in an argument. */
         char args[1024];
@@ -315,7 +523,7 @@ int main(void)
               "the host was run with [%s]", args);
     }
     host_says("echo '{\"ok\": false, \"error\": \"that is no Ed25519 public key\"}'; exit 1");
-    CHECK(extpkg_key_add("maker", "not a key", 9, 1, &status, why, sizeof(why)) != 0 && status == 409,
+    CHECK(extpkg_key_add("maker", "not a key", 9, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 409,
           "what the host will not take: %d %s", status, why);
     host_says("echo '{\"ok\": true, \"keys\": []}'");
     CHECK(extpkg_key_remove("maker", &status, why, sizeof(why)) == 0 && !strcmp(ran(), "key-remove\nmaker\n"),
@@ -506,7 +714,8 @@ int main(void)
              "\"versions\": [{\"version\": \"2.0.0\", \"url\": \"https://example.org/later.ffx\", \"sha256\": \"%s\", " \
              "\"size\": 5, \"usable\": false}]}]}}", sha, url, sha, (int)(size), sha); \
     snprintf(cscript, sizeof(cscript), "if [ \"$1\" = index ]; then echo '%s'; exit 0; fi\n" \
-             "echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"package\": {\"id\": \"%s\", \"version\": \"%s\"}}'", \
+             "echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"digest\": \"" DIG "\", " \
+             "\"package\": {\"id\": \"%s\", \"version\": \"%s\"}}'", \
              text, pid, pver); \
     host_says(cscript); unlink(curl_args); extpkg_stage_discard(); } while (0)
 
@@ -522,9 +731,10 @@ int main(void)
     CHECK(!strcmp(CURL_RAN(), want_any), "curl for the package, bounded to its size: [%s]", CURL_RAN());
     snprintf(want_any, sizeof(want_any), "inspect\n%s\n", stage);
     CHECK(!strcmp(ran(), want_any) && access(stage, F_OK) == 0, "the host inspected the staged file, which stays: [%s]", ran());
-    host_says("if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true}'; exit 0; fi\n"
+    host_says("if [ \"$1\" = inspect ]; then echo '{\"ok\": true, \"tier\": \"community\", \"endorsed\": true, \"digest\": \""
+              DIG "\"}'; exit 0; fi\n"
               "echo '{\"ok\": true}'");
-    CHECK(extpkg_install(NULL, NULL, 1, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, EXTPKG_PHRASE),
+    CHECK(extpkg_install(NULL, NULL, DIG, 1, NULL, 0, &status, why, sizeof(why)) != 0 && status == 400 && strstr(why, EXTPKG_PHRASE),
           "its install takes the phrase: %d %s", status, why);
     extpkg_stage_discard();
 

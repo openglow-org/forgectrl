@@ -35,13 +35,26 @@
  * withholds every job, and no route reaches it by name. */
 #define BTNRES_SETUP "setup:press"
 
+/* The longest one consent of the panel's stands from its registration,
+ * however often it is renewed: a press, and its use, come within it. */
+#define BTNRES_CONSENT_S 120.0
+/* How often a consent that waits is judged again for coming in force
+ * (who else waits on the button): a job's own wait reads files. */
+#define BTNRES_CONSENT_JUDGE_S 0.2
+#define BTNRES_KIND_MAX 16
+#define BTNRES_SUBJECT_MAX 96
+#define BTNRES_HOLDER_MAX 80
+#define BTNRES_PEER_MAX 64
+
 /* Open @who's reservation for @ttl_s seconds (at most BTNRES_TTL_MAX_S),
  * or renew it. @who names one prompt: "panel:<nonce>" (one hold dialog,
  * the nonce 1 to BTNRES_NONCE_MAX of letters, digits, '-' and '_'),
  * "check:<package>" (a package's check prompt, one at a time; that
  * package's own jobs are not withheld, btnres_pkg_holds) or BTNRES_SETUP
  * (the Setup page's press). It ends a
- * package's ask that stands: the operator's own prompt comes first.
+ * package's ask that stands: the operator's own prompt comes first. For
+ * BTNRES_SETUP and "check:<package>" the ask's reservation lingers
+ * WIZPKG_LINGER_S (btnres_ask).
  * 0, or -1 with the reason (a name it cannot take, every slot in use). */
 int btnres_open(const char *who, double ttl_s, char *why, size_t len);
 /* Whether @who has one of those forms. */
@@ -92,8 +105,13 @@ extern int (*btnres_pkg_holds)(const char *pkg);
  * reservation stands (a panel dialog's, a check's, another package's ask
  * or the linger after it), btnres_ask_refused answers, the package is
  * turned off (btnres_ask_bar), or the button cannot be read. An ask that
- * stands when the operator's prompt reserves the button ends there. -2
- * with @why when @pkg is no package id. */
+ * stands when the operator's prompt reserves the button ends there; its
+ * reservation lingers WIZPKG_LINGER_S when that prompt is a consent, the
+ * Setup page's wait or a package's check, which do not come in force
+ * beside it. A "pressed" not yet collected then counts for nobody: the
+ * package is never told (its next call is refused while that prompt or
+ * its linger stands, and opens a new ask after), and the operator presses
+ * again. -2 with @why when @pkg is no package id. */
 int btnres_ask(const char *pkg, const char **state, char *why, size_t len);
 /* End @pkg's ask unpressed (it withdrew it). The linger after a press
  * stands its time. */
@@ -138,8 +156,72 @@ extern int (*btnres_session_reported)(void);
  * cool_button_on_file_s). NULL: no ask comes in force. */
 extern double (*btnres_on_file_s)(void);
 /* The button's level for the reader thread: 1, 0, or -1 unreadable. NULL:
- * no thread is started (a test steps the ask itself). */
+ * no thread is started (a test steps the ask and the consent itself). */
 extern int (*btnres_button)(void);
+
+/* ---- the panel's consent: one press for one guarded action ----
+ *
+ * An action the panel guards with the machine's button (an unverified
+ * package's install, an owner's key, the fuse identity, the reset of every
+ * setting, unsigned firmware, an older firmware's install, the factory
+ * return) takes one press made for it. The panel's dialog registers the
+ * consent when it opens (btnres_consent_open), and renews it while it
+ * stands: what it is for (kind), what exactly (subject, main.c's
+ * consent_subject: the archive's digest, the key's fingerprint, the
+ * firmware's file, slot, SHA-256 and what it skips, the factory return's
+ * slot, "" for none), and who asks (holder: the asking session, or the
+ * address of a client that has none; peer, for the log). Its reservation is
+ * "panel:<nonce>", against every job. At most one consent stands on the
+ * machine: one registered while another stands refuses both, unless it is
+ * the same holder's, which replaces its own. A consent comes in force once
+ * its reservation has stood on file BTNRES_READY_S, and it has stood that
+ * long itself, with nobody else waiting on the button (btnres_consent_
+ * refused) and no other reservation standing; the press counts from a
+ * release read in force and is two readings down in a row
+ * (BTNRES_ASK_POLL_MS apart), asked again then, and a press somebody else
+ * takes is not the consent's. The action takes the press once
+ * (btnres_consent_take), for the same nonce, kind, subject and holder: a
+ * take that names anything else ends the consent. The reservation stands
+ * WIZPKG_LINGER_S after the press, whatever ends the consent then. A
+ * consent ends when nothing renews it (BTNRES_PANEL_TTL_S), BTNRES_CONSENT_S
+ * after its registration, when the button cannot be read, and with its
+ * dialog (btnres_consent_close); its nonce is not registered again. */
+typedef struct {
+    const char *nonce;      /* the dialog's own name, as btnres_name_ok takes "panel:<nonce>" */
+    const char *kind;       /* what the press is for: install, key, fuse, reset, firmware, factory */
+    const char *subject;    /* what exactly; "" for none */
+    const char *holder;     /* who asks: compared, never logged */
+    const char *peer;       /* the asker's address, for the log */
+} btnres_consent_t;
+
+enum { BTNRES_CONSENT_WAITING, BTNRES_CONSENT_READY, BTNRES_CONSENT_PRESSED };
+
+/* Register @c's consent or renew it: BTNRES_CONSENT_WAITING (not yet in
+ * force, with who else waits in @why when somebody does), _READY (the next
+ * press is its own), _PRESSED (that press, made). -1 with the refusal in
+ * @why: another holder's consent stands (both end, and @other gets that one's
+ * kind and peer for the log; "" when the refusal is another), this nonce's
+ * consent has ended (in the words it ended with), or it stands for another
+ * kind, subject or holder (it ends too). */
+int btnres_consent_open(const btnres_consent_t *c, char *why, size_t len, char *other, size_t olen);
+/* The dialog closed: its consent ends, and its reservation, but the
+ * linger after a press. */
+void btnres_consent_close(const char *nonce);
+/* The action takes @c's press, once. BTNRES_TAKEN; BTNRES_NOT_PRESSED (it
+ * stands, no press yet: the operator may still press); BTNRES_NOT_STANDING
+ * (no consent stands under this nonce: never one, or it ended, its words in
+ * @why); BTNRES_MISMATCH (it stands for another kind, subject or holder:
+ * it ends). */
+enum { BTNRES_TAKEN, BTNRES_NOT_PRESSED, BTNRES_NOT_STANDING, BTNRES_MISMATCH };
+int btnres_consent_take(const btnres_consent_t *c, char *why, size_t len);
+/* One reading of the button for the consent that stands, as
+ * btnres_ask_step (the reader thread steps both). */
+void btnres_consent_step(int button);
+/* Whether anybody else waits on the button when a consent would come in
+ * force or is pressed, with who in @why: main.c answers (a job that waits,
+ * runs or is paused; this daemon's own wait; the machine's lease). NULL:
+ * nobody. Asked under btnres.c's lock: it calls nothing of btnres. */
+extern int (*btnres_consent_refused)(char *why, size_t len);
 
 /* The clock reservations run on, in seconds: NULL is CLOCK_MONOTONIC (a
  * test sets its own). */

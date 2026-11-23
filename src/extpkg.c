@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <jansson.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,9 +125,88 @@ static int spawn(const char *prog, const char *const argv_in[], char **out, int 
     return WEXITSTATUS(status);
 }
 
+/* The host's two lists for the status document (extpkg.h), and the count
+ * of the other commands run through the host, moved on as each starts and
+ * as it ends: lists read across a change are not kept. */
+double (*extpkg_clock)(void) = mono;
+static pthread_mutex_t lists_mu = PTHREAD_MUTEX_INITIALIZER;
+static json_t *lists_kept;
+static double lists_at;
+static unsigned lists_gen, lists_kept_gen;
+
+static int lists_read_only(const char *const argv[])
+{
+    return argv[0] && (!strcmp(argv[0], "list") || !strcmp(argv[0], "keys"));
+}
+
+static void lists_drop(void)
+{
+    pthread_mutex_lock(&lists_mu);
+    lists_gen++;
+    pthread_mutex_unlock(&lists_mu);
+}
+
 int extpkg_cli(const char *const argv[], char **out)
 {
-    return spawn(bin(), argv, out, EXTPKG_TIMEOUT_S, 0);
+    int ro = lists_read_only(argv);
+    if (!ro)
+        lists_drop();
+    int rc = spawn(bin(), argv, out, EXTPKG_TIMEOUT_S, 0);
+    if (!ro)
+        lists_drop();
+    return rc;
+}
+
+/* The host's lists: a new object with "packages" when the list answered and
+ * "keys" when the keys did. Kept, both read, EXTPKG_STATUS_CACHE_S. */
+static json_t *host_lists(void)
+{
+    double now = extpkg_clock();
+    pthread_mutex_lock(&lists_mu);
+    if (lists_kept && lists_kept_gen == lists_gen && now >= lists_at && now - lists_at < EXTPKG_STATUS_CACHE_S) {
+        json_t *copy = json_deep_copy(lists_kept);
+        pthread_mutex_unlock(&lists_mu);
+        if (copy)
+            return copy;
+        pthread_mutex_lock(&lists_mu);
+    }
+    unsigned gen = lists_gen;
+    pthread_mutex_unlock(&lists_mu);
+
+    json_t *lists = json_object();
+    if (!lists)
+        return NULL;
+    char *text = NULL;
+    const char *argv[] = { "list", NULL };
+    json_t *listed = extpkg_cli(argv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    json_t *pkgs = json_object_get(listed, "packages");
+    if (json_is_array(pkgs))
+        json_object_set(lists, "packages", pkgs);
+    json_decref(listed);
+    text = NULL;
+    const char *kargv[] = { "keys", NULL };
+    json_t *klist = extpkg_cli(kargv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
+    free(text);
+    json_t *keys = json_object_get(klist, "keys");
+    if (json_is_array(keys))
+        json_object_set(lists, "keys", keys);
+    json_decref(klist);
+
+    if (json_is_array(pkgs) && json_is_array(keys)) {
+        json_t *keep = json_deep_copy(lists);
+        pthread_mutex_lock(&lists_mu);
+        if (keep && lists_gen == gen) {
+            json_decref(lists_kept);
+            lists_kept = keep;
+            keep = NULL;
+            lists_at = now;
+            lists_kept_gen = gen;
+        }
+        pthread_mutex_unlock(&lists_mu);
+        json_decref(keep);
+    }
+    return lists;
 }
 
 static int host_running(json_int_t pid)
@@ -161,28 +241,20 @@ char *extpkg_status_json(int ext_enabled)
     json_object_set_new(host, "running", json_boolean(running));
     json_object_set_new(top, "host", host);
 
-    char *text = NULL;
-    const char *argv[] = { "list", NULL };
-    json_t *listed = extpkg_cli(argv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
-    free(text);
-    json_t *pkgs = json_object_get(listed, "packages");
+    json_t *lists = host_lists();
+    json_t *pkgs = json_object_get(lists, "packages");
     if (json_is_array(pkgs)) {
         json_object_set(top, "packages", pkgs);
     } else {
         json_object_set_new(top, "packages", json_array());
         json_object_set_new(top, "error", json_string("the extension host's command line does not answer"));
     }
-    json_decref(listed);
-    text = NULL;
-    const char *kargv[] = { "keys", NULL };
-    json_t *klist = extpkg_cli(kargv, &text) == 0 && text ? json_loads(text, 0, NULL) : NULL;
-    free(text);
-    json_t *keys = json_object_get(klist, "keys");
+    json_t *keys = json_object_get(lists, "keys");
     if (json_is_array(keys))
         json_object_set(top, "keys", keys);
     else
         json_object_set_new(top, "keys", json_array());
-    json_decref(klist);
+    json_decref(lists);
     char *doc = json_dumps(top, JSON_COMPACT);
     json_decref(top);
     return doc;
@@ -545,13 +617,17 @@ static int grant_ok(const char *g, size_t n)
 
 void (*extpkg_installed)(const char *id) = NULL;
 
-int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen)
+int extpkg_install(const char *grants, const char *phrase, const char *digest, int pressed, char *what, size_t whlen,
+                   int *status, char *why, size_t wlen)
 {
     char held[EXTPKG_GRANTS_MAX][44];   /* this install's own: never another's grants */
-    const char *argv[8 + 2 * EXTPKG_GRANTS_MAX];
+    const char *argv[10 + 2 * EXTPKG_GRANTS_MAX];
     int n = 0, ng = 0;
 
-    /* The grants, in the form of capability names, before anything runs. */
+    if (what && whlen)
+        what[0] = '\0';
+    /* The grants, in the form of capability names, and the digest of the
+     * archive the operator was shown, before anything runs. */
     *status = 400;
     for (const char *p = grants; p && *p;) {
         size_t len = strcspn(p, ",");
@@ -562,15 +638,30 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
         snprintf(held[ng++], sizeof(held[0]), "%.*s", (int)len, p);
         p += len + (p[len] == ',');
     }
+    if (!digest || strlen(digest) != 64 || strspn(digest, "0123456789abcdef") != 64) {
+        snprintf(why, wlen, "digest is the one the upload answered with (64 hex digits): a client that sends none is older than this firmware (update tools/ffx)");
+        return -1;
+    }
 
-    /* What the staged file is, from the host and not from the request. */
+    /* What the staged file is, from the host and not from the request: the
+     * archive that was shown, or another one staged since. */
     json_t *j = inspect(status, why, wlen);
     if (!j)
         return -1;
-    char pid[80] = "";
+    const char *shown = json_string_value(json_object_get(j, "digest"));
+    if (!shown || strcmp(shown, digest) != 0) {
+        json_decref(j);
+        *status = 409;
+        snprintf(why, wlen, "the staged package is not the one that was shown: upload it again");
+        return -1;
+    }
+    char pid[80] = "", pver[40] = "";
     const char *inspected_id = json_string_value(json_object_get(json_object_get(j, "package"), "id"));
+    const char *inspected_ver = json_string_value(json_object_get(json_object_get(j, "package"), "version"));
     if (inspected_id)
         snprintf(pid, sizeof(pid), "%s", inspected_id);
+    if (inspected_ver)
+        snprintf(pver, sizeof(pver), "%s", inspected_ver);
     const char *consent = consent_of(j);
     const char *flag = NULL;
     if (!strcmp(consent, "typed")) {
@@ -585,10 +676,11 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
         }
         flag = "--consent-community";
     } else if (!strcmp(consent, "button")) {
-        if (!button_held) {
+        if (!pressed) {
             json_decref(j);
             *status = 409;
-            snprintf(why, wlen, "nobody the machine trusts signed this package: hold the machine's button while you install it");
+            snprintf(why, wlen, "nobody the machine trusts signed this package: press the machine's button for it when "
+                                "the control panel asks");
             return -1;
         }
         flag = "--consent-unverified";
@@ -603,6 +695,8 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     }
     if (flag)
         argv[n++] = flag;
+    argv[n++] = "--digest";
+    argv[n++] = digest;
     argv[n] = NULL;
     char *text = NULL;
     int rc = extpkg_cli(argv, &text);
@@ -625,6 +719,8 @@ int extpkg_install(const char *grants, const char *phrase, int button_held, int 
     extpkg_stage_discard();
     if (extpkg_installed && pid[0])
         extpkg_installed(pid);
+    if (what && whlen)
+        snprintf(what, whlen, "%s %s", pid[0] ? pid : "?", pver[0] ? pver : "?");
     *status = 200;
     return 0;
 }
@@ -685,9 +781,12 @@ static int key_name_ok(const char *name)
     return strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") == n;
 }
 
-int extpkg_key_add(const char *name, const char *key, size_t klen, int button_held, int *status, char *why, size_t wlen)
+int extpkg_key_add(const char *name, const char *key, size_t klen, int pressed, char *kid, size_t kidlen, int *status,
+                   char *why, size_t wlen)
 {
     *status = 400;
+    if (kid && kidlen)
+        kid[0] = '\0';
     if (!key_name_ok(name)) {
         snprintf(why, wlen, "a key's name is letters, digits, dash, underscore, and dot, at most 48 bytes");
         return -1;
@@ -696,14 +795,24 @@ int extpkg_key_add(const char *name, const char *key, size_t klen, int button_he
         snprintf(why, wlen, "key is the public key fwup wrote, at most %d bytes", EXTPKG_KEY_MAX);
         return -1;
     }
-    if (!button_held) {
+    if (!pressed) {
         *status = 409;
-        snprintf(why, wlen, "a key you add is what this machine will trust: hold the machine's button while you add it");
+        snprintf(why, wlen, "a key you add is what this machine will trust: press the machine's button for it when the "
+                            "control panel asks");
         return -1;
     }
     const char *argv[] = { "key-add", name, NULL };
     char *text = NULL;
     int rc = key_cli(argv, key, klen, &text);       /* filled before it is read: C orders neither */
+    /* The key's id as the host lists it, for the log. */
+    json_t *j = text ? json_loads(text, 0, NULL) : NULL, *e;
+    size_t i;
+    json_array_foreach(json_object_get(j, "keys"), i, e) {
+        const char *n = json_string_value(json_object_get(e, "name")), *k = json_string_value(json_object_get(e, "key"));
+        if (n && k && kid && kidlen && !strcmp(n, name))
+            snprintf(kid, kidlen, "%s", k);
+    }
+    json_decref(j);
     return key_answer(rc, text, status, why, wlen);
 }
 

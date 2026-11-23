@@ -66,12 +66,12 @@
 #     readable, SENSOR cleared at idle is a notice and the Acknowledge is
 #     taken; a dismissal up to an earlier seq leaves the notice, one with
 #     no upto takes it
-#   the button held as proof of an operator (the switch device a file,
+#   the button pressed as proof of an operator (the switch device a file,
 #     its ioctl a preloaded stand-in; GF_SLOT_LIST the slot inventory,
 #     GF_REBOOT_FILE the reboot): a login that cannot make a session (the
 #     stand-in refuses /dev/urandom while a flag file stands) is a JSON
 #     500; the reset of every setting, an unsigned
-#     install and the fuse view each refuse 403 with the button up; under
+#     install and the fuse view each refuse 403 with no press; under
 #     an armed job the reset, the unsigned install, /ext/key, /ext/install,
 #     the fuse view and the Setup page's press each answer 409 before the
 #     button is asked for, and so do the fuse view beside a paused or a
@@ -80,20 +80,28 @@
 #     refused press reserving the button), the fuse view beside a state
 #     file past its age, and the reset
 #     with the next boot on the other slot; with the
-#     button held the reset is still refused under the lease, on a machine
-#     that is not idle, and outside the panel's reservation of the button,
-#     as the fuse view, the unsigned install, /ext/key and /ext/install are
-#     (409), and inside one not yet on file or not yet on file for its
-#     second, but a package's install, which goes on without the consent
-#     (a staged package nobody signed: refused in its own words, nothing
-#     installed); a reservation with no name of its own is 400, one that
-#     names a package 409; renewed until ready (POST /button/reserve) the
-#     install is taken with the consent, and it
-#     says not ready, naming the job, while a job waits for the press, and
-#     the reset is refused with a request that cannot be written or a
-#     reboot that cannot be scheduled, leaving no request; then it is
-#     taken, its request written and the reboot scheduled, and on=0 ends
-#     the reservation; the Setup page's press with no job reserves the
+#     button held the reset and an owner's key are still refused under the
+#     lease and on a machine that is not idle, and an owner's key on a
+#     consent pressed for it is refused by both too; the button held with no
+#     consent named (the panel's consent, POST /button/reserve) is no
+#     consent for the reset, the fuse view, the unsigned install, /ext/key
+#     or /ext/install (a staged package nobody signed: refused in its own
+#     words, nothing installed); a consent in force with the button down
+#     from before has no press; the press made for the reset is refused
+#     to the fuse view and ends that consent; the unsigned install takes
+#     its press through a consent of its own (403 before the press); a
+#     second address's consent beside one refuses both; another address's
+#     upload while an install's consent stands, and the press made for the
+#     archive shown installs nothing, then that archive staged again
+#     installs on a press of its own, the host held to its digest; an
+#     ordinary event stream shows no press made for a consent, and shows
+#     one once none stands; a consent with no name of its own or no kind is
+#     400, one that names a package 409; a consent says not ready, naming
+#     the job, while a job waits for the press, and the reset on its press
+#     is refused with a request that cannot be written or a reboot that
+#     cannot be scheduled, leaving no request; then it is taken, its
+#     request written and the reboot scheduled, and the reservation ends
+#     with the press's linger; the Setup page's press with no job reserves the
 #     button (the verdict's button_reserved), its poll says not ready at
 #     the first verdict that carries it and ready about a second after,
 #     not ready while an armed session is reported, a press made once a
@@ -107,8 +115,10 @@
 #     the extension host's call alone (403), refused while a job waits for
 #     its press or is inside its armed window (409, in the routes' words),
 #     else reserved (the verdict's button_reserved, fire blocked), ready
-#     once on file, another package's ask refused by name meanwhile, the
-#     press said once to the asker; a press that somebody else takes (a
+#     once on file, another package's ask refused by name meanwhile; the
+#     Setup page's wait ending it and refusing the next, and not ready
+#     while the ended ask's reservation lingers, a press then not the
+#     Setup's; the press said once to the asker; a press that somebody else takes (a
 #     GRBL job running, an armed session, a stale GRBL state file, the
 #     Switches check) not said, the ask ended with them named; a package
 #     turned off or removed refused whatever its service calls, until it
@@ -202,7 +212,7 @@ launch_daemon() {
         FORGECTRL_LICENSES="$T/licenses.tar.gz" GF_DEV_MARKER="${DEV_MARKER:-}" \
         GF_DATA_STATE="${DATA_STATE:-}" GF_SLOT_LIST="${SLOT_LIST:-}" GF_REBOOT_FILE="${REBOOT_FILE:-}" \
         LD_PRELOAD="${PRELOAD:-}" SWSHIM_NO_URANDOM="$T/no-urandom" \
-        GF_PRESS_RES_S="${PRESS_RES_S:-}" GF_LED_ROOT="$T/leds" \
+        GF_PRESS_RES_S="${PRESS_RES_S:-}" GF_LED_ROOT="$T/leds" GF_CONSENT_LINGER_S=1 \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
     PID=$!
@@ -1072,17 +1082,17 @@ code=$(login $NAME $PW)
 rm -f "$T/no-urandom"
 expect "500|True" "$code|$(jv 'bool(d.get("error"))')" "a login that cannot make a session: 500, with a JSON error"
 
-# The button up, no job: each route's own refusal for the button.
+# No job, no consent named: each route's own refusal for the button.
 expect 400 "$(post /system/reset "$TOKEN")" "POST /system/reset without confirm=1 is 400"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
-if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not held" ]; then
-    ok "confirm=1 without the machine button held: 403, the button named (the panel's dialog stays open on it)"
-else bad "confirm=1 without the button -> $code $(cat "$T/body")"; fi
-code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1)
-if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not held" ]; then
-    ok "an unsigned install without the button held: 403, the button named"
-else bad "confirm_unsigned=1 without the button -> $code $(cat "$T/body")"; fi
-expect 403 "$(getfuse)" "GET /fuse-identity without the button held is 403"
+if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not pressed" ]; then
+    ok "confirm=1 with no press for it: 403, the button named (the panel's dialog stays open on it)"
+else bad "confirm=1 with no press -> $code $(cat "$T/body")"; fi
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1 -d sha256=abababababababababababababababababababababababababababababababab)
+if [ "$code" = 403 ] && [ "$(jv 'd.get("button")')" = "not pressed" ]; then
+    ok "an unsigned install with no press for it: 403, the button named"
+else bad "confirm_unsigned=1 with no press -> $code $(cat "$T/body")"; fi
+expect 403 "$(getfuse)" "GET /fuse-identity with no press for it is 403"
 
 # A job armed, the button still up: 409 from each, before the button is
 # asked for, in the words the routes share.
@@ -1138,131 +1148,239 @@ cp "$T/slots.other" "$T/slots.list"
 expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset with the next boot on the other slot is 409"
 cp "$T/slots.same" "$T/slots.list"
 
-# The button held, and each refusal still comes first: the machine's
-# lease (an extension keeping the sender out holds it), a machine that is
-# not idle, a request that cannot be written (its name a link to
-# /dev/full), a reboot that cannot be scheduled (the stand-in's file a
-# directory). None leaves a request or a reboot.
+# The button held, and each refusal that is not the button's still comes
+# first: the machine's lease (an extension keeping the sender out holds
+# it) and a machine that is not idle, for the reset and for an owner's key
+# alike. None leaves a request or a reboot.
 echo 12 > "$T/switches"
 none_left() { [ ! -e "$T/data/reset-requested" ] && [ ! -L "$T/data/reset-requested" ] && [ ! -s "$T/reboot" ]; }
 CRED=$(cat "$CRED_FILE")
 expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "$PKG keeps the sender out: it holds the machine"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "409|True" "$code|$(jv '"'$PKG'" in d.get("error", "")')" "the reset under the lease, the button held: 409, the holder named"
+case "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(cat "$T/body")" in
+    "409|"*"$PKG"*) ok "an owner's key under the lease: 409, the holder named" ;;
+    *) bad "an owner's key under the lease: $(cat "$T/body")" ;; esac
 expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
 echo running > "$SYS/cnc/state"
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "409|machine is not idle" "$code|$(jv 'd.get("error")')" "the reset on a machine that is not idle, the button held: 409"
+expect "409|the machine is not idle" "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(cat "$T/body")" \
+    "an owner's key on a machine that is not idle: 409"
 echo idle > "$SYS/cnc/state"
 none_left && ok "neither left a request or a reboot" || bad "a refused reset left data/reset-requested or a reboot"
-# The button held, but not inside the control panel's own reservation of
-# it: a press the dialog did not ask for once the reservation stood is no
-# proof of presence. Each route that reads the button refuses it, the
-# reset with nothing left.
+# The panel's consent (btnres.h): the button down when a request arrives
+# is no consent. With no consent named each route refuses in its own
+# words, and a package nobody the machine trusts signed (the host's
+# stand-in says so) is not installed.
 gstate Idle
-NR='the button was not reserved for this: start it again from the control panel'
-expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset with the button held and the button not reserved: 409"
-none_left && ok "and it left no request or reboot" || bad "an unreserved reset left data/reset-requested or a reboot"
-expect "409|$NR" "$(getfuse)|$(cat "$T/body")" "the fuse view with the button held outside the reservation: 409"
-code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1)
-expect "409|$NR" "$code|$(jv 'd.get("error")')" "an unsigned install with the button held outside the reservation: 409"
-expect "409|$NR" "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)|$(cat "$T/body")" \
-    "POST /ext/key with the button held outside the reservation: 409"
-# A package's install takes the button held inside the reservation as its
-# consent, and goes on without it otherwise: a package nobody the machine
-# trusts signed (the host's stand-in says so) is refused in its own words,
-# and nothing is installed.
 cat > "$T/bin/forgeext" <<'EOF'
 #!/bin/sh
 echo "$*" >> "${0%/bin/forgeext}/forgeext.ran"
 tier=$(cat "${0%/bin/forgeext}/ext.tier" 2>/dev/null || echo unverified)
-case $1 in inspect) echo "{\"ok\": true, \"tier\": \"$tier\", \"package\": {\"id\": \"org.example.hostroutes\"}}" ;;
+case $1 in inspect) echo "{\"ok\": true, \"tier\": \"$tier\", \"digest\": \"$(sha256sum "$2" | cut -c1-64)\", \"package\": {\"id\": \"org.example.hostroutes\"}}" ;;
     *) [ ! -e "${0%/bin/forgeext}/ext.slow" ] || sleep 3
        [ ! -e "${0%/bin/forgeext}/ext.silent" ] || exit 0
        if [ -e "${0%/bin/forgeext}/ext.refuse" ]; then echo '{"ok": false, "error": "the stand-in refuses"}'; exit 1; fi
        echo '{"ok": true}' ;; esac
 EOF
 chmod +x "$T/bin/forgeext"
-: > "$T/ext.staged"
-NC="nobody the machine trusts signed this package: hold the machine's button while you install it"
-expect "409|$NC" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" \
-    "POST /ext/install with the button held outside the reservation: no consent, the package's own refusal"
-grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "a hold outside the reservation installed the package: $(cat "$T/forgeext.ran")" \
+printf 'archive X' > "$T/ext.staged"
+DX=$(sha256sum "$T/ext.staged" | cut -c1-64)
+NC="nobody the machine trusts signed this package: press the machine's button for it when the control panel asks"
+expect "403|not pressed" "$(post /system/reset "$TOKEN" -d confirm=1)|$(jv 'd.get("button")')" \
+    "the reset with the button held and no consent named: 403"
+expect 403 "$(getfuse)" "the fuse view with the button held and no consent named: 403"
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1 -d sha256=abababababababababababababababababababababababababababababababab)
+expect "403|not pressed" "$code|$(jv 'd.get("button")')" "an unsigned install with the button held and no consent named: 403"
+expect 409 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=none)" "an owner's key with the button held and no consent named: 409"
+expect "409|$NC" "$(post /ext/install "$TOKEN" -d digest=$DX)|$(cat "$T/body")" \
+    "an unverified install with the button held and no consent named: the package's own refusal"
+grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "a hold with no consent installed the package: $(cat "$T/forgeext.ran")" \
     || ok "and nothing was installed"
 # The published verdict's button_reserved.
 vreserved() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("button_reserved"))' \
                   "$T/run/cooling.state" 2>&1; }
-# In the verdict, but not yet for the second both controllers need to have
-# read it: still no proof. Caught inside that second (the reservation's own
-# answer says it is not ready yet), the fuse view refuses, and the install
-# takes the hold as no consent; a try that misses the second starts the
-# reservation again, three tries at most.
-early_fuse() {
-    for _ in 1 2 3; do
-        post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
-        until_ok 25 eval '[ "$(vreserved)" = False ]' || return 1
-        post '/button/reserve?on=1&id=d0' "$TOKEN" > /dev/null
-        until_ok 25 eval '[ "$(vreserved)" = True ]' || return 1
-        code=$(getfuse)
-        fbody=$(cat "$T/body")
-        icode=$(post /ext/install "$TOKEN")
-        ibody=$(cat "$T/body")
-        [ "$(post '/button/reserve?on=1&id=d0' "$TOKEN")|$(jv 'd.get("ready")')" = "200|False" ] || continue
-        post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
-        [ "$code|$fbody" = "409|$NR" ]
-        return
-    done
-    post '/button/reserve?on=0&id=d0' "$TOKEN" > /dev/null
-    return 1
+# consent <id> <kind> [curl args]: a dialog's consent registered or
+# renewed, as the panel's hold dialog sends it; cstate: its state after
+# that ("refused" for a refusal); cwait <state> <tries> <id> <kind>
+# [args]: renewed every 0.2 s until it reads <state>; pressed_for <id>
+# <kind> [args]: in force with the button up, a release read, then a press
+# of 0.25 s, renewed until the daemon has read it.
+consent() { c=$1; k=$2; shift 2; post "/button/reserve?on=1&id=$c&for=$k" "$TOKEN" "$@"; }
+cstate() {
+    [ "$(consent "$@")" = 200 ] || { echo refused; return; }
+    jv '"pressed" if d.get("pressed") else "ready" if d.get("ready") else "waiting" if d.get("reserved") else "refused"'
 }
-early_fuse && ok "the fuse view inside the reservation's first second in the verdict: 409" \
-    || bad "the fuse view was taken inside the reservation's first second, or that second was never caught"
-expect "409|$NC" "$icode|$ibody" "POST /ext/install inside the reservation's first second: no consent yet, the package's own refusal"
-grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "a hold inside the reservation's first second installed the package" \
+# The GRBL controller's state file kept current while it waits (a live
+# controller rewrites it at least every 5 s).
+cwait() {
+    w=$1; n=$2; shift 2
+    while gstate Idle; [ "$(cstate "$@")" != "$w" ]; do n=$((n - 1)); [ $n -gt 0 ] || return 1; sleep 0.2; done
+}
+pressed_for() {
+    echo 8 > "$T/switches"
+    cwait ready 60 "$@" || return 1
+    sleep 0.2
+    echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+    cwait pressed 25 "$@"
+}
+# An ordinary event stream, open across every consent below: no press made
+# for one is on it (events.h, button_wait).
+curl -s -N -m 120 --interface 127.0.0.7 -o "$T/ev.consent" "$URL/events" &
+CEV=$!
+EVS="$EVS $CEV"
+until_ok 25 grep -qs '^event: hello' "$T/ev.consent" || bad "the event stream did not open: $(head -c 200 "$T/ev.consent")"
+# A consent in force while the button is already down has no press: a
+# press counts from a release read in force.
+cwait ready 60 d0 reset || bad "the reset's consent did not come ready: $(cat "$T/body")"
+sleep 0.3
+expect "ready|403|not pressed" "$(cstate d0 reset)|$(post /system/reset "$TOKEN" -d confirm=1 -d consent=d0)|$(jv 'd.get("button")')" \
+    "a consent in force with the button held from before: no press, the reset 403"
+none_left && ok "and it left no request or reboot" || bad "a reset with no press left data/reset-requested or a reboot"
+# The press made for the reset is the reset's: the fuse view naming its
+# consent is refused, and the consent ends with that refusal.
+pressed_for d0 reset || bad "the press for the reset's consent was not read: $(cat "$T/body")"
+expect 409 "$(curl -s -o "$T/body" -w '%{http_code}' -H "X-ForgeFIRM-Token: $TOKEN" "$URL/fuse-identity?consent=d0")" \
+    "the press made for the reset, taken by the fuse view: 409"
+expect 409 "$(post /system/reset "$TOKEN" -d confirm=1 -d consent=d0)" "and the reset's consent ended with it: 409"
+none_left && ok "and it left no request or reboot" || bad "an ended consent's reset left data/reset-requested or a reboot"
+# Unsigned firmware takes its press through the same consent: one in
+# force with no press yet is refused as not pressed.
+consent fw firmware -d file=upload -d slot=a -d sha256=abababababababababababababababababababababababababababababababab -d confirm_unsigned=1 > /dev/null
+code=$(post /update/apply "$TOKEN" -d slot=a -d file=upload -d confirm_unsigned=1 -d sha256=abababababababababababababababababababababababababababababababab -d consent=fw)
+expect "403|not pressed" "$code|$(jv 'd.get("button")')" "an unsigned install naming its consent before a press: 403"
+post '/button/reserve?on=0&id=fw' "$TOKEN" > /dev/null
+# The install and the owner's key take the press too: each naming its
+# consent before a press is 403, and nothing reaches the host. The key's
+# consent is bound to the key as well as its name: the consent for key A,
+# named for key B, is refused and ends (the take compares the subject
+# before it asks for the press, so no press is needed to show it).
+consent n1 install -d digest=$DX > /dev/null
+expect 403 "$(post /ext/install "$TOKEN" -d digest=$DX -d consent=n1)" "an unverified install naming its consent before a press: 403"
+post '/button/reserve?on=0&id=n1' "$TOKEN" > /dev/null
+consent n2 key -d name=hostroutes -d key=keyA > /dev/null
+expect 403 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=keyA -d consent=n2)" "an owner's key naming its consent before a press: 403"
+post '/button/reserve?on=0&id=n2' "$TOKEN" > /dev/null
+grep -qE '^(install|key)' "$T/forgeext.ran" 2>/dev/null && bad "a consent with no press reached the host: $(cat "$T/forgeext.ran")" \
+    || ok "and neither reached the host"
+consent n3 key -d name=hostroutes -d key=keyA > /dev/null
+expect 409 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=keyB -d consent=n3)" "the consent for key A, named for key B: 409"
+expect 409 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=keyA -d consent=n3)" "and that consent ended with the refusal: 409"
+grep -qE '^key' "$T/forgeext.ran" 2>/dev/null && bad "a key reached the host: $(cat "$T/forgeext.ran")" || ok "and no key reached the host"
+# The key's lease and idle gates hold on a press made for it: a consent
+# pressed for key K on an idle machine, named under another holder's lease
+# or on a machine that is not idle, is refused, and no key reaches the host.
+pressed_for kx key -d name=hostroutes -d key=keyK || bad "the press for key K was not read: $(cat "$T/body")"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "$PKG keeps the sender out: it holds the machine"
+expect 409 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=keyK -d consent=kx)" "a key pressed for, named under another holder's lease: 409"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the sender back in"
+echo running > "$SYS/cnc/state"
+expect 409 "$(post /ext/key "$TOKEN" -d name=hostroutes -d key=keyK -d consent=kx)" "a key pressed for, named on a machine that is not idle: 409"
+echo idle > "$SYS/cnc/state"
+grep -qE '^key' "$T/forgeext.ran" 2>/dev/null && bad "a key reached the host past its gates: $(cat "$T/forgeext.ran")" || ok "and no key reached the host"
+post '/button/reserve?on=0&id=kx' "$TOKEN" > /dev/null
+# The install's consent is bound to the archive shown: the consent for X,
+# named with Y's digest while Y is staged, installs nothing.
+DY=$(printf 'archive Y' | sha256sum | cut -c1-64)
+consent n4 install -d digest=$DX > /dev/null
+printf 'archive Y' > "$T/ext.staged"
+expect 409 "$(post /ext/install "$TOKEN" -d digest=$DY -d consent=n4)" "the consent for X, named with Y's digest (Y staged): 409"
+grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "the press made for X installed Y: $(cat "$T/forgeext.ran")" \
+    || ok "and Y was not installed"
+printf 'archive X' > "$T/ext.staged"
+# Two consents at once from two holders (here two addresses): one press
+# would be one of two parties'. The second refuses both.
+expect waiting "$(cstate s1 fuse)" "a consent from one address: registered, not yet in force"
+expect 409 "$(post '/button/reserve?on=1&id=s2&for=fuse' "$TOKEN" --interface 127.0.0.2)" \
+    "another address's consent beside it: 409"
+expect refused "$(cstate s1 fuse)" "and the first is refused too"
+# Two sessions of one account at one address are two holders as well.
+expect 200 "$(login $NAME $PW)" "a first login"
+SA=$(tr -d '\r' < "$T/head" | sed -n 's/^[Ss]et-[Cc]ookie: ffsid=\([0-9a-f]*\).*/\1/p' | head -1)
+expect 200 "$(login $NAME $PW)" "a second login from the same address"
+SB=$(tr -d '\r' < "$T/head" | sed -n 's/^[Ss]et-[Cc]ookie: ffsid=\([0-9a-f]*\).*/\1/p' | head -1)
+[ -n "$SA" ] && [ -n "$SB" ] && [ "$SA" != "$SB" ] && ok "two sessions" || bad "no two session cookies: $SA $SB"
+expect waiting "$(cstate b1 fuse -H "Cookie: ffsid=$SA")" "the first session's consent: registered, not yet in force"
+expect 409 "$(post '/button/reserve?on=1&id=b2&for=fuse' "$TOKEN" -H "Cookie: ffsid=$SB")" \
+    "the second session's beside it, from the same address: 409"
+expect refused "$(cstate b1 fuse -H "Cookie: ffsid=$SA")" "and the first session's is refused too"
+# Two sessions, one staging file (extpkg.h): the consent registered for
+# the archive this address was shown (X), another address uploads Y while
+# it stands, and the press made for X installs nothing.
+pressed_for i1 install -d digest=$DX || bad "the press for the install's consent was not read: $(cat "$T/body")"
+printf 'archive Y' > "$T/y.ffx"
+expect 200 "$(post /ext/upload "$TOKEN" --interface 127.0.0.2 -F "file=@$T/y.ffx;filename=package.ffx")" \
+    "another address uploads Y while the consent for X stands"
+expect 409 "$(post /ext/install "$TOKEN" -d digest=$DX -d consent=i1)" "the install on the press made for X: 409, Y is not the archive shown"
+grep -q '^install ' "$T/forgeext.ran" 2>/dev/null && bad "the press made for X installed Y: $(cat "$T/forgeext.ran")" \
     || ok "and nothing was installed"
+expect 409 "$(post /ext/install "$TOKEN" -d digest=$DX -d consent=i1)" "and the press was taken once"
+# X staged again: the press made for it installs it, the host held to its digest.
+printf 'archive X' > "$T/ext.staged"
+pressed_for i2 install -d digest=$DX || bad "the second press for the install was not read: $(cat "$T/body")"
+post /ext/install "$TOKEN" -d digest=$DX -d consent=i2 > /dev/null
+grep -q "^install .* --consent-unverified --digest $DX\$" "$T/forgeext.ran" \
+    && ok "the install on the press made for X: installed with the consent, the host held to X's digest" \
+    || bad "the install on the press made for X: $(cat "$T/body") [$(cat "$T/forgeext.ran")]"
+grep -qs '^event: button' "$T/ev.consent" && bad "a press made for a consent is on an ordinary event stream" \
+    || ok "no press made for a consent is on an ordinary event stream"
 # A package's page reserves nothing: the route names no package.
-expect 409 "$(post "/button/reserve?on=1&pkg=$PKG&id=p0" "$TOKEN")" "a reservation that names a package: 409"
-# The dialog's reservation, under its own name. Not on file yet, it is no
-# proof either; renewed until it is ready (on file in the verdict long
-# enough for both controllers to have read it, no job waiting), it is.
-expect "200|True" "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("reserved")')" "the dialog reserves the button"
-expect 409 "$(post /system/reset "$TOKEN" -d confirm=1)" "the reset before the reservation is on file: 409"
-none_left && ok "and it left no request or reboot" || bad "an early reset left data/reset-requested or a reboot"
-reserved_ready() {
-    [ "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("reserved"), d.get("ready")')" = "200|(True, True)" ]
-}
-until_ok 50 reserved_ready && ok "POST /button/reserve?on=1: reserved, and ready once on file" \
-    || bad "the reservation did not come ready: $(cat "$T/body")"
-post /ext/install "$TOKEN" > /dev/null
-grep -q '^install .* --consent-unverified$' "$T/forgeext.ran" \
-    && ok "POST /ext/install with the button held inside the reservation: installed with the consent" \
-    || bad "the install inside the reservation: $(cat "$T/body") [$(cat "$T/forgeext.ran")]"
+expect 409 "$(post "/button/reserve?on=1&pkg=$PKG&id=p0&for=fuse" "$TOKEN")" "a reservation that names a package: 409"
 # A job that waits for its press takes the dialog's readiness away, and is named.
 gstate Idle arming
-expect "200|False|$WAITS" "$(post '/button/reserve?on=1&id=d1' "$TOKEN")|$(jv 'd.get("ready")')|$(jv 'd.get("waits")')" \
+expect "200|False|$WAITS" "$(consent j1 reset)|$(jv 'd.get("ready")')|$(jv 'd.get("waits")')" \
     "a job waiting for the press: not ready, the job named"
+for _ in 1 2 3 4 5 6 7; do gstate Idle arming; consent j1 reset > /dev/null; sleep 0.2; done
+echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+sleep 0.2
+gstate Idle arming
+expect "200|False" "$(consent j1 reset)|$(jv 'str(d.get("pressed"))')" "and a press while the job waits is not the consent's"
 gstate Idle
-expect 400 "$(post '/button/reserve?on=1' "$TOKEN")" "a reservation with no name of its own: 400"
+post '/button/reserve?on=0&id=j1' "$TOKEN" > /dev/null
+# The machine's lease in anybody's hands keeps a consent out of force (a
+# press under it is its holder's to judge); let go, the consent comes in
+# force.
+expect 200 "$(host /motion/sender -d id=$PKG -d out=1)" "$PKG holds the machine"
+consent l1 fuse > /dev/null
+for _ in 1 2 3 4 5 6 7 8; do gstate Idle; consent l1 fuse > /dev/null; sleep 0.2; done
+expect waiting "$(cstate l1 fuse)" "a consent under the lease: not in force"
+expect 200 "$(host /motion/sender -d id=$PKG -d out=0)" "$PKG lets the machine go"
+cwait ready 60 l1 fuse && ok "the lease let go: the consent in force" || bad "the consent did not come in force: $(cat "$T/body")"
+post '/button/reserve?on=0&id=l1' "$TOKEN" > /dev/null
+expect 400 "$(post '/button/reserve?on=1&for=reset' "$TOKEN")" "a reservation with no name of its own: 400"
+expect 400 "$(post '/button/reserve?on=1&id=k0' "$TOKEN")" "a reservation that says nothing of what it is for: 400"
 ln -s /dev/full "$T/data/reset-requested"
-code=$(post /system/reset "$TOKEN" -d confirm=1)
+pressed_for r1 reset || bad "the press for the reset was not read: $(cat "$T/body")"
+code=$(post /system/reset "$TOKEN" -d confirm=1 -d consent=r1)
 expect "500|cannot write the reset request" "$code|$(jv 'd.get("error")')" "a reset request that cannot be written: 500"
 none_left && ok "and no request is left, nor a reboot" || bad "the unwritten request left data/reset-requested or a reboot"
 mkdir "$T/reboot"
-code=$(post /system/reset "$TOKEN" -d confirm=1)
+pressed_for r2 reset || bad "the press for the reset was not read: $(cat "$T/body")"
+code=$(post /system/reset "$TOKEN" -d confirm=1 -d consent=r2)
 expect "500|cannot schedule reboot" "$code|$(jv 'd.get("error")')" "a reset whose reboot cannot be scheduled: 500"
 [ ! -e "$T/data/reset-requested" ] && ok "and the request is withdrawn" || bad "a reset with no reboot left data/reset-requested"
 rmdir "$T/reboot"
 
-# The button held: the reset is taken, its request written, the reboot scheduled.
-post '/button/reserve?on=1&id=d1' "$TOKEN" > /dev/null
-code=$(post /system/reset "$TOKEN" -d confirm=1)
-expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "with the button held the reset is taken"
+# The press made for the reset: the reset is taken, its request written,
+# the reboot scheduled.
+pressed_for r3 reset || bad "the press for the reset was not read: $(cat "$T/body")"
+code=$(post /system/reset "$TOKEN" -d confirm=1 -d consent=r3)
+expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "on the press made for it the reset is taken"
 [ -s "$T/data/reset-requested" ] && ok "the reset request is in the data directory" || bad "no data/reset-requested"
 expect "reboot in 5 s" "$(cat "$T/reboot" 2>/dev/null)" \
-    "and the reboot is scheduled 5 s on, for the button to be let go (written to the stand-in's file)"
-expect "200|False" "$(post '/button/reserve?on=0&id=d1' "$TOKEN")|$(jv 'd.get("reserved")')" "on=0 ends the reservation"
-until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "with the dialog's reservation ended the verdict carries none" \
+    "and the reboot is scheduled 5 s on, for a press still held to be let go (written to the stand-in's file)"
+post '/button/reserve?on=0&id=r3' "$TOKEN" > /dev/null
+until_ok 50 eval 'gstate Idle; [ "$(vreserved)" = False ]' && ok "with the press's linger over the verdict carries no reservation" \
     || bad "the verdict still carries a reservation: $(vreserved)"
+# With no consent standing (the event stream's next full snapshot, 1 /
+# EVENTS_HZ later), a press is on the same stream again.
+gstate Idle
+sleep 0.4
+echo 12 > "$T/switches"; sleep 0.3; echo 8 > "$T/switches"
+until_ok 25 grep -qs '^event: button' "$T/ev.consent" && ok "a press with no consent standing is on that stream" \
+    || bad "the stream shows no press with no consent standing: $(tail -c 300 "$T/ev.consent")"
+kill $CEV 2>/dev/null
 # A package's ask for a press (POST /button/ask), the one way a package
 # gets one: the extension host's call, refused while a job waits on the
 # button, a reservation against every job from then on, and the press said
@@ -1377,6 +1495,26 @@ within() { python3 -c 'import sys, time; sys.exit(time.monotonic() * 1000 > int(
 gone=late
 while within 1500; do [ "$(vreserved)" = False ] && { gone=yes; break; }; sleep 0.1; done
 expect yes "$gone" "and the button is no longer reserved within 1.5 s of the cancel"
+# A panel consent standing: the Setup page's ask for its press is refused.
+# One registered while the Setup's wait stands is not in force (the
+# machine waits for its own press), and a press then ends the Setup's
+# wait unpressed and is not the consent's either: one press, nobody's.
+gstate Idle
+consent s3 fuse > /dev/null
+expect 409 "$(post /wiz/advisories/press "$TOKEN")" "a panel consent standing: the Setup page's ask for its press is 409"
+post '/button/reserve?on=0&id=s3' "$TOKEN" > /dev/null
+gstate Idle
+post /wiz/advisories/press "$TOKEN" > /dev/null
+until_ok 50 press_ready || bad "the Setup's wait never came ready: $(cat "$T/body")"
+for _ in 1 2 3 4 5 6 7 8; do gstate Idle; consent s4 fuse > /dev/null; post /wiz/advisories/press/take "$TOKEN" > /dev/null; sleep 0.2; done
+expect waiting "$(cstate s4 fuse)" "a consent registered beside the Setup's wait: not in force"
+echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+until_ok 25 eval '[ "$(post /wiz/advisories/press/take "$TOKEN")|$(jv "d.get(\"button\")")" != "200|waiting" ]'
+expect "200|cancelled" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')" \
+    "a press then ends the Setup's wait unpressed"
+expect "200|False" "$(consent s4 fuse)|$(jv 'str(d.get("pressed"))')" "and the press is not the consent's"
+post '/button/reserve?on=0&id=s4' "$TOKEN" > /dev/null
+until_ok 50 eval '[ "$(vreserved)" = False ]' || bad "a reservation stands on: $(vreserved)"
 OTHER=org.example.other
 ask() {
     c=$(host /button/ask -d id=$1)
@@ -1431,6 +1569,16 @@ post /wiz/advisories/press "$TOKEN" > /dev/null
 sleep 0.2
 expect "409|the machine waits for a press of the button for its own setup" "$(ask $PKG)|$(cat "$T/body")" \
     "the Setup page's wait for a press: the ask ended, a new one refused"
+# The ended ask's reservation lingers its 5 s, and the Setup's wait does
+# not come in force beside it: a press made for the package's prompt
+# before its page learned of the end is nobody's.
+sleep 2
+expect "200|waiting|False" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')|$(jv 'd.get("ready")')" \
+    "2 s on, the ended ask's reservation lingering: the Setup's wait not ready"
+press
+sleep 0.3
+expect "200|waiting" "$(post /wiz/advisories/press/take "$TOKEN")|$(jv 'd.get("button")')" \
+    "and a press then is not the Setup's"
 post /wiz/advisories/press/cancel "$TOKEN" > /dev/null
 until_ok 50 ask_ready && ok "asked again, ready" || bad "the second ask did not come ready: $(cat "$T/body")"
 sleep 0.2                       # the button read released with the ask in force
@@ -1544,7 +1692,8 @@ rm "$T/ext.refuse"
 rm -f "$T/ext.tier"
 : > "$T/ext.staged"
 gstate Idle
-expect "409|$NC" "$(post /ext/install "$TOKEN")|$(cat "$T/body")" "an install refused for its consent"
+DE=$(sha256sum "$T/ext.staged" | cut -c1-64)
+expect "409|$NC" "$(post /ext/install "$TOKEN" -d digest=$DE)|$(cat "$T/body")" "an install refused for its consent"
 expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "lifts nothing: still 409"
 post /ext/package "$TOKEN" -d id=$PKG -d action=enable > /dev/null
 expect "200|waiting" "$(asked $PKG)" "turned on again: its ask is taken"
@@ -1553,7 +1702,7 @@ expect "409|$OFF" "$(ask $PKG)|$(cat "$T/body")" "removed, its service calling a
 echo official > "$T/ext.tier"
 : > "$T/ext.staged"
 gstate Idle
-expect 200 "$(post /ext/install "$TOKEN")" "the package installed anew"
+expect 200 "$(post /ext/install "$TOKEN" -d digest=$DE)" "the package installed anew"
 expect "200|waiting" "$(asked $PKG)" "and its ask is taken"
 expect "200|ended" "$(host /button/ask -d id=$PKG -d end=1)|$(jv 'd.get("state")')" "withdrawn"
 until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "and the verdict carries no reservation" \

@@ -68,6 +68,7 @@
 #include "senslog.h"
 #include "session.h"
 #include "settings.h"
+#include "sha256.h"
 #include "sheetid.h"
 #include "status.h"
 #include "stopsig.h"
@@ -1564,9 +1565,9 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
         return reply_error(res, 409, why);
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is not idle");
-    /* The button held is the consent for a package nobody the machine
-     * trusts signed: a job that would take the hold as its own press
-     * refuses the install before the button is read. */
+    /* The press is the consent for a package nobody the machine trusts
+     * signed: a job that would take it as its own refuses the install
+     * before any press is taken. */
     if (job_takes_button(why, sizeof(why)))
         return reply_error(res, 409, why);
     /* One install at a time, and none while the staging file is being
@@ -1582,34 +1583,43 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
     extinst_busy = 1;
     pthread_mutex_unlock(&extup_mu);
     /* The package installed is the one the dialog showed: sha256, when the
-     * request names it (the panel does), is held to the staged file. */
+     * request names it, is held to the staged file, and
+     * the host holds the install to the digest the upload answered with.
+     * The consent is the press made for this install's own dialog, of this
+     * session, for this archive: with none named the install goes on
+     * without it (a package that needs none installs; one that does is
+     * refused in its own words), and a consent named that cannot be taken
+     * refuses the install in its words. */
     const char *sha = setting_param(req, "sha256");
-    int rc = -1;
+    const char *digest = setting_param(req, "digest");
+    int pressed = 0, rc = -1;
+    char what[120] = "";
     if (sha && *sha && extpkg_stage_matches(sha, &status, why, sizeof(why)) != 0)
         ;
+    else if (setting_param(req, "consent") && (status = panel_consent_take(req, "install", why, sizeof(why))) != 0)
+        ;
     else {
-        /* The consent is the button held inside the panel's own
-         * reservation: a hold outside one is no consent, and the install
-         * goes on without it (a package that needs none installs; one that
-         * does is refused in its own words). */
-        int present = operator_present() && panel_press_reserved(why, sizeof(why));
-        rc = extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), present, &status, why,
-                            sizeof(why));
+        pressed = setting_param(req, "consent") != NULL;
+        rc = extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), digest, pressed, what,
+                            sizeof(what), &status, why, sizeof(why));
     }
     pthread_mutex_lock(&extup_mu);
     extinst_busy = 0;
     pthread_mutex_unlock(&extup_mu);
     if (rc != 0)
         return reply_error(res, (unsigned)status, why);
-    fflog(LOG_NOTICE, "ext: a package was installed (by the operator, through the panel; grants: %s)",
-          setting_param(req, "grants") ? setting_param(req, "grants") : "none");
+    char peer[64];
+    auth_peer_text(req, peer, sizeof(peer));
+    fflog(LOG_NOTICE, "ext: %s was installed, its archive %s (by the operator from %s, through the panel%s; grants: %s)",
+          what, digest, peer[0] ? peer : "?", pressed ? ", the button pressed for it" : "",
+          setting_param(req, "grants") && setting_param(req, "grants")[0] ? setting_param(req, "grants") : "none");
     return cb_ext_status(req, res, NULL);
 }
 
-/* The owner's keys. Adding one takes the machine's button held: a key
- * added here is what the machine will trust from then on. A job that
- * would take the hold as its own press refuses it before the button is
- * read. */
+/* The owner's keys. Adding one takes the machine's button pressed for it:
+ * a key added here is what the machine will trust from then on. Gated as
+ * the install is (the lease, an idle machine), and a job that would take
+ * the press as its own refuses it before any press is taken. */
 static int cb_ext_key(const struct _u_request *req, struct _u_response *res, void *user_data)
 {
     (void)user_data;
@@ -1618,17 +1628,30 @@ static int cb_ext_key(const struct _u_request *req, struct _u_response *res, voi
     const char *key = setting_param(req, "key");
     char why[300];
     int status;
+    if (lease_refusal(why, sizeof(why)))
+        return reply_error(res, 409, why);
+    if (!machine_is_idle())
+        return reply_error(res, 409, "the machine is not idle");
     if (job_takes_button(why, sizeof(why)))
         return reply_error(res, 409, why);
-    /* The button counts only when the panel's dialog reserved it first. */
-    int present = operator_present();
-    if (present && !panel_press_reserved(why, sizeof(why)))
-        return reply_error(res, 409, why);
-    if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, present, &status, why,
+    /* The press made for this key's own dialog, of this session, for this
+     * name and key: with none named the host is not asked (refused in the
+     * key's own words), and one that cannot be taken refuses in its. */
+    int pressed = 0;
+    if (setting_param(req, "consent")) {
+        int st = panel_consent_take(req, "key", why, sizeof(why));
+        if (st != 0)
+            return reply_error(res, (unsigned)st, why);
+        pressed = 1;
+    }
+    char kid[80] = "";
+    if (extpkg_key_add(setting_param(req, "name"), key, key ? strlen(key) : 0, pressed, kid, sizeof(kid), &status, why,
                        sizeof(why)) != 0)
         return reply_error(res, (unsigned)status, why);
-    fflog(LOG_NOTICE, "ext: the owner's key %s was added (by the operator, with the button held)",
-          setting_param(req, "name"));
+    char peer[64];
+    auth_peer_text(req, peer, sizeof(peer));
+    fflog(LOG_NOTICE, "ext: the owner's key %s (%s) was added (by the operator from %s, the button pressed for it)",
+          setting_param(req, "name"), kid[0] ? kid : "?", peer[0] ? peer : "?");
     return cb_ext_status(req, res, NULL);
 }
 
@@ -2160,17 +2183,17 @@ static int cb_fuse_identity(const struct _u_request *req,
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
     /* The SRK password is irrevocable and never rotates - reveal it only
-     * to someone physically at the machine holding the button. A job
-     * that would take the hold as its own press refuses the view before
-     * the button is read. */
-    char taken[96];
+     * to someone physically at the machine, on a press of the button made
+     * for this view's own dialog. A job that would take the press as its
+     * own refuses the view before any press is taken. */
+    char taken[200];
     if (job_takes_button(taken, sizeof(taken)))
         return reply_error(res, 409, taken);
-    if (!operator_present())
-        return reply_error(res, 403,
-            "hold the machine button to reveal the fuse identity");
-    if (!panel_press_reserved(taken, sizeof(taken)))
-        return reply_error(res, 409, taken);
+    if (!setting_param(req, "consent"))
+        return reply_error(res, 403, "press the machine's button to reveal the fuse identity, when the panel asks for it");
+    int st = panel_consent_take(req, "fuse", taken, sizeof(taken));
+    if (st != 0)
+        return reply_error(res, (unsigned)st, taken);
     char body[192], mid[16], pw[65];
     unsigned long serial = fuse_serial();
     machine_id(mid, sizeof(mid));
@@ -2496,23 +2519,150 @@ int job_takes_button(char *why, size_t len)
     return 1;
 }
 
-/* hooks.h. */
-int panel_press_reserved(char *why, size_t len)
+/* The kinds of the panel's consents (btnres.h), and what each is bound to,
+ * read from the request's own parameters by one function, so that the
+ * dialog's registration (POST /button/reserve, for=<kind>) and the action
+ * that takes its press name the same thing: an install the digest of the
+ * archive it was shown, an owner's key its name and its text, a firmware
+ * install on the button's word (unsigned, an older version, or both) the
+ * staged file, the slot, the archive's SHA-256 and what it skips, the
+ * factory return its slot. The fuse view and the reset of every setting
+ * are bound to their kind alone. 0 with the subject in @out,
+ * -1 with the refusal in @why. A route that takes a press for a new action
+ * adds its kind here. */
+static int consent_subject(const struct _u_request *req, const char *kind, char *out, size_t len, char *why,
+                           size_t wlen)
 {
-    if (btnres_any("panel:") && cool_button_on_file_s() >= BTNRES_READY_S)
-        return 1;
-    snprintf(why, len, "the button was not reserved for this: start it again from the control panel");
+    out[0] = '\0';
+    if (!kind) {
+        snprintf(why, wlen, "for names what the press is for");
+        return -1;
+    }
+    if (!strcmp(kind, "install")) {
+        const char *d = setting_param(req, "digest");
+        if (!d || strlen(d) != 64 || strspn(d, "0123456789abcdef") != 64) {
+            snprintf(why, wlen, "digest is the one the upload answered with (64 hex digits): a client that sends none is older than this firmware (update tools/ffx)");
+            return -1;
+        }
+        snprintf(out, len, "%s", d);
+        return 0;
+    }
+    if (!strcmp(kind, "key")) {
+        const char *name = setting_param(req, "name"), *key = setting_param(req, "key");
+        if (!name || !key) {
+            snprintf(why, wlen, "a key's consent names the key: name and key");
+            return -1;
+        }
+        sha256_ctx c;
+        unsigned char d[SHA256_LEN];
+        sha256_init(&c);
+        sha256_update(&c, name, strlen(name));
+        sha256_update(&c, "\n", 1);
+        sha256_update(&c, key, strlen(key));
+        sha256_final(&c, d);
+        if (len < 2 * SHA256_LEN + 1)
+            return -1;
+        sha256_hex(d, SHA256_LEN, out);
+        return 0;
+    }
+    if (!strcmp(kind, "firmware")) {
+        const char *file = setting_param(req, "file"), *slot = setting_param(req, "slot");
+        const char *sha = setting_param(req, "sha256");
+        const char *cu = setting_param(req, "confirm_unsigned"), *dg = setting_param(req, "downgrade");
+        if (!file || !slot || (strcmp(file, "upload") && strcmp(file, "download")) || (strcmp(slot, "a") && strcmp(slot, "b")) ||
+            !sha || strlen(sha) != 2 * SHA256_LEN || strspn(sha, "0123456789abcdef") != 2 * SHA256_LEN) {
+            snprintf(why, wlen, "a firmware install's consent names the file (upload or download), the slot (a or b) "
+                                "and the archive's sha256");
+            return -1;
+        }
+        snprintf(out, len, "%s:%s:%s:%c%c", file, slot, sha, cu && !strcmp(cu, "1") ? 'u' : '-',
+                 dg && !strcmp(dg, "1") ? 'd' : '-');
+        return 0;
+    }
+    if (!strcmp(kind, "factory")) {
+        const char *slot = setting_param(req, "slot");
+        if (slot && strcmp(slot, "a") && strcmp(slot, "b")) {
+            snprintf(why, wlen, "the factory return's consent names the slot (a or b) or none");
+            return -1;
+        }
+        snprintf(out, len, "%s", slot ? slot : "");
+        return 0;
+    }
+    if (!strcmp(kind, "fuse") || !strcmp(kind, "reset"))
+        return 0;
+    snprintf(why, wlen, "no consent of the panel's is for %.40s", kind);
+    return -1;
+}
+
+/* A consent as this request names it: its kind, its subject, and who asks. */
+static int consent_of_request(const struct _u_request *req, const char *nonce, const char *kind, btnres_consent_t *c,
+                              char subject[BTNRES_SUBJECT_MAX], char holder[BTNRES_HOLDER_MAX], char peer[BTNRES_PEER_MAX],
+                              char *why, size_t wlen)
+{
+    if (consent_subject(req, kind, subject, BTNRES_SUBJECT_MAX, why, wlen) != 0)
+        return -1;
+    auth_holder(req, holder, BTNRES_HOLDER_MAX);
+    auth_peer_text(req, peer, BTNRES_PEER_MAX);
+    c->nonce = nonce;
+    c->kind = kind;
+    c->subject = subject;
+    c->holder = holder;
+    c->peer = peer;
     return 0;
 }
 
-/* POST /button/reserve: the panel reserves the machine's button for one
- * hold dialog that asks for it (btnres.h), named by the caller's own id
+/* hooks.h. */
+int panel_consent_take(const struct _u_request *req, const char *kind, char *why, size_t len)
+{
+    const char *nonce = setting_param(req, "consent");
+    char subject[BTNRES_SUBJECT_MAX], holder[BTNRES_HOLDER_MAX], peer[BTNRES_PEER_MAX];
+    btnres_consent_t c;
+    if (!nonce) {
+        snprintf(why, len, "press the machine's button for this when the control panel asks for it");
+        return 403;
+    }
+    if (consent_of_request(req, nonce, kind, &c, subject, holder, peer, why, len) != 0)
+        return 400;
+    switch (btnres_consent_take(&c, why, len)) {
+    case BTNRES_TAKEN:
+        fflog(LOG_NOTICE, "button: the press made for the %s was taken (by the operator from %s)", kind, peer);
+        return 0;
+    case BTNRES_NOT_PRESSED:
+        return 403;
+    case BTNRES_MISMATCH:
+        fflog(LOG_WARNING, "button: a request from %s for the %s named a consent given for something else, or by "
+                           "another session: refused, and that consent ended", peer, kind);
+        return 409;
+    default:
+        return 409;
+    }
+}
+
+/* btnres.h: who else waits on the button when a consent would come in
+ * force or is pressed. A job first, then this daemon's own wait for a
+ * press (the Setup page's), then the machine's lease in anybody's hands (a
+ * press under it is its holder's to judge). Asked under btnres.c's lock:
+ * it calls nothing of btnres. */
+static int consent_refused(char *why, size_t len)
+{
+    if (job_takes_button(why, len))
+        return 1;
+    if (!strcmp(button_state(), "waiting")) {
+        snprintf(why, len, "the machine waits for a press of the button for its own setup");
+        return 1;
+    }
+    return lease_refusal(why, len);
+}
+
+/* POST /button/reserve: the panel's consent (btnres.h): one hold dialog
+ * registers what its press is for (for=<kind>, with the parameters its
+ * action will carry, consent_subject) under the caller's own id
  * (id=<nonce>), and renews it while the dialog stands (on=1); on=0 ends
- * that one. The answer says whether the dialog may ask for the press now
- * ("ready": the reservation on file long enough for both controllers to
- * have read it, and no job that would take the press as its own), and
- * which job waits ("waits"). A package's page reserves nothing: the
- * route names no package. */
+ * it. The answer says whether the dialog may ask for the press now
+ * ("ready": in force, and no job that would take the press as its own),
+ * whether it was made ("pressed"), and who waits ("waits"). A second
+ * session's consent while one stands refuses both, and the log names the
+ * two. A package's page reserves nothing: the route names no package. */
 static int cb_button_reserve(const struct _u_request *req,
                              struct _u_response *res, void *user_data)
 {
@@ -2525,19 +2675,33 @@ static int cb_button_reserve(const struct _u_request *req,
         return reply_error(res, 400, "on must be 0 or 1");
     if (setting_param(req, "pkg"))
         return reply_error(res, 409, "a package's page reserves nothing: reload the control panel");
-    char who[BTNRES_WHO_MAX], why[160] = "";
+    char who[BTNRES_WHO_MAX], why[200] = "";
     snprintf(who, sizeof(who), "panel:%s", nonce ? nonce : "");
     if (!btnres_name_ok(who))
         return reply_error(res, 400, "id names the prompt: 1 to 32 of letters, digits, '-' and '_'");
+    int st = -1;
     if (!strcmp(on, "0")) {
-        btnres_close(who);
-    } else if (btnres_open(who, BTNRES_PANEL_TTL_S, why, sizeof(why)) != 0) {
-        return reply_error(res, 409, why);
+        btnres_consent_close(nonce);
+    } else {
+        char subject[BTNRES_SUBJECT_MAX], holder[BTNRES_HOLDER_MAX], peer[BTNRES_PEER_MAX], other[120];
+        const char *kind = setting_param(req, "for");
+        btnres_consent_t c;
+        if (consent_of_request(req, nonce, kind, &c, subject, holder, peer, why, sizeof(why)) != 0)
+            return reply_error(res, 400, why);
+        st = btnres_consent_open(&c, why, sizeof(why), other, sizeof(other));
+        if (st < 0) {
+            if (other[0])
+                fflog(LOG_WARNING, "button: two consents at once, the %s standing and a %s from %s: both refused",
+                      other, kind, peer);
+            return reply_error(res, 409, why);
+        }
     }
     int reserved = btnres_stands(who);
-    int waits = reserved && job_takes_button(why, sizeof(why));
-    int ready = reserved && !waits && cool_button_on_file_s() >= BTNRES_READY_S;
-    json_t *o = json_pack("{s:b, s:b, s:s}", "reserved", reserved, "ready", ready, "waits", waits ? why : "");
+    int pressed = st == BTNRES_CONSENT_PRESSED;
+    int waits = st >= 0 && !pressed && (job_takes_button(why, sizeof(why)) || st == BTNRES_CONSENT_WAITING);
+    int ready = st == BTNRES_CONSENT_READY && !waits;
+    json_t *o = json_pack("{s:b, s:b, s:b, s:s}", "reserved", reserved, "ready", ready, "pressed", pressed, "waits",
+                          waits ? why : "");
     char *body = o ? json_dumps(o, JSON_COMPACT) : NULL;
     json_decref(o);
     if (!body)
@@ -2671,7 +2835,10 @@ static void events_gather_state(events_snap_t *s)
     if (!lease_holder(s->lease, sizeof(s->lease)))
         s->lease[0] = '\0';
 
-    s->button_wait = !strcmp(button_state(), "waiting");
+    /* The press is somebody else's while this daemon waits for one (the
+     * Setup page's) and while the panel's consent reserves the button,
+     * with the linger after its press: nobody listening is told of it. */
+    s->button_wait = !strcmp(button_state(), "waiting") || btnres_any("panel:");
     update_newer_release(s->update, sizeof(s->update));
     s->gate_open = setup_gate_open(s->gate_why, sizeof(s->gate_why));
 }
@@ -4055,7 +4222,8 @@ static const char *const ENV_OVERRIDES[] = {
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
     "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_HTTP_IDLE_S", "GF_IIO_ROOT", "GF_LED_ROOT",
-    "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PAUSE_DIR", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S",
+    "GF_CONSENT_LINGER_S", "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PAUSE_DIR", "GF_PRESS_DEBOUNCE_MS",
+    "GF_PRESS_RES_S",
     "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S",
     "GF_RUN_DIR", "GF_RUN_END_GAP_MS", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
     "GF_SYSFS_ROOT", "GF_USERS_REPLAY", "GF_RELEASE_HTTP", "GF_SLOT_DIR", "GF_VERSION_FILE",
@@ -4282,6 +4450,7 @@ int main(int argc, char **argv)
     btnres_session_reported = cool_armed;
     btnres_on_file_s = cool_button_on_file_s;
     btnres_button = ask_button;
+    btnres_consent_refused = consent_refused;
     button_wait_judge = wiz_press_judge;
     button_wait_ended = wiz_press_ended;
     extpkg_installed = btnres_ask_unbar;

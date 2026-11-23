@@ -332,27 +332,30 @@ cmp -s "$T/paused.ffx" "$STAGE" && ok "with its own bytes staged" || bad "the st
 expect 200 "$(post /ext/upload/discard "$TOKEN")" "the discard is 200"
 
 echo "== the install and a key"
-expect 409 "$(post /ext/install "$TOKEN")" "an install with nothing staged is 409"
+expect 409 "$(post /ext/install "$TOKEN" -d digest=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef)" \
+    "an install with nothing staged is 409"
 grep -q 'staged' "$T/body" && ok "and says nothing is staged" || bad "the body is $(cat "$T/body")"
 # The install takes the archive the dialog showed, and one install at a
 # time: while it runs, an upload, a catalog fetch and a second install are
 # refused. The stand-in inspects these bytes as official (no consent
 # beyond the login) and its install lasts while install.slow stands.
 printf 'an official package\n' > "$T/official.ffx"
+# the payload digest the stand-in's inspect names (host_ext_forgeext.c DIGEST)
+HDIG=abababababababababababababababababababababababababababababababab
 expect 200 "$(upload "$TOKEN" "$T/official.ffx")" "an official package is staged"
 n=$(runs)
 expect 409 "$(post /ext/install "$TOKEN" -d sha256=0000000000000000000000000000000000000000000000000000000000000000)" \
     "an install naming another archive's SHA-256 is 409"
 expect "$n" "$(runs)" "and the host was not asked to install"
 : > "$T/install.slow"
-curl -s -o "$T/install.body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $TOKEN" \
+curl -s -o "$T/install.body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $TOKEN" -d "digest=$HDIG" \
     --data-urlencode "sha256=$(sha256sum "$T/official.ffx" | cut -d' ' -f1)" "$URL/ext/install" > "$T/install.code" &
 IPID=$!
 until_ok 50 grep -q '^install' "$RAN" || bad "the install did not reach the host"
 expect 400 "$(upload "$TOKEN" "$T/taken.ffx")" "an upload while an install runs is refused"
 grep -q 'being installed' "$T/body" && ok "and says a package is being installed" || bad "the body is $(cat "$T/body")"
 expect 409 "$(post /ext/catalog/get "$TOKEN" -d id=$PKG)" "a catalog fetch while an install runs is 409"
-expect 409 "$(post /ext/install "$TOKEN")" "a second install while one runs is 409"
+expect 409 "$(post /ext/install "$TOKEN" -d "digest=$HDIG")" "a second install while one runs is 409"
 grep -q 'being installed' "$T/body" && ok "in the words of the install that runs" || bad "the body is $(cat "$T/body")"
 rm -f "$T/install.slow"
 wait $IPID

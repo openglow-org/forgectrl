@@ -85,10 +85,10 @@ static char archive_dir[200], dl_fw[200], dl_probe[200], up_fw[200], lock_file[2
 /* A download lands here and takes DL_FW's name only once verified: a cut
  * or refused download never stands as a staged archive. */
 #define PART_SUFFIX ".part"
-/* The reboot that follows a change made with the button held comes this
- * many seconds after the answer, which tells the operator to let go:
- * U-Boot reads a button held at power-on as a request for the factory
- * recovery. */
+/* The reboot that follows a change made on a press of the button comes
+ * this many seconds after the answer: U-Boot reads a button held at
+ * power-on as a request for the factory recovery, so a press still held
+ * is let go first. */
 #define RELEASE_DELAY_S 5
 #define KEY_RELEASE "/etc/forgefirm/keys/forgefirm-release.pub"
 #define KEY_GF_DIR  "/etc/forgefirm/keys/gf"
@@ -1310,15 +1310,17 @@ int cb_system_reboot(const struct _u_request *req, struct _u_response *res,
  * carries it out at the next boot, before anything reads the directory,
  * and keeps what an install keeps (the factory archive, the sshd host
  * keys, the TLS key and certificate, the boot state); the setup then runs
- * as after an install. It takes the machine button held, as the other
- * changes that need an operator at the machine do, an idle machine, and
- * no update job or lease. Every refusal that is not the button's comes
- * before the button is read: the operator is told to hold the button only
- * when the hold is all that is missing, and never while a job would take
- * the hold as its own press. The machine's lease is held from the check to
- * the schedule (schedule_reboot), so no update job starts in between: the
- * hold the reset takes serves no downgrade as well. */
-static int system_reset_held(struct _u_response *res);
+ * as after an install. It takes the machine button pressed for its own
+ * dialog (hooks.h, panel_consent_take), as the other changes that need an
+ * operator at the machine do, an idle machine, and no update job or lease.
+ * Every refusal that is not the button's comes before the press is taken:
+ * the operator is told to press the button only when the press is all
+ * that is missing, and never while a job would take the press as its own.
+ * The machine's lease is held from the check to the schedule
+ * (schedule_reboot), so no update job starts in between, and the press
+ * is taken once (btnres_consent_take ends the consent): the press the
+ * reset takes serves no downgrade as well. */
+static int system_reset_held(const struct _u_request *req, struct _u_response *res);
 
 int cb_system_reset(const struct _u_request *req, struct _u_response *res,
                     void *user_data)
@@ -1332,16 +1334,16 @@ int cb_system_reset(const struct _u_request *req, struct _u_response *res,
     char held[160];
     if (lease_take("update:reset", LEASE_SYSTEM, NULL, held, sizeof(held)) != 0)
         return reply_err(res, 409, held);
-    int rc = system_reset_held(res);
+    int rc = system_reset_held(req, res);
     lease_release("update:reset");
     return rc;
 }
 
-static int system_reset_held(struct _u_response *res)
+static int system_reset_held(const struct _u_request *req, struct _u_response *res)
 {
     char held[160];
     /* No job (machine_job_free): a reboot already scheduled, the kernel, a
-     * job that would take the hold as its press, a connected Grbl sender. */
+     * job that would take the press as its own, a connected Grbl sender. */
     if (!machine_job_free(held, sizeof(held)))
         return reply_err(res, 409, held);
     if (update_job_running())
@@ -1357,12 +1359,16 @@ static int system_reset_held(struct _u_response *res)
             return reply_err(res, 409, why);
     }
     /* "button" names the refusal for the panel's dialog, which stays open
-     * and says the button is not held. */
-    if (!operator_present())
-        return reply_json(res, 403, "{\"error\":\"hold the machine button to reset every setting\","
-                                    "\"button\":\"not held\"}");
-    if (!panel_press_reserved(held, sizeof(held)))
-        return reply_err(res, 409, held);
+     * and says the button was not pressed for it. */
+    {
+        char taken[200];
+        int st = panel_consent_take(req, "reset", taken, sizeof(taken));
+        if (st == 403)
+            return reply_json(res, 403, "{\"error\":\"press the machine's button to reset every setting, when the "
+                                        "control panel asks for it\",\"button\":\"not pressed\"}");
+        if (st != 0)
+            return reply_err(res, (unsigned)st, taken);
+    }
     char path[256], ts[32], line[64];
     snprintf(path, sizeof(path), "%s/reset-requested", ff_data_dir());
     time_t now = time(NULL);
@@ -1379,7 +1385,7 @@ static int system_reset_held(struct _u_response *res)
         unlink(path);
         return reply_err(res, 500, "cannot write the reset request");
     }
-    fflog(LOG_WARNING, "update: every setting is reset at the next boot; rebooting in %d s (the button was held)",
+    fflog(LOG_WARNING, "update: every setting is reset at the next boot; rebooting in %d s (the button was pressed for it)",
           RELEASE_DELAY_S);
     sync();
     if (schedule_reboot(RELEASE_DELAY_S) != 0) {
@@ -1577,7 +1583,7 @@ int cb_update_dismiss(const struct _u_request *req, struct _u_response *res,
  * keeps nothing either way. A download fetches the release only when it is
  * newer than the installed version, unless the request says downgrade=1
  * (a reinstall or an older release: its install then takes downgrade=1
- * and the button held as well). */
+ * and the button pressed for it as well). */
 struct dl_args {
     int probe;
     int downgrade;
@@ -1801,8 +1807,8 @@ static void *apply_worker(void *argp)
 
     fflog(LOG_NOTICE, "update: writing the %s archive into slot %s%s%s",
           a->from_download ? "downloaded" : "uploaded", a->slot->name,
-          a->allow_unsigned ? " (unsigned allowed: the button was held)" : "",
-          a->downgrade ? " (downgrade=1: the button was held)" : "");
+          a->allow_unsigned ? " (unsigned allowed: the button was pressed for it)" : "",
+          a->downgrade ? " (downgrade=1: the button was pressed for it)" : "");
     job_set_phase("taking update lock");
     if (take_lock() != 0) {
         job_finish("{\"ok\":false,\"error\":\"update lock is held "
@@ -1882,7 +1888,7 @@ static void *apply_worker(void *argp)
     if (!a->downgrade && !relcheck_is_newer(ver, rel_current)) {
         drop_lock();
         job_finish("{\"ok\":false,\"error\":\"the archive (%s) is not newer than the installed version "
-                   "(%s): installing it takes downgrade=1 and the machine's button held\"}",
+                   "(%s): installing it takes downgrade=1 and the machine's button pressed for it\"}",
                    ver[0] ? ver : "no version", rel_current[0] ? rel_current : "unknown");
         free(a);
         return NULL;
@@ -1965,30 +1971,32 @@ int cb_update_apply(const struct _u_request *req, struct _u_response *res,
     int downgrade = dg && !strcmp(dg, "1");
     /* Skipping the signature check, and installing an older or the same
      * version (downgrade=1), require an operator physically at the
-     * machine, not just a token: the button must be held, inside the
-     * panel's reservation of it, and the request must name the archive the
-     * dialog showed (its SHA-256), so the consent is to that archive. Any
-     * job (machine_job_free: the job's start asks it again) refuses it
-     * before the button is read, so the operator is told to hold the
-     * button only when the hold is all that is missing, and never while a
-     * job would take the hold as its own press. An archive not newer than the installed version is
-     * refused by the job without downgrade=1 (after the signature and
-     * product gates); the upload's answer and GET /slots say "newer", so
-     * the panel asks for the button before it applies. */
+     * machine, not just a token: the button pressed for this archive's own
+     * dialog (hooks.h, panel_consent_take; its subject is the file, the
+     * slot, the archive's SHA-256 and what the install skips), and the
+     * request must name the archive the dialog showed (its SHA-256), which
+     * the job holds the staged file to. Any job (machine_job_free: the
+     * job's start asks it again) refuses it before any press is taken, so
+     * a job never takes the press as its own. An archive not newer than
+     * the installed version is refused by the job without downgrade=1
+     * (after the signature and product gates); the upload's answer and GET
+     * /slots say "newer", so the panel asks for the press before it
+     * applies. */
     if (allow_unsigned || downgrade) {
-        char taken[160];
+        char taken[200];
         if (!machine_job_free(taken, sizeof(taken)))
-            return reply_err(res, 409, taken);
-        if (!operator_present())
-            return reply_json(res, 403, allow_unsigned
-                                  ? "{\"error\":\"hold the machine button to install unsigned firmware\","
-                                    "\"button\":\"not held\"}"
-                                  : "{\"error\":\"hold the machine button to install an older version\","
-                                    "\"button\":\"not held\"}");
-        if (!panel_press_reserved(taken, sizeof(taken)))
             return reply_err(res, 409, taken);
         if (!sha || !*sha)
             return reply_err(res, 400, "an install on the button's word names its archive: sha256 is required");
+        int pst = panel_consent_take(req, "firmware", taken, sizeof(taken));
+        if (pst == 403)
+            return reply_json(res, 403, allow_unsigned
+                                  ? "{\"error\":\"press the machine's button to install unsigned firmware, when "
+                                    "the control panel asks for it\",\"button\":\"not pressed\"}"
+                                  : "{\"error\":\"press the machine's button to install an older version, when "
+                                    "the control panel asks for it\",\"button\":\"not pressed\"}");
+        if (pst != 0)
+            return reply_err(res, (unsigned)pst, taken);
     }
     const char *guard = slot_guard(t);
     if (guard)
@@ -2272,8 +2280,8 @@ static void *restore_worker(void *argp)
  * image is restored into it first. Then the machine reboots. A reinstall
  * of ForgeFIRM is the install process again, from the console; the
  * archive and ForgeFIRM's files under /data stay. It takes the machine's
- * button held inside the panel's reservation, as every change does that
- * needs an operator at the machine: the factory firmware it boots may
+ * button pressed for its own dialog, as every change does that needs an
+ * operator at the machine: the factory firmware it boots may
  * update itself over the other slot, which ends ForgeFIRM on the machine
  * until a console reinstall. */
 struct return_args {
@@ -2467,7 +2475,7 @@ int cb_restore_factory_return(const struct _u_request *req,
     if (lease_refusal(held, sizeof(held)))
         return reply_err(res, 409, held);
     /* No job, before the button is read: a job that waits for its press
-     * would take the hold as its own. */
+     * would take the operator's press as its own. */
     if (!machine_job_free(held, sizeof(held)))
         return reply_err(res, 409, held);
 
@@ -2496,17 +2504,20 @@ int cb_restore_factory_return(const struct _u_request *req,
                 "factory recovery mode instead");
         }
     }
-    /* The operator at the machine: the button held inside the panel's
-     * reservation of it, after every other refusal, so the hold is asked
-     * for only when it is all that is missing. */
-    if (!operator_present()) {
+    /* The operator at the machine: the button pressed for this return's
+     * own dialog (hooks.h, panel_consent_take; its subject is the slot the
+     * request names), after every other refusal, so the press is asked for
+     * only when it is all that is missing. */
+    char pwhy[200];
+    int pst = panel_consent_take(req, "factory", pwhy, sizeof(pwhy));
+    if (pst == 403) {
         free(a);
-        return reply_json(res, 403, "{\"error\":\"hold the machine button to go back to the factory firmware\","
-                                    "\"button\":\"not held\"}");
+        return reply_json(res, 403, "{\"error\":\"press the machine's button to go back to the factory firmware, "
+                                    "when the control panel asks for it\",\"button\":\"not pressed\"}");
     }
-    if (!panel_press_reserved(held, sizeof(held))) {
+    if (pst != 0) {
         free(a);
-        return reply_err(res, 409, held);
+        return reply_err(res, (unsigned)pst, pwhy);
     }
     char why[160];
     int rc = job_start("factory-return", factory_return_worker, a, why, sizeof(why));

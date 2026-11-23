@@ -1692,16 +1692,17 @@ function clearIdentity() {
 (function () {
   fillRegions($('wifi_country'));
 })();
-/* The fuse identity takes the machine's button held, so it is asked for
- * in the hold dialog: the button is reserved before the press is asked
- * for, and a job waiting for its press is named instead. */
+/* The fuse identity takes the machine's button pressed for it, so it is
+ * asked for in the hold dialog: the button is reserved before the press is
+ * asked for, and a job waiting for its press is named instead. */
 function showFuse() {
   $('msg-i').textContent = '';
   holdConfirm({
     title: 'Show the fuse identity?',
     body: ["The serial, hostname and password burned into this machine's fuses. They never change."],
-    send: function () {
-      return fx('/fuse-identity');
+    consent: { 'for': 'fuse' },
+    send: function (c) {
+      return fx('/fuse-identity?consent=' + encodeURIComponent(c));
     },
     done: function (f) {
       var g = '';
@@ -1993,29 +1994,36 @@ function doReboot() {
     });
 }
 /* ---- A change that needs an operator at the machine -----------------
- * The dialog asks; OK sends the request, which the daemon takes only
- * with the machine button held. The dialog closes when the daemon takes
- * it, or on Cancel, and on nothing else: a refusal stays in the dialog,
- * and one for the button (the answer's "button": "not held") says the
- * button is not held, so OK can go again once it is. While a request is
- * out, neither button answers.
+ * The dialog asks; OK sends the request, which the daemon takes only on
+ * a press of the machine button made for this dialog. The dialog closes
+ * when the daemon takes it, or on Cancel, and on nothing else: a refusal
+ * stays in the dialog, and one for the button (403, "not pressed") says
+ * the button was not pressed, so OK can go again once it is. While a
+ * request is out, neither button answers.
  *
- * A job waiting for the button press would take the hold as its own, so
- * the dialog reserves the button while it is on screen (POST
- * /button/reserve, under a name of its own, renewed every second from the
- * moment it is shown until it is hidden): the cooling engine then blocks
- * fire and withholds every armed window's acknowledgment, and the
- * controllers' arm and resume refuse. The dialog asks for the press only
- * once the daemon says the reservation is ready (on file long enough for
- * both controllers to have read it, and no job waiting for the press);
- * until then OK is off, and a job that waits is named. A ready is as old
+ * The dialog's press is a consent of its own (POST /button/reserve, under
+ * a name of its own, for=<what OK does> and what exactly, renewed every
+ * second from the moment it is shown until it is hidden): bound to this
+ * session and to what the dialog shows, taken once by the request OK
+ * sends (consent=<its name>), and refused, with the other one, when
+ * another session's dialog asks at the same time. A press used, or a
+ * consent ended, is no consent any more: a refusal other than "not
+ * pressed" starts the dialog's consent again under a new name, so the
+ * next OK needs a new press. A job waiting for the button press would take
+ * the press as its own, so the consent reserves the button: the cooling
+ * engine then blocks fire and withholds every armed window's
+ * acknowledgment, and the controllers' arm and resume refuse. The dialog
+ * asks for the press only once the daemon says the consent is ready (on
+ * file long enough for both controllers to have read it, and no job
+ * waiting for the press); until then OK is off, and a job that waits is
+ * named. Once the daemon has read the press, the dialog says so. A ready is as old
  * as the request it answered, by the larger of its monotonic and its
  * wall-clock age (a wall-clock step back leaves the monotonic age; the
  * monotonic clock can stand still while the device sleeps, the wall clock
  * does not): past HOLD_FRESH_MS it asks for nothing, and an answer that
  * arrives older than that asks for nothing either. A dialog asked for
  * while the last one fades out is shown once that one is hidden. */
-var HOLD_NOT_HELD = "The machine's button is not held. Hold it down, then press OK again.";
+var HOLD_NOT_PRESSED = "The machine's button was not pressed for this. Press it once, then press OK again.";
 var HOLD_JOB_WAITS = 'A job is waiting for the button press: cancel it first.';
 var HOLD_FRESH_MS = 2500;
 var holdModal = null,
@@ -2026,12 +2034,14 @@ var holdModal = null,
   holdReady = false,
   holdAt = 0,
   holdWall = 0;
-function holdShowReady(ready, waits) {
-  holdReady = ready;
-  $('hold-press').style.display = ready ? '' : 'none';
-  $('hold-wait').style.display = ready ? 'none' : '';
+/* ready: the consent asks for the press; pressed: the daemon read it. */
+function holdShowReady(ready, waits, pressed) {
+  holdReady = !!(ready || pressed);
+  $('hold-press').style.display = holdReady && !pressed ? '' : 'none';
+  $('hold-pressed').style.display = holdReady && pressed ? '' : 'none';
+  $('hold-wait').style.display = holdReady ? 'none' : '';
   $('hold-wait').textContent = waits || 'Making sure no job can take the press…';
-  if (!$('hold-cancel').disabled) $('hold-ok').disabled = !ready;
+  if (!$('hold-cancel').disabled) $('hold-ok').disabled = !holdReady;
 }
 /* A name for one prompt's reservation: no other tab's or dialog's. */
 function resNonce() {
@@ -2048,10 +2058,21 @@ function holdAnswer(r) {
     }
   });
 }
+/* The dialog's consent registered or renewed (on), or ended: what it is
+ * for and what exactly go with every renewal, so that a renewal can only
+ * be the same consent's. */
 function holdReserve(o, on) {
-  return fx('/button/reserve?on=' + (on ? '1' : '0') + '&id=' + encodeURIComponent(o.nonce), {
-    method: 'POST'
-  }).then(holdAnswer);
+  var q = 'on=' + (on ? '1' : '0') + '&id=' + encodeURIComponent(o.nonce),
+    k;
+  if (on) for (k in o.consent) q += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(o.consent[k]);
+  return fx('/button/reserve?' + q, { method: 'POST' }).then(holdAnswer);
+}
+/* The press was used or the consent ended: the dialog's next press is a
+ * new consent's, under a new name. */
+function holdRenew(o) {
+  holdReserve(o, false).catch(function () {});
+  o.nonce = resNonce();
+  holdShowReady(false, '', false);
 }
 /* The age of the request a ready answered: the larger of its two clocks'. */
 function holdAge(sent, sentWall) {
@@ -2093,7 +2114,7 @@ function holdTick() {
       }
       holdAt = sent;
       holdWall = sentWall;
-      holdShowReady(!!j.ready, j.waits || (j.error ? String(j.error) : ''));
+      holdShowReady(!!j.ready, j.waits || (j.error ? String(j.error) : ''), !!j.pressed);
     })
     .catch(function () {
       if (holdReq === o) holdShowReady(false, 'no answer from the machine');
@@ -2174,15 +2195,19 @@ function holdGo() {
   $('hold-ok').disabled = true;
   $('hold-cancel').disabled = true;
   $('hold-err').style.display = 'none';
-  o.send()
+  o.send(o.nonce)
     .then(function (r) {
       return holdAnswer(r).then(function (j) {
         if (holdReq !== o) return;
         if (r.ok) {
           holdModal.hide();
           o.done(j);
-        } else if (j.button === 'not held') refuse(HOLD_NOT_HELD);
-        else refuse(j.error || 'the machine refused it (HTTP ' + r.status + ')');
+          return;
+        }
+        /* Not pressed yet (403): the consent stands, and a press then OK
+         * takes it. Anything else used the press or ended the consent. */
+        if (r.status !== 403) holdRenew(o);
+        refuse(j.button === 'not pressed' ? HOLD_NOT_PRESSED : j.error || 'the machine refused it (HTTP ' + r.status + ')');
       });
     })
     .catch(function () {
@@ -2191,7 +2216,7 @@ function holdGo() {
 }
 /* Every setting back to a fresh install: the daemon leaves the request
  * and restarts the machine, and the boot carries it out. It takes the
- * machine button held while OK is pressed. */
+ * machine button pressed for its dialog. */
 function doReset() {
   /* A job waiting for the press would take the hold as its own. */
   if (CL && CL.armed) {
@@ -2204,8 +2229,9 @@ function doReset() {
     body: [
       'Your account, every setting, the setup record, the API tokens and every extension package are removed, and the setup runs again.'
     ],
-    send: function () {
-      return fx('/system/reset?confirm=1', { method: 'POST' });
+    consent: { 'for': 'reset' },
+    send: function (c) {
+      return fx('/system/reset?confirm=1&consent=' + encodeURIComponent(c), { method: 'POST' });
     },
     done: function () {
       /* The machine restarts a few seconds after the answer; a button still
@@ -2743,13 +2769,18 @@ function startJob(url, q, msgid, done) {
  * the press consents to that archive and the daemon refuses any other. */
 function applyConsent(f, slot, e, needs) {
   var q = 'file=' + f + '&slot=' + slot + '&sha256=' + encodeURIComponent(e.sha256 || '');
+  /* The consent names the same file, slot, archive and what the install
+   * skips as the apply does (main.c, consent_subject). */
+  var consent = { 'for': 'firmware', file: f, slot: slot, sha256: e.sha256 || '' };
   var body = [];
   if (needs.indexOf('unsigned') >= 0) {
     q += '&confirm_unsigned=1';
+    consent.confirm_unsigned = '1';
     body.push('The archive is not signed with the release key.');
   }
   if (needs.indexOf('downgrade') >= 0) {
     q += '&downgrade=1';
+    consent.downgrade = '1';
     body.push(
       'It is ' +
         (e.version || 'an archive with no version') +
@@ -2762,8 +2793,9 @@ function applyConsent(f, slot, e, needs) {
   holdConfirm({
     title: needs.length > 1 ? 'Install this archive anyway?' : needs[0] === 'unsigned' ? 'Install unsigned firmware?' : 'Install an older version?',
     body: body,
-    send: function () {
-      return fx('/update/apply?' + q, { method: 'POST' });
+    consent: consent,
+    send: function (c) {
+      return fx('/update/apply?' + q + '&consent=' + encodeURIComponent(c), { method: 'POST' });
     },
     done: function (r) {
       if (r.started) jobPoll();

@@ -196,6 +196,17 @@ static int press_wait_mine(const struct _u_request *req)
     return mine;
 }
 
+/* A consent of the control panel's stands (btnres.h: its dialog asks for
+ * a press, or its press lingers): 1, with the words in @why. A press then
+ * could be the consent's, so the Setup's wait does not take it. */
+static int consent_stands(char *why, size_t len)
+{
+    if (!btnres_any("panel:"))
+        return 0;
+    snprintf(why, len, "the control panel asks for the button: finish or cancel its dialog first");
+    return 1;
+}
+
 /* button.h, button_wait_judge: the Setup page's wait, judged at every
  * reading of the button (the wait thread's 40 ms) and at a press. */
 int wiz_press_judge(int at_press)
@@ -227,14 +238,16 @@ int wiz_press_judge(int at_press)
     }
     /* In force once the reservation has stood on file BTNRES_READY_S, and
      * no sooner than that after this wait began: a reservation another
-     * wait left on file does not bring the teal back at once. */
+     * wait left on file does not bring the teal back at once. Nor while a
+     * package's ask this wait ended still lingers (btnres.c, btnres_open):
+     * a press made for the package's prompt then is nobody's. */
     pthread_mutex_lock(&press_mu);
     int first = !press_in_force;
     double began = press_began;
     pthread_mutex_unlock(&press_mu);
-    if (cool_button_on_file_s() < BTNRES_READY_S || claim_now() - began < BTNRES_READY_S)
+    if (cool_button_on_file_s() < BTNRES_READY_S || claim_now() - began < BTNRES_READY_S || btnres_any("ask:"))
         return 0;
-    if ((first || at_press) && job_takes_button(why, sizeof(why))) {
+    if ((first || at_press) && (job_takes_button(why, sizeof(why)) || consent_stands(why, sizeof(why)))) {
         pthread_mutex_lock(&press_mu);
         snprintf(press_why, sizeof(press_why), "%s", why);
         press_lingers = at_press;
@@ -834,8 +847,8 @@ static int press_start(const struct _u_request *req, struct _u_response *res)
     if (claim_refused(req, why, sizeof(why)) != 0)
         return reply_error(res, 409, why);
     /* A job that waits for its press, runs or is paused would take this
-     * press as its own. */
-    if (job_takes_button(why, sizeof(why)))
+     * press as its own; a panel consent that stands could. */
+    if (job_takes_button(why, sizeof(why)) || consent_stands(why, sizeof(why)))
         return reply_error(res, 409, why);
     /* A wait started for another request (one that lapsed, or this
      * host's) is not this browser's to join: it ends here, before this

@@ -82,7 +82,7 @@ typedef struct {
     char home_source[16];
     int released;                   /* the X and Y motors */
     char lease[72];                 /* the machine lease's innermost holder, "" with none (LEASE_OWNER_MAX) */
-    int button_wait;                /* this daemon waits for a press (the setup's, an install's) */
+    int button_wait;                /* this daemon waits for a press (the setup's), or the panel's consent reserves it */
     char update[48];                /* a release newer than the installed one, "" with none */
     int gate_open;                  /* the setup's controller gate */
     char gate_why[96];
@@ -98,7 +98,8 @@ void events_diff(const events_snap_t *a, const events_snap_t *b, events_emit_fn 
 /* The button, from one switch word to the next: a "button" event for each
  * edge, but only when nothing else is waiting for the press - not while a
  * job arms or runs, not under the machine lease (a wizard, a diagnostic),
- * not while this daemon waits for it itself, and not while the GRBL
+ * not while this daemon waits for it itself or the panel's consent
+ * reserves it (button_wait), and not while the GRBL
  * controller's state cannot be known (a job could be arming). The state
  * is the last full snapshot's. The extension host's stream carries none
  * of them: a package gets a press by asking for one (btnres.h). */

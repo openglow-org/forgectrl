@@ -325,7 +325,8 @@ function extCatalogGet(id) {
     });
 }
 /* The owner's keys: what makes a package community rather than unverified.
- * Adding one takes the machine's button held, as unsigned firmware does. */
+ * Adding one takes the machine's button pressed for it, as unsigned
+ * firmware does. */
 function renderExtKeys(keys) {
   var g = '',
     i;
@@ -340,8 +341,9 @@ function renderExtKeys(keys) {
     );
   $('extkeys').innerHTML = g || "<p class='hint'>No key of yours is here: only a package signed by OpenGlow reads as official, and every other one as unverified.</p>";
 }
-/* Adding a key takes the machine's button held: the hold dialog reserves
- * the button first (panel.js, holdConfirm), so no job takes the press. */
+/* Adding a key takes the machine's button pressed for it: the hold dialog
+ * registers its consent for this name and key and reserves the button
+ * first (panel.js, holdConfirm), so no job takes the press. */
 function extKeyAdd() {
   var name = $('extkeyname').value.trim(),
     key = $('extkeytext').value.trim();
@@ -349,8 +351,9 @@ function extKeyAdd() {
   holdConfirm({
     title: 'Add the key ' + name + '?',
     body: ['A package signed with it reads as Community from then on.'],
-    send: function () {
-      return fx('/ext/key', { method: 'POST', body: new URLSearchParams({ name: name, key: key }) });
+    consent: { 'for': 'key', name: name, key: key },
+    send: function (c) {
+      return fx('/ext/key', { method: 'POST', body: new URLSearchParams({ name: name, key: key, consent: c }) });
     },
     done: function (j) {
       $('extkeyname').value = '';
@@ -790,18 +793,51 @@ function extBackground(p) {
  * a package turned off anywhere takes its page with it. */
 function extPollKeep() {
   var need = extTabOn || EXT_FRAMES.length > 0;
-  if (need && !extTabTimer) extTabTimer = setInterval(extStatusPoll, 5000);
+  if (need && !extTabTimer) extTabTimer = setInterval(extPollTick, 5000);
   if (!need && extTabTimer) {
     clearInterval(extTabTimer);
     extTabTimer = null;
   }
 }
 
+/* A page granted ui.background runs now: its card stands. */
+function extBackgroundRuns() {
+  return (EXT_LAST.packages || []).some(function (p) {
+    return extBackground(p) && !!extCardOf(p.id);
+  });
+}
+
+/* One tick of the 5 s poll. None while the browser tab is hidden, unless
+ * a page granted ui.background runs (the list is what takes that page away
+ * when its package is turned off), and the poll asks at once when the tab
+ * shows again. After an answer that failed, the ticks back off: 1, 3, 7,
+ * then 11 are skipped (10 s, 20 s, 40 s, 60 s apart), until one answers. */
+var extPollFails = 0,
+  extPollSkip = 0;
+
+function extPollTick() {
+  if (document.hidden && !extBackgroundRuns()) return;
+  if (extPollSkip > 0) {
+    extPollSkip--;
+    return;
+  }
+  extStatusPoll();
+}
+
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && extTabTimer) extStatusPoll();
+});
+
 function extStatusPoll() {
   fx('/ext/status')
     .then(extAnswer)
-    .then(renderExt)
+    .then(function (j) {
+      extPollFails = extPollSkip = 0;
+      renderExt(j);
+    })
     .catch(function (e) {
+      extPollFails++;
+      extPollSkip = Math.min((1 << Math.min(extPollFails, 4)) - 1, 11);
       if (EXT_FRAMES.length) return;      /* the cards stand; the next answer decides */
       $('extnonemsg').textContent = String(e);
       $('extnone').style.display = '';
@@ -1077,7 +1113,10 @@ function extInstall() {
     boxes = document.querySelectorAll('.extgrant'),
     i;
   for (i = 0; i < boxes.length; i++) if (boxes[i].checked) grants.push(boxes[i].value);
-  var body = { grants: grants.join(','), phrase: $('extinstallphrase').value };
+  /* The install names the archive this page was shown: the machine
+   * installs that one or nothing. */
+  var digest = (extStaged && extStaged.digest) || '';
+  var body = { grants: grants.join(','), phrase: $('extinstallphrase').value, digest: digest };
   var installed = function (j) {
     extSay('msg-extinstall', '');
     extStaged = null;
@@ -1085,14 +1124,17 @@ function extInstall() {
     $('extfile').value = '';
     renderExt(j);
   };
-  /* A package nobody the machine trusts signed takes the button held: the
-   * hold dialog reserves it first (panel.js, holdConfirm). */
+  /* A package nobody the machine trusts signed takes the button pressed
+   * for it: the hold dialog registers its consent for this archive and
+   * reserves the button first (panel.js, holdConfirm). */
   if (extStaged && extStaged.consent === 'button') {
     extSay('msg-extinstall', '');
     holdConfirm({
       title: 'Install this unverified package?',
       body: ['Nobody this machine trusts signed it.'],
-      send: function () {
+      consent: { 'for': 'install', digest: digest },
+      send: function (c) {
+        body.consent = c;
         return fx('/ext/install', { method: 'POST', body: new URLSearchParams(body) });
       },
       done: installed

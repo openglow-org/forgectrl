@@ -57,18 +57,24 @@
 #   the apply on the slot seam: the booted slot and a slot that cannot be
 #     read refused; the product gate in the job; the archive the request
 #     names (its SHA-256); an archive not newer than the installed one
-#     needs downgrade=1 and the button held inside the reservation; a
+#     needs downgrade=1 and the button pressed for its own consent (the
+#     file, the slot, the archive and what it skips: a consent named with
+#     another archive, for another slot, or given for the downgrade alone
+#     and named by an apply that also skips the signature check, refused
+#     and ended); a
 #     download not signed with the release key refused even with the
-#     button; the incomplete mark left by a failed write and a failed
+#     press; the incomplete mark left by a failed write and a failed
 #     verification (no version file, no kernel), refusing the boot
 #     selection, and cleared by a write that verifies; the guards asked
 #     again under the update lock; a release applied with the release key;
 #     an archive signed with another key refused at the job's signature
 #     gate without confirm_unsigned=1, and written with no key with it and
-#     the button
+#     the press
 #   the boot selection: force is no parameter; refused under the update
 #     lock; the inventory answered from its last probe under the lock
-#   the factory return: the button held inside the reservation; a job
+#   the factory return: the button pressed for its own consent (the slot
+#     it names: one given for slot a, named by a return naming none,
+#     refused and ended); a job
 #     that comes up at the point-back keeps the machine before any write;
 #     the guards asked again under the update lock; a restore whose write
 #     fails, or whose image does not verify, keeps the slot's mark; the
@@ -85,16 +91,18 @@
 #     report past 5 s under the cloud one, the cloud client's wait for the
 #     press reported with the mode idle, fresh and past 5 s, a GRBL job
 #     waiting for its press, running, paused, a state file gone stale, a
-#     Grbl sender connected), and a hold dialog's reservation not ready
-#     under a paused print and a reported wait; the cloud client's cooldown
-#     and a stopped controller's last report are no job, and a report that
-#     passed its check as its controller stopped stores nothing; the reboot
-#     route and the reset hold the machine's lease from their check to
-#     their schedule (an apply, and a downgrade on the reset's hold, landing
-#     in between are refused), a reboot pending refuses an apply, and the
-#     reset's a downgrade on the same hold, and a downgrade whose check
-#     passed before the reset was scheduled is refused under its own hold;
-#     the reset refused while an update job writes
+#     Grbl sender connected); under a print paused past its grace a consent
+#     in force is not given the press; the cloud client's cooldown and a stopped controller's last
+#     report are no job, and a report that passed its check as its
+#     controller stopped stores nothing; the reboot route and the reset
+#     hold the machine's lease from their check to their schedule (an
+#     apply, and a downgrade on the reset's consent, landing in between are
+#     refused), a reboot pending refuses an apply, and the reset's a
+#     downgrade on the same consent, and a downgrade whose check passed
+#     before the reset was scheduled is refused under its own hold; once
+#     the restart has cleared the pending reboot, the press the reset took
+#     serves no downgrade (one press, one consent); the reset refused while
+#     an update job writes
 #   the daemon's stop during a slot write: the write ended, the slot left
 #     marked incomplete
 #   HTTPS alone: with no GF_RELEASE_HTTP the release check refuses the
@@ -174,7 +182,7 @@ start_daemon() {
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/switches" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
         GF_SLOT_DIR="$SLOTS" GF_SLOT_LIST="$T/slots.list" GF_REBOOT_FILE="$T/reboot" GF_PAUSE_DIR="$T/pause" \
-        GF_VERSION_FILE="$T/installed" ${RELHTTP:+GF_RELEASE_HTTP=1} \
+        GF_VERSION_FILE="$T/installed" ${RELHTTP:+GF_RELEASE_HTTP=1} GF_CONSENT_LINGER_S=1 \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         GF_LOGS_ROOT="$T/log" GF_LOGS_RSYSLOG="$T/rsyslog-forgefirm.conf" \
         GF_LOGS_EFFECTIVE="$T/loglevels" GF_LOGS_STAGE="$T/stage" \
@@ -530,12 +538,29 @@ report() {
 }
 # armed <1|0>: the controller's report, its armed window open or closed
 armed() { if [ "$1" = 1 ]; then report "$SEC" run 1; else report "$SEC" idle 0; fi; }
-# The panel's reservation of the button, renewed until it is ready (on file
-# long enough for both controllers to have read it), then ended.
-reserve_ready() {
-    until_ok 50 eval '[ "$(post "/button/reserve?on=1&id=d1" "$TOKEN")|$(jv "d.get(\"ready\")")" = "200|true" ]'
+# The panel's consents (btnres.h): consent <id> <kind> [-d param...]
+# registers or renews one (for=<kind>, with the parameters its action will
+# carry); cstate prints its state; cwait <state> <tries> <id> <kind> ...
+# renews it until it is in that state; pressed_for <id> <kind> ... renews it
+# until it is ready, presses the button once (0.25 s), and renews it until
+# the daemon has read the press. This daemon's consent lingers 1 s after
+# its press (GF_CONSENT_LINGER_S).
+consent() { c=$1; k=$2; shift 2; post "/button/reserve?on=1&id=$c&for=$k" "$TOKEN" "$@"; }
+cstate() {
+    [ "$(consent "$@")" = 200 ] || { echo refused; return; }
+    jv '"pressed" if d.get("pressed") else "ready" if d.get("ready") else "waiting" if d.get("reserved") else "refused"'
 }
-unreserve() { post '/button/reserve?on=0&id=d1' "$TOKEN" > /dev/null; }
+cwait() {
+    w=$1; n=$2; shift 2
+    while [ "$(cstate "$@")" != "$w" ]; do n=$((n - 1)); [ $n -gt 0 ] || return 1; sleep 0.2; done
+}
+pressed_for() {
+    echo 8 > "$T/switches"
+    cwait ready 60 "$@" || return 1
+    sleep 0.2
+    echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+    cwait pressed 25 "$@"
+}
 # job_end: the update job's end, its result in $T/job.json
 job_end() {
     until_ok 150 eval 'get /update/status > /dev/null; [ "$(jv "json.dumps(d[\"running\"])")" = false ]' \
@@ -543,7 +568,6 @@ job_end() {
     cp "$T/body" "$T/job.json"
 }
 jres() { jget "$T/job.json" "$1" 2>/dev/null; }
-NR='the button was not reserved for this: start it again from the control panel'
 
 echo "== the release check"
 expect 200 "$(get /update/release)" "GET /update/release is 200"
@@ -807,15 +831,35 @@ case $(jres 'str((d.get("result") or {}).get("error"))') in
 esac
 grep -q '^-a' "$T/path/fwup.log" && bad "fwup wrote an older archive" || ok "and fwup never wrote"
 code=$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d downgrade=1 -d "sha256=$S9")
-expect "403|not held" "$code|$(jv 'd.get("button")')" "downgrade=1 without the button: 403, the button named"
-echo 12 > "$T/switches"
-code=$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d downgrade=1 -d "sha256=$S9")
-expect "409|$NR" "$code|$(jv 'd.get("error")')" "downgrade=1 with the button held outside the reservation: 409"
-reserve_ready || bad "the reservation did not come ready"
-expect 400 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d downgrade=1)" \
-    "downgrade=1 with the button held that names no archive: 400"
-expect 202 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d downgrade=1 -d "sha256=$S9")" \
-    "downgrade=1, the button held inside the reservation, the archive named: 202"
+expect "403|not pressed" "$code|$(jv 'd.get("button")')" "downgrade=1 naming no consent: 403, the button named"
+FW9="-d file=upload -d slot=b -d sha256=$S9 -d downgrade=1"
+expect 409 "$(post /update/apply "$TOKEN" $FW9 -d consent=g0)" "downgrade=1 naming a consent never registered: 409"
+consent g1 firmware $FW9 > /dev/null
+expect 400 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d downgrade=1 -d consent=g1)" \
+    "downgrade=1 on its consent, naming no archive: 400"
+# The consent is to this archive in this slot, skipping what the dialog
+# said: the consent for v0.0.9's downgrade, named with another archive's
+# SHA-256, or given for slot a, is refused and ends (the take compares
+# the subject before it asks for the press, so no press is needed).
+SX=$(printf 'another archive' | sha256sum | cut -c1-64)
+expect 409 "$(post /update/apply "$TOKEN" -d file=upload -d slot=b -d "sha256=$SX" -d downgrade=1 -d consent=g1)" \
+    "the consent for v0.0.9's downgrade, named with another archive's SHA-256: 409"
+expect 409 "$(post /update/apply "$TOKEN" $FW9 -d consent=g1)" "and that consent ended with the refusal: 409"
+consent g1b firmware -d file=upload -d slot=a -d "sha256=$S9" -d downgrade=1 > /dev/null
+expect 409 "$(post /update/apply "$TOKEN" $FW9 -d consent=g1b)" \
+    "the consent for slot a's downgrade, named for slot b: 409"
+expect 409 "$(post /update/apply "$TOKEN" -d file=upload -d slot=a -d "sha256=$S9" -d downgrade=1 -d consent=g1b)" \
+    "and that consent ended with the refusal: 409"
+# What the install skips is the subject too: a consent given for the
+# downgrade alone, named by an apply that also skips the signature check,
+# is refused and ends.
+consent g1c firmware $FW9 > /dev/null
+expect 409 "$(post /update/apply "$TOKEN" $FW9 -d confirm_unsigned=1 -d consent=g1c)" \
+    "the consent for v0.0.9's downgrade, named by an apply that also skips the signature check: 409"
+expect 409 "$(post /update/apply "$TOKEN" $FW9 -d consent=g1c)" "and that consent ended with the refusal: 409"
+pressed_for g2 firmware $FW9 || bad "the press for the downgrade was not read: $(cat "$T/body")"
+expect 202 "$(post /update/apply "$TOKEN" $FW9 -d consent=g2)" \
+    "downgrade=1 on the press made for that archive and slot: 202"
 job_end
 expect "True|v0.0.9" "$(jres 'str((d.get("result") or {}).get("ok"))')|$(jres '(d.get("result") or {}).get("version")')" \
     "the older version is written"
@@ -832,9 +876,10 @@ case $(jres 'str((d.get("result") or {}).get("error"))') in
     *) bad "the job ended with $(cat "$T/job.json")" ;;
 esac
 grep -q '^-a' "$T/path/fwup.log" && bad "fwup wrote an unsigned archive" || ok "and fwup never wrote"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload -d confirm_unsigned=1 -d "sha256=$SU")" \
-    "confirm_unsigned=1, the button held inside the reservation, the archive named: 202"
+FWU="-d file=upload -d slot=b -d sha256=$SU -d confirm_unsigned=1"
+pressed_for g3 firmware $FWU || bad "the press for the unsigned install was not read: $(cat "$T/body")"
+expect 202 "$(post /update/apply "$TOKEN" $FWU -d consent=g3)" \
+    "confirm_unsigned=1 on the press made for that archive and slot: 202"
 job_end
 expect "True|False" "$(jres 'str((d.get("result") or {}).get("ok"))')|$(jres 'str((d.get("result") or {}).get("signed"))')" \
     "it is written, unsigned"
@@ -854,17 +899,16 @@ grep -q '^-a' "$T/path/fwup.log" && bad "fwup wrote a download of another versio
 # A download installs only with the release key, the button or not.
 archive "$DL" "ForgeFIRM firmware" v0.0.11 -
 : > "$T/path/fwup.log"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post /update/apply "$TOKEN" -d slot=b -d file=download -d confirm_unsigned=1 -d "sha256=$(sha "$DL")")" \
-    "an unsigned download, confirm_unsigned=1 and the button held: 202"
+FWD="-d file=download -d slot=b -d sha256=$(sha "$DL") -d confirm_unsigned=1"
+pressed_for g4 firmware $FWD || bad "the press for the unsigned download was not read: $(cat "$T/body")"
+expect 202 "$(post /update/apply "$TOKEN" $FWD -d consent=g4)" \
+    "an unsigned download, confirm_unsigned=1 on the press made for it: 202"
 job_end
 case $(jres 'str((d.get("result") or {}).get("error"))') in
     *"a download installs only with it"*) ok "the job refuses it" ;;
     *) bad "the job ended with $(cat "$T/job.json")" ;;
 esac
 grep -q '^-a' "$T/path/fwup.log" && bad "fwup wrote an unsigned download" || ok "and fwup never wrote"
-unreserve
-echo 8 > "$T/switches"
 # The guards again under the update lock: the next boot moved onto the
 # target while the job waited for the lock refuses the write.
 archive "$STAGED" "ForgeFIRM firmware" v0.0.12 "$KEY"
@@ -917,10 +961,15 @@ printf 'etc/version=20260101000000\nboot/zImage=factory-kernel\n' | gzip -c > "$
 echo "2026-01-01 00:00:00 slot2 factory 20260101000000 ver=2.6.0 factory-rootfs-20260101000000.img.gz md5=$(md5sum "$T/data/archive/factory-rootfs-20260101000000.img.gz" | cut -d' ' -f1)" \
     > "$T/data/archive/manifest"
 code=$(post '/restore/factory-return?confirm=1' "$TOKEN")
-expect "403|not held" "$code|$(jv 'd.get("button")')" "the return without the button: 403, the button named"
-echo 12 > "$T/switches"
-code=$(post '/restore/factory-return?confirm=1' "$TOKEN")
-expect "409|$NR" "$code|$(jv 'd.get("error")')" "the button held outside the reservation: 409"
+expect "403|not pressed" "$code|$(jv 'd.get("button")')" "the return naming no consent: 403, the button named"
+expect 409 "$(post '/restore/factory-return?confirm=1&consent=f0' "$TOKEN")" "the return naming a consent never registered: 409"
+# The consent is to the slot its dialog named: one given for slot a, named
+# by a return that names no slot (slot b, the one slot this boot can
+# return to), is refused and ends (compared before the press is asked for).
+consent fa factory -d slot=a > /dev/null
+expect 409 "$(post '/restore/factory-return?confirm=1&consent=fa' "$TOKEN")" \
+    "the consent for a return to slot a, named by a return naming no slot: 409"
+expect 409 "$(consent fa factory -d slot=a)" "and that consent ended with the refusal: 409"
 BMARK=$T/data/slot-b.incomplete
 BBEFORE=$(cat "$B")
 # A job that comes up as the next boot is pointed back, before the restore
@@ -928,8 +977,8 @@ BBEFORE=$(cat "$B")
 : > "$T/ffboot.run-on-a"
 : > "$T/ffboot.log"
 rm -f "$T/reboot"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "the return, a job coming up at the point-back: 202"
+pressed_for f1 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f1' "$TOKEN")" "the return, a job coming up at the point-back: 202"
 job_end
 rm -f "$T/ffboot.run-on-a"
 gwant Idle
@@ -948,8 +997,8 @@ while not os.path.exists(sys.argv[3]):
     time.sleep(0.05)' "$T/data/update.lock" "$T/locked" "$T/unlock" &
 LKPID=$!
 until_ok 25 test -e "$T/locked" || bad "the test could not take the update lock"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "a return under the update lock: 202, waiting for it"
+pressed_for f2 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f2' "$TOKEN")" "a return under the update lock: 202, waiting for it"
 until_ok 50 eval 'get /update/status > /dev/null; [ "$(jv "d[\"phase\"]")" = "taking update lock" ]' \
     || bad "the restore did not reach the lock"
 inventory forgefirm forgefirm b
@@ -974,8 +1023,8 @@ add_archive() {
 }
 printf 'not a gzip stream\n' > "$ARCH/factory-rootfs-20260202000000.img.gz"
 add_archive 20260202000000
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "a return whose restore write fails: 202"
+pressed_for f3 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f3' "$TOKEN")" "a return whose restore write fails: 202"
 job_end
 case $(jres 'str((d.get("result") or {}).get("error"))') in
     *"restore write failed"*) ok "the restore's write fails" ;;
@@ -985,8 +1034,8 @@ esac
 rm -f "$BMARK" "$ARCH/factory-rootfs-20260202000000.img.gz"
 printf 'etc/version=20260303000000\n' | gzip -c > "$ARCH/factory-rootfs-20260303000000.img.gz"
 add_archive 20260303000000
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "a return whose restored image has no kernel: 202"
+pressed_for f4 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f4' "$TOKEN")" "a return whose restored image has no kernel: 202"
 job_end
 case $(jres 'str((d.get("result") or {}).get("error"))') in
     *"restored slot failed verification"*) ok "the restored slot fails its verification (no kernel)" ;;
@@ -1001,8 +1050,8 @@ inventory forgefirm forgefirm b
 : > "$T/mount.run"
 : > "$T/ffboot.log"
 rm -f "$T/reboot"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "the return, the button held inside the reservation: 202"
+pressed_for f5 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f5' "$TOKEN")" "the return, on the press made for it: 202"
 job_end
 rm -f "$T/mount.run"
 gwant Idle
@@ -1018,8 +1067,8 @@ grep -qxF 'etc/version=20260101000000' "$B" && ok "slot b holds the factory imag
 inventory forgefirm factory a
 : > "$T/ffboot.run-on-b"
 : > "$T/ffboot.log"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "the return to the factory image in place: 202"
+pressed_for f6 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f6' "$TOKEN")" "the return to the factory image in place: 202"
 job_end
 rm -f "$T/ffboot.run-on-b"
 gwant Idle
@@ -1030,11 +1079,11 @@ esac
 expect "-e2 -n|-e1 -n" "$(paste -sd'|' "$T/ffboot.log")" "slot b selected, then slot a again"
 [ ! -e "$T/reboot" ] && ok "and nothing rebooted" || bad "the return rebooted under a job: $(cat "$T/reboot")"
 : > "$T/ffboot.log"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "the return again, no job: 202"
+pressed_for f7 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f7' "$TOKEN")" "the return again, no job: 202"
 job_end
 expect "True|-e2 -n|reboot in 5 s" "$(jres 'str((d.get("result") or {}).get("ok"))')|$(cat "$T/ffboot.log")|$(cat "$T/reboot" 2>/dev/null)" \
-    "slot b selected and the reboot 5 s out, for the button to be let go"
+    "slot b selected and the reboot 5 s out, for a press still held to be let go"
 expect 409 "$(post '/boot?target=a' "$TOKEN")" "the return's reboot pending refuses a boot selection: 409"
 rm -f "$T/reboot"
 # A slot that probes as factory but is marked incomplete (a cut restore) is
@@ -1042,8 +1091,8 @@ rm -f "$T/reboot"
 inventory forgefirm factory a
 echo cut > "$T/data/slot-b.incomplete"
 : > "$T/ffboot.log"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "the return to a marked slot that reads factory: 202"
+pressed_for f8 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f8' "$TOKEN")" "the return to a marked slot that reads factory: 202"
 job_end
 expect "True|True" "$(jres 'str((d.get("result") or {}).get("ok"))')|$(jres 'str((d.get("result") or {}).get("restored"))')" \
     "the marked slot is restored, not just selected"
@@ -1057,13 +1106,11 @@ expect 409 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "booted from t
 grep -qF 'name the slot' "$T/body" && ok "and the operator is asked to name the slot" || bad "the refusal says '$(cat "$T/body")'"
 inventory factory forgefirm sd
 : > "$T/ffboot.log"
-reserve_ready || bad "the reservation did not come ready"
-expect 202 "$(post '/restore/factory-return?confirm=1' "$TOKEN")" "booted from the card with the factory image in slot a: 202"
+pressed_for f9 factory || bad "the press for the return was not read: $(cat "$T/body")"
+expect 202 "$(post '/restore/factory-return?confirm=1&consent=f9' "$TOKEN")" "booted from the card with the factory image in slot a: 202"
 job_end
 expect "True|a|-e1 -n" "$(jres 'str((d.get("result") or {}).get("ok"))')|$(jres '(d.get("result") or {}).get("slot")')|$(cat "$T/ffboot.log")" \
     "slot a is the one selected"
-unreserve
-echo 8 > "$T/switches"
 ln -sf mmcblk2p1 "$SLOTS/root"
 rm -f "$SLOTS/mmcblk1p1" "$T/reboot"
 inventory forgefirm forgefirm a
@@ -1082,12 +1129,6 @@ refused_all() {
         [ "$code" = 409 ] || { bad "$1: POST $r -> $code $(cat "$T/body")"; return; }
     done
     ok "$1: the reboot, the boot selection, the factory return, an update job's start, the reset, a downgrade's and an unsigned install are each 409"
-}
-# not_ready <state>: a hold dialog's reservation is not ready for its press
-not_ready() {
-    code=$(post '/button/reserve?on=1&id=d2' "$TOKEN")
-    expect "200|False" "$code|$(jv 'str(d.get("ready"))')" "$1: a hold dialog's reservation is not ready for its press"
-    post '/button/reserve?on=0&id=d2' "$TOKEN" > /dev/null
 }
 # taken <state>: no job, so the boot selection (of the slot already next) is 200
 taken() {
@@ -1109,7 +1150,16 @@ armed 0
 # print still running (mode run); a press would re-arm it.
 report "$SEC" run 0
 refused_all "a print paused past its grace (mode run, the window closed)"
-not_ready "a print paused past its grace"
+# A consent in force when a print comes to that pause: the press is asked
+# about again, and is not the consent's (main.c, consent_refused).
+armed 0
+cwait ready 60 d3 fuse || bad "the fuse view's consent did not come ready: $(cat "$T/body")"
+report "$SEC" run 0
+echo 12 > "$T/switches"; sleep 0.25; echo 8 > "$T/switches"
+sleep 0.4
+expect "200|False" "$(consent d3 fuse)|$(jv 'str(d.get("pressed"))')" \
+    "a consent in force, then a print paused past its grace: the press is not the consent's"
+post '/button/reserve?on=0&id=d3' "$TOKEN" > /dev/null
 armed 0
 for s in arming Run Hold stale connected; do
     gwant $s
@@ -1141,16 +1191,13 @@ CSEC=$(cat "$T/cloud.secret")
 report "$CSEC" idle 1
 R0=$(at)
 refused_all "the cloud client waiting for its press (armed, mode idle)"
-not_ready "the cloud client waiting for its press"
 stale "$R0"
 refused_all "the same report gone stale"
-not_ready "the same report gone stale"
 report "$CSEC" cooldown 0
 taken "the cloud client's cooldown reported"
 report "$CSEC" run 0
 R0=$(at)
 refused_all "the cloud controller's print paused past its grace"
-not_ready "the cloud controller's print paused past its grace"
 stale "$R0"
 refused_all "the same report gone stale"
 # The print armed again, then its controller stopped, GRBL started and not
@@ -1190,9 +1237,11 @@ SEC=$(cat "$T/ctl.secret")
 armed 0
 # A reboot route holds the machine's lease from its check to its schedule,
 # so an update job asked for in between is refused; once scheduled, the
-# reboot refuses what it would cut, and a second consent on the hold that
-# asked for it. An update job whose check passed before a reboot was
-# scheduled asks again under its own hold.
+# reboot refuses what it would cut. The press the reset takes is used
+# once: a downgrade that names the reset's consent is refused while the
+# reset runs, while its reboot is pending, and after the restart. An
+# update job whose check passed before a reboot was scheduled asks again
+# under its own hold.
 pause reboot
 bgpost "$T/bg.code" -H "X-ForgeFIRM-Token: $TOKEN" "$URL/system/reboot?confirm=1"
 arrived reboot || bad "the reboot did not reach its schedule"
@@ -1203,27 +1252,35 @@ wait $BG
 expect 200 "$(cat "$T/bg.code")" "that reboot: 200"
 expect 409 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload)" "an apply while the reboot is pending: 409"
 rm -f "$T/reboot"
-echo 12 > "$T/switches"
-reserve_ready || bad "the reservation did not come ready"
 DG="-d slot=b -d file=upload -d downgrade=1 -d sha256=$(sha "$STAGED")"
+pressed_for r1 reset || bad "the press for the reset was not read: $(cat "$T/body")"
 pause reboot
-bgpost "$T/bg.code" -H "X-ForgeFIRM-Token: $TOKEN" "$URL/system/reset?confirm=1"
+bgpost "$T/bg.code" -H "X-ForgeFIRM-Token: $TOKEN" "$URL/system/reset?confirm=1&consent=r1"
 arrived reboot || bad "the reset did not reach its schedule"
-expect 409 "$(post /update/apply "$TOKEN" $DG)" \
-    "a downgrade on the same hold while the reset is between its check and its schedule: 409"
+expect 409 "$(post /update/apply "$TOKEN" -d slot=b -d file=upload)" \
+    "an apply while the reset is between its check and its schedule: 409"
+expect 409 "$(post /update/apply "$TOKEN" $DG -d consent=r1)" \
+    "a downgrade on the reset's consent while the reset is between its check and its schedule: 409"
 go_on reboot
 wait $BG
-expect 200 "$(cat "$T/bg.code")" "the reset, the button held inside the reservation: 200"
-expect 409 "$(post /update/apply "$TOKEN" $DG)" "a downgrade on the same hold, the reset's reboot pending: 409"
+expect 200 "$(cat "$T/bg.code")" "the reset, on the press made for it: 200"
+expect 409 "$(post /update/apply "$TOKEN" $DG -d consent=r1)" "a downgrade on the reset's consent, the reset's reboot pending: 409"
 rm -f "$T/reboot" "$T/data/reset-requested"
+# The restart (the stand-in's removal) clears the pending reboot, so the
+# binding alone answers: the press the reset took is used, and serves no
+# downgrade.
+expect 409 "$(post /update/apply "$TOKEN" $DG -d consent=r1)" \
+    "the restart come, a downgrade on the press the reset took: 409 (one press, one consent)"
+pressed_for g5 firmware $DG || bad "the press for the downgrade was not read: $(cat "$T/body")"
 pause job_start
-bgpost "$T/bg.code" -H "X-ForgeFIRM-Token: $TOKEN" $DG "$URL/update/apply"
+bgpost "$T/bg.code" -H "X-ForgeFIRM-Token: $TOKEN" $DG -d consent=g5 "$URL/update/apply"
 arrived job_start || bad "the downgrade did not reach its hold"
-expect 200 "$(post '/system/reset?confirm=1' "$TOKEN")" "the reset while a downgrade is between its check and its hold: 200"
+pressed_for r2 reset || bad "the press for the reset was not read: $(cat "$T/body")"
+expect 200 "$(post '/system/reset?confirm=1&consent=r2' "$TOKEN")" \
+    "the reset, on its own press, while a downgrade is between its check and its hold: 200"
 go_on job_start
 wait $BG
 expect 409 "$(cat "$T/bg.code")" "that downgrade, asked again under its hold: 409"
-unreserve
 echo 8 > "$T/switches"
 rm -f "$T/reboot" "$T/data/reset-requested"
 get /update/status > /dev/null

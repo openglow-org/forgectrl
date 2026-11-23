@@ -11,7 +11,8 @@
  * /proc/<pid>/exe against FORGECTRL_FORGEEXT finds this binary. Run as any
  * other command, it appends its arguments to RAN_FILE as one line, answers
  * on standard output as the host's command line does for one package,
- * org.example.hostext (inspected as official when its bytes say so), and
+ * org.example.hostext (inspected as official when its bytes say so, its
+ * payload digest DIGEST whatever the bytes), and
  * exits; its install lasts while the file INSTALL_SLOW stands.
  */
 #include <fcntl.h>
@@ -21,6 +22,8 @@
 #include <unistd.h>
 
 #define ID "org.example.hostext"
+/* The payload digest its inspect names, as the host's does (host_ext.sh's HDIG). */
+#define DIGEST "abababababababababababababababababababababababababababababababab"
 
 static char *slurp(const char *path)
 {
@@ -122,9 +125,9 @@ int main(int argc, char **argv)
         if (refused)
             return answer("{\"ok\": false, \"error\": \"the stand-in host will not take these bytes\"}", 1);
         if (official)
-            return answer("{\"ok\": true, \"tier\": \"official\", \"needs_grant\": [], "
+            return answer("{\"ok\": true, \"tier\": \"official\", \"needs_grant\": [], \"digest\": \"" DIGEST "\", "
                           "\"package\": {\"id\": \"" ID "\", \"version\": \"1.0.0\"}}", 0);
-        return answer("{\"ok\": true, \"tier\": \"unverified\", \"needs_grant\": [], "
+        return answer("{\"ok\": true, \"tier\": \"unverified\", \"needs_grant\": [], \"digest\": \"" DIGEST "\", "
                       "\"package\": {\"id\": \"" ID "\", \"version\": \"1.0.0\"}}", 0);
     }
     if (!strcmp(cmd, "install")) {

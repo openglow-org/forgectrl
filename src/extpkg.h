@@ -42,8 +42,20 @@ int extpkg_cli(const char *const argv[], char **out);
 
 /* The document of GET /ext/status, malloc'd: whether extensions are on,
  * safe mode, the host's own status file (or that no host is running), and
- * the installed packages as the host lists them. NULL when out of memory. */
+ * the installed packages and keys as the host lists them. NULL when out of
+ * memory. Every panel tab and package page asks for it, and each list is a
+ * run of the host's command line (a fork of this daemon), so the two lists
+ * are kept EXTPKG_STATUS_CACHE_S on extpkg_clock once both were read: any
+ * other command this daemon runs through the host (an install, a removal,
+ * a switch, a key) drops them, so a change made through this daemon shows
+ * at the next read, and one the host makes of its own shows within those
+ * seconds. The status file is read at every request. */
+#define EXTPKG_STATUS_CACHE_S   3.0
 char *extpkg_status_json(int ext_enabled);
+
+/* The clock the status lists are kept on: CLOCK_MONOTONIC seconds; a test
+ * sets its own. */
+extern double (*extpkg_clock)(void);
 
 /* One action on one package: enable, disable, remove, remove-keep-data,
  * hold-required, hold-advisory. 0 when the host did it. Otherwise the HTTP
@@ -86,13 +98,21 @@ int extpkg_count(void);
 /* Installing, in two requests. The archive is uploaded to one staging
  * file and the host is asked what it is (inspect changes nothing): the
  * answer goes to the operator with the consent its tier takes. Then the
- * install names the grants and carries the consent, and forgectrl asks the
- * host again what the staged file is, because the tier is never the
- * client's to say:
+ * install names the grants, the digest of the archive it was shown and the
+ * consent, and forgectrl asks the host again what the staged file is,
+ * because the tier is never the client's to say:
  *
  *   official      the login
  *   community     the login and the typed phrase
- *   unverified    the login and the machine's button held, as for unsigned firmware
+ *   unverified    the login and the machine's button pressed for this
+ *                 install (btnres.h, the panel's consent), as for unsigned
+ *                 firmware
+ *
+ * The staging file is one for every session: the install is of the archive
+ * that was shown or of nothing. forgectrl's own inspect must name the
+ * digest the install carries, and the host is given it to hold the bytes it
+ * reads to (forgeext install --digest), so another archive staged at any
+ * moment between the upload's answer and the host's read is refused.
  */
 const char *extpkg_stage_path(void);
 void extpkg_stage_discard(void);
@@ -114,13 +134,17 @@ char *extpkg_ui_json(const char *id, int *status, char *why, size_t wlen);
  * value; this only carries the request and the answer. */
 char *extpkg_settings_json(const char *id, const char *patch, int *status, char *why, size_t wlen);
 
-/* Install the staged archive. grants is a comma-separated list of
- * capabilities the operator grants (or NULL). 0 when installed (the staged
- * file is removed). Otherwise the status (400 for a request with no such
- * form or a missing consent, 409 for the host's refusal and for a button
- * that is not held, 502) and the words; the staged file stays for another
- * try. */
-int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen);
+/* Install the staged archive, which must be the one whose digest the
+ * operator was shown (@digest, the inspect's "digest"). grants is a
+ * comma-separated list of capabilities the operator grants (or NULL);
+ * @pressed, the operator's press for this install was taken. 0 when
+ * installed (the staged file is removed), with "<id> <version>" in @what.
+ * Otherwise the status (400 for a request with no such form or a missing
+ * consent, 409 for an archive that is not the one shown, for the host's
+ * refusal and for a button not pressed, 502) and the words; the staged file
+ * stays for another try. */
+int extpkg_install(const char *grants, const char *phrase, const char *digest, int pressed, char *what, size_t whlen,
+                   int *status, char *why, size_t wlen);
 
 /* Whether the staged file is the one whose SHA-256 (lowercase hex, as
  * the inspect document's "sha256" gives it) the install dialog showed: 0,
@@ -133,14 +157,17 @@ extern void (*extpkg_installed)(const char *id);
 
 /* The owner's keys, the trust anchor a community package is judged by.
  * Adding one is the operator's own act: forgectrl takes it only with the
- * machine's button held, as for unsigned firmware. The key is written
- * through the extension host, which parses it before it lands, so a file
- * that is no Ed25519 public key never becomes a trust anchor.
+ * machine's button pressed for it (@pressed), as for unsigned firmware. The
+ * key is written through the extension host, which parses it before it
+ * lands, so a file that is no Ed25519 public key never becomes a trust
+ * anchor.
  *
- * 0 when the host did it; otherwise the status (400 for a name or a key
- * with no such form, 409 for the host's refusal and for a button that is
- * not held, 502 when the host cannot be asked) and the words. */
-int extpkg_key_add(const char *name, const char *key, size_t klen, int button_held, int *status, char *why, size_t wlen);
+ * 0 when the host did it, with the key's id as the host lists it in @kid
+ * ("" when it lists none by that name); otherwise the status (400 for a
+ * name or a key with no such form, 409 for the host's refusal and for a
+ * button not pressed, 502 when the host cannot be asked) and the words. */
+int extpkg_key_add(const char *name, const char *key, size_t klen, int pressed, char *kid, size_t kidlen, int *status,
+                   char *why, size_t wlen);
 int extpkg_key_remove(const char *name, int *status, char *why, size_t wlen);
 
 /* The catalog: the signed index of the packages OpenGlow lists, and the
