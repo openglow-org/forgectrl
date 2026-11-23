@@ -1249,6 +1249,11 @@ echo "== the Lens travel check, the pulse engine busy at its end"
 # not go idle: the lens stays where it stands and the marker goes. The
 # clock stand-in's .mono flag stands from the start and comes off at the
 # check's end, so the end's wait for the engine finds its deadline past.
+# The finder's quiet hold is taken only in the idle phase: the burn's run
+# session above leaves a smoke clear of about 16 s, which the cases since
+# may not have outlasted, so the case waits for the idle phase first.
+cphase() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cool/status" | python3 -c 'import json, sys; print(json.load(sys.stdin)["phase"])'; }
+until_ok 150 eval '[ "$(cphase)" = idle ]' || bad "the cooling engine is not idle: its phase is $(cphase)"
 : > "$T/timeshift.mono"
 OLD=$(ctl_pid)
 check lens.travel "onphase:the fans stop before the listening=echo running > $SYS/cnc/state" \
@@ -1269,7 +1274,6 @@ echo "== the Lens travel check in the cooling engine's cooldown"
 # once the session ends. The finder's quiet hold is refused there: the
 # check ends in an error before anything is listened to, and the window
 # stored stands (no fallback written over it).
-cphase() { curl -s -H "X-ForgeFIRM-Token: $TOKEN" "$URL/cool/status" | python3 -c 'import json, sys; print(json.load(sys.stdin)["phase"])'; }
 expect 200 "$(post /settings "$TOKEN" -d lens_stop_below_steps=20 -d lens_stop_above_steps=17)" \
     "a window stored as found: 20 half-steps below, 17 above"
 grep '^lens_stop' "$CONF" > "$T/lens.before"
