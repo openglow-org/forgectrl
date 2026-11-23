@@ -1403,6 +1403,11 @@ sleep 4
 expect cancelled "$(curl -s -H "X-ForgeFIRM-Token: $TOKEN" "$URL/wiz/advisories/press" | python3 -c 'import json, sys; print(json.load(sys.stdin)["button"])')" \
     "no poll for 4 s: the wait is over"
 teal && bad "the teal still breathes after the wait ended" || ok "and the button no longer breathes teal"
+# A lapse with no press opens nothing again: the published verdict carries
+# no reservation 2 s after the lapse.
+sleep 1
+expect false "$(jget "$T/run/cooling.state" 'd.get("button_reserved")')" \
+    "and 2 s after the lapse the button is not reserved (no press, no linger)"
 expect 200 "$(post /wiz/advisories/press "$TOKEN")" "asked again"
 until_ok 50 teal || bad "the second wait never lit the teal"
 # a new reason: the supervisor takes it up on its next tick, then holds the gate on it

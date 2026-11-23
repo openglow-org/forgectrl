@@ -68,15 +68,18 @@
 #     GF_PRESS_DEBOUNCE_MS=400 and GF_HTTP_IDLE_S=1: a second browser's ask
 #     and its account step are refused there too; one request lapses 3 s
 #     after its first ask though its holder asks again, and the wait the
-#     holder's ask again started ends with it, before its own timeout; a
+#     holder's ask again started ends with it, before its own timeout,
+#     leaving no reservation (no press, no linger); a
 #     cancel ends it at once; two browsers asking at once while this
 #     host's wait stands ready are taken one at a time: one ends that wait
 #     and starts its own, not ready 0.6 s later (its teal starts over), the
 #     other is refused; a press judged as its request ends is unsaid, the
 #     holder's poll is told its request ended and not to press, and the
-#     button stays reserved its linger (2.9 s after the press); a press
-#     judged as the page's reservation lapses is unsaid and reserves the
-#     button its linger again; a taken press holds the request
+#     button stays reserved its linger (2.9 s after the press) and no
+#     longer 6.6 s after it; a press judged as the page's reservation
+#     lapses is unsaid and reserves the button its linger again, which
+#     stands 2.9 s after the press and has ended 6.6 s after it; a taken
+#     press holds the request
 #     for the account step past those 3 s; a polled wait ends at its own
 #     timeout; an idle connection to either listener is closed after the
 #     1 s.
@@ -642,8 +645,12 @@ while [ $(( $(mono_ms) - T0 )) -lt 3200 ]; do press_as lan press/take "$C1" > /d
 until_t 3400
 expect "200|cancelled" "$(lan GET "https://$DAEMON:$TLS_PORT/wiz/advisories/press")|$(jfield button)" \
     "the second wait ended with its request, before its own timeout"
-until_t 3500
-expect 200 "$(press_as lan2 press)" "$CLIENT2 asks at 3.5 s: the request lapsed 3 s after its first ask"
+# A request that ends with no press keeps no linger: the reservation
+# closes with the wait, and the published verdict says so by 5 s.
+vres() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("button_reserved"))' "$T/run/cooling.state" 2>&1; }
+until_t 5000
+expect False "$(vres)" "and the button is not reserved 2 s after that request's end (no press, no linger)"
+expect 200 "$(press_as lan2 press)" "$CLIENT2 asks at 5 s: the request lapsed 3 s after its first ask"
 C2=$(cookie ffpress)
 expect 200 "$(press_as lan2 press/cancel "$C2")" "$CLIENT2 cancels its request"
 # Two browsers ask at once while a wait 127.0.0.1 started stands ready.
@@ -717,9 +724,12 @@ case "$(press_as lan press/take "$CLAIM")|$(jfield error)" in
     "409|"*"request for the press ended: do not press"*) ok "the holder's poll is told its request ended and not to press" ;;
     *) bad "the holder's poll after its request ended: $(cat "$T/body")" ;;
 esac
-vres() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("button_reserved"))' "$T/run/cooling.state" 2>&1; }
 until_t 6000
 expect True "$(vres)" "and the button stays reserved 2.9 s after that press (its linger)"
+# The linger ends: judged at about 3.1 s, its 5 s run out and the next
+# published verdict says so by 9.7 s.
+until_t 9700
+expect False "$(vres)" "and is no longer reserved 6.6 s after that press (its linger ended)"
 # A press caught as the reservation lapses (the page stopped polling: the
 # 1 s renewal, GF_PRESS_RES_S, runs out while the press is read again) is
 # unsaid too, and reserves the button its linger again.
@@ -731,8 +741,10 @@ until_t 650
 echo 12 > "$T/switches"; sleep 0.6; echo 8 > "$T/switches"
 expect "200|cancelled" "$(lan GET "https://$DAEMON:$TLS_PORT/wiz/advisories/press")|$(jfield button)" \
     "a press judged as the page's reservation lapsed is unsaid"
-until_t 2500
-expect True "$(vres)" "and the button stays reserved 1.4 s after that press (its linger)"
+until_t 4000
+expect True "$(vres)" "and the button stays reserved 2.9 s after that press (its linger again)"
+until_t 7700
+expect False "$(vres)" "and is no longer reserved 6.6 s after that press (that linger ended)"
 expect 200 "$(press_as lan press)" "$CLIENT asks then"
 T0=$(mono_ms)
 CLAIM=$(cookie ffpress)
