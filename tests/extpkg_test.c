@@ -18,11 +18,15 @@
  * and SHA-256 before the host reads it, refused when it is another package
  * or another version, and staged for the upload's install; and a package
  * with no version this firmware runs refused before anything is fetched.
+ * The install: the inspect document names the staged file's SHA-256 and a
+ * file staged over it since is refused; two installs at once each carry
+ * their own grants.
  */
 #include "../src/extpkg.h"
 #include "../src/sha256.h"
 
 #include <jansson.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +59,16 @@ static const char *ran(void)
         fclose(f);
     text[n] = '\0';
     return text;
+}
+
+/* The first of two installs at once (the grants case below). */
+static void *install_with_hold(void *arg)
+{
+    (void)arg;
+    int st;
+    char w[300];
+    extpkg_install("hold", NULL, 0, &st, w, sizeof(w));
+    return NULL;
 }
 
 static void host_says(const char *script_body)
@@ -210,6 +224,52 @@ int main(void)
     CHECK(extpkg_install("hold", NULL, 1, &status, why, sizeof(why)) == 0, "unverified with the button held: %d %s", status, why);
     snprintf(expect, sizeof(expect), "install\n%s\n--grant\nhold\n--consent-unverified\n", stage);
     CHECK(!strcmp(INSTALL_RAN(), expect), "unverified: [%s]", INSTALL_RAN());
+
+    /* What installs is what the dialog showed: the inspect document names
+     * the staged file's SHA-256, and the install holds the file to it. */
+    {
+        unsigned char d[SHA256_LEN];
+        char hex[2 * SHA256_LEN + 1];
+        sha256("an archive", strlen("an archive"), d);
+        sha256_hex(d, SHA256_LEN, hex);
+        HOST_TIER("official");
+        doc = extpkg_inspect_json(&status, why, sizeof(why));
+        j = doc ? json_loads(doc, 0, NULL) : NULL;
+        CHECK(j && json_string_value(json_object_get(j, "sha256")) &&
+              !strcmp(json_string_value(json_object_get(j, "sha256")), hex),
+              "the inspect document names the staged file's SHA-256: %s", doc ? doc : why);
+        json_decref(j);
+        free(doc);
+        CHECK(extpkg_stage_matches(hex, &status, why, sizeof(why)) == 0, "the staged file is the one shown: %s", why);
+        write_file(stage, "another archive", 0600);
+        CHECK(extpkg_stage_matches(hex, &status, why, sizeof(why)) != 0 && status == 409,
+              "a file staged over the one shown is refused: %d", status);
+    }
+
+    /* Two installs at once each carry their own grants: the first one's
+     * inspect is slow, and the second's grants are taken meanwhile. */
+    {
+        char marker[340];
+        snprintf(marker, sizeof(marker), "%s/slow", dir);
+        write_file(marker, "", 0600);
+        snprintf(script, sizeof(script),
+                 "if [ \"$1\" = inspect ]; then if [ -e %s ]; then rm -f %s; sleep 0.6; fi; "
+                 "echo '{\"ok\": true, \"tier\": \"official\"}'; exit 0; fi\n"
+                 "for a in \"$@\"; do echo \"$a\"; done >> %s.install\necho '{\"ok\": true}'",
+                 marker, marker, args_file);
+        host_says(script);
+        write_file(stage, "an archive", 0600);
+        snprintf(script, sizeof(script), "%s.install", args_file);
+        unlink(script);
+        pthread_t first;
+        pthread_create(&first, NULL, install_with_hold, NULL);
+        usleep(200000);
+        int rc2 = extpkg_install("job_time.run", NULL, 0, &status, why, sizeof(why));
+        pthread_join(first, NULL);
+        const char *both = INSTALL_RAN();
+        CHECK(rc2 == 0 && strstr(both, "--grant\nhold\n") && strstr(both, "--grant\njob_time.run\n"),
+              "each of two installs at once carried its own grants: [%s]", both);
+    }
 
     /* Grants that have not the form of capability names run nothing. */
     HOST_TIER("official");

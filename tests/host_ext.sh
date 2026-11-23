@@ -23,6 +23,8 @@
 #     file, and the stand-in never run
 #   bytes the stand-in refuses: 400 in its words, and the staging file
 #     gone
+#   an upload refused at its first chunk beside a staged package: the
+#     package left as it was
 #   bytes it takes: 200, tier unverified, consent button, and the staging
 #     file holds those bytes; the discard: 200, and the file gone
 #   an upload paused part way holds the staging file: with the daemon's
@@ -163,7 +165,7 @@ echo 8 > "$T/switches"
 : > "$T/pulse"
 echo "cool_intake_fans = 1" > "$T/data/forgefirm.conf"
 command -v cc > /dev/null || fatal "no C compiler (cc): the host's stand-in is compiled here"
-cc -O2 -DRAN_FILE="\"$RAN\"" -DKEY_DIR="\"$T/keys\"" -o "$T/bin/forgeext" "$HERE/host_ext_forgeext.c" \
+cc -O2 -DRAN_FILE="\"$RAN\"" -DKEY_DIR="\"$T/keys\"" -DINSTALL_SLOW="\"$T/install.slow\"" -o "$T/bin/forgeext" "$HERE/host_ext_forgeext.c" \
     || fatal "the host's stand-in did not compile"
 # The clock stand-in: the daemon's reading of the wall clock (time() and
 # CLOCK_REALTIME) runs ahead by the seconds the file WALLSHIFT_FILE names
@@ -271,6 +273,13 @@ expect 'unverified|button' "$(jget "$T/body" '"%s|%s" % (d.get("tier"), d.get("c
     "tier unverified, consent button"
 cmp -s "$T/taken.ffx" "$STAGE" && ok "the staging file holds those bytes" \
     || bad "the staging file does not hold the bytes sent"
+# An upload refused at its first chunk opened nothing: the package staged
+# before it is not its to discard.
+echo running > "$SYS/cnc/state"
+expect 409 "$(upload "$TOKEN" "$T/refused.ffx")" "an upload while the machine runs, a package staged: 409"
+cmp -s "$T/taken.ffx" "$STAGE" && ok "and the package staged before it is left as it was" \
+    || bad "the refused upload removed the staged package"
+echo idle > "$SYS/cnc/state"
 expect 200 "$(post /ext/upload/discard "$TOKEN")" "the discard is 200"
 [ ! -e "$STAGE" ] && ok "the discard leaves no staging file" || bad "the discarded upload is still staged"
 
@@ -325,6 +334,30 @@ expect 200 "$(post /ext/upload/discard "$TOKEN")" "the discard is 200"
 echo "== the install and a key"
 expect 409 "$(post /ext/install "$TOKEN")" "an install with nothing staged is 409"
 grep -q 'staged' "$T/body" && ok "and says nothing is staged" || bad "the body is $(cat "$T/body")"
+# The install takes the archive the dialog showed, and one install at a
+# time: while it runs, an upload, a catalog fetch and a second install are
+# refused. The stand-in inspects these bytes as official (no consent
+# beyond the login) and its install lasts while install.slow stands.
+printf 'an official package\n' > "$T/official.ffx"
+expect 200 "$(upload "$TOKEN" "$T/official.ffx")" "an official package is staged"
+n=$(runs)
+expect 409 "$(post /ext/install "$TOKEN" -d sha256=0000000000000000000000000000000000000000000000000000000000000000)" \
+    "an install naming another archive's SHA-256 is 409"
+expect "$n" "$(runs)" "and the host was not asked to install"
+: > "$T/install.slow"
+curl -s -o "$T/install.body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $TOKEN" \
+    --data-urlencode "sha256=$(sha256sum "$T/official.ffx" | cut -d' ' -f1)" "$URL/ext/install" > "$T/install.code" &
+IPID=$!
+until_ok 50 grep -q '^install' "$RAN" || bad "the install did not reach the host"
+expect 400 "$(upload "$TOKEN" "$T/taken.ffx")" "an upload while an install runs is refused"
+grep -q 'being installed' "$T/body" && ok "and says a package is being installed" || bad "the body is $(cat "$T/body")"
+expect 409 "$(post /ext/catalog/get "$TOKEN" -d id=$PKG)" "a catalog fetch while an install runs is 409"
+expect 409 "$(post /ext/install "$TOKEN")" "a second install while one runs is 409"
+grep -q 'being installed' "$T/body" && ok "in the words of the install that runs" || bad "the body is $(cat "$T/body")"
+rm -f "$T/install.slow"
+wait $IPID
+expect 200 "$(cat "$T/install.code")" "the install that ran, named by the staged archive's SHA-256, is 200"
+post /ext/upload/discard "$TOKEN" > /dev/null
 expect 409 "$(post /ext/key "$TOKEN" -d name=maker --data-urlencode 'key=a public key the host never sees')" \
     "a key with the token is 409"
 grep -q 'button' "$T/body" && ok "and names the button" || bad "the body is $(cat "$T/body")"

@@ -22,14 +22,24 @@
  * shortens the lens hunt's step cadence. Two more stand in for a
  * program a host test must not run: GF_SLOT_LIST names a file that holds
  * the slot inventory in place of `ffboot -l`, and GF_REBOOT_FILE a file
- * a reboot the daemon schedules is written to in place of the reboot,
- * and GF_USERS_REPLAY a script run in place of the account replay
- * (/etc/init.d/forgefirm-users). GF_HTTP_IDLE_S shortens the listeners'
+ * a reboot the daemon schedules is written to in place of the reboot
+ * (the reboot stands pending while that file does: the test removes it
+ * for the restart), and GF_USERS_REPLAY a script run in place of the account replay
+ * (/etc/init.d/forgefirm-users). GF_SLOT_DIR moves the slot table into a
+ * scratch directory (each slot's device a file there, the booted root the
+ * file `root` links to, each size under sys/), so an update job writes
+ * and verifies a file and never a block device; GF_VERSION_FILE names the
+ * installed version's file (/etc/forgefirm-version); GF_RELEASE_HTTP lets
+ * the release check and the download take a plain-HTTP release server
+ * (curl takes HTTPS alone otherwise). GF_HTTP_IDLE_S shortens the listeners'
  * idle connection timeout, GF_PRESS_TIMEOUT_S the Setup page's press
  * wait and its request's life, GF_PRESS_RES_S the renewal its poll gives
  * the press's reservation, GF_RESET_HOLD_S the button hold at start
  * that resets the account, and GF_PRESS_DEBOUNCE_MS lengthens how long a
- * press must still be held after the wait first reads it.
+ * press must still be held after the wait first reads it. GF_PAUSE_DIR
+ * names a directory of pauses (ff_test_pause): a route that reaches a
+ * named point waits there while the file of that name stands in it, so a
+ * test lands a second request between a route's check and its act.
  * ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion
@@ -41,8 +51,11 @@
  */
 #ifndef FORGECTRL_TESTHOOK_H
 #define FORGECTRL_TESTHOOK_H
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 static inline int ff_host_test(void)
 {
@@ -58,5 +71,27 @@ static inline const char *ff_test_hook(const char *hook)
         return NULL;
     const char *v = getenv(hook);
     return v && *v ? v : NULL;
+}
+
+/* A host test's pause at a named point: while <GF_PAUSE_DIR>/<point>
+ * stands, the caller waits here (30 s at most), with <point>.at beside it
+ * saying it has arrived. Nothing in any other run, or with no such file. */
+static inline void ff_test_pause(const char *point)
+{
+    const char *dir = ff_test_hook("GF_PAUSE_DIR");
+    char path[512], at[520];
+    if (!dir)
+        return;
+    snprintf(path, sizeof(path), "%s/%s", dir, point);
+    if (access(path, F_OK) != 0)
+        return;
+    snprintf(at, sizeof(at), "%s.at", path);
+    FILE *f = fopen(at, "w");
+    if (f)
+        fclose(f);
+    struct timespec tick = {0, 20 * 1000 * 1000};
+    for (int i = 0; i < 1500 && access(path, F_OK) == 0; i++)
+        nanosleep(&tick, NULL);
+    unlink(at);
 }
 #endif

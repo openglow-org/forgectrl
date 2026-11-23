@@ -818,6 +818,8 @@ class Mock:
         self.retried = ''               # the route the last supervisor start came by
         self.report_at = self.t0
         self.rep_armed = False
+        self.rep_mode = 'idle'
+        self.reboot_refuse = False     # the walk's: a restart refused as for a connected sender
         self.button = os.environ.get('GF_MOCK_BUTTON') == '1'
         # The panel's reservation of the button (POST /button/reserve): when it
         # was opened, and until when its last renewal holds it.
@@ -1076,11 +1078,14 @@ class Mock:
         """main.c's job_takes_button: the refusal of a route that asks for
         the machine button held, while a job would take the hold as its
         own press, or None. An armed window (the controller's report), the
-        GRBL controller's own wait for the press, or a GRBL job running or
-        paused."""
+        GRBL controller's own wait for the press, a controller that reports
+        a job in progress (mode run, a print paused past its grace among
+        them), or a GRBL job running or paused."""
         g = self.grbl_report if self.mode == 'grbl' and self.controller == 'running' else None
         if self.rep_armed or (g and g['laser'].get('arming')):
             return 'a job waits for the button press: cancel it first'
+        if self.rep_mode == 'run':
+            return 'a job is in progress (the controller reports it running or paused): finish or cancel it first'
         if g and g['state'] in ('Run', 'Hold'):
             return 'a job is running or paused: finish or cancel it first'
         return None
@@ -2371,13 +2376,15 @@ class Mock:
             return J(409, {'error': 'an update job is already running'})
         if self.lease_refusal():
             return J(409, {'error': self.lease_refusal()})
-        self.update.update({'running': True, 'kind': kind,
+        # update.c: each job has a number, in the 202 and in /update/status,
+        # so a page acts on the result of the job it started.
+        self.update.update({'running': True, 'job': self.update.get('job', 0) + 1, 'kind': kind,
                             'phase': JOB_PHASES[kind][0], 'elapsed': 0,
                             'progress_bytes': -1, 'result': None})
         self.job_t0 = time.time()
         self.job_args = args
         self._log('update: %s started' % kind)
-        return J(202, {'started': True})
+        return J(202, {'started': True, 'job': self.update['job']})
 
     def _slot_target(self, form, J):
         """The a/b slot an apply or restore writes, or the daemon's
@@ -2641,10 +2648,22 @@ class Mock:
             self._log('camkey: camera key rotated')
             return J(200, self._camkey_reply({}))
         if path == '/restore/factory-return':
+            # update.c's order: confirm, the lease, no job (a job that would
+            # take the hold among them), then the button held inside the
+            # panel's reservation.
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
             if self.lease_refusal():
                 return J(409, {'error': self.lease_refusal()})
+            if not self.idle():
+                return J(409, {'error': 'machine is not idle'})
+            if self.job_takes_button():
+                return J(409, {'error': self.job_takes_button()})
+            if not self.button:
+                return J(403, {'error': 'hold the machine button to go back to the factory firmware',
+                               'button': 'not held'})
+            if self.press_unreserved():
+                return J(409, {'error': self.press_unreserved()})
             return self._job_start('factory-return',
                                    {'slot': 'b', 'archive': {'version': '2.6.0'}}, J)
         return J(404, {'error': 'mock: no such endpoint'})
@@ -2937,6 +2956,7 @@ class Mock:
                 return T(400, 'mode must be idle, run or cooldown')
             self.report_at = time.time()
             self.rep_armed = form.get('armed', '0') not in ('', '0')
+            self.rep_mode = mode
             return J(200, {'ok': True})
 
         # The quiet hold for a listening (the bench tools): every fan off,
@@ -3186,6 +3206,8 @@ class Mock:
                 return J(409, {'error': self.lease_refusal()})
             if not self.idle():
                 return J(409, {'error': 'machine is not idle'})
+            if self.job_takes_button():
+                return J(409, {'error': self.job_takes_button()})
             t = form.get('target', '')
             if t not in SLOT_TARGETS:
                 return J(400, {'error': 'target must be sd, a, b, or legacy'})
@@ -3200,8 +3222,13 @@ class Mock:
         if path == '/system/reboot':
             if self.lease_refusal():
                 return J(409, {'error': self.lease_refusal()})
+            if self.reboot_refuse:
+                return J(409, {'error': 'a Grbl sender is connected to the machine: finish its job and close '
+                                        'the sender first'})
             if not self.idle():
                 return J(409, {'error': 'machine is not idle'})
+            if self.job_takes_button():
+                return J(409, {'error': self.job_takes_button()})
             if form.get('confirm') != '1':
                 return J(400, {'error': 'confirm=1 required'})
             self._log('system: reboot requested (mock: down for %d s)'
@@ -3266,18 +3293,21 @@ class Mock:
             if not self.slots['staged'][f]['present']:
                 return J(404, {'error': 'staged archive not found'})
             unsigned = form.get('confirm_unsigned') == '1'
-            if unsigned:
+            downgrade = form.get('downgrade') == '1'
+            if unsigned or downgrade:
                 if self.job_takes_button():
                     return J(409, {'error': self.job_takes_button()})
                 if not self.button:
-                    return J(403, {'error': 'hold the machine button to install unsigned firmware',
+                    return J(403, {'error': 'hold the machine button to install unsigned firmware'
+                                   if unsigned else 'hold the machine button to install an older version',
                                    'button': 'not held'})
                 if self.press_unreserved():
                     return J(409, {'error': self.press_unreserved()})
             slot, err = self._slot_target(form, J)
             if err:
                 return err
-            return self._job_start('apply', {'slot': slot, 'file': f, 'unsigned': unsigned}, J)
+            return self._job_start('apply', {'slot': slot, 'file': f, 'unsigned': unsigned,
+                                             'downgrade': downgrade, 'sha256': form.get('sha256', '')}, J)
         if path == '/update/upload':
             if self.lease_refusal():
                 return J(400, {'error': self.lease_refusal()})

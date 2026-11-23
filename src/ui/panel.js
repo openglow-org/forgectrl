@@ -1850,8 +1850,10 @@ function slotRow(n, s) {
         ? esc(s.type) + ' ' + esc(s.version)
         : '(empty)'
       : '(not present)';
+  /* A slot an update left half-written is never offered as a boot. */
+  if (s.incomplete) b += " <span class='b-bad'>incomplete update: write it again</span>";
   var act =
-    s.present === 'yes' && !s.next
+    s.present === 'yes' && !s.next && !s.incomplete
       ? " <button class='btn btn-sm btn-outline-secondary' data-boot='" +
         n +
         "'>Set next boot</button>"
@@ -1922,6 +1924,8 @@ function renderLists() {
       lb[n] +
       "</span><span class='mono'>" +
       esc(e.version || '?') +
+      (e.newer === false ? " <span class='b-warn'>not newer than the installed version</span>" : '') +
+      (e.signature && e.signature !== 'forgefirm' ? " <span class='b-warn'>" + esc(e.signature) + '</span>' : '') +
       ' \u00b7 ' +
       Math.round(e.bytes / 1048576) +
       ' MB' +
@@ -1966,8 +1970,8 @@ function loadSlots() {
     })
     .catch(function () {});
 }
-function bootTo(t, f) {
-  fx('/boot?target=' + t + (f ? '&force=1' : ''), { method: 'POST' })
+function bootTo(t) {
+  fx('/boot?target=' + t, { method: 'POST' })
     .then(function (r) {
       return r.json();
     })
@@ -2204,7 +2208,10 @@ function doReset() {
       return fx('/system/reset?confirm=1', { method: 'POST' });
     },
     done: function () {
-      $('msg-reset').textContent = 'restarting\u2026 the setup opens when the machine is back';
+      /* The machine restarts a few seconds after the answer; a button still
+       * held when it starts asks for the factory recovery. */
+      $('msg-reset').textContent =
+        'Let go of the button now. Restarting\u2026 the setup opens when the machine is back';
       waitBack($('msg-reset'));
     }
   });
@@ -2505,6 +2512,20 @@ function relWatchJob(kind) {
           );
           return;
         }
+        /* What was downloaded, and what the slot now holds, is the release
+         * this dialog shows, or the install stops before the next boot moves. */
+        if (relVer(j.result.version) !== relVer(REL.version)) {
+          relFail(
+            'The ' +
+              (kind === 'download' ? 'downloaded archive' : 'written slot') +
+              ' is ' +
+              (j.result.version || 'of no version') +
+              ', not the release ' +
+              REL.version +
+              '. Nothing was selected for the next boot.'
+          );
+          return;
+        }
         if (kind === 'download') relApply();
         else relSelect();
       })
@@ -2563,11 +2584,33 @@ function relApply() {
   if (relJob.next && relJob.booted) relPost('/boot?target=' + relJob.booted, go);
   else go();
 }
+/* A version as written, without its leading v. */
+function relVer(v) {
+  return String(v || '').replace(/^v/, '');
+}
 function relSelect() {
   relStep('select', 92, 'selecting ' + SLNAME[relJob.slot] + ' for the next boot');
   relPost('/boot?target=' + relJob.slot, function () {
     relStep('reboot', 96, 'restarting the machine');
-    relPost('/system/reboot?confirm=1', relWait);
+    /* A restart refused for a job (or a sender) leaves the next boot set:
+     * the new firmware starts at the next restart. */
+    fx('/system/reboot?confirm=1', { method: 'POST' })
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (j) {
+        if (!relJob) return;
+        if (j.rebooting) relWait();
+        else
+          relFail(
+            'The new firmware is installed and selected for the next boot, but the machine did not restart: ' +
+              (j.error || 'refused') +
+              '. Finish the job, then restart from the System card.'
+          );
+      })
+      .catch(function () {
+        if (relJob) relFail('the machine did not answer the restart');
+      });
   });
 }
 /* The machine goes down, then comes back: then the page reloads, so the
@@ -2653,27 +2696,18 @@ function jobPoll() {
           jobTimer = null;
           loadSlots();
         }
+        /* The unsigned dialog only for the apply this tab started (its job
+         * number), once: never for another tab's job or an older result. */
         if (
           j.result &&
           j.result.ok === false &&
           String(j.result.error || '').indexOf('confirm_unsigned') >= 0 &&
-          lastApply
+          lastApply &&
+          lastApply.job === j.job
         ) {
           var la = lastApply;
           lastApply = null;
-          holdConfirm({
-            title: 'Install unsigned firmware?',
-            body: ['The archive is not signed with the release key. Install it anyway?'],
-            send: function () {
-              return fx('/update/apply?file=' + la.f + '&slot=' + la.s + '&confirm_unsigned=1', {
-                method: 'POST'
-              });
-            },
-            done: function (r) {
-              if (r.started) jobPoll();
-              else $('msg-up').textContent = r.error || '?';
-            }
-          });
+          applyConsent(la.f, la.s, la.e, ['unsigned']);
         }
         g = j.result
           ? j.result.ok
@@ -2689,16 +2723,53 @@ function jobPoll() {
     })
     .catch(function () {});
 }
-function startJob(url, q, msgid) {
+/* Start a job; done(j) gets the answer (started or refused). */
+function startJob(url, q, msgid, done) {
   $(msgid).textContent = '';
   fx(url + (q ? '?' + q : ''), { method: 'POST' })
     .then(function (r) {
       return r.json();
     })
     .then(function (j) {
+      if (done) done(j);
       if (j.started) jobPoll();
       else $(msgid).textContent = j.error || '?';
     });
+}
+/* An install the daemon takes only with the machine's button held: an
+ * archive not signed with the release key, or one not newer than the
+ * installed version. The dialog names the archive (its version and the
+ * start of its SHA-256), and the request carries the whole SHA-256, so
+ * the press consents to that archive and the daemon refuses any other. */
+function applyConsent(f, slot, e, needs) {
+  var q = 'file=' + f + '&slot=' + slot + '&sha256=' + encodeURIComponent(e.sha256 || '');
+  var body = [];
+  if (needs.indexOf('unsigned') >= 0) {
+    q += '&confirm_unsigned=1';
+    body.push('The archive is not signed with the release key.');
+  }
+  if (needs.indexOf('downgrade') >= 0) {
+    q += '&downgrade=1';
+    body.push(
+      'It is ' +
+        (e.version || 'an archive with no version') +
+        ', not newer than the installed ' +
+        ((REL && REL.current) || S.version || 'version') +
+        '.'
+    );
+  }
+  body.push('Archive SHA-256 ' + String(e.sha256 || '?').slice(0, 16) + '…');
+  holdConfirm({
+    title: needs.length > 1 ? 'Install this archive anyway?' : needs[0] === 'unsigned' ? 'Install unsigned firmware?' : 'Install an older version?',
+    body: body,
+    send: function () {
+      return fx('/update/apply?' + q, { method: 'POST' });
+    },
+    done: function (r) {
+      if (r.started) jobPoll();
+      else $('msg-up').textContent = r.error || '?';
+    }
+  });
 }
 function applyStaged(f, ver) {
   var t = tgt();
@@ -2706,6 +2777,10 @@ function applyStaged(f, ver) {
     $('msg-up').textContent = 'no writable target slot';
     return;
   }
+  var e = (SL.staged || {})[f] || {};
+  var needs = [];
+  if (e.signature && e.signature !== 'forgefirm') needs.push('unsigned');
+  if (e.newer === false) needs.push('downgrade');
   if (
     !confirm(
       'Install ' +
@@ -2718,8 +2793,18 @@ function applyStaged(f, ver) {
     )
   )
     return;
-  lastApply = { f: f, s: t.slot };
-  startJob('/update/apply', 'file=' + f + '&slot=' + t.slot, 'msg-up');
+  if (needs.length) {
+    applyConsent(f, t.slot, e, needs);
+    return;
+  }
+  lastApply = { f: f, s: t.slot, e: e, job: null };
+  var mine = lastApply;
+  startJob('/update/apply', 'file=' + f + '&slot=' + t.slot + '&sha256=' + encodeURIComponent(e.sha256 || ''), 'msg-up', function (j) {
+    /* Only a started apply's result is this tab's to act on. */
+    if (lastApply !== mine) return;
+    if (j.started) mine.job = j.job;
+    else lastApply = null;
+  });
 }
 function restoreArch(f, ver) {
   var t = tgt();
@@ -2920,7 +3005,7 @@ document.addEventListener('click', function (e) {
   var t = e.target,
     v;
   if (!t || !t.getAttribute) return;
-  if ((v = t.getAttribute('data-boot'))) bootTo(v, 0);
+  if ((v = t.getAttribute('data-boot'))) bootTo(v);
   else if ((v = t.getAttribute('data-apply'))) applyStaged(v, t.getAttribute('data-ver'));
   else if ((v = t.getAttribute('data-restore'))) restoreArch(v, t.getAttribute('data-ver'));
 });

@@ -11,7 +11,8 @@
  * /proc/<pid>/exe against FORGECTRL_FORGEEXT finds this binary. Run as any
  * other command, it appends its arguments to RAN_FILE as one line, answers
  * on standard output as the host's command line does for one package,
- * org.example.hostext, and exits.
+ * org.example.hostext (inspected as official when its bytes say so), and
+ * exits; its install lasts while the file INSTALL_SLOW stands.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -116,11 +117,21 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "inspect")) {
         char *bytes = argc > 2 ? slurp(argv[2]) : NULL;
         int refused = bytes && strstr(bytes, "refuse");
+        int official = bytes && strstr(bytes, "official");
         free(bytes);
         if (refused)
             return answer("{\"ok\": false, \"error\": \"the stand-in host will not take these bytes\"}", 1);
+        if (official)
+            return answer("{\"ok\": true, \"tier\": \"official\", \"needs_grant\": [], "
+                          "\"package\": {\"id\": \"" ID "\", \"version\": \"1.0.0\"}}", 0);
         return answer("{\"ok\": true, \"tier\": \"unverified\", \"needs_grant\": [], "
                       "\"package\": {\"id\": \"" ID "\", \"version\": \"1.0.0\"}}", 0);
+    }
+    if (!strcmp(cmd, "install")) {
+        /* An install that lasts while INSTALL_SLOW stands, 20 s at most. */
+        for (int i = 0; i < 200 && access(INSTALL_SLOW, F_OK) == 0; i++)
+            usleep(100000);
+        return answer("{\"ok\": true}", 0);
     }
     if (!strcmp(cmd, "key-add") && argc > 3)
         return key_add(argv[2], argv[3]);

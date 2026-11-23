@@ -1258,7 +1258,8 @@ post '/button/reserve?on=1&id=d1' "$TOKEN" > /dev/null
 code=$(post /system/reset "$TOKEN" -d confirm=1)
 expect "200|True|True" "$code|$(jv 'd.get("rebooting")')|$(jv 'd.get("reset")')" "with the button held the reset is taken"
 [ -s "$T/data/reset-requested" ] && ok "the reset request is in the data directory" || bad "no data/reset-requested"
-[ -s "$T/reboot" ] && ok "and the reboot is scheduled (written to the stand-in's file)" || bad "no reboot was scheduled"
+expect "reboot in 5 s" "$(cat "$T/reboot" 2>/dev/null)" \
+    "and the reboot is scheduled 5 s on, for the button to be let go (written to the stand-in's file)"
 expect "200|False" "$(post '/button/reserve?on=0&id=d1' "$TOKEN")|$(jv 'd.get("reserved")')" "on=0 ends the reservation"
 until_ok 25 eval '[ "$(vreserved)" = False ]' && ok "with the dialog's reservation ended the verdict carries none" \
     || bad "the verdict still carries a reservation: $(vreserved)"

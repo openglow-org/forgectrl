@@ -68,10 +68,18 @@ int relcheck(struct relcheck_result *r, relcheck_fetch_fn fetch);
 
 /* True when the tag names a release newer than the installed version.
  * A version is v<major>.<minor>.<patch>, an optional -suffix marking a
- * prerelease of that number. An installed version that is not one (a
- * development build's stamp, an empty string) is older than every
- * release. */
+ * prerelease of that number (the development archives' meta-versions,
+ * v<release>-dev-<stamp> and v<version>-dev, among them: older than the
+ * release of their number, ordered among themselves by the suffix's
+ * text). An installed version that is not one (a development image's
+ * stamp, an empty string) is older than every release, and a tag that is
+ * not one is newer than nothing. */
 int relcheck_is_newer(const char *tag, const char *current);
+
+/* True when a and b are the same version, parsed (the leading v
+ * optional): an archive's meta-version against its release tag. False
+ * when either is not a version. */
+int relcheck_same_version(const char *a, const char *b);
 
 /* True when s is made of tag characters only (letters, digits, . - _ +)
  * and is not empty: safe to quote into a reply and into a command. */

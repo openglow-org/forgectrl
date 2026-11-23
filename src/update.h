@@ -12,6 +12,10 @@
 
 void update_init(void);
 int  update_job_running(void);
+/* The daemon's stop: no slot write starts from here on, and one that runs
+ * is ended (its process group, TERM then KILL after 2 s); its slot keeps
+ * the incomplete mark, so no boot selects it until it is written again. */
+void update_shutdown(void);
 
 int cb_slots(const struct _u_request *req, struct _u_response *res,
              void *user_data);

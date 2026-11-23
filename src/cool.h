@@ -101,6 +101,16 @@ int cool_state_report(const char *mode, int armed,
                       long air_assist, long exhaust, long intake,
                       const cool_limits_t *lim);
 
+/* The reporter's generation: cool_controller_stopped moves it on. The
+ * report route reads it before it checks the report's secret and stores
+ * with cool_state_report_for, so a report that passed its check for a
+ * controller that has since stopped or been reaped stores nothing (-2):
+ * the stop's forgetting stands. Otherwise as cool_state_report. */
+unsigned cool_report_generation(void);
+int cool_state_report_for(unsigned generation, const char *mode, int armed,
+                          long air_assist, long exhaust, long intake,
+                          const cool_limits_t *lim);
+
 /* Engine state as JSON (verdict, temps, phase, last report age, the
  * effective limits and the per-fan gate states) for the UI and bench
  * tooling. A buffer of COOL_STATUS_JSON_MAX bytes always holds the
@@ -124,6 +134,21 @@ void cool_notices_dismiss(unsigned upto);
  * there is none or it has gone stale. Callers that must not add work
  * beside the step stream ask this. */
 int cool_armed(void);
+
+/* The mode of the running controller's last report: 0 idle, 1 run, 2
+ * cooldown, held until the next report or the controller's stop
+ * (cool_controller_stopped), whatever its age: a report gone stale still
+ * names a job the controller may hold. A cloud print reports run from its
+ * warm-up (after its arm, which reports armed with the mode idle) through
+ * every pause, the grace past which it disarms included. */
+int cool_report_mode(void);
+
+/* The armed flag of the running controller's last report, held the same
+ * way (until the next report or the controller's stop), whatever its age:
+ * a controller gone silent in its wait for the press still holds that
+ * job. cool_armed is the window's fresh reading, for what must not act on
+ * a stale one. */
+int cool_report_armed(void);
 
 /* Seconds since the last job-state report, or -1 if none has ever
  * arrived (the supervisor uses this to see a controller come alive). */

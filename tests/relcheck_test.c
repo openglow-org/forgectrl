@@ -276,6 +276,27 @@ static void t_version_order(void)
     CHECK(!relcheck_is_newer("nightly", "v0.0.3"),
           "a tag that is not a version is not newer than a release");
     CHECK(!relcheck_is_newer("v0.0", "v0.0.3"), "two numbers are not a version");
+    /* The development archives' meta-versions (release.sh --dev, and the
+     * sign step's forgefirm-dev.fw) order as prereleases of their number. */
+    CHECK(relcheck_is_newer("v0.0.12-dev-20261121120000", "v0.0.11") &&
+              !relcheck_is_newer("v0.0.12-dev-20261121120000", "v0.0.12"),
+          "a dev build of v0.0.12 is newer than v0.0.11, older than v0.0.12");
+    CHECK(relcheck_is_newer("v0.0.12-dev-20261122000000", "v0.0.12-dev-20261121120000"),
+          "dev builds of one number order by their stamp");
+    CHECK(!relcheck_is_newer("v0.0.12-dev", "v0.0.12") && relcheck_is_newer("v0.0.12-dev", "v0.0.11"),
+          "a release's dev archive (v<version>-dev) is older than its release");
+}
+
+/* An archive's meta-version against the tag it was downloaded as. */
+static void t_same_version(void)
+{
+    printf("the same version\n");
+    CHECK(relcheck_same_version("v0.0.12", "v0.0.12"), "a tag is its own version");
+    CHECK(relcheck_same_version("0.0.12", "v0.0.12"), "the v is optional");
+    CHECK(!relcheck_same_version("v0.0.11", "v0.0.12"), "an older archive under the tag is not the tag");
+    CHECK(!relcheck_same_version("v0.0.12-dev", "v0.0.12"), "the dev archive is not the release");
+    CHECK(!relcheck_same_version("", "v0.0.12") && !relcheck_same_version("v0.0.12", "nightly"),
+          "what is not a version is no version");
 }
 
 /* The download's URL: the firmware file for a download, the acceptance
@@ -316,6 +337,7 @@ int main(void)
     t_not_json();
     t_long_notes();
     t_version_order();
+    t_same_version();
     t_download_url();
     printf("%s: %d failure%s\n", failures ? "FAIL" : "PASS", failures,
            failures == 1 ? "" : "s");

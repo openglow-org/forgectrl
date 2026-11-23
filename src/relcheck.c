@@ -218,6 +218,15 @@ static int parse_version(const char *s, long n[3], const char **suffix)
     return 1;
 }
 
+int relcheck_same_version(const char *a, const char *b)
+{
+    long x[3], y[3];
+    const char *xs, *ys;
+    if (!a || !b || !parse_version(a, x, &xs) || !parse_version(b, y, &ys))
+        return 0;
+    return x[0] == y[0] && x[1] == y[1] && x[2] == y[2] && !strcmp(xs, ys);
+}
+
 int relcheck_is_newer(const char *tag, const char *current)
 {
     long t[3], c[3];

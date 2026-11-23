@@ -566,7 +566,7 @@ target_compile_options(wizpkg_test PRIVATE -Wall -Wextra)
 target_compile_definitions(wizpkg_test PRIVATE WIZPKG_READY_WAIT_S=1.0)
 target_link_libraries(wizpkg_test jansson pthread)
 target_compile_options(extpkg_test PRIVATE -Wall -Wextra)
-target_link_libraries(extpkg_test jansson)
+target_link_libraries(extpkg_test jansson pthread)
 
 add_executable(lease_test tests/lease_test.c src/lease.c)
 target_compile_options(lease_test PRIVATE -Wall -Wextra)

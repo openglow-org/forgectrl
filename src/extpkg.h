@@ -121,6 +121,11 @@ char *extpkg_settings_json(const char *id, const char *patch, int *status, char 
  * that is not held, 502) and the words; the staged file stays for another
  * try. */
 int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen);
+
+/* Whether the staged file is the one whose SHA-256 (lowercase hex, as
+ * the inspect document's "sha256" gives it) the install dialog showed: 0,
+ * or 409 and the words when it is not, or nothing is staged. */
+int extpkg_stage_matches(const char *sha256, int *status, char *why, size_t wlen);
 /* Told the id of each package installed, as the host's inspect named it
  * (main.c: a package installed anew may ask for a press again, btnres.h).
  * NULL: nobody is told. */

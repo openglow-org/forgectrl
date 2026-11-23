@@ -101,7 +101,7 @@ jobs:
         run: sh tests/host_guard.sh build build/ulfius-image/lib
       - name: "host_lan (writes from a LAN peer go to HTTPS, a scoped token there refused and named; the camera key reads from the LAN with the reads closed; before the account the token writes the setup routes alone, form bodies over their bounds end unanswered, the press bound to one browser of two, the account step revoking tokens, rotating the camera key and ending sessions; LAN connections held to 48 slots, the idle timeout, an account record in fault: a network namespace, one veth, four client addresses, the daemon as the CI user)"
         run: sudo sh tests/host_lan.sh build build/ulfius-image/lib
-      - name: "host_update (the release check against a local release server, and an update job's lease: a probe download refuses the settings and a job)"
+      - name: "host_update (the release check against a local release server, an update job's lease, and the update routes on a scratch slot table: the download only newer than the installed version and only its tag's archive, staged once verified; the apply's guards, its archive named by SHA-256, the downgrade on the button inside the reservation, the incomplete mark left by a failed write and refused by the boot selection; the boot selection under the update lock, with no force; the factory return on the button, pointing the next boot back before a restore, keeping a job that comes up meanwhile, choosing the factory slot on a card boot, rebooting 5 s out; the reboot, boot selection, factory return, update start, reset and a downgrade's and an unsigned install's press refused under each job state the cases name, a cloud print paused past its grace and the cloud client's wait for the press with no GRBL controller among them, each with its report gone stale too; a report from a stopped controller storing nothing; the reboot and the reset holding the machine from their check to their schedule; a scheduled reboot refusing what follows; the daemon's stop ending a slot write)"
         run: sh tests/host_update.sh build build/ulfius-image/lib
       - name: Raw-frame narrowing and Bayer phase
         run: ./build/debayer_test
@@ -127,7 +127,7 @@ jobs:
         run: ./build/holds_test
       - name: "holds_wire_test (the extension host's real hold files, read by the engine's real reader: the names, the fields and their types, the monotonic stamp, the write period inside the window, stale on a silent host)"
         run: ./build/holds_wire_test
-      - name: "extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words)"
+      - name: "extpkg_test (the package routes' relay to the extension host: an argument vector, a closed list of actions, the host's words; the staged file held to the SHA-256 the dialog showed; each install's own grants)"
         run: ./build/extpkg_test
       - name: "mcode_test (the M-code relay: the table from the host's status, the host's mcode command, the answer line in the port's form, the daemon set)"
         run: ./build/mcode_test
@@ -177,7 +177,7 @@ jobs:
         run: ./build/wizlive_test
       - name: Camera key
         run: ./build/camkey_test
-      - name: Published-release check (the tag from the first hop)
+      - name: Published-release check (the tag from the first hop; versions, the development archives' among them, ordered and matched)
         run: ./build/relcheck_test
       - name: "test_routes (every panel route registered, every route's capability, the page policy, every fork the stop-signal helper's)"
         run: python3 -B -m unittest -v tests/test_routes.py

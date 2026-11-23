@@ -1447,7 +1447,9 @@ static uint64_t extup_bytes;
 static int extup_error;
 static double extup_last;               /* the upload's last chunk, on mono_s()'s clock */
 static char extup_refusal[96];
+static int extup_opened;                /* extup_owner opened the staging file: its own to discard */
 static int extcat_busy;                 /* a package is being fetched from the catalog into the staging file */
+static int extinst_busy;                /* a package is being installed from the staging file */
 
 static int ext_upload_sink(const struct _u_request *req, const char *data, uint64_t off, size_t size)
 {
@@ -1469,10 +1471,13 @@ static int ext_upload_sink(const struct _u_request *req, const char *data, uint6
         extup_owner = req;
         extup_refusal[0] = '\0';
         extup_bytes = 0;
+        extup_opened = 0;
         if (lease_refusal(extup_refusal, sizeof(extup_refusal)))
             ;                           /* the holder, in words */
         else if (extcat_busy)
             snprintf(extup_refusal, sizeof(extup_refusal), "a package is being fetched from the catalog");
+        else if (extinst_busy)
+            snprintf(extup_refusal, sizeof(extup_refusal), "a package is being installed");
         else if (!machine_is_idle())
             snprintf(extup_refusal, sizeof(extup_refusal), "the machine is not idle");
         if (!extup_refusal[0]) {
@@ -1486,6 +1491,7 @@ static int ext_upload_sink(const struct _u_request *req, const char *data, uint6
             extup_fp = fopen(extpkg_stage_path(), "wb");
             if (!extup_fp)
                 snprintf(extup_refusal, sizeof(extup_refusal), "cannot open the staging file");
+            extup_opened = extup_fp != NULL;
         }
         extup_error = extup_refusal[0] != '\0';
     }
@@ -1520,13 +1526,18 @@ static int cb_ext_upload(const struct _u_request *req, struct _u_response *res, 
         extup_fp = NULL;
     }
     int mine = extup_owner == req, err = extup_error;
+    /* A request the sink refused at its first chunk opened nothing: the
+     * staged package (which an install may be reading) is not its to
+     * discard. */
+    int opened = mine && extup_opened;
     uint64_t bytes = mine ? extup_bytes : 0;
     char why[300];
     snprintf(why, sizeof(why), "%s", mine && extup_refusal[0] ? extup_refusal : "no file data received");
     extup_owner = NULL;
+    extup_opened = 0;
     pthread_mutex_unlock(&extup_mu);
     if (!mine || err || bytes == 0) {
-        if (mine)
+        if (opened)
             extpkg_stage_discard();
         return reply_error(res, err && strstr(why, "idle") ? 409 : 400, why);
     }
@@ -1558,13 +1569,37 @@ static int cb_ext_install(const struct _u_request *req, struct _u_response *res,
      * refuses the install before the button is read. */
     if (job_takes_button(why, sizeof(why)))
         return reply_error(res, 409, why);
-    /* The consent is the button held inside the panel's own reservation:
-     * a hold outside one is no consent, and the install goes on without
-     * it (a package that needs none installs; one that does is refused in
-     * its own words). */
-    int present = operator_present() && panel_press_reserved(why, sizeof(why));
-    if (extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), present, &status, why,
-                       sizeof(why)) != 0)
+    /* One install at a time, and none while the staging file is being
+     * written (an upload streaming, a catalog fetch): the install reads
+     * that file, and each of them refuses while an install runs. */
+    pthread_mutex_lock(&extup_mu);
+    if ((extup_fp && mono_s() - extup_last < 60) || extcat_busy || extinst_busy) {
+        pthread_mutex_unlock(&extup_mu);
+        return reply_error(res, 409, extinst_busy ? "a package is being installed already"
+                                     : extcat_busy ? "a package is being fetched from the catalog"
+                                                   : "an upload is in progress");
+    }
+    extinst_busy = 1;
+    pthread_mutex_unlock(&extup_mu);
+    /* The package installed is the one the dialog showed: sha256, when the
+     * request names it (the panel does), is held to the staged file. */
+    const char *sha = setting_param(req, "sha256");
+    int rc = -1;
+    if (sha && *sha && extpkg_stage_matches(sha, &status, why, sizeof(why)) != 0)
+        ;
+    else {
+        /* The consent is the button held inside the panel's own
+         * reservation: a hold outside one is no consent, and the install
+         * goes on without it (a package that needs none installs; one that
+         * does is refused in its own words). */
+        int present = operator_present() && panel_press_reserved(why, sizeof(why));
+        rc = extpkg_install(setting_param(req, "grants"), setting_param(req, "phrase"), present, &status, why,
+                            sizeof(why));
+    }
+    pthread_mutex_lock(&extup_mu);
+    extinst_busy = 0;
+    pthread_mutex_unlock(&extup_mu);
+    if (rc != 0)
         return reply_error(res, (unsigned)status, why);
     fflog(LOG_NOTICE, "ext: a package was installed (by the operator, through the panel; grants: %s)",
           setting_param(req, "grants") ? setting_param(req, "grants") : "none");
@@ -1678,10 +1713,11 @@ static int cb_ext_catalog_get(const struct _u_request *req, struct _u_response *
     if (!machine_is_idle())
         return reply_error(res, 409, "the machine is not idle");
     pthread_mutex_lock(&extup_mu);
-    if ((extup_fp && mono_s() - extup_last < 60) || extcat_busy) {
+    if ((extup_fp && mono_s() - extup_last < 60) || extcat_busy || extinst_busy) {
         pthread_mutex_unlock(&extup_mu);
         return reply_error(res, 409, extcat_busy ? "a package is being fetched from the catalog already"
-                                                 : "an upload is in progress");
+                                     : extinst_busy ? "a package is being installed"
+                                                    : "an upload is in progress");
     }
     extcat_busy = 1;
     pthread_mutex_unlock(&extup_mu);
@@ -2417,16 +2453,24 @@ static void snap_str(json_t *o, const char *key, char *dst, size_t len)
 }
 
 /* hooks.h. Two sources, both state the daemon already holds: the running
- * controller's report of its armed window (the cooling engine's, either
- * controller's: it opens with the wait for the press), and the GRBL
+ * controller's report (the cooling engine's, either controller's), as
+ * last reported whatever its age (a controller gone silent still holds
+ * its job): its armed flag, which rises with the wait for the press, and
+ * its mode, "run" from a job's arm to its end, a cloud print paused past
+ * its grace included (its window closed, a press re-arms it); and the GRBL
  * controller's own state file while the supervisor holds one, which
  * names the wait itself and a job that runs or is held with its window
  * closed, and which refuses when it is not current. */
 int job_takes_button(char *why, size_t len)
 {
     static const char waits[] = "a job waits for the button press: cancel it first";
-    if (cool_armed()) {
+    if (cool_report_armed()) {
         snprintf(why, len, "%s", waits);
+        return 1;
+    }
+    if (cool_report_mode() == 1) {
+        snprintf(why, len, "a job is in progress (the controller reports it running or paused): "
+                           "finish or cancel it first");
         return 1;
     }
     if (!super_grbl_running())
@@ -2695,9 +2739,15 @@ static int cb_cool_state(const struct _u_request *req,
         return U_CALLBACK_COMPLETE;
     /* ...and on this host, only the controller the supervisor spawned:
      * anything that runs here is a loopback peer, and a forged idle
-     * report would drop the exhaust as surely from inside the machine. */
+     * report would drop the exhaust as surely from inside the machine.
+     * The reporter's generation is read first, and the report is stored
+     * only under it (cool_state_report_for): one that passes here and
+     * whose controller is stopped or reaped before the store leaves the
+     * stop's forgetting standing. */
+    unsigned gen = cool_report_generation();
     if (!super_report_secret_ok(u_map_get_case(req->map_header, "X-ForgeFIRM-Report")))
         return reply_error(res, 403, "the report channel is the running controller's alone");
+    ff_test_pause("report");
     const char *mode = setting_param(req, "mode");
     if (!mode)
         return reply_error(res, 400, "mode is required");
@@ -2729,7 +2779,10 @@ static int cb_cool_state(const struct _u_request *req,
             *lim_val[i] = d;
     }
 
-    if (cool_state_report(mode, armed, duty[0], duty[1], duty[2], &lim) != 0)
+    int rc = cool_state_report_for(gen, mode, armed, duty[0], duty[1], duty[2], &lim);
+    if (rc == -2)
+        return reply_error(res, 409, "the controller that sent the report has stopped");
+    if (rc != 0)
         return reply_error(res, 400, "mode must be idle, run or cooldown");
     ulfius_set_string_body_response(res, 200, "{\"ok\":true}");
     ulfius_add_header_to_response(res, "Content-Type", "application/json");
@@ -4002,10 +4055,10 @@ static const char *const ENV_OVERRIDES[] = {
  * test_routes.py holds this list to the sources too. */
 static const char *const TEST_HOOKS[] = {
     "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_HTTP_IDLE_S", "GF_IIO_ROOT", "GF_LED_ROOT",
-    "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S",
+    "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PAUSE_DIR", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S",
     "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S",
     "GF_RUN_DIR", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
-    "GF_SYSFS_ROOT", "GF_USERS_REPLAY",
+    "GF_SYSFS_ROOT", "GF_USERS_REPLAY", "GF_RELEASE_HTTP", "GF_SLOT_DIR", "GF_VERSION_FILE",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */
@@ -4075,6 +4128,7 @@ static void daemon_stop(struct _u_instance *inst, struct _u_instance *tls)
     tokens_flush();
     char none[8];
     jobrun_program_abort(none, sizeof(none));
+    update_shutdown();          /* a slot write ends, its slot left marked incomplete */
     diag_shutdown();
     super_shutdown();
     senslog_stop();

@@ -927,25 +927,103 @@ function finish() {
     });
 }
 
-/* ---- The exit: back to the factory firmware --------------------------- */
+/* ---- The exit: back to the factory firmware ---------------------------
+ * The return takes the machine's button held while Go back is pressed, as
+ * every change does that needs an operator at the machine. While the
+ * dialog stands it reserves the button (POST /button/reserve, under a
+ * name of its own, renewed every second), so no job can take the hold as
+ * its own press; Go back is offered only once the machine says the
+ * reservation is ready. A ready older than RET_FRESH_MS asks for nothing. */
+var RET_FRESH_MS = 2500;
+var ret = { nonce: '', timer: null, ready: false, at: 0, pending: false };
+function retReserve(on) {
+  return fx('/button/reserve?on=' + (on ? '1' : '0') + '&id=' + encodeURIComponent(ret.nonce), {
+    method: 'POST'
+  }).then(function (r) {
+    return r.json().catch(function () {
+      return {};
+    });
+  });
+}
+function retShowReady(ready, why) {
+  ret.ready = ready;
+  $('ret-go').disabled = !ready;
+  if (!ready) $('ret-msg').textContent = why || 'Making sure no job can take the press…';
+  else if (/Making sure|no answer/.test($('ret-msg').textContent)) $('ret-msg').textContent = '';
+}
+function retTick() {
+  if (!ret.nonce || ret.pending) return;
+  ret.pending = true;
+  var sent = Date.now();
+  retReserve(true)
+    .then(function (j) {
+      if (!ret.nonce) return;
+      ret.at = sent;
+      retShowReady(!!j.ready && Date.now() - sent <= RET_FRESH_MS, j.waits || j.error || '');
+    })
+    .catch(function () {
+      if (ret.nonce) retShowReady(false, 'no answer from the machine');
+    })
+    .then(function () {
+      ret.pending = false;
+    });
+}
 function askReturn() {
   $('ret-msg').textContent = '';
-  $('ret-go').disabled = false;
-  new bootstrap.Modal($('retmodal')).show();
+  ret.nonce = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  retShowReady(false, '');
+  var m = $('retmodal');
+  if (!m.dataset.wired) {
+    m.dataset.wired = '1';
+    m.addEventListener('hidden.bs.modal', function () {
+      if (ret.timer) clearInterval(ret.timer);
+      ret.timer = null;
+      if (ret.nonce) retReserve(false).catch(function () {});
+      ret.nonce = '';
+    });
+  }
+  bootstrap.Modal.getOrCreateInstance(m).show();
+  if (ret.timer) clearInterval(ret.timer);
+  ret.timer = setInterval(retTick, 1000);
+  retTick();
 }
 function doReturn() {
+  if (!ret.ready || Date.now() - ret.at > RET_FRESH_MS) {
+    retShowReady(false, '');
+    return;
+  }
   $('ret-go').disabled = true;
   $('ret-msg').textContent = 'starting…';
-  post('/restore/factory-return?confirm=1', {})
-    .then(function () {
-      bootstrap.Modal.getInstance($('retmodal')).hide();
-      show('return');
-      $('exitlink').style.display = 'none';
-      pollReturn();
+  fx('/restore/factory-return?confirm=1', { method: 'POST' })
+    .then(function (r) {
+      return r
+        .json()
+        .catch(function () {
+          return {};
+        })
+        .then(function (j) {
+          if (r.ok) {
+            /* The machine took the hold at the request: it reads the
+             * button no longer, so the operator lets go now, well before
+             * the restart. */
+            bootstrap.Modal.getInstance($('retmodal')).hide();
+            show('return');
+            $('r-lead').textContent =
+              'Let go of the button now. The machine is putting the Glowforge firmware back.';
+            $('exitlink').style.display = 'none';
+            pollReturn();
+            return;
+          }
+          $('ret-msg').textContent =
+            j.button === 'not held'
+              ? "The machine's button is not held. Hold it down, then press Go back again."
+              : j.error || 'the machine refused it (HTTP ' + r.status + ')';
+          $('ret-go').disabled = !ret.ready;
+        });
     })
-    .catch(function (e) {
-      $('ret-msg').textContent = String(e);
-      $('ret-go').disabled = false;
+    .catch(function () {
+      $('ret-msg').textContent = 'no answer from the machine';
+      $('ret-go').disabled = !ret.ready;
     });
 }
 function pollReturn() {
@@ -967,7 +1045,7 @@ function pollReturn() {
           ? 'The factory firmware ' + (res.factory_version || '') + ' was restored and selected for the next boot.'
           : 'The factory firmware was still on the machine and is selected for the next boot.';
       } else {
-        $('r-lead').textContent = 'The return did not complete.';
+        $('r-lead').textContent = 'The return did not complete. Let go of the button if you still hold it.';
         $('r-phase').textContent = (res.error || 'unknown error') + (res.detail ? ': ' + res.detail : '');
         $('exitlink').style.display = '';
       }

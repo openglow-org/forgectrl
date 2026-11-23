@@ -3980,9 +3980,39 @@ void cool_shutdown(void)
     }
 }
 
+/* The reporter's generation (cool.h), under mu: moved on by every
+ * cool_controller_stopped. */
+static unsigned rep_gen;
+
+unsigned cool_report_generation(void)
+{
+    pthread_mutex_lock(&mu);
+    unsigned g = rep_gen;
+    pthread_mutex_unlock(&mu);
+    return g;
+}
+
+static int state_report(int checked, unsigned gen, const char *mode, int armed,
+                        long air_assist, long exhaust, long intake,
+                        const cool_limits_t *lim);
+
 int cool_state_report(const char *mode, int armed,
                       long air_assist, long exhaust, long intake,
                       const cool_limits_t *lim)
+{
+    return state_report(0, 0, mode, armed, air_assist, exhaust, intake, lim);
+}
+
+int cool_state_report_for(unsigned generation, const char *mode, int armed,
+                          long air_assist, long exhaust, long intake,
+                          const cool_limits_t *lim)
+{
+    return state_report(1, generation, mode, armed, air_assist, exhaust, intake, lim);
+}
+
+static int state_report(int checked, unsigned gen, const char *mode, int armed,
+                        long air_assist, long exhaust, long intake,
+                        const cool_limits_t *lim)
 {
     int m;
     if (!strcmp(mode, "idle"))
@@ -4000,6 +4030,12 @@ int cool_state_report(const char *mode, int armed,
      * pub_mu keeps the engine's publish from landing between the two. */
     pthread_mutex_lock(&pub_mu);
     pthread_mutex_lock(&mu);
+    if (checked && gen != rep_gen) {
+        /* Its controller stopped after the check: nothing is stored. */
+        pthread_mutex_unlock(&mu);
+        pthread_mutex_unlock(&pub_mu);
+        return -2;
+    }
     double now = wall_s();
     int was_open = coolfmt_armed(rep_armed, rep_at < 0 ? -1 : now - rep_at, REPORT_TIMEOUT_S);
     int opens = armed && !was_open;
@@ -4041,6 +4077,7 @@ void cool_controller_stopped(void)
     rep_at = -1.0;
     rep_mode = 0;
     rep_armed = 0;
+    rep_gen++;
     pthread_mutex_unlock(&mu);
     ack_withdraw();
     pthread_mutex_unlock(&pub_mu);
@@ -4089,6 +4126,22 @@ int cool_armed(void)
     int armed = coolfmt_armed(rep_armed, age, REPORT_TIMEOUT_S);
     pthread_mutex_unlock(&mu);
     return armed;
+}
+
+int cool_report_mode(void)
+{
+    pthread_mutex_lock(&mu);
+    int m = rep_mode;
+    pthread_mutex_unlock(&mu);
+    return m;
+}
+
+int cool_report_armed(void)
+{
+    pthread_mutex_lock(&mu);
+    int a = rep_armed;
+    pthread_mutex_unlock(&mu);
+    return a;
 }
 
 int cool_gates_off_json(char *buf, size_t len)

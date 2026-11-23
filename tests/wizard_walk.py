@@ -75,7 +75,14 @@ dialog and says so. The fuse view asks through the hold dialog, which
 shows the mock's plain-text refusal as it came. An upload the release key did
 not sign (the walk's /__walk/mock stages one and holds the button) asks
 through the hold dialog once its install is refused, and OK installs it
-with confirm_unsigned=1. The cooling engine's banners, in the mock's
+with confirm_unsigned=1; one not newer than the installed version asks
+through the hold dialog before it installs, and OK installs it with
+downgrade=1 and its SHA-256; another client's install refused for its
+signature opens no dialog in this tab; a restart refused after an install
+says the firmware is installed and selected and to finish the job. On the
+setup page, the way back to the factory firmware offers Go back only once
+its reservation is ready, says when the button is not held, and its
+reservation ends with the dialog. The cooling engine's banners, in the mock's
 demos: a live failure offers no Acknowledge, one that waits does, a 409
 says the failure still stands and a taken one clears the banner; two
 notices go with one Dismiss. Set home here asks whether the head is
@@ -451,6 +458,31 @@ var STEPS = [
             aw({ tokens_revoked: true, camera_key_rotated: true }))
           throw new Error('the account warning does not name each failure alone, or names one that did not happen');
         return walkMock('revoke_fails=0'); }); }],
+  /* The way back to the factory firmware takes the button held inside a
+   * reservation of the page's own: Go back is offered only once the
+   * machine says the reservation is ready, a button that is not held is
+   * said in the dialog, and the reservation ends with the dialog. */
+  ['the way back to the factory firmware asks for the button only once its reservation is ready, says when it is not held, and its reservation ends with the dialog', function () {
+    var m = function () { return q('#retmodal'); };
+    var open = function () { return !!(m() && m().classList.contains('show')); };
+    if (!PLAN.mock) return Promise.resolve();          /* the mock's button and reservations alone */
+    return walkMock('button=0')
+      .then(function () {
+        w().askReturn();
+        if (!el('#ret-go').disabled) throw new Error('Go back is offered before the reservation is ready');
+        return until('Go back offered, the reservation ready', function () { return open() && !el('#ret-go').disabled; }, 10000); })
+      .then(function () { return walkMock(''); })
+      .then(function (s) {
+        if (!s.panel_reserved) throw new Error('Go back is offered with no reservation standing');
+        click('#ret-go');
+        return until('the refusal in the dialog', function () { return /not held/.test(q('#ret-msg').textContent); }, 5000); })
+      .then(function () {
+        if (!open()) throw new Error('the dialog closed on the refusal');
+        w().bootstrap.Modal.getInstance(m()).hide();
+        return until('the dialog closed', function () { return !open() && m().style.display === 'none'; }, 5000); })
+      .then(function () {
+        return untilGot('the reservation ended', function () { return walkMock(''); },
+                        function (s) { return s.panel_reserved === 0; }, 5000); }); }],
   ['preferences', function () {
     return until('the preferences read', function () { return on('st-preferences') && q('#p-units').value; })
       .then(function () { set('#p-units', 'metric'); click('[onclick="savePreferences()"]'); })
@@ -784,6 +816,64 @@ if (PLAN.diag) STEPS = STEPS.concat([
       .then(function (s) {
         if (!s.job || s.job.unsigned !== true || s.job.file !== 'upload' || s.running)
           throw new Error('the install went again as ' + JSON.stringify(s)); }); }],
+  /* An archive not newer than the installed version: the page asks
+   * through the hold dialog before it installs, and OK installs it with
+   * downgrade=1 and the SHA-256 the inventory named. */
+  ['an archive not newer than the installed version asks through the hold dialog, and OK installs it with downgrade=1 and its SHA-256', function () {
+    var opened = false;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    return walkMock('older=1&button=1')
+      .then(function () { w().loadSlots(); return until('the older upload listed', function () {
+        return w().SL && w().SL.staged && w().SL.staged.upload.newer === false && q('#applyslot') && q('#applyslot').value; }, 5000); })
+      .then(function () {
+        w().confirm = function () { return true; };
+        w().applyStaged('upload', 'the upload');
+        return until('the hold dialog for the older archive', function () {
+          return opened && modalOpen() && /not newer/.test(q('#holdmodal').textContent); }, 5000); })
+      .then(function () { return until('the dialog asking for the press', function () { return !el('#hold-ok').disabled; }, 10000); })
+      .then(function () { click('#hold-ok'); return until('the dialog closed on the install', function () { return !modalOpen(); }, 5000); })
+      .then(function () { return walkMock('job_end=1&button=0'); })
+      .then(function (s) {
+        if (!s.job || s.job.downgrade !== true || s.job.unsigned || s.job.sha256 !== 'ab'.repeat(32))
+          throw new Error('the install went as ' + JSON.stringify(s.job)); }); }],
+  /* The unsigned dialog belongs to the job this tab started: another
+   * client's install, refused for its signature, asks nothing here. */
+  ['an install another client started, refused for its signature, opens no dialog in this tab', function () {
+    var opened = false, slot;
+    el('#holdmodal').addEventListener('shown.bs.modal', function () { opened = true; });
+    return walkMock('signed=1')
+      .then(function () { w().loadSlots(); return until('the signed upload listed, a slot to install to', function () {
+        return w().SL.staged && w().SL.staged.upload.sha256 === 'cd'.repeat(32) && (slot = q('#applyslot') && q('#applyslot').value); }, 5000); })
+      .then(function () {
+        w().confirm = function () { return true; };
+        w().applyStaged('upload', 'the upload');
+        return untilGot('this tab\'s install running', function () { return walkMock(''); }, function (s) { return s.running; }, 5000); })
+      .then(function () { return walkMock('job_end=1&unsigned=1'); })
+      .then(function () { return w().fx('/update/apply?file=upload&slot=' + slot, { method: 'POST' }); })
+      .then(function () { return untilGot('the other client\'s install running', function () { return walkMock(''); }, function (s) { return s.running; }, 5000); })
+      .then(function () { return walkMock('job_end=1'); })
+      .then(function () { w().jobPoll(); return sleep(1500); })
+      .then(function () { w().jobPoll(); return sleep(1500); })
+      .then(function () {
+        if (opened || modalOpen()) throw new Error('another client\'s refused install opened the unsigned dialog here'); }); }],
+  /* A restart the machine refuses after an install (a job, a sender) says
+   * so, and leaves the new slot selected. */
+  ['a restart refused after an install says the firmware is installed and selected, and to finish the job first', function () {
+    var was = null;
+    return api('/slots')
+      .then(function (s) {
+        Object.keys(s.slots || {}).forEach(function (k) { if (s.slots[k].next) was = k; });
+        return walkMock('reboot_refuse=1'); })
+      .then(function () {
+        w().REL = { version: 'v9.9.9' };
+        w().relJob = { slot: 'b' };
+        w().relSelect();
+        return until('the refusal shown', function () { return shown('#rel-err') && /Finish the job/.test(q('#rel-err').textContent); }, 8000); })
+      .then(function () {
+        if (!/selected for the next boot/.test(q('#rel-err').textContent) || !/Grbl sender/.test(q('#rel-err').textContent))
+          throw new Error('the refusal says ' + JSON.stringify(q('#rel-err').textContent));
+        return walkMock('reboot_refuse=0'); })
+      .then(function () { return was ? w().fx('/boot?target=' + was, { method: 'POST' }) : null; }); }],
   /* The cooling engine's attention, in the mock's demos: live, a failure
    * that still stands; ack, one that waits for its Acknowledge. */
   ['the attention banner: a live failure offers no Acknowledge; one that waits does, a refusal says the failure still stands, and a taken one clears the banner', function () {
@@ -1330,10 +1420,11 @@ class Walk(devserver.Handler):
             return self._json(200, {"starts": [[c, round(t - t0, 3)] for c, t in Walk.starts]})
         # The mock's state as the walk sets it: the machine button held or
         # not, the cooling demo (GF_MOCK_COOL's words, its notices undismissed),
-        # an upload staged that the release key did not sign, the running
-        # update job ended now (the walk's clock, not the mock's), the next
-        # login answered with a body that is not JSON; and the update job,
-        # read back.
+        # the running update job ended now (the walk's clock, not the mock's),
+        # then an upload staged that the release key did not sign, one it
+        # signed, or one not newer than the installed version, a restart
+        # refused, the next login answered with a body that is not JSON; and
+        # the update job, read back.
         if u.path == "/__walk/mock" and Walk.mock:
             if self.command == "POST":
                 with Walk.mock.lock:
@@ -1342,12 +1433,25 @@ class Walk(devserver.Handler):
                     if "cool" in q:
                         Walk.mock.cool_demo = q["cool"]
                         Walk.mock.notices_seen = 0
+                    if q.get("job_end") == "1" and Walk.mock.update["running"]:
+                        Walk.mock._job_end()
                     if q.get("unsigned") == "1":
                         Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1,
                                                                "version": devserver.MOCK_RELEASE}
                         Walk.mock.upload_unsigned = True
-                    if q.get("job_end") == "1" and Walk.mock.update["running"]:
-                        Walk.mock._job_end()
+                    if q.get("signed") == "1":
+                        Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1,
+                                                               "version": devserver.MOCK_RELEASE,
+                                                               "newer": True, "signature": "forgefirm",
+                                                               "sha256": "cd" * 32}
+                        Walk.mock.upload_unsigned = False
+                    if q.get("older") == "1":
+                        Walk.mock.slots["staged"]["upload"] = {"present": True, "bytes": 1, "version": "v0.0.1",
+                                                               "newer": False, "signature": "forgefirm",
+                                                               "sha256": "ab" * 32}
+                        Walk.mock.upload_unsigned = False
+                    if "reboot_refuse" in q:
+                        Walk.mock.reboot_refuse = q["reboot_refuse"] == "1"
                     if "ext" in q:
                         Walk.mock.settings["ext_enabled"] = q["ext"]
                     if "revoke_fails" in q:

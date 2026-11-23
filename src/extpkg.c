@@ -508,12 +508,20 @@ char *extpkg_call_json(const char *id, const char *method, const char *path, con
     return out;
 }
 
+static int file_sha256(const char *path, char hex[2 * SHA256_LEN + 1], long long *size);
+
 char *extpkg_inspect_json(int *status, char *why, size_t wlen)
 {
     json_t *j = inspect(status, why, wlen);
     if (!j)
         return NULL;
     json_object_set_new(j, "consent", json_string(consent_of(j)));
+    /* The staged file's own SHA-256, which the install dialog carries back
+     * (extpkg_stage_matches), so what installs is what was shown. */
+    char hex[2 * SHA256_LEN + 1];
+    long long size;
+    if (file_sha256(extpkg_stage_path(), hex, &size) == 0)
+        json_object_set_new(j, "sha256", json_string(hex));
     char *doc = json_dumps(j, JSON_COMPACT);
     json_decref(j);
     if (!doc) {
@@ -539,7 +547,7 @@ void (*extpkg_installed)(const char *id) = NULL;
 
 int extpkg_install(const char *grants, const char *phrase, int button_held, int *status, char *why, size_t wlen)
 {
-    static char held[EXTPKG_GRANTS_MAX][44];
+    char held[EXTPKG_GRANTS_MAX][44];   /* this install's own: never another's grants */
     const char *argv[8 + 2 * EXTPKG_GRANTS_MAX];
     int n = 0, ng = 0;
 
@@ -949,6 +957,23 @@ static int file_sha256(const char *path, char hex[2 * SHA256_LEN + 1], long long
     return bad ? -1 : 0;
 }
 
+int extpkg_stage_matches(const char *sha256, int *status, char *why, size_t wlen)
+{
+    char hex[2 * SHA256_LEN + 1];
+    long long size;
+    if (access(extpkg_stage_path(), R_OK) != 0) {
+        *status = 409;
+        snprintf(why, wlen, "no package is staged: upload one first");
+        return -1;
+    }
+    if (!sha256 || file_sha256(extpkg_stage_path(), hex, &size) != 0 || strcmp(hex, sha256) != 0) {
+        *status = 409;
+        snprintf(why, wlen, "the staged package is not the one the dialog showed: upload or fetch it again");
+        return -1;
+    }
+    return 0;
+}
+
 char *extpkg_catalog_json(int *status, char *why, size_t wlen)
 {
     const char *argv[] = { "index", NULL };
@@ -1093,6 +1118,7 @@ char *extpkg_catalog_get(const char *id, int *status, char *why, size_t wlen)
     }
     json_object_set_new(in, "consent", json_string(consent_of(in)));
     json_object_set_new(in, "catalog", json_true());
+    json_object_set_new(in, "sha256", json_string(got));   /* the staged file's, held to the index's above */
     char *doc = json_dumps(in, JSON_COMPACT);
     json_decref(in);
     if (!doc) {
