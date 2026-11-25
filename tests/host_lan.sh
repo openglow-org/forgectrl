@@ -745,6 +745,20 @@ until_t 4000
 expect True "$(vres)" "and the button stays reserved 2.9 s after that press (its linger again)"
 until_t 7700
 expect False "$(vres)" "and is no longer reserved 6.6 s after that press (that linger ended)"
+# A press taken within its request's 3 s. The wait comes ready once its
+# reservation has stood 1 s on file, counted from the first verdict that
+# carries it, and the cooling engine publishes once a second: an ask made
+# just after a publish comes ready at about 2 s, which leaves a press read
+# again 400 ms later too little of the 3 s. The ask goes out about 0.25 s
+# before a publish (cooling.state's mtime marks each one), so the wait
+# comes ready at about 1.25 s.
+python3 -c 'import os, sys, time
+p = sys.argv[1]
+m = os.stat(p).st_mtime_ns
+end = time.monotonic() + 3
+while os.stat(p).st_mtime_ns == m and time.monotonic() < end:
+    time.sleep(0.01)
+time.sleep(0.75)' "$T/run/cooling.state"
 expect 200 "$(press_as lan press)" "$CLIENT asks then"
 T0=$(mono_ms)
 CLAIM=$(cookie ffpress)
