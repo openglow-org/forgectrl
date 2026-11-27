@@ -42,6 +42,10 @@
  * test lands a second request between a route's check and its act.
  * GF_RUN_END_GAP_MS pauses an update job and a setup check that long
  * once each reads ended, so a host test can start the next in that gap.
+ * GF_THREAD_FAIL_FILE names a file: while it stands, the next start of an
+ * update job or a setup check takes its worker thread as not created and
+ * removes the file (ff_test_thread_fail), so a host test reaches the
+ * path of a start whose thread cannot start, once.
  * ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion
@@ -95,5 +99,14 @@ static inline void ff_test_pause(const char *point)
     for (int i = 0; i < 1500 && access(path, F_OK) == 0; i++)
         nanosleep(&tick, NULL);
     unlink(at);
+}
+
+/* A host test's failed thread start: 1 once while <GF_THREAD_FAIL_FILE>
+ * stands (the call removes it, so the next asks find none), 0 in any
+ * other run or with no such file. */
+static inline int ff_test_thread_fail(void)
+{
+    const char *path = ff_test_hook("GF_THREAD_FAIL_FILE");
+    return path && unlink(path) == 0;
 }
 #endif

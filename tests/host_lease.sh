@@ -36,7 +36,13 @@
 # run 1.5 s once it reads ended, a Sensors check started in a switches
 # check's gap holds the lease, and a download job started in an ended
 # one's gap is taken (the release check points at a closed local port, so
-# each ends at once), the lease free after. Nothing posts confirm=1, a
+# each ends at once), the lease free after. A start whose worker thread
+# cannot start gives the lease back before it reads ended too: with
+# GF_THREAD_FAIL_FILE failing one thread start, and a GF_PAUSE_DIR pause
+# once that start reads ended, a download job started in a failed
+# download's gap is taken, and a Sensors check started in a failed
+# switches check's gap holds the lease; the failed starts are 409, and the
+# lease is free after both. Nothing posts confirm=1, a
 # reboot, /system/ssh, or an update's write. The daemon runs on the image's ulfius
 # (tests/ulfius_image.sh). Runs unprivileged; build.yml runs it:
 #
@@ -106,6 +112,7 @@ start_daemon() {
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
         GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" GF_RUN_END_GAP_MS=1500 \
+        GF_PAUSE_DIR="$T/pause" GF_THREAD_FAIL_FILE="$T/thread-fail" \
         FORGECTRL_RELCHECK_URL="http://127.0.0.1:1/no-release" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
@@ -310,6 +317,44 @@ until_ok 50 updating False || bad "the download job did not end"
 expect 202 "$(post /update/download "$TOKEN")" "a download started in the ended one's gap is 202: $(cat "$T/body")"
 until_ok 50 updating False || bad "the second download job did not end"
 until_ok 50 free && ok "the lease is free after both" || bad "the lease is still held: $(holder)"
+
+echo "== a start whose thread cannot start gives the lease back before it reads ended"
+# failing <path> <pause point>: POSTs <path> in the background with one
+# thread start failing and a pause once that start reads ended, and
+# returns once it waits at the pause; land_done then lets it go, its
+# status in $FCODE and its body in $T/first.body.
+failing() {
+    : > "$T/pause/$2"
+    : > "$T/thread-fail"
+    curl -s -o "$T/first.body" -w '%{http_code}' -X POST -H "X-ForgeFIRM-Token: $TOKEN" "$URL$1" \
+        > "$T/first.code" &
+    FIRST=$!
+    POINT=$2
+    until_ok 100 test -f "$T/pause/$2.at" || bad "POST $1 did not reach the pause $2: $(cat "$T/first.body")"
+    [ ! -e "$T/thread-fail" ] && ok "POST $1 took its thread as not created" \
+        || bad "POST $1 did not ask for its thread"
+}
+land_done() {
+    rm -f "$T/pause/$POINT"
+    wait $FIRST
+    FCODE=$(cat "$T/first.code")
+}
+mkdir -p "$T/pause"
+failing /update/download job_thread_failed
+expect 202 "$(post /update/download "$TOKEN")" "a download started in the failed one's gap is 202: $(cat "$T/body")"
+land_done
+expect 409 "$FCODE" "the download whose thread cannot start is 409"
+until_ok 50 updating False || bad "the download job in the gap did not end"
+until_ok 50 free && ok "the lease is free after both" || bad "the lease is still held: $(holder)"
+failing /wiz/switches/start wizdark_thread_failed
+expect 200 "$(post /wiz/sensors/start "$TOKEN")" "a check started in the failed check's gap is 200: $(cat "$T/body")"
+expect wizard:sensors "$(holder)" "and holds the lease"
+land_done
+expect 409 "$FCODE" "the switches check whose thread cannot start is 409"
+grep -qF 'cannot start the wizard thread' "$T/first.body" && ok "and says it cannot start its thread" \
+    || bad "the failed check's refusal: $(cat "$T/first.body")"
+post /wiz/sensors/abort "$TOKEN" > /dev/null
+until_ok 150 free && ok "the lease is free after both" || bad "the lease is still held: $(holder)"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

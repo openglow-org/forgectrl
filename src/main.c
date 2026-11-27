@@ -4059,6 +4059,7 @@ static const char *const TEST_HOOKS[] = {
     "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S",
     "GF_RUN_DIR", "GF_RUN_END_GAP_MS", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
     "GF_SYSFS_ROOT", "GF_USERS_REPLAY", "GF_RELEASE_HTTP", "GF_SLOT_DIR", "GF_VERSION_FILE",
+    "GF_THREAD_FAIL_FILE",
 };
 
 /* Adds a name to a notice line: 0 when the line has no room. */

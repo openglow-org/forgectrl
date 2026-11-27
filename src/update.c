@@ -841,15 +841,17 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg, char 
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    int rc = pthread_create(&th, &at, worker, arg);
+    int rc = ff_test_thread_fail() ? EAGAIN : pthread_create(&th, &at, worker, arg);
     pthread_attr_destroy(&at);
     if (rc != 0) {
         /* As job_finish: the lease goes back while job_owner is still
-         * this job's, before a start can rewrite it. */
+         * this job's, before a start can rewrite it. host_lease.sh lands
+         * a start at the pause, once the job reads ended. */
         pthread_mutex_lock(&mu);
         lease_release(job_owner);
         job_running = 0;
         pthread_mutex_unlock(&mu);
+        ff_test_pause("job_thread_failed");
         return -1;
     }
     return 0;

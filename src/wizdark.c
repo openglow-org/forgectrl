@@ -2313,16 +2313,18 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, worker, (void *)(intptr_t)ix) != 0) {
+    if (ff_test_thread_fail() || pthread_create(&th, &at, worker, (void *)(intptr_t)ix) != 0) {
         pthread_attr_destroy(&at);
         /* As update.c's job_start: the lease goes back while the check
          * still reads running, so a start cannot rewrite lease_held and
-         * lease_owner first (mu, then the lease's mutex, as in the take). */
+         * lease_owner first (mu, then the lease's mutex, as in the take).
+         * host_lease.sh lands a start at the pause, once it reads ended. */
         pthread_mutex_lock(&mu);
         if (lease_held)
             lease_release(lease_owner);
         S.running = 0;
         pthread_mutex_unlock(&mu);
+        ff_test_pause("wizdark_thread_failed");
         snprintf(err, elen, "cannot start the wizard thread");
         return -1;
     }
