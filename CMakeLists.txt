@@ -489,7 +489,7 @@ target_link_libraries(grblport_test pthread m)
 add_executable(jobrun_test tests/jobrun_test.c src/jobrun.c src/jobstream.c src/lease.c src/fflog.c)
 target_compile_options(jobrun_test PRIVATE -Wall -Wextra)
 target_compile_definitions(jobrun_test PRIVATE JOBRUN_STOP_SEEN_S=0.3)
-target_link_libraries(jobrun_test -Wl,--wrap=write pthread)
+target_link_libraries(jobrun_test -Wl,--wrap=write -Wl,--wrap=pthread_mutex_unlock pthread m)
 
 # POST /job's multipart reader on a ulfius instance of its own, fed raw
 # bodies: the form parts reach the runner's start byte for byte, and a
@@ -498,7 +498,8 @@ target_link_libraries(jobrun_test -Wl,--wrap=write pthread)
 add_executable(jobpost_test tests/jobpost_test.c src/jobpost.c src/jobrun.c src/jobstream.c
                src/lease.c src/fflog.c)
 target_compile_options(jobpost_test PRIVATE -Wall -Wextra)
-target_link_libraries(jobpost_test -Wl,--wrap=jobrun_program_start -Wl,--wrap=clock_gettime ulfius pthread)
+target_link_libraries(jobpost_test -Wl,--wrap=jobrun_program_start_as -Wl,--wrap=jobrun_program_abort
+                      -Wl,--wrap=jobrun_program_abort_of -Wl,--wrap=clock_gettime ulfius pthread m)
 
 # The scoped-token store: the closed capability list, the judgment, the
 # hash-only file, the deferred last-used write, revoke, and a damaged store.

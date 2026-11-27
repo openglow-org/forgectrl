@@ -11,10 +11,11 @@
  * files the host writes read as the holds it meant (their names, their
  * fields, the host's own words), and a silent host's files going stale.
  * The required-holds markers are the second agreement: the directory
- * literal, install.h's against holds.h's, and a marker written as
- * install.c writes it, one empty file named after the package, which
- * holds alone when no hold file speaks for the package and is answered
- * by the host's file of the same name. The test reads the files
+ * literal, install.h's against holds.h's, and a marker written by the
+ * host's own writer, named after the package and naming its modes, which
+ * holds alone when no hold file speaks for the package (unless its modes
+ * leave out the controller that runs) and is answered by the host's file
+ * of the same name. The test reads the files
  * on CLOCK_MONOTONIC, and the target wraps clock_gettime: every other
  * clock reads 2000000000 s, as in cool_engine_test's fake clock. A host that
  * stamps ts_mono on another clock writes files that read stale, and the
@@ -156,22 +157,29 @@ int main(void)
           "the required file a stopped host left does not stand stale: %d %s", h.standing, h.reason);
 
     /* The marker alone: the hold files are gone (a reboot takes the tmpfs) and the host has not
-       written any, and the operator marked the package's hold required. The marker is written as
-       install.c's ext_required_holds_sync writes it, one empty file named after the package, and
-       the hold stands in the engine's words with no file read. */
+       written any, and the operator marked the package's hold required. The marker is written by
+       the host's own writer (install.c's ext_required_holds_sync calls it), naming the package's
+       one mode, GRBL; the hold stands in the engine's words with no file read while GRBL runs or
+       nothing is agreed, and not while the cloud controller runs. Then the same with a marker that
+       names no mode (a manifest that did not read): it holds in every mode. */
     char path[400];
     snprintf(path, sizeof(path), "%s/org.example.badge.json", dir);
     CHECK(unlink(path) == 0, "the required file is not where the host wrote it: %s", path);
-    snprintf(path, sizeof(path), "%s/org.example.badge", req);
-    int fd = open(path, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
-    CHECK(fd >= 0, "the marker could not be written: %s", path);
-    if (fd >= 0)
-        close(fd);
-    holds_read(dir, req, mono(), &h);
+    CHECK(holdkeep_marker_write(req, "org.example.badge", 1, 0) == 0, "the host's marker could not be written");
+    holds_read_for(dir, req, mono(), "grbl", &h);
     CHECK(h.standing && h.files == 0 && h.stale_required == 1 &&
           !strcmp(h.reason, "org.example.badge: the extension host is not answering"),
           "a marker with no hold file does not hold: standing %d, files %d, stale required %d, reason %s",
           h.standing, h.files, h.stale_required, h.reason);
+    holds_read_for(dir, req, mono(), NULL, &h);
+    CHECK(h.standing && h.stale_required == 1, "the GRBL marker does not hold with no controller agreed");
+    holds_read_for(dir, req, mono(), "cloud", &h);
+    CHECK(!h.standing && h.stale_required == 0, "the GRBL marker holds while the cloud controller runs: %s", h.reason);
+    CHECK(holdkeep_marker_write(req, "org.example.badge", 0, 0) == 0, "the host's marker could not be written again");
+    holds_read_for(dir, req, mono(), "cloud", &h);
+    CHECK(h.standing && h.stale_required == 1, "a marker with no modes does not hold in cloud mode");
+    holds_read(dir, req, mono(), &h);
+    CHECK(h.standing && h.stale_required == 1, "a marker with no modes does not hold");
 
     /* The host comes up and speaks for the package: its file answers the marker by the same name,
        and nothing stands. */

@@ -32,6 +32,11 @@
 /* 1 while the tray is out (the controller's marker). */
 int tray_is_out(void);
 
+/* The mode in force as a package's M103 must state it: 1 out (the
+ * marker), 0 in (no marker), -1 when the marker cannot be looked at
+ * (anything but its absence). */
+int tray_mode(void);
+
 /* The offset setting as the controller reads it: the value, held to its
  * range; the default when it is unset or not a number. */
 double tray_offset_mm(void);

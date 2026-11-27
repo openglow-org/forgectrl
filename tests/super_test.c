@@ -136,6 +136,9 @@
  *      respawn's idle read halts nothing and starts nothing; before the
  *      daemon's listener is up nothing moves and no controller starts (V:
  *      super_init leaves it waiting)
+ *  H5. the controller the hold markers are judged on (super_ctl_agreed)
+ *      is named only while one runs and it is the stored mode's: none
+ *      running, or a switch under way, names none
  */
 #define _GNU_SOURCE
 #define GF_SYSFS  "super-test/sys/"
@@ -2689,6 +2692,27 @@ int main(void)
         CHECK(stat(marker, &sb) != 0, "a cloud client after a GRBL controller: the marker goes");
         unlink(marker);
         unsetenv("GF_NOHUNT_MARKER");
+        reset_state();
+    }
+
+    printf("H5. the controller the hold markers are judged on\n");
+    {
+        static const struct { ctl_t want, ctl; pid_t pid; const char *named, *what; } agreed[] = {
+            { Ctl_Grbl, Ctl_Grbl, 4242, "grbl", "the GRBL controller runs in GRBL mode" },
+            { Ctl_Cloud, Ctl_Cloud, 4242, "cloud", "the cloud client runs in cloud mode" },
+            { Ctl_Grbl, Ctl_Grbl, 0, NULL, "no controller runs (its type left from the last)" },
+            { Ctl_Cloud, Ctl_Grbl, 4242, NULL, "a switch to cloud mode under way, the GRBL controller still up" },
+        };
+        for (size_t i = 0; i < sizeof(agreed) / sizeof(*agreed); i++) {
+            reset_state();
+            pthread_mutex_lock(&mu);
+            want = agreed[i].want;
+            child_ctl = agreed[i].ctl;
+            child_pid = agreed[i].pid;
+            pthread_mutex_unlock(&mu);
+            const char *got = super_ctl_agreed();
+            CHECK(agreed[i].named ? got && strcmp(got, agreed[i].named) == 0 : got == NULL, agreed[i].what);
+        }
         reset_state();
     }
 

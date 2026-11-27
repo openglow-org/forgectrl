@@ -761,6 +761,15 @@ static void log_outcome(const char *kind, int probe, const char *result)
     json_decref(o);
 }
 
+/* GF_RUN_END_GAP_MS (testhook.h): a host test's pause once a job reads
+ * ended, so it can start the next one there. */
+static void run_end_gap(void)
+{
+    const char *ms = ff_test_hook("GF_RUN_END_GAP_MS");
+    if (ms)
+        usleep((useconds_t)atoi(ms) * 1000);
+}
+
 static void job_finish(const char *fmt, ...)
 {
     char kind[sizeof(job_kind)], result[sizeof(job_result)];
@@ -771,13 +780,17 @@ static void job_finish(const char *fmt, ...)
     snprintf(kind, sizeof(kind), "%s", job_kind);
     snprintf(result, sizeof(result), "%s", job_result);
     int probe = job_probe;
+    /* The lease goes back while the job still reads running: a start
+     * that comes once it reads idle finds the lease free, and job_owner
+     * is the ending job's (mu, then the lease's mutex, as in job_start). */
+    lease_release(job_owner);
     job_running = 0;
     job_phase[0] = '\0';
     progress_file[0] = '\0';
     pthread_mutex_unlock(&mu);
     va_end(ap);
+    run_end_gap();
     log_outcome(kind, probe, result);
-    lease_release(job_owner);
 }
 
 /* Start a job: 0 ok, -1 busy, -2 a job runs on the machine
@@ -831,10 +844,12 @@ static int job_start(const char *kind, void *(*worker)(void *), void *arg, char 
     int rc = pthread_create(&th, &at, worker, arg);
     pthread_attr_destroy(&at);
     if (rc != 0) {
+        /* As job_finish: the lease goes back while job_owner is still
+         * this job's, before a start can rewrite it. */
         pthread_mutex_lock(&mu);
+        lease_release(job_owner);
         job_running = 0;
         pthread_mutex_unlock(&mu);
-        lease_release(job_owner);
         return -1;
     }
     return 0;

@@ -95,7 +95,9 @@ button's reservation), and the machine's status it reads through the
 bridge carries no level of the button. The page's own jog and cancel,
 sent from inside its frame through the bridge, reach the machine marked
 as that page's (page=<id>): the machine refuses a page's jog inside the
-laser's armed window and ends only a page's own jog at its cancel. The hold
+laser's armed window and ends only a page's own jog at its cancel. Its
+job goes marked the same way, and its job's abort names the package
+(id=<id>), so it ends that package's own job alone. The hold
 dialog's OK sends nothing on a ready 3 s old by either clock or on none;
 a tab back in view, a focused window and a page shown again check its
 ready at once, and the first frames after a wake that brings no event
@@ -119,6 +121,7 @@ could not run (no pages, no browser, no verdict in time).
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -996,7 +999,7 @@ if (PLAN.diag) STEPS = STEPS.concat([
   /* A page's jog and cancel are the page's: the page asks for them from
    * inside its frame, through the bridge, and the machine gets each with
    * page=<id>, the panel's word for whose they are. */
-  ['a package\'s page jogs and cancels through the bridge, each marked as that page\'s', function () {
+  ['a package\'s page jogs, cancels, runs a job and aborts it through the bridge, each marked as that page\'s', function () {
     var frame = function () { return q('#extcards .extcard iframe'); }, got = null, part = null, id = '', ready = [];
     var W = w();
     W.addEventListener('message', function (ev) {
@@ -1019,7 +1022,8 @@ if (PLAN.diag) STEPS = STEPS.concat([
         return until('the page\'s jog and cancel answered (so far: ' + JSON.stringify(part) + ')',
                      function () { return got; }, 10000); })
       .then(function () {
-        if (got.jog !== 'ok' || got.cancel !== 'ok') throw new Error('the page\'s calls answered ' + JSON.stringify(got));
+        if (got.jog !== 'ok' || got.cancel !== 'ok' || got.job !== 'ok' || got.abort !== 'ok')
+          throw new Error('the page\'s calls answered ' + JSON.stringify(got));
         return walkMock(''); })
       .then(function (s) {
         /* The mock's page asks for a jog of its own as it loads (x=5); the
@@ -1030,6 +1034,13 @@ if (PLAN.diag) STEPS = STEPS.concat([
           throw new Error('the page\'s jog reached the machine as ' + JSON.stringify(jog) + ', not marked page=' + id);
         if (cancel.length !== 1 || cancel[0][1].page !== id)
           throw new Error('the page\'s cancel reached the machine as ' + JSON.stringify(cancel) + ', not marked page=' + id);
+        /* Its job is marked page=<id>, and its abort names the package. */
+        var job = (s.moves || []).filter(function (m) { return m[0] === '/job'; }),
+          abort = (s.moves || []).filter(function (m) { return m[0] === '/job/abort'; });
+        if (job.length !== 1 || job[0][1].page !== id || job[0][1].name !== id)
+          throw new Error('the page\'s job reached the machine as ' + JSON.stringify(job) + ', not marked page=' + id);
+        if (abort.length !== 1 || abort[0][1].id !== id)
+          throw new Error('the page\'s abort reached the machine as ' + JSON.stringify(abort) + ', not naming id=' + id);
         click('#t-system');
         return walkMock('ext=0'); }); }],
   /* OK sends nothing on a ready that no answer has confirmed for 2.5 s, by
@@ -1267,6 +1278,12 @@ window.addEventListener("message", function (ev) {
     return ask("motion.cancel");
   }).then(function (r) {
     out.cancel = r.ok ? "ok" : String(r.error);
+    return ask("motion.job", { program: "G91\nG0 X1\n" });
+  }).then(function (r) {
+    out.job = r.ok ? "ok" : String(r.error);
+    return ask("motion.job.abort");
+  }).then(function (r) {
+    out.abort = r.ok ? "ok" : String(r.error);
     parent.postMessage({ walkMoved: out }, "*");
   });
 });
@@ -1351,8 +1368,14 @@ class Walk(devserver.Handler):
         self.wfile.write(b'{"reserv')
 
     def _mock(self, path, q):
-        if self.command == "POST" and path in ("/motion/jog", "/motion/cancel"):
+        if self.command == "POST" and path in ("/motion/jog", "/motion/cancel", "/job/abort"):
             form = dict(parse_qsl(self._read_body().decode("utf-8", "replace"), keep_blank_values=True))
+            Walk.moves.append((path, form))
+            return self._json(200, {"ok": True})
+        if self.command == "POST" and path == "/job":
+            # The form's fields, the program part left out.
+            body = self._read_body().decode("utf-8", "replace")
+            form = dict(re.findall(r'name="(\w+)"\r\n\r\n([^\r]*)\r\n', body))
             Walk.moves.append((path, form))
             return self._json(200, {"ok": True})
         if self.command == "POST" and path == "/login" and Walk.login_plain:
@@ -1599,11 +1622,14 @@ def main():
                      "report": devserver.MOCK_REPORT_SECRET}
         Walk.mock = devserver.Mock(devserver.MOCK_TOKEN)
         Walk.mock.call_port = 0
-        # The package with an interface may jog, and its page carries the
-        # walk's few lines that ask the bridge for a jog and a cancel.
+        # The package with an interface may jog and run a job, and its page
+        # carries the walk's few lines that ask the bridge for a jog, a
+        # cancel, a job and its abort.
         for pk in Walk.mock.ext_packages:
-            if pk["package"].get("runtime") == "ui" and "motion.jog" not in pk["package"]["capabilities"]:
-                pk["package"]["capabilities"] = pk["package"]["capabilities"] + ["motion.jog"]
+            for cap in ("motion.jog", "motion.job"):
+                if pk["package"].get("runtime") == "ui" and cap not in pk["package"]["capabilities"]:
+                    pk["package"]["capabilities"] = pk["package"]["capabilities"] + [cap]
+                    pk["grants"] = pk["grants"] + [cap]         # motion.job is the operator's to grant
         page_of = Walk.mock.ext_page
 
         def ext_page(pk):

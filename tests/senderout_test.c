@@ -263,6 +263,19 @@ int main(void)
     }
     unkeep(A);
 
+    printf("A claim that ends while the package's own job runs:\n");
+    CHECK(senderout_claim(A, why, sizeof(why)) == 0, "granted");
+    keep(A, 0, 1);
+    CHECK(lease_take("job:org.openglow.alignment", LEASE_SENDER, "ext:org.openglow.alignment", why, sizeof(why)) == 0,
+          "its job runs under the claim: %s", why);
+    CHECK(senderout_end(A, why, sizeof(why)) == 0 && lease_holder(id, sizeof(id)) == 1 && !strcmp(id, "job:org.openglow.alignment"),
+          "the claim's end leaves the job holding the machine alone: '%s'", id);
+    lease_release("job:org.openglow.alignment");
+    CHECK(lease_holder(id, sizeof(id)) == 0 && senderout_claim(A, why, sizeof(why)) == 0,
+          "the job's end leaves the machine to nobody, and the package can claim again: %s", why);
+    CHECK(senderout_end(A, why, sizeof(why)) == 0 && lease_holder(id, sizeof(id)) == 0, "and let it go");
+    unkeep(A);
+
     printf("The operator lets the sender back in:\n");
     CHECK(senderout_claim(A, why, sizeof(why)) == 0, "granted");
     keep(A, 0, 1);

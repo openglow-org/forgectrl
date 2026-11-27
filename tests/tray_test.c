@@ -6,7 +6,8 @@
  *
  * The GRBL controller keeps the mode and persists it as the marker
  * tray.out in the data directory; the daemon reads it. Cases: the marker
- * says the mode; the offset setting reads as the controller reads it (the
+ * says the mode, and a marker that cannot be looked at is neither mode
+ * for a package's M103 (tray_mode); the offset setting reads as the controller reads it (the
  * value held to 13 to 60 mm, the default when unset or not a number) and
  * lands on the controller's half-step, 1.35 in on 100; the shift is zero
  * with the tray in; a write of the offset is valid from 13 to 60 mm only;
@@ -71,8 +72,22 @@ int main(void)
     set_out(0);
     CHECK(!tray_is_out(), "no marker: the tray is in");
     CHECK(near(tray_shift_mm(), 0), "tray in: no shift");
+    CHECK(tray_mode() == 0, "no marker: a package's M103 must say in");
     set_out(1);
     CHECK(tray_is_out(), "the marker: the tray is out");
+    CHECK(tray_mode() == 1, "the marker: a package's M103 must say out");
+    /* A marker that cannot be looked at (the data directory is a file)
+     * is neither mode. */
+    {
+        char file[96];
+        snprintf(file, sizeof(file), "%s/file", dir);
+        FILE *f = fopen(file, "w");
+        fclose(f);
+        setenv("FORGECTRL_DATA_DIR", file, 1);
+        CHECK(tray_mode() == -1, "a marker that cannot be looked at: no mode");
+        setenv("FORGECTRL_DATA_DIR", dir, 1);
+        unlink(file);
+    }
 
     /* The offset, as the controller reads it, on its grid. */
     const struct { const char *v; double mm; long k; const char *what; } off[] = {

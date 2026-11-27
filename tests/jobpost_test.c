@@ -22,10 +22,20 @@
  *     its own lines
  *   a missing name: 400, nothing started, nothing staged
  *   a $ line: 400 naming its line number, nothing started, nothing staged
+ *   a G92 in the extension host's program or a page's (page=<id>): 400,
+ *     nothing started; in the operator's: started
+ *   a package's M103: started, as a package's program (its M103 judged
+ *     again as it goes out), when its P is the tray's mode in force; the
+ *     operator's program is started as no package's;
+ *     400 naming M103, nothing started, for the other mode and for a mode
+ *     that cannot be read
  *   a malformed boundary (the body's delimiter is not the one declared):
  *     400, nothing started, nothing staged
  *   an abandoned upload is adopted by no request on another thread, even
  *     one whose structure sits at the abandoned request's address: 400
+ *   POST /job/abort: the extension host's names the package or is 400; a
+ *     package's (the host's, or a page's through the bridge) ends that
+ *     package's own job alone; the operator's ends whatever runs
  */
 #include "../src/auth.h"
 #include "../src/jobpost.h"
@@ -71,8 +81,40 @@ int auth_write_permitted_cap(const struct _u_request *req, const char *cap)
     return 1;
 }
 
+static int by_host;
+
 int auth_by_host(void)
 {
+    return by_host;
+}
+
+/* The crumb tray's mode as the controller's marker gives it (tray.c's
+ * tray_mode): 0 in, 1 out, -1 not readable. */
+static int stub_tray;
+
+int tray_mode(void)
+{
+    return stub_tray;
+}
+
+/* The runner's two aborts, wrapped (--wrap): which one the route chose, and for whom. */
+static struct {
+    int any, of;
+    char name[64];
+} aborts;
+
+int __wrap_jobrun_program_abort(char *err, size_t elen)
+{
+    (void)err; (void)elen;
+    aborts.any++;
+    return 0;
+}
+
+int __wrap_jobrun_program_abort_of(const char *name, char *err, size_t elen)
+{
+    (void)err; (void)elen;
+    aborts.of++;
+    snprintf(aborts.name, sizeof(aborts.name), "%s", name ? name : "");
     return 0;
 }
 
@@ -83,6 +125,7 @@ static struct {
     char name[64];
     int unlock;
     int under;
+    int package;
     double run_timeout_s;
     char *program;
     size_t len;
@@ -105,10 +148,11 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *ts)
     return rc;
 }
 
-int __wrap_jobrun_program_start(const char *path, const char *name, const char *under,
-                                double lit_timeout_s, double run_timeout_s, int unlock,
-                                char *err, size_t elen)
+int __wrap_jobrun_program_start_as(const char *path, const char *name, const char *under,
+                                   double lit_timeout_s, double run_timeout_s, int unlock, int package,
+                                   char *err, size_t elen)
 {
+    started.package = package;
     (void)lit_timeout_s; (void)err; (void)elen;
     if (second_upload) {
         /* Past the minute an abandoned upload is kept: the start alone
@@ -330,6 +374,49 @@ int main(void)
         printf("a $ line: %d %s\n", st, out);
     }
 
+    /* A package's program (the extension host's; a page's, which the
+     * bridge marks page=<id>) is refused a word that changes what the
+     * controller keeps; the operator's own is not. */
+    {
+        int calls = started.calls;
+        const char *named[] = { "name", "org.example.a", NULL };
+        const char *paged[] = { "name", "org.example.a", "page", "org.example.a", NULL };
+        const char *program = "G21\nG92 X0 Y0\nG1 X5 F1200\n";
+        by_host = 1;
+        int st = send_form(named, program, out, sizeof(out));
+        by_host = 0;
+        CHECK(st == 400 && strstr(out, "line 2") && started.calls == calls && !is_staged(),
+              "the host's G92 -> %d %s, %d starts", st, out, started.calls - calls);
+        st = send_form(paged, program, out, sizeof(out));
+        CHECK(st == 400 && started.calls == calls && !is_staged(), "a page's G92 -> %d %s", st, out);
+        st = send_form(named, program, out, sizeof(out));
+        CHECK(st == 200 && started.calls == calls + 1 && started.package == 0,
+              "the operator's G92 -> %d %s, started as a package's %d", st, out, started.package);
+        printf("a package's G92: refused, the operator's taken\n");
+
+        /* Its M103 is taken as the tray's mode in force, read from the
+         * marker at the post: the other mode, or a marker that cannot be
+         * read, is refused naming M103. */
+        const char *tray_prog = "G21\nM103 P1\nG1 X5 F1200\n";
+        calls = started.calls;
+        stub_tray = 1;
+        st = send_form(paged, tray_prog, out, sizeof(out));
+        CHECK(st == 200 && started.calls == calls + 1 && started.package == 1,
+              "a page's M103 P1 with the tray out -> %d %s, started as a package's %d", st, out, started.package);
+        stub_tray = 0;
+        st = send_form(paged, tray_prog, out, sizeof(out));
+        CHECK(st == 400 && strstr(out, "line 2") && strstr(out, "M103") && started.calls == calls + 1 && !is_staged(),
+              "a page's M103 P1 with the tray in -> %d %s", st, out);
+        stub_tray = -1;
+        by_host = 1;
+        st = send_form(named, tray_prog, out, sizeof(out));
+        by_host = 0;
+        CHECK(st == 400 && strstr(out, "M103") && started.calls == calls + 1 && !is_staged(),
+              "the host's M103 P1 with the tray's mode not readable -> %d %s", st, out);
+        stub_tray = 0;
+        printf("a package's M103: the tray's mode in force taken, any other refused\n");
+    }
+
     /* A malformed boundary: the body's delimiter is not the declared one. */
     {
         int calls = started.calls;
@@ -358,6 +445,44 @@ int main(void)
               "a request on another thread adopted an abandoned upload: %d, %d starts", stranger_status,
               started.calls - calls);
         printf("an abandoned upload: %d\n", stranger_status);
+    }
+
+    /* POST /job/abort: a package's abort names the package and ends its own job alone (the runner's
+     * abort_of); the extension host's must name it; the operator's names nobody and ends whatever
+     * posted program runs. */
+    {
+        struct _u_request ar;
+        struct _u_response rr;
+        ulfius_init_request(&ar);
+        ulfius_init_response(&rr);
+        by_host = 1;
+        cb_job_abort(&ar, &rr, NULL);
+        CHECK(rr.status == 400 && aborts.any == 0 && aborts.of == 0,
+              "the host's abort with no id: %ld, %d plain, %d own", (long)rr.status, aborts.any, aborts.of);
+        ulfius_clean_response(&rr);
+        ulfius_init_response(&rr);
+        u_map_put(ar.map_url, "id", "org.example.a");
+        cb_job_abort(&ar, &rr, NULL);
+        CHECK(rr.status == 200 && aborts.any == 0 && aborts.of == 1 && !strcmp(aborts.name, "org.example.a"),
+              "the host's abort of a package's job did not go to that package's job alone: %ld, %d plain, %d own (%s)",
+              (long)rr.status, aborts.any, aborts.of, aborts.name);
+        ulfius_clean_response(&rr);
+        ulfius_clean_request(&ar);
+        by_host = 0;
+        ulfius_init_request(&ar);
+        ulfius_init_response(&rr);
+        u_map_put(ar.map_post_body, "id", "org.example.b");
+        cb_job_abort(&ar, &rr, NULL);
+        CHECK(aborts.of == 2 && !strcmp(aborts.name, "org.example.b"), "a page's abort (the bridge's id) ended more than its job");
+        ulfius_clean_response(&rr);
+        ulfius_clean_request(&ar);
+        ulfius_init_request(&ar);
+        ulfius_init_response(&rr);
+        cb_job_abort(&ar, &rr, NULL);
+        CHECK(rr.status == 200 && aborts.any == 1 && aborts.of == 2, "the operator's abort: %ld, %d plain, %d own",
+              (long)rr.status, aborts.any, aborts.of);
+        ulfius_clean_response(&rr);
+        ulfius_clean_request(&ar);
     }
 
     ulfius_stop_framework(&inst);

@@ -141,6 +141,22 @@ void jobrun_stop(const char *owner);
 /* A posted program, staged at path. The check: 0 with the line count,
  * or -1 with the first offense and its line number in err. */
 int jobrun_program_check(const char *path, int *lines, char *err, size_t elen);
+/* A word in one line, as the line goes out (comments gone), that changes
+ * what the controller keeps past the program: G10 (the work offsets),
+ * G20 (inches; G21 passes), G28.1 and G30.1 (the stored positions), G43
+ * in every form (the tool length offset; G49, its cancel, passes), G51
+ * (the scaling; G50, its cancel, passes), G92 in every form (the G92
+ * offset), and M103 (the crumb tray's mode) unless it is M103 with one P
+ * of exactly 0 or 1 that is tray, the mode in force (tray_mode(): 1 out,
+ * 0 in, -1 not readable, which no M103 matches). Its name ("G92"), or
+ * NULL. The words are read as the controller's parser reads them: spaces
+ * anywhere dropped, letters in either case, the number read to its
+ * value, so G010, G10.0 and "G 1 0" are all G10. */
+const char *jobrun_line_kept_word(const char *line, int tray);
+/* A package's program, staged at path, against the tray's mode tray: 0
+ * when no line has such a word, or -1 with the first, its line number, in
+ * err. */
+int jobrun_program_check_package(const char *path, int tray, char *err, size_t elen);
 /* Check it and start it as job:<name>. The file is the runner's from
  * here: it is opened and its name removed, started or refused. lit_timeout_s
  * above 0 says the program must show a discharge within that long (the
@@ -148,9 +164,23 @@ int jobrun_program_check(const char *path, int *lines, char *err, size_t elen);
  * runner's own stop only (above). */
 int jobrun_program_start(const char *path, const char *name, const char *under, double lit_timeout_s,
                          double run_timeout_s, int unlock, char *err, size_t elen);
+/* The same, with package 1 for a package's program (jobpost: the host's,
+ * or a page's): each line jobrun_line_kept_word() would refuse with the
+ * tray's mode unknown (an M103) is read again as it is about to go out,
+ * against jobrun_tray_mode() then, and one that no longer passes ends the
+ * run there, unsent, failed in words naming the line and the word. */
+int jobrun_program_start_as(const char *path, const char *name, const char *under, double lit_timeout_s,
+                            double run_timeout_s, int unlock, int package, char *err, size_t elen);
+/* The tray's mode as tray_mode() gives it (1 out, 0 in, -1 not readable);
+ * main.c sets it. NULL reads as -1, which no M103 matches. */
+extern int (*jobrun_tray_mode)(void);
 /* Abort a posted program: 0, or -1 with why not in err (nothing runs,
  * or the run is not a posted program's). */
 int jobrun_program_abort(char *err, size_t elen);
+/* The same, only for the posted program named name (job:<name>): a package
+ * ends its own job and no one else's. -1 with why in err when another
+ * party's runs. */
+int jobrun_program_abort_of(const char *name, char *err, size_t elen);
 /* A job's name from a client: 0 when it is usable as it is. */
 int jobrun_name_ok(const char *name);
 

@@ -48,7 +48,9 @@ typedef enum {
  * the holder in words, or the connected client for a sender hold. */
 int lease_take(const char *owner, lease_kind_t kind, const char *under, char *why, size_t len);
 
-/* Gives it back. Only the innermost owner can; anything else is ignored. */
+/* Gives it back: the named owner goes at whatever level it holds, and an
+ * owner nested inside it then holds alone. A name that holds nothing is
+ * ignored. */
 void lease_release(const char *owner);
 
 /* For a route that must not act under a holder: 1 with the holder in

@@ -40,6 +40,8 @@
  * names a directory of pauses (ff_test_pause): a route that reaches a
  * named point waits there while the file of that name stands in it, so a
  * test lands a second request between a route's check and its act.
+ * GF_RUN_END_GAP_MS pauses an update job and a setup check that long
+ * once each reads ended, so a host test can start the next in that gap.
  * ff_test_hook() returns the hook's value in a host-test run
  * and NULL in any other, so on a machine every reader takes its machine
  * path whatever the environment says: the switch device is the motion

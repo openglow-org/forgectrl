@@ -2224,6 +2224,15 @@ int super_grbl_running(void)
     return super_grbl_pid() > 0;
 }
 
+const char *super_ctl_agreed(void)
+{
+    pthread_mutex_lock(&mu);
+    const char *ctl = child_pid <= 0 || child_ctl != want ? NULL
+                    : child_ctl == Ctl_Grbl ? "grbl" : child_ctl == Ctl_Cloud ? "cloud" : NULL;
+    pthread_mutex_unlock(&mu);
+    return ctl;
+}
+
 long super_grbl_pid(void)
 {
     pthread_mutex_lock(&mu);

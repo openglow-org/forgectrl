@@ -678,12 +678,16 @@ function extBridgeCall(id, call, args) {
     /* A program the page wrote, run as the machine's one sender under
      * every gate a sender is under, the arm press included. Who it is
      * from is the panel's word - the package's id - and never a name the
-     * page chose, which is also what the arm prompt shows. */
+     * page chose, which is also what the arm prompt shows. page=<id> marks
+     * it a package's: the machine refuses a line that would set what the
+     * controller keeps for later jobs (inches, offsets, stored positions,
+     * the scaling, a tray mode other than the one in force). */
     var p = args || {},
       form = new FormData();
     if (typeof p.program !== 'string' || !p.program.length) return Promise.reject('program is the text of a G-code program');
     if (p.program.length > EXT_JOB_MAX) return Promise.reject('a program from a page is at most 2 MiB');
     form.append('name', id);
+    form.append('page', id);
     var k, key;
     for (k = 0; k < 2; k++) {
       key = ['lit_within_s', 'timeout_s'][k];
@@ -727,7 +731,10 @@ function extBridgeCall(id, call, args) {
       .then(extAnswer)
       .then(function (j) { return { status: j.status, body: j.body }; });
   }
-  if (call === 'motion.job.abort') return fx('/job/abort', { method: 'POST' }).then(extAnswer);
+  /* In the frame's package's name: it ends that package's own job, and
+   * no one else's. */
+  if (call === 'motion.job.abort')
+    return fx('/job/abort', { method: 'POST', body: new URLSearchParams({ id: id }) }).then(extAnswer);
   if (call === 'motion.job.state') return fx('/job').then(extAnswer);
   return fx(spec.path)
     .then(extAnswer)

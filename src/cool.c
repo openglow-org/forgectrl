@@ -1099,7 +1099,7 @@ static void ext_holds_read(double now, holds_t *h)
     }
     if (access(ext_safe_file, F_OK) == 0 || !ext_enabled_last)
         return;
-    holds_read(holds_dir, holds_required_dir, now, h);
+    holds_read_for(holds_dir, holds_required_dir, now, super_ctl_agreed(), h);
 }
 
 /* Named on its edges, and when the hold that stands changes. */

@@ -106,6 +106,11 @@ int super_gated(char *why, size_t len);
  * alive: the gate for echoing the controller's published state files
  * (a dead controller's files must read as absent, not as truth). */
 int super_grbl_running(void);
+/* "grbl" or "cloud" while that controller's process is alive and it is
+ * the stored mode's; NULL with no controller, or when what runs is not
+ * what the mode says (a switch under way). The extension holds' reader
+ * lets a required marker of the other mode go unread only on this. */
+const char *super_ctl_agreed(void);
 /* The running GRBL controller's pid, 0 with none: a new pid is a new
  * controller, whatever lay between. */
 long super_grbl_pid(void);

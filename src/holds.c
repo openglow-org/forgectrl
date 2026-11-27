@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void plain(char *s)
@@ -60,9 +61,16 @@ static int judge(const char *dir, const char *name, double now, holds_t *out)
     char path[512], text[HOLDS_FILE_MAX + 1], id[72], why[HOLDS_REASON_MAX], say[HOLDS_REASON_MAX];
     if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
         return -1;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* O_NONBLOCK: a FIFO here would hold the engine's thread at the open
+     * until a writer came. Anything but a regular file cannot be read. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0)
         return -1;
+    struct stat sb;
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+        close(fd);
+        return -1;
+    }
     ssize_t n = read(fd, text, sizeof(text));
     close(fd);
     if (n <= 0 || n > HOLDS_FILE_MAX)
@@ -113,7 +121,46 @@ static int judge(const char *dir, const char *name, double now, holds_t *out)
     return 0;
 }
 
+/* 1 when a marker's own modes leave out the controller that runs: the
+ * marker names one or both of "grbl" and "cloud" and nothing else, and
+ * running is neither of them. A marker that cannot be read, names no mode,
+ * names a word it should not, or a running of NULL (no controller, or one
+ * that is not the stored mode's) is 0: the marker is judged. */
+static int marker_elsewhere(const char *dir, const char *name, const char *running)
+{
+    char path[512], text[64];
+    if (!running || snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path))
+        return 0;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return 0;
+    struct stat sb;
+    ssize_t n = fstat(fd, &sb) == 0 && S_ISREG(sb.st_mode) ? read(fd, text, sizeof(text) - 1) : -1;
+    close(fd);
+    if (n <= 0 || n >= (ssize_t)sizeof(text) - 1)
+        return 0;
+    text[n] = '\0';
+    int grbl = 0, cloud = 0, words = 0;
+    for (char *save = NULL, *w = strtok_r(text, " \t\r\n", &save); w; w = strtok_r(NULL, " \t\r\n", &save)) {
+        if (!strcmp(w, "grbl"))
+            grbl = 1;
+        else if (!strcmp(w, "cloud"))
+            cloud = 1;
+        else
+            return 0;
+        words++;
+    }
+    if (!words)
+        return 0;
+    return !strcmp(running, "grbl") ? !grbl : !strcmp(running, "cloud") ? !cloud : 0;
+}
+
 void holds_read(const char *dir, const char *required_dir, double now, holds_t *out)
+{
+    holds_read_for(dir, required_dir, now, NULL, out);
+}
+
+void holds_read_for(const char *dir, const char *required_dir, double now, const char *running, holds_t *out)
 {
     static char spoken[HOLDS_MAX][72];  /* the packages a file speaks for (the engine's one thread calls this) */
     int nspoken = 0;
@@ -160,7 +207,7 @@ void holds_read(const char *dir, const char *required_dir, double now, holds_t *
         int has = 0;
         for (int k = 0; k < nspoken; k++)
             has |= strcmp(spoken[k], list[i]->d_name) == 0;
-        if (!has && i < HOLDS_MAX) {
+        if (!has && i < HOLDS_MAX && !marker_elsewhere(required_dir, list[i]->d_name, running)) {
             char say[HOLDS_REASON_MAX];
             out->stale_required++;
             snprintf(say, sizeof(say), "%.64s: the extension host is not answering", list[i]->d_name);
@@ -169,4 +216,8 @@ void holds_read(const char *dir, const char *required_dir, double now, holds_t *
         free(list[i]);
     }
     free(list);
+    if (n > HOLDS_MAX) {
+        out->unreadable += n - HOLDS_MAX;
+        stand(out, "more required holds than there are package accounts");
+    }
 }

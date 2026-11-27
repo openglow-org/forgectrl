@@ -11,7 +11,14 @@
  * tree carries the witnesses the test flips.
  *
  * The runner: a posted program's check (what is
- * stripped, every offense with its line number); a program plays as
+ * stripped, every offense with its line number), and a package's check
+ * (G10, G20, G28.1, G30.1, G43, G51 and G92 in each form the controller's
+ * parser reads, G21, G49 and G50 taken, never in a comment; M103 taken
+ * only as M103 with one P of 0 or 1 that is the tray's mode in force, and
+ * never when that mode cannot be read); a package's program has its M103
+ * judged again as the line goes out, and a tray's mode changed since ends
+ * the run with the line unsent, while an operator's is not judged so; a
+ * program plays as
  * job:<name> with the machine lease held as a sender, refuses a second
  * program and a wizard in the holder's words, gets the runner's M2, and
  * leaves the lease free and its staging file gone; a program that ends
@@ -32,7 +39,9 @@
  * program is done when the kernel is idle,
  * not at its last ok nor while its state cannot be read, and at once on an
  * underrun; the abort sends the soft reset and frees the
- * lease; a connected Grbl sender refuses the start with nothing sent; a
+ * lease; a package's abort ends its own job alone, and never one that
+ * starts between its read of the runner and its stop (the link wraps
+ * pthread_mutex_unlock to start one there); a connected Grbl sender refuses the start with nothing sent; a
  * start keeps the Grbl socket to this host first, a controller that calls
  * the machine busy refuses it with nothing sent, and a run gives the
  * socket back once at its end; a
@@ -93,6 +102,23 @@ ssize_t __wrap_write(int fd, const void *buf, size_t n)
         return -1;
     }
     return __real_write(fd, buf, n);
+}
+
+/* The link wraps pthread_mutex_unlock() as well: armed on one thread, its
+ * next unlock there is followed at once by race_start(), so a run can be
+ * started between a read under the runner's lock and what comes next. */
+static void (*volatile race_start)(void);
+static pthread_t race_thread;
+int __real_pthread_mutex_unlock(pthread_mutex_t *m);
+int __wrap_pthread_mutex_unlock(pthread_mutex_t *m)
+{
+    int rc = __real_pthread_mutex_unlock(m);
+    void (*fn)(void) = race_start;
+    if (fn && pthread_equal(pthread_self(), race_thread)) {
+        race_start = NULL;
+        fn();
+    }
+    return rc;
 }
 
 static char root[128], staged[192];
@@ -477,6 +503,41 @@ static void test_check(void)
     longline[sizeof(longline) - 2] = ')';
     stage(longline, sizeof(longline));
     CHECK(jobrun_program_check(staged, &n, err, sizeof(err)) == 0 && n == 1, "a long comment: n %d \"%s\"", n, err);
+
+    /* A package's program: the words that change what the controller
+     * keeps, read as its parser reads them, with the tray's mode in force
+     * (0 in, 1 out, -1 not readable). */
+    static const struct { const char *line; int tray; const char *word; } kept[] = {
+        { "G10 L2 P1 X0", 0, "G10" }, { "g 1 0 l20 p1 x0", 0, "G10" }, { "G010L2P1", 0, "G10" },
+        { "G00000000010 L2", 0, "G10" }, { "G10.0 L2", 0, "G10" }, { "N20 G0 X1 G92 X0", 0, "G92" },
+        { "G92.1", 0, "G92" }, { "G92.2", 0, "G92" }, { "g 9 2 . 3", 0, "G92" }, { "G+92 X0", 0, "G92" },
+        { "G28.1", 0, "G28.1" }, { "G28.10", 0, "G28.1" }, { "G30.1", 0, "G30.1" },
+        { "G43 H1", 0, "G43" }, { "g43.1x5", 0, "G43" }, { "G43.10 Z1", 0, "G43" }, { "G43.2 H1", 0, "G43" },
+        { "G 5 1 X2", 0, "G51" }, { "G49", 0, NULL }, { "G50", 0, NULL },
+        { "G20", 0, "G20" }, { "g 2 0 G0 X1", 0, "G20" }, { "G20.0", 0, "G20" }, { "G21", 0, NULL },
+        { "G28", 0, NULL }, { "G30 X0", 0, NULL }, { "G1 X10 Y92 F1092", 0, NULL },
+        { "G100", 0, NULL }, { "M3 S103", 0, NULL },
+        /* M103: the mode in force passes, any other is refused. */
+        { "M103 P0", 0, NULL }, { "M103 P1", 1, NULL }, { "m 1 0 3 p 0 . 0", 0, NULL }, { "M+103 P1", 1, NULL },
+        { "m0103p1", 0, "M103" }, { "M+103 P1", 0, "M103" }, { "M103 P0", 1, "M103" }, { "M103", 0, "M103" }, { "M103", 1, "M103" },
+        { "M103 P2", 0, "M103" }, { "M103 P0.5", 0, "M103" }, { "M103 P-1", 1, "M103" },
+        { "M103 P0", -1, "M103" }, { "M103 P1", -1, "M103" }, { "M103.1 P1", 1, "M103" },
+        { "M103 P1 P1", 1, "M103" },
+    };
+    for (size_t i = 0; i < sizeof(kept) / sizeof(*kept); i++) {
+        const char *got = jobrun_line_kept_word(kept[i].line, kept[i].tray);
+        CHECK(kept[i].word ? got && !strcmp(got, kept[i].word) : !got, "\"%s\" (tray %d) read as %s, not %s",
+              kept[i].line, kept[i].tray, got ? got : "nothing kept", kept[i].word ? kept[i].word : "nothing kept");
+    }
+    STAGE("G21\n(G92 X0) G1 X1 ; G10 L2\nG91 G0 X1\n");
+    CHECK(jobrun_program_check_package(staged, 0, err, sizeof(err)) == 0, "the words in comments refused: \"%s\"", err);
+    STAGE("G21\nG1 X1\nG92 X0\n");
+    CHECK(jobrun_program_check_package(staged, 0, err, sizeof(err)) == -1 && strstr(err, "line 3") &&
+          strstr(err, "G92"), "a package's G92 on line 3: \"%s\"", err);
+    STAGE("; a profile's program\nG21 G90 G94 M5\nM103 P1\nM4 S0\n");
+    CHECK(jobrun_program_check_package(staged, 1, err, sizeof(err)) == 0, "the tray's mode in force refused: \"%s\"", err);
+    CHECK(jobrun_program_check_package(staged, 0, err, sizeof(err)) == -1 && strstr(err, "line 3") &&
+          strstr(err, "M103"), "the other tray mode on line 3: \"%s\"", err);
 
     CHECK(jobrun_name_ok("panel") == 0 && jobrun_name_ok("a.b_c-9") == 0 &&
           jobrun_name_ok("org.example.a-package-id-of-sixty-three-characters-at-the-bound") == 0,
@@ -957,15 +1018,41 @@ static void test_done_is_idle(void)
     kernel_state("idle");
 }
 
+static int raced_rc = -1;
+static void start_panel(void)
+{
+    char e[160] = "";
+    raced_rc = jobrun_program_start(staged, "panel", NULL, 0, 30, 0, e, sizeof(e));
+    if (raced_rc != 0)
+        printf("the panel's start: %s\n", e);
+}
+
 static void test_abort(void)
 {
     char err[160] = "", who[64];
     mock_clear();
     CHECK(jobrun_program_abort(err, sizeof(err)) == -1 && strstr(err, "no job"), "abort of nothing: \"%s\"", err);
+    /* The operator's job, started between a package's abort's read of the
+     * runner (nothing running) and what the abort does next: it runs on. */
+    STAGE("G21\nG4 P77\nG1 X5 F600\n");
+    race_thread = pthread_self();
+    race_start = start_panel;
+    int rc = jobrun_program_abort_of("stopme", err, sizeof(err));
+    race_start = NULL;
+    CHECK(raced_rc == 0 && rc == -1 && strstr(status(), "\"state\":\"running\"") &&
+          strstr(status(), "\"owner\":\"job:panel\""),
+          "a job started after a package's abort read the runner: started %d, the abort %d, %s", raced_rc, rc, status());
+    CHECK(wait_for(&mock.holding, 1, 3000), "the operator's held line never arrived");
+    CHECK(jobrun_program_abort(err, sizeof(err)) == 0, "the operator's abort: \"%s\"", err);
+    mock_clear();
     STAGE("G21\nG4 P77\nG1 X5 F600\n");
     CHECK(jobrun_program_start(staged, "stopme", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
     CHECK(wait_for(&mock.holding, 1, 3000), "the held line never arrived");
-    CHECK(jobrun_program_abort(err, sizeof(err)) == 0, "abort: \"%s\"", err);
+    /* A package ends its own job and no one else's. */
+    CHECK(jobrun_program_abort_of("another", err, sizeof(err)) == -1 &&
+          lease_holder(who, sizeof(who)) && !strcmp(who, "job:stopme"),
+          "another package's abort: \"%s\", the lease \"%s\"", err, who);
+    CHECK(jobrun_program_abort_of("stopme", err, sizeof(err)) == 0, "abort: \"%s\"", err);
     /* The abort waits for the run: the record and the lease are final here. */
     const char *st = status();
     CHECK(strstr(st, "\"state\":\"failed\"") && strstr(st, "aborted"), "record after the abort: %s", st);
@@ -976,6 +1063,52 @@ static void test_abort(void)
      * M2 is a barrier and never went out. */
     CHECK(mock.lines == 3 && strcmp(mock.seen[2], "M2"), "%d lines went out, the last \"%s\"",
           mock.lines, mock.seen[2]);
+}
+
+/* A package's M103 is judged again as it goes out, against the tray's
+ * mode then: the other mode ends the run before the line is sent; the
+ * mode it gives goes out. An operator's program is not judged so. */
+static int stub_tray = -1;
+static int tray_stub(void)
+{
+    return stub_tray;
+}
+
+static int seen_word(const char *word)
+{
+    for (int i = 0; i < mock.lines && i < 64; i++)
+        if (strstr(mock.seen[i], word))
+            return 1;
+    return 0;
+}
+
+static void test_package_tray(void)
+{
+    char err[160] = "";
+    mock_clear();
+    stub_tray = 1;
+    STAGE("G21\nM103 P0\nG1 X5 F600\n");
+    CHECK(jobrun_program_start_as(staged, "org.example.p", NULL, 0, 30, 0, 1, err, sizeof(err)) == 0,
+          "start: %s", err);
+    CHECK(wait_state("failed", 3000) && strstr(status(), "M103"), "a package's M103 for the other mode: %s",
+          status());
+    msleep(200);
+    CHECK(!seen_word("M103") && !seen_word("X5"), "the line went out after the tray's mode changed: %d lines, "
+          "the last \"%s\"", mock.lines, mock.lines ? mock.seen[mock.lines - 1] : "");
+    mock_clear();
+    stub_tray = 0;
+    STAGE("G21\nM103 P0\nG1 X5 F600\n");
+    CHECK(jobrun_program_start_as(staged, "org.example.p", NULL, 0, 30, 0, 1, err, sizeof(err)) == 0,
+          "start: %s", err);
+    CHECK(wait_state("done", 5000) && seen_word("M103 P0"), "a package's M103 for the mode in force: %s",
+          status());
+    mock_clear();
+    stub_tray = 1;
+    STAGE("G21\nM103 P0\nG1 X5 F600\n");
+    CHECK(jobrun_program_start(staged, "panel", NULL, 0, 30, 0, err, sizeof(err)) == 0, "start: %s", err);
+    CHECK(wait_state("done", 5000) && seen_word("M103 P0"), "the operator's M103 judged as a package's: %s",
+          status());
+    stub_tray = -1;
 }
 
 static void test_client_refuses(void)
@@ -1057,6 +1190,10 @@ static void test_sync_under_a_wizard(void)
     CHECK(strstr(status(), "\"program\":false"), "record: %s", status());
     CHECK(jobrun_program_abort(err, sizeof(err)) == -1 && strstr(err, "stop it where it was started"),
           "the abort route on a wizard's job: \"%s\"", err);
+    /* A package's abort ends its own posted program alone: a wizard's job
+     * whose name is the package's is not one. */
+    CHECK(jobrun_program_abort_of("laser.focus", err, sizeof(err)) == -1 && strstr(status(), "\"state\":\"running\""),
+          "a package's abort on a wizard's job of its name: \"%s\", %s", err, status());
     mock.release = 1;
     pthread_join(t, NULL);
     CHECK(rc == 0, "the wizard's job: rc %d", rc);
@@ -1450,6 +1587,7 @@ int main(void)
     lease_sender_connected = client_connected;
     jobrun_sender_out = sender_out;
     jobrun_sender_in = sender_in;
+    jobrun_tray_mode = tray_stub;
     mock_start();
 
     static const struct { const char *name; void (*run)(void); } cases[] = {
@@ -1464,7 +1602,7 @@ int main(void)
         { "lit-program", test_lit_program }, { "enddark-alarm", test_enddark_alarm },
         { "refused-connect", test_refused_connect }, { "abort-and-pacing", test_abort_and_pacing },
         { "witness-rate", test_witness_rate }, { "stray-ok", test_stray_ok },
-        { "sender-check", test_sender_check },
+        { "sender-check", test_sender_check }, { "package-tray", test_package_tray },
     };
     setvbuf(stdout, NULL, _IOLBF, 0);
     signal(SIGPIPE, SIG_IGN);           /* the mock answers a connection an abort has closed */

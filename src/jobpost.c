@@ -23,6 +23,7 @@
 #include "jobrun.h"
 #include "lease.h"
 #include "testhook.h"
+#include "tray.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -228,6 +229,17 @@ static int job_start(const struct _u_request *req, struct _u_response *res, cons
         unlink(path);
         return reply_text(res, 400, why);
     }
+    /* A package's program - the extension host's, or a page's, which the
+     * panel's bridge marks page=<id> - is refused inches and the words
+     * that set an offset, a stored position or the scaling for later jobs,
+     * and an M103 other than the tray's mode in force, read from the
+     * controller's marker here (jobrun_line_kept_word). The operator's
+     * own program is a sender's. */
+    int package = auth_by_host() || u_map_get(req->map_post_body, "page");
+    if (package && jobrun_program_check_package(path, tray_mode(), why, wlen) != 0) {
+        unlink(path);
+        return reply_text(res, 400, why);
+    }
     /* An extension that keeps the Grbl sender out holds the machine as
      * ext:<id>, and the job its host sends in its name runs under that
      * hold. The name is the host's word, and no one else's. */
@@ -237,8 +249,9 @@ static int job_start(const struct _u_request *req, struct _u_response *res, cons
     if (auth_by_host() && lease_holder(holder, sizeof(holder)) && !strcmp(holder, ext_owner))
         under = ext_owner;
     const char *unlock = u_map_get(req->map_post_body, "unlock");
-    if (jobrun_program_start(path, name, under, lit_s, run_s, unlock && !strcmp(unlock, "1"),
-                             why, wlen) != 0)
+    /* A package's M103 is judged again as it goes out (jobrun_program_start_as). */
+    if (jobrun_program_start_as(path, name, under, lit_s, run_s, unlock && !strcmp(unlock, "1"), package,
+                                why, wlen) != 0)
         return reply_text(res, 409, why);
     return reply_record(res);
 }
@@ -256,8 +269,23 @@ int cb_job_abort(const struct _u_request *req, struct _u_response *res, void *us
     (void)user_data;
     if (!auth_write_ok(req, res))
         return U_CALLBACK_COMPLETE;
+    /* A package's abort names the package (`id`): the extension host's
+     * always does, and the panel's bridge does for a package's page. It
+     * ends only a posted program named with that id (job:<id>): the
+     * host and the bridge name a package's jobs so, and a client that
+     * names its own program with a package's id can have it ended by
+     * that package's abort (a stop, which that client can make itself
+     * with the operator's abort). The operator's own
+     * abort names nobody and ends whatever posted program runs. */
     char why[160];
-    if (jobrun_program_abort(why, sizeof(why)) != 0)
+    const char *id = u_map_get(req->map_url, "id");
+    if (!id)
+        id = u_map_get(req->map_post_body, "id");
+    if (auth_by_host() && (!id || !*id))
+        return reply_text(res, 400, "the extension host's abort names the package (id)");
+    if (id && jobrun_name_ok(id) != 0)
+        return reply_text(res, 400, "id is a package id");
+    if ((id ? jobrun_program_abort_of(id, why, sizeof(why)) : jobrun_program_abort(why, sizeof(why))) != 0)
         return reply_text(res, 409, why);
     return reply_record(res);
 }

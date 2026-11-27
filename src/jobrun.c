@@ -20,7 +20,9 @@
 #include "testhook.h"
 
 #include <ctype.h>
+#include <math.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -524,11 +526,150 @@ int jobrun_program_check(const char *path, int *nlines, char *err, size_t elen)
     return rc;
 }
 
+/* The controller's number reader (the core's read_float), on a line with
+ * no spaces: a sign, then digits with at most one point, the digits past
+ * the ninth significant one dropped. The characters read, 0 for no
+ * number. */
+static int core_number(const char *s, float *out)
+{
+    const char *p = s;
+    int neg = 0, point = 0, digits = 0, any = 0, exp = 0;
+    uint32_t v = 0;
+    if (*p == '-' || *p == '+')
+        neg = *p++ == '-';
+    for (;; p++) {
+        if (*p >= '0' && *p <= '9') {
+            any = 1;
+            if (*p != '0' || v)
+                digits++;
+            if (digits <= 9) {
+                if (point)
+                    exp--;
+                v = v * 10 + (uint32_t)(*p - '0');
+            } else if (!point)
+                exp++;
+        } else if (*p == '.' && !point)
+            point = 1;
+        else
+            break;
+    }
+    if (!any)
+        return 0;
+    float f = (float)v;
+    if (f != 0.0f) {
+        while (exp <= -2) {
+            f *= 0.01f;
+            exp += 2;
+        }
+        if (exp < 0)
+            f *= 0.1f;
+        else
+            for (; exp > 0; exp--)
+                f *= 10.0f;
+    }
+    *out = neg ? -f : f;
+    return (int)(p - s);
+}
+
+/* The P words of a line with no spaces, as the parser reads them: how
+ * many, and the last one's value. */
+static int line_p(const char *w, float *val)
+{
+    int count = 0;
+    for (const char *p = w; *p; p++) {
+        float v;
+        if (*p == 'P' && core_number(p + 1, &v)) {
+            count++;
+            *val = v;
+        }
+    }
+    return count;
+}
+
+const char *jobrun_line_kept_word(const char *line, int tray)
+{
+    char w[RAW_MAX];
+    size_t n = 0;
+    for (const char *p = line; *p && n + 1 < sizeof(w); p++)
+        if (*p > ' ')
+            w[n++] = (char)toupper((unsigned char)*p);
+    w[n] = '\0';
+    for (size_t i = 0; i < n;) {
+        char letter = w[i++];
+        float v;
+        int used = core_number(w + i, &v);
+        if (!used || (letter != 'G' && letter != 'M'))
+            continue;
+        i += (size_t)used;
+        /* The command's number and its fraction in hundredths, as the
+         * parser splits them. */
+        int whole = (int)truncf(v);
+        int frac = (int)roundf(fabsf(100.0f * (v - (float)whole)));
+        if (letter == 'G' && whole == 10)
+            return "G10";
+        if (letter == 'G' && whole == 20)
+            return "G20";
+        if (letter == 'G' && whole == 28 && frac == 10)
+            return "G28.1";
+        if (letter == 'G' && whole == 30 && frac == 10)
+            return "G30.1";
+        if (letter == 'G' && whole == 43)
+            return "G43";
+        if (letter == 'G' && whole == 51)
+            return "G51";
+        if (letter == 'G' && whole == 92)
+            return "G92";
+        if (letter == 'M' && whole == 103) {
+            /* The crumb tray's mode is taken only as the mode already in
+             * force: M103 itself, one P of exactly 0 (in) or 1 (out), and
+             * that P the marker's; a marker that cannot be looked at (-1)
+             * matches no P. The controller's M103 to the mode it is in
+             * changes nothing. */
+            float pv = -1.0f;
+            if (frac != 0 || line_p(w, &pv) != 1 || (pv != 0.0f && pv != 1.0f) || (int)pv != tray)
+                return "M103";
+        }
+    }
+    return NULL;
+}
+
+int jobrun_program_check_package(const char *path, int tray, char *err, size_t elen)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(err, elen, "no program was received");
+        return -1;
+    }
+    char raw[RAW_MAX], out[RAW_MAX];
+    int row = 0, rc = 0;
+    while (rc == 0 && fgets(raw, sizeof(raw), f)) {
+        const char *why = NULL, *word;
+        row++;
+        if (line_clean(raw, out, sizeof(out), &why) > 0 && (word = jobrun_line_kept_word(out, tray))) {
+            if (!strcmp(word, "M103"))
+                snprintf(err, elen, "line %d has M103, which a package's program may give only as the tray's mode "
+                                    "in force (M103 P0 with the tray in, M103 P1 with it out)%s", row,
+                         tray < 0 ? ", and the tray's mode cannot be read" : "");
+            else
+                snprintf(err, elen, "line %d has %s, which changes what the controller keeps for later jobs: "
+                                    "a package's program is in millimeters, moves from where the head is, "
+                                    "and sets no offset, stored position or scale", row, word);
+            rc = -1;
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
+int (*jobrun_tray_mode)(void);
+
 typedef struct {
     FILE *f;                            /* open, and its name already gone */
     int unlock;                         /* the runner's $X is still to go out */
     int ended;                          /* the last line out was the program's end */
     int closed;                         /* and the runner's own M2 has gone out */
+    int package;                        /* a package's program: its M103 is judged as it goes out */
+    int row;                            /* the program's lines read so far */
 } program_t;
 static program_t prog;                  /* written under mu, and only while no run is active */
 
@@ -543,6 +684,7 @@ static int program_gen(void *ctx, char *buf, size_t len)
     }
     while (p->f && fgets(raw, sizeof(raw), p->f)) {
         const char *why = NULL;
+        p->row++;
         int n = line_clean(raw, clean, sizeof(clean), &why);
         if (n < 0) {
             snprintf(buf, len, "a line of the program %s", why);
@@ -550,6 +692,19 @@ static int program_gen(void *ctx, char *buf, size_t len)
         }
         if (n == 0)
             continue;
+        /* A package's M103 passed the post's check against the tray's mode
+         * then; it goes out only if that is still the mode in force, read
+         * again now, under the run's lease and with the sender kept out.
+         * Otherwise the run ends here, the line not sent. */
+        if (p->package && jobrun_line_kept_word(clean, -1)) {
+            int mode = jobrun_tray_mode ? jobrun_tray_mode() : -1;
+            const char *word = jobrun_line_kept_word(clean, mode);
+            if (word) {
+                snprintf(buf, len, "line %d has %s, and the tray's mode in force is not the one it gives%s",
+                         p->row, word, mode < 0 ? " (the tray's mode cannot be read)" : "");
+                return -1;
+            }
+        }
         snprintf(buf, len, "%s", clean);
         p->ended = is_end(buf);
         return 1;
@@ -628,6 +783,12 @@ static void program_done(void *ctx, int rc, const jobstream_run_t *run, const ch
 int jobrun_program_start(const char *path, const char *name, const char *under, double lit_timeout_s,
                          double run_timeout_s, int unlock, char *err, size_t elen)
 {
+    return jobrun_program_start_as(path, name, under, lit_timeout_s, run_timeout_s, unlock, 0, err, elen);
+}
+
+int jobrun_program_start_as(const char *path, const char *name, const char *under, double lit_timeout_s,
+                            double run_timeout_s, int unlock, int package, char *err, size_t elen)
+{
     char who[LEASE_OWNER_MAX];
     int n = 0;
     FILE *f = NULL;
@@ -665,6 +826,7 @@ int jobrun_program_start(const char *path, const char *name, const char *under, 
          * no other: an alarm of anything else's stands, and the program's
          * first line meets it (program_ready decides). */
         prog.unlock = unlock;
+        prog.package = package;
         rc = start_locked(&cfg, 1, n, err, elen);
         if (rc != 0)
             prog.f = NULL;
@@ -696,6 +858,29 @@ int jobrun_program_abort(char *err, size_t elen)
         return -1;
     }
     jobrun_stop(who);
+    return 0;
+}
+
+int jobrun_program_abort_of(const char *name, char *err, size_t elen)
+{
+    char who[LEASE_OWNER_MAX], mine[LEASE_OWNER_MAX];
+    snprintf(mine, sizeof(mine), "job:%s", name ? name : "");
+    pthread_mutex_lock(&mu);
+    int on = active, program = is_program;
+    snprintf(who, sizeof(who), "%s", holder);
+    pthread_mutex_unlock(&mu);
+    /* Every refusal is built here from the one read: the stop below is
+     * the only one, and it stops the run only while job:<name> holds it
+     * (a run started since the read is somebody else's, and runs on). */
+    if (!on) {
+        snprintf(err, elen, "no job is running");
+        return -1;
+    }
+    if (!program || strcmp(who, mine) != 0) {
+        snprintf(err, elen, "the running job is not this package's");
+        return -1;
+    }
+    jobrun_stop(mine);
     return 0;
 }
 

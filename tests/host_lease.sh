@@ -31,9 +31,13 @@
 # check is aborted (and a diagnostic and the recorder stopped, in case a
 # refusal failed): the lease is free, the check is not running, the
 # controller runs again, the same settings write is 200, and the event
-# stream said lease.changed for the hold and then for its end. Nothing
-# posts confirm=1, a reboot,
-# /system/ssh, or an update. The daemon runs on the image's ulfius
+# stream said lease.changed for the hold and then for its end. A run gives
+# the lease back before it reads ended: with GF_RUN_END_GAP_MS holding each
+# run 1.5 s once it reads ended, a Sensors check started in a switches
+# check's gap holds the lease, and a download job started in an ended
+# one's gap is taken (the release check points at a closed local port, so
+# each ends at once), the lease free after. Nothing posts confirm=1, a
+# reboot, /system/ssh, or an update's write. The daemon runs on the image's ulfius
 # (tests/ulfius_image.sh). Runs unprivileged; build.yml runs it:
 #
 #   sh tests/host_lease.sh <build-dir> <ulfius-lib-dir>
@@ -101,7 +105,8 @@ start_daemon() {
         FORGECTRL_DATA_DIR="$T/data" FORGECTRL_CONF="$CONF" \
         FFLOG_CONF="$CONF" FFLOG_SOCK="$T/no-log" FFLOG_STDERR=1 \
         GF_RUN_DIR="$T/run" GF_SYSFS_ROOT="$SYS/" GF_SWITCH_DEV="$T/no-switches" \
-        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" \
+        GF_SWITCH_WORD_FILE="$T/switches" GF_PULSE_DEV="$T/pulse" GF_RUN_END_GAP_MS=1500 \
+        FORGECTRL_RELCHECK_URL="http://127.0.0.1:1/no-release" \
         FORGECTRL_GRBL_BIN="$T/bin/grbl" FORGECTRL_CLOUD_BIN="$T/bin/cloud" \
         FORGECTRL_PORT=$HTTP_PORT FORGECTRL_TLS_PORT=$TLS_PORT \
         "$BUILD/forgectrl" >> "$T/out" 2>&1 &
@@ -286,6 +291,25 @@ t = open(sys.argv[1], encoding='utf-8', errors='replace').read()
 take, free = t.find('"owner":"wizard:switches"'), t.find('"owner":null')
 sys.exit(0 if 0 <= take < free else 1)
 EOF
+
+echo "== a run that ends gives the lease back before it reads ended"
+# GF_RUN_END_GAP_MS holds each run 1.5 s once it reads ended: the next
+# start comes inside that gap, and finds the lease free.
+expect 200 "$(post /wiz/switches/start "$TOKEN")" "POST /wiz/switches/start is 200"
+until_ok 100 held || bad "the lease is not the check's: $(holder)"
+expect 200 "$(post /wiz/switches/abort "$TOKEN")" "POST /wiz/switches/abort is 200"
+until_ok 150 stopped || bad "the check still runs: $(cat "$T/dark.json")"
+post /wiz/sensors/start "$TOKEN" > /dev/null
+expect wizard:sensors "$(holder)" "a check started in the ended check's gap holds the lease"
+post /wiz/sensors/abort "$TOKEN" > /dev/null
+until_ok 150 free && ok "and the lease is free once it ends" || bad "the lease is still held: $(holder)"
+# updating <true|false>: GET /update/status's running
+updating() { [ "$(curl -s "$URL/update/status" | python3 -c 'import json, sys; print(json.load(sys.stdin)["running"])')" = "$1" ]; }
+expect 202 "$(post /update/download "$TOKEN")" "POST /update/download is 202 (no release to find: it ends at once)"
+until_ok 50 updating False || bad "the download job did not end"
+expect 202 "$(post /update/download "$TOKEN")" "a download started in the ended one's gap is 202: $(cat "$T/body")"
+until_ok 50 updating False || bad "the second download job did not end"
+until_ok 50 free && ok "the lease is free after both" || bad "the lease is still held: $(holder)"
 
 stop_daemon
 if [ $fails -eq 0 ]; then

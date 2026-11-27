@@ -172,7 +172,56 @@ int main(void)
     hold("org.example.badge", 1, 0, "", now - 10);
     holds_read(dir, req, now, &h);
     CHECK(h.standing && h.stale_required == 1, "stale and marked: counted %d times", h.stale_required);
+
+    /* The marker's modes: a package that runs only in GRBL mode holds nothing while the cloud controller
+     * runs and is the stored mode's; it holds while GRBL runs, while what runs is not known, and whenever
+     * its marker names no mode or a word that is not a mode. */
+    clear_dir();
+    FILE *mf = fopen(marker, "w");
+    fputs("grbl\n", mf);
+    fclose(mf);
+    holds_read_for(dir, req, now, "cloud", &h);
+    CHECK(!h.standing && h.stale_required == 0, "a GRBL-only marker holds while the cloud controller runs: %s", h.reason);
+    holds_read_for(dir, req, now, "grbl", &h);
+    CHECK(h.standing && h.stale_required == 1, "a GRBL-only marker does not hold while GRBL runs");
+    holds_read_for(dir, req, now, NULL, &h);
+    CHECK(h.standing && h.stale_required == 1, "a GRBL-only marker does not hold with no controller agreed");
+    mf = fopen(marker, "w");
+    fputs("grbl laser\n", mf);
+    fclose(mf);
+    holds_read_for(dir, req, now, "cloud", &h);
+    CHECK(h.standing, "a marker naming a word that is not a mode does not hold");
+    fclose(fopen(marker, "w"));
+    holds_read_for(dir, req, now, "cloud", &h);
+    CHECK(h.standing, "a marker naming no mode does not hold in every mode");
     unlink(marker);
+
+    /* More markers than there are package accounts: the ones past HOLDS_MAX hold. */
+    for (int i = 0; i < HOLDS_MAX + 1; i++) {
+        char id[64], mp[400];
+        snprintf(id, sizeof(id), "org.example.m%02d", i);
+        snprintf(mp, sizeof(mp), "%s/%s", req, id);
+        fclose(fopen(mp, "w"));
+        if (i < HOLDS_MAX)
+            hold(id, 1, 0, "", now);
+    }
+    holds_read(dir, req, now, &h);
+    CHECK(h.standing && strstr(h.reason, "more required holds"), "a marker past the %dth does not hold: %d %s",
+          HOLDS_MAX, h.standing, h.reason);
+    for (int i = 0; i < HOLDS_MAX + 1; i++) {
+        char mp[400];
+        snprintf(mp, sizeof(mp), "%s/org.example.m%02d", req, i);
+        unlink(mp);
+    }
+
+    /* A FIFO named as a hold file is not opened to wait for a writer: it cannot be read, and holds. */
+    clear_dir();
+    char fifo[300];
+    snprintf(fifo, sizeof(fifo), "%s/org.example.pipe.json", dir);
+    CHECK(mkfifo(fifo, 0644) == 0, "no FIFO could be made");
+    holds_read(dir, NULL, now, &h);
+    CHECK(h.standing && h.unreadable == 1, "a FIFO as a hold file: standing %d, unreadable %d", h.standing, h.unreadable);
+    unlink(fifo);
     snprintf(marker, sizeof(marker), "%s/Not An Id", req);
     fclose(fopen(marker, "w"));
     snprintf(marker, sizeof(marker), "%s/.hidden", req);

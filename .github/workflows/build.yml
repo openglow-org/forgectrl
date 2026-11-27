@@ -55,7 +55,7 @@ jobs:
         run: ./build/grblport_test
       - name: "jobrun_test (the job runner: the lease as a sender, a posted program's check, its M2, its abort; the daemon's own sender under it)"
         run: ./build/jobrun_test
-      - name: "jobpost_test (POST /job's multipart reader: the form parts reach the start, a missing name, a $ line and a malformed boundary are refused)"
+      - name: "jobpost_test (POST /job's multipart reader: the form parts reach the start, a missing name, a $ line, a package's G92 and a malformed boundary are refused)"
         run: ./build/jobpost_test
 
       - name: "tokens_test (scoped tokens: the closed capability list, the judgment, the hash-only store)"
@@ -95,7 +95,7 @@ jobs:
         run: sh tests/host_ext.sh build build/ulfius-image/lib
       - name: "host_setup (the setup gate and its consents on a host: each reason the gate holds, the advisories, the extensions' consent, cloud mode off, the press step's teal put back after a red flash; the first-run page the daemon serves, walked in headless Chrome: the documents, the press, the account, the forms, the counted intake fans passed by, the choice onto the panel, a save, the login)"
         run: sh tests/host_setup.sh build build/ulfius-image/lib
-      - name: "host_lease (the machine lease on a host: a waiting switches check holds it, six requests are refused in its name, the abort frees it, and the event stream says both)"
+      - name: "host_lease (the machine lease on a host: a waiting switches check holds it, six requests are refused in its name, the abort frees it, and the event stream says both; a check's and an update job's lease given back before each reads ended)"
         run: sh tests/host_lease.sh build build/ulfius-image/lib
       - name: "host_guard (the start's machine check on a record made on another machine, the factory return refused without confirm=1, the slot inventory, the setup page's call, the record's routes and its place in the sanitized export, the log tree and its tail, and what the export carries and takes out)"
         run: sh tests/host_guard.sh build build/ulfius-image/lib

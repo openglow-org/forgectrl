@@ -9,6 +9,7 @@
 #include "paths.h"
 #include "settings.h"
 
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,15 @@ int tray_is_out(void)
     char path[256];
     snprintf(path, sizeof(path), "%s/tray.out", ff_data_dir());
     return access(path, F_OK) == 0;
+}
+
+int tray_mode(void)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "%s/tray.out", ff_data_dir());
+    if (access(path, F_OK) == 0)
+        return 1;
+    return errno == ENOENT ? 0 : -1;
 }
 
 static double clamp_offset(double mm)

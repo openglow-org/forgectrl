@@ -5,8 +5,9 @@
  * SPDX-License-Identifier: MIT
  *
  * One holder at a time, and the refusal names it; one owner let in under
- * a holder, and only under the holder it names; release by the innermost
- * owner alone; a sender hold refused while a client is connected, and no
+ * a holder, and only under the holder it names; a release by the owner
+ * that holds, at either level, an outer one ending first leaving the inner
+ * one alone; a sender hold refused while a client is connected, and no
  * other kind; the controls locked by every holder but a log export; the
  * /status document with no holder, a holder, a nested one, and what is
  * observed outside the lease; and sixteen threads asking at once, of
@@ -82,14 +83,34 @@ int main(void)
     CHECK(lease_json(doc, sizeof(doc)) > 0 && strstr(doc, "\"owner\":\"diag:aa-offset-calibrate\"") &&
           strstr(doc, "\"kind\":\"hardware\"") && strstr(doc, "\"under\":\"wizard:cooling.aa-offset\"") &&
           strstr(doc, "\"words\":\"a diagnostic (aa-offset-calibrate)\""), "the nested document: %s", doc);
-    lease_release("wizard:cooling.aa-offset");
-    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:aa-offset-calibrate"),
-          "the outer owner released from under the inner one: '%s'", who);
     lease_release("diag:aa-offset-calibrate");
     CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "wizard:cooling.aa-offset"), "after the inner release: '%s'", who);
     CHECK(lease_json(doc, sizeof(doc)) > 0 && !strstr(doc, "\"under\""), "the document after it: %s", doc);
     lease_release("wizard:cooling.aa-offset");
     CHECK(lease_holder(who, sizeof(who)) == 0, "not empty at the end of the nesting");
+
+    /* The outer owner ends first: it goes, and the inner one holds the machine alone until it ends.
+     * A wizard whose diagnostic still runs, and a package's claim under which its own job still runs. */
+    CHECK(lease_take("wizard:cooling.aa-offset", LEASE_HARDWARE, NULL, why, sizeof(why)) == 0 &&
+          lease_take("diag:aa-offset-calibrate", LEASE_HARDWARE, "wizard:cooling.aa-offset", why, sizeof(why)) == 0,
+          "the wizard and its diagnostic: %s", why);
+    lease_release("wizard:cooling.aa-offset");
+    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "diag:aa-offset-calibrate") &&
+          lease_json(doc, sizeof(doc)) > 0 && !strstr(doc, "\"under\""),
+          "the outer owner released first: the inner one does not hold alone: '%s' %s", who, doc);
+    lease_release("diag:aa-offset-calibrate");
+    CHECK(lease_holder(who, sizeof(who)) == 0, "a level with nobody behind it is left: '%s'", who);
+    CHECK(lease_take("ext:org.example.a", LEASE_EXTENSION, NULL, why, sizeof(why)) == 0 &&
+          lease_take("job:org.example.a", LEASE_SENDER, "ext:org.example.a", why, sizeof(why)) == 0,
+          "the claim and its job: %s", why);
+    lease_release("ext:org.example.a");
+    CHECK(lease_holder(who, sizeof(who)) == 1 && !strcmp(who, "job:org.example.a") &&
+          lease_take("ext:org.example.a", LEASE_EXTENSION, NULL, why, sizeof(why)) != 0,
+          "the claim let go under its job: the job does not hold alone: '%s'", who);
+    lease_release("job:org.example.a");
+    CHECK(lease_holder(who, sizeof(who)) == 0 && lease_take("ext:org.example.a", LEASE_EXTENSION, NULL, why, sizeof(why)) == 0,
+          "the job's end leaves the machine held: %s", why);
+    lease_release("ext:org.example.a");
 
     /* A sender hold and a connected client. */
     client = 1;

@@ -105,9 +105,20 @@ int lease_take(const char *owner, lease_kind_t kind, const char *under, char *wh
 
 void lease_release(const char *owner)
 {
+    /* The named owner goes at whatever level it holds, and the level above
+     * it moves down: an outer owner that ends first (a package's claim
+     * under which its own job still runs, a cooling wizard whose
+     * diagnostic still runs) leaves the inner one holding the machine
+     * alone until it ends, never a level with nobody behind it. */
     pthread_mutex_lock(&mu);
-    if (depth > 0 && owner && !strcmp(held[depth - 1].owner, owner))
+    for (int i = depth - 1; owner && i >= 0; i--) {
+        if (strcmp(held[i].owner, owner) != 0)
+            continue;
+        for (int k = i; k + 1 < depth; k++)
+            held[k] = held[k + 1];
         depth--;
+        break;
+    }
     pthread_mutex_unlock(&mu);
 }
 

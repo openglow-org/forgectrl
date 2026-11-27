@@ -25,12 +25,16 @@
  *
  *   no file at all, and the package is named in the required directory
  *                        the hold stands: the host has not spoken for it
- *                        since the boot, or has taken its word away
+ *                        since the boot, or has taken its word away;
+ *                        unless its marker's modes leave out the
+ *                        controller that runs
  *
  * The files live on a tmpfs and are gone with a reboot, and a host that
- * never comes up writes none. So the host also keeps, on /data, one empty
- * file named after each package whose hold the operator marked required
- * (HOLDS_REQUIRED_DIR); only the names are read.
+ * never comes up writes none. So the host also keeps, on /data, one file
+ * named after each package whose hold the operator marked required
+ * (HOLDS_REQUIRED_DIR), holding the controller modes the package runs in:
+ * a marker whose modes leave out the controller the supervisor runs, while
+ * that controller is the stored mode's, holds nothing (holds_read_for()).
  *
  * Fresh is HOLDS_FRESH_S, the rule the controllers apply to the verdict.
  * Whether holds are read at all is the caller's: with extensions off, or in
@@ -61,5 +65,14 @@ typedef struct {
  * package named under required_dir that has no file there. A directory
  * that does not exist holds nothing. */
 void holds_read(const char *dir, const char *required_dir, double now, holds_t *out);
+
+/* The same, knowing which controller runs: running is "grbl" or "cloud"
+ * while the supervisor runs that controller and it is the stored mode's,
+ * and NULL otherwise (nothing runs, or the two disagree). A marker holds
+ * the modes its package runs in; one whose modes leave out the running
+ * controller holds nothing, since that package does not run. A marker with
+ * no modes, one that cannot be read, and every marker while running is
+ * NULL hold. More markers than HOLDS_MAX hold too. */
+void holds_read_for(const char *dir, const char *required_dir, double now, const char *running, holds_t *out);
 
 #endif

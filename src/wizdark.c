@@ -2228,6 +2228,11 @@ static void *worker(void *arg)
         machine_held = 0;
         led_release();
     }
+    /* The lease goes back while the run still reads running: a start
+     * rewrites lease_held and lease_owner only once it reads ended, so
+     * these are this run's. */
+    if (lease_held)
+        lease_release(lease_owner);
     pthread_mutex_lock(&mu);
     if (S.abort_req && !S.error[0])
         snprintf(S.error, sizeof(S.error), "aborted");
@@ -2237,8 +2242,11 @@ static void *worker(void *arg)
     S.owner[0] = '\0';
     pthread_cond_broadcast(&cv);
     pthread_mutex_unlock(&mu);
-    if (lease_held)
-        lease_release(lease_owner);
+    /* GF_RUN_END_GAP_MS (testhook.h): a host test's pause once the run
+     * reads ended, so it can start the next one there. */
+    const char *gap = ff_test_hook("GF_RUN_END_GAP_MS");
+    if (gap)
+        usleep((useconds_t)atoi(gap) * 1000);
     return NULL;
 }
 
@@ -2307,11 +2315,14 @@ int wizdark_start(const char *id, const char *owner, char *err, size_t elen)
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
     if (pthread_create(&th, &at, worker, (void *)(intptr_t)ix) != 0) {
         pthread_attr_destroy(&at);
+        /* As update.c's job_start: the lease goes back while the check
+         * still reads running, so a start cannot rewrite lease_held and
+         * lease_owner first (mu, then the lease's mutex, as in the take). */
         pthread_mutex_lock(&mu);
-        S.running = 0;
-        pthread_mutex_unlock(&mu);
         if (lease_held)
             lease_release(lease_owner);
+        S.running = 0;
+        pthread_mutex_unlock(&mu);
         snprintf(err, elen, "cannot start the wizard thread");
         return -1;
     }

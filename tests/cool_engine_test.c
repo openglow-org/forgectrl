@@ -60,7 +60,11 @@
  *   N. the fail tiers:      FIRE and CRASH end the controller through the
  *                           supervisor's hook, once, after the kernel writes
  *   O. the pause tiers:     FLAME and BUMP hold the job and call nothing
- *   Q. the verdict file:    the contract's keys and types; the stamp on
+ *   P. an extension's hold: joins the pause tier; the engine judges the
+ *                           required markers on the supervisor's agreed
+ *                           controller (a GRBL-only one passed over while
+ *                           the cloud client runs, standing under GRBL)
+ *   Q. the verdict file:   the contract's keys and types; the stamp on
  *                           CLOCK_MONOTONIC to the millisecond, never
  *                           ahead of the clock
  *
@@ -537,6 +541,10 @@ void led_set(led_pattern_t p) { led_red = p == LED_FLASH_RED; led_released = 0; 
 void led_release(void) { led_red = 0; led_released = 1; led_writes++; }
 int led_red_up(void) { return led_unreadable ? -1 : led_red; }
 int super_motion_fault(void) { return motion_fault_stub; }
+/* The supervisor's agreed controller, as a case sets it (P); holds_test
+ * and holds_wire_test judge the markers' modes themselves. */
+static const char *agreed_ctl;
+const char *super_ctl_agreed(void) { return agreed_ctl; }
 double chassis_degc(void) { return 25.0; }
 long supply_temp_raw(void) { return 540; }
 double soc_degc(void) { return 38.0; }
@@ -5569,6 +5577,20 @@ int main(void)
     kv[0] = NULL;
     run_tick(&L);
     CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "extensions off ends the hold at the next tick");
+    /* A required hold of a package made for GRBL mode alone, with no file:
+     * passed over while the supervisor's agreed controller is the cloud
+     * client, standing while it is the GRBL controller. */
+    kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
+    unlink("cool-engine-test/holds/org.example.badge.json");
+    { FILE *f = fopen("cool-engine-test/required-holds/org.example.grblonly", "w"); if (f) { fputs("grbl\n", f); fclose(f); } }
+    agreed_ctl = "cloud";
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "OK") && pub_fire_ok, "a GRBL-only required hold while the cloud client runs: OK");
+    agreed_ctl = "grbl";
+    run_tick(&L);
+    CHECK(!strcmp(pub_verdict, "EXT") && !pub_fire_ok, "a GRBL-only required hold while the GRBL controller runs: EXT");
+    agreed_ctl = NULL;
+    unlink("cool-engine-test/required-holds/org.example.grblonly");
     /* a fail tier is a fail tier under a hold too */
     kv[0] = "ext_enabled"; kv[1] = "1"; kv[2] = NULL;
     unlink("cool-engine-test/holds/org.example.badge.json");

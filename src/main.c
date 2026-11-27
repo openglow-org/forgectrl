@@ -4057,7 +4057,7 @@ static const char *const TEST_HOOKS[] = {
     "GF_DATA_STATE", "GF_DEV_MARKER", "GF_GRBL_PORT", "GF_HTTP_IDLE_S", "GF_IIO_ROOT", "GF_LED_ROOT",
     "GF_LENS_STEP_US", "GF_NOHUNT_MARKER", "GF_PAUSE_DIR", "GF_PRESS_DEBOUNCE_MS", "GF_PRESS_RES_S",
     "GF_PRESS_TIMEOUT_S", "GF_PROC_STAT", "GF_PULSE_DEV", "GF_REBOOT_FILE", "GF_RESET_HOLD_S",
-    "GF_RUN_DIR", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
+    "GF_RUN_DIR", "GF_RUN_END_GAP_MS", "GF_SLOT_LIST", "GF_SWITCH_DEV", "GF_SWITCH_WORD_FILE", "GF_SYSFS_DIR",
     "GF_SYSFS_ROOT", "GF_USERS_REPLAY", "GF_RELEASE_HTTP", "GF_SLOT_DIR", "GF_VERSION_FILE",
 };
 
@@ -4296,6 +4296,7 @@ int main(int argc, char **argv)
     lease_sender_connected = jobstream_sender_blocks;
     jobrun_sender_out = senderout_runner_out;
     jobrun_sender_in = senderout_runner_in;
+    jobrun_tray_mode = tray_mode;
     jobrun_wire(super_grbl_pid, &grblport_alarm_touched);
     lease_motors_released = motors_released_now;
     events_gather = events_gather_state;
